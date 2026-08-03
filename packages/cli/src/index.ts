@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { createHash, createPublicKey } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, resolve } from 'node:path';
@@ -13,6 +13,7 @@ import { claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai/agent-
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, pollEnrollment, saveDeviceConfig, type DeviceConfig,
 } from '@dharma-ai/agent-fabric-relay-client';
+import { getActiveSkillBundleId, installSkillBundle, type SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope } from '@dharma-ai/agent-fabric-task-runner';
 
 const VERSION = '0.1.0';
@@ -233,6 +234,65 @@ async function runOneTask(flags: Map<string, string | boolean>): Promise<Output>
   return executeOneTask(await client(), policy, Number(flags.get('lease-seconds') || 120));
 }
 
+function nativeSkillDirectory(provider: 'codex' | 'claude') {
+  return provider === 'codex'
+    ? resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'skills')
+    : resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude'), 'skills');
+}
+
+async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
+  const workspaceId = required(flags, 'workspace-id');
+  const providerValue = required(flags, 'provider');
+  if (!['codex', 'claude'].includes(providerValue)) throw new Error('Skill provider must be codex or claude.');
+  const provider = providerValue as 'codex' | 'claude';
+  const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
+  if (!workspace) throw new Error('Skill workspace is not registered locally.');
+  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const destination = nativeSkillDirectory(provider);
+  const fabric = await client();
+  const response = await fabric.pollSkill({ workspaceId, provider, installedBundleId: await getActiveSkillBundleId(destination) });
+  const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
+  if (!rollout) return { ok: true, rollout: null, changed: false };
+  if (typeof rollout.id !== 'string' || !rollout.bundle || typeof rollout.bundle !== 'object') throw new Error('Skill rollout response is invalid.');
+  const bundle = rollout.bundle as SkillBundle;
+  if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills) || bundle.skills.length === 0) {
+    throw new Error('Skill bundle does not match local organization policy.');
+  }
+  const commits = [...new Set(bundle.skills.map((skill) => skill.commit))];
+  if (commits.length !== 1 || !/^[a-f0-9]{40,64}$/i.test(commits[0]!)) throw new Error('Skill bundle must pin one full Git commit.');
+  const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
+  await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
+  await rm(sourceRoot, { recursive: true, force: true });
+  let hasCommit = true;
+  try { await execFileAsync('git', ['-C', workspace.path, 'cat-file', '-e', `${commits[0]}^{commit}`], { timeout: 10_000 }); }
+  catch { hasCommit = false; }
+  if (!hasCommit) {
+    await execFileAsync('git', ['-C', workspace.path, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
+  }
+  await execFileAsync('git', ['-C', workspace.path, 'worktree', 'add', '--detach', sourceRoot, commits[0]!], { timeout: 30_000 });
+  try {
+    const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
+    const receipt = await installSkillBundle({
+      bundle,
+      sourceDirectory: sourceRoot,
+      nativeSkillDirectory: destination,
+      policy,
+      serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
+      devicePrivateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }),
+      deviceId: config.deviceId,
+      workspaceId,
+      provider,
+      smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
+      organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
+    });
+    await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
+    return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };
+  } finally {
+    await execFileAsync('git', ['-C', workspace.path, 'worktree', 'remove', '--force', sourceRoot], { timeout: 30_000 }).catch(() => undefined);
+  }
+}
+
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
   const fabric = await client();
@@ -280,8 +340,14 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);
   if (command === 'tasks' && subcommand === 'list') return { tasks: [], coverage: 'server_poll_requires_relay' };
-  if (command === 'skills' && subcommand === 'status') return { installations: [], coverage: 'local_only' };
-  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence capture|evidence sync|relay start|tasks run-once|skills status> [options]');
+  if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
+  if (command === 'skills' && subcommand === 'status') {
+    const providerValue = required(flags, 'provider');
+    if (!['codex', 'claude'].includes(providerValue)) throw new Error('Skill provider must be codex or claude.');
+    const root = nativeSkillDirectory(providerValue as 'codex' | 'claude');
+    return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
+  }
+  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence capture|evidence sync|relay start|tasks run-once|skills sync|skills status> [options]');
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

@@ -40,16 +40,22 @@ test('verified skill activates and a failed canary restores the prior bundle', a
   await writeFile(resolve(source, 'SKILL.md'), '# Enforce evidence boundary\n');
   const server = generateKeyPairSync('ed25519');
   const device = generateKeyPairSync('ed25519');
-  const first = await signedBundle(source, 'bundle-1', server.privateKey);
-  const receipt = await installSkillBundle({ bundle: first, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: 'device', workspaceId: 'workspace', provider: 'codex', smokeCommandId: 'smokePass' });
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const firstBundleId = randomUUID();
+  const secondBundleId = randomUUID();
+  const first = await signedBundle(source, firstBundleId, server.privateKey);
+  const receipt = await installSkillBundle({ bundle: first, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, workspaceId, provider: 'codex', smokeCommandId: 'smokePass' });
   assert.equal(receipt.status, 'active');
   assert.match(await readFile(resolve(native, '.dharma-managed/active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
+  assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
   await writeFile(resolve(source, 'SKILL.md'), '# Broken candidate\n');
-  const second = await signedBundle(source, 'bundle-2', server.privateKey);
-  const rollback = await installSkillBundle({ bundle: second, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: 'device', workspaceId: 'workspace', provider: 'codex', smokeCommandId: 'smokeFail' });
+  const second = await signedBundle(source, secondBundleId, server.privateKey);
+  const rollback = await installSkillBundle({ bundle: second, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, workspaceId, provider: 'codex', smokeCommandId: 'smokeFail' });
   assert.equal(rollback.status, 'rolled_back');
   assert.match(await readFile(resolve(native, '.dharma-managed/active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
-  assert.equal((await readFile(resolve(native, '.dharma-managed/ACTIVE_BUNDLE'), 'utf8')).trim(), 'bundle-1');
+  assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
+  assert.equal((await readFile(resolve(native, '.dharma-managed/ACTIVE_BUNDLE'), 'utf8')).trim(), firstBundleId);
 });
 
 test('R3 bundles cannot install without explicit organization approval', async () => {
@@ -63,5 +69,5 @@ test('R3 bundles cannot install without explicit organization approval', async (
   const { signature: _old, bundleHash: _oldHash, ...unsigned } = bundle;
   const bundleHash = calculateBundleHash(unsigned);
   const signed = { ...unsigned, bundleHash, signature: signCanonicalObject({ ...unsigned, bundleHash }, server.privateKey) };
-  await assert.rejects(() => installSkillBundle({ bundle: signed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: resolve(root, 'native'), policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: 'device', workspaceId: 'workspace', provider: 'codex' }), /require organization approval/);
+  await assert.rejects(() => installSkillBundle({ bundle: signed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: resolve(root, 'native'), policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: randomUUID(), workspaceId: randomUUID(), provider: 'codex' }), /require organization approval/);
 });

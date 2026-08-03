@@ -9,6 +9,7 @@
     { "path": "../policy" },
     { "path": "../provider-adapters" },
     { "path": "../relay-client" },
+    { "path": "../skill-manager" },
     { "path": "../task-runner" }
   ]
 }

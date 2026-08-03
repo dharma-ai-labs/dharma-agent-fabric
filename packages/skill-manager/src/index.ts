@@ -104,6 +104,53 @@ async function readActiveBundleId(root: string): Promise<string | null> {
   }
 }
 
+async function pathExists(path: string) {
+  try { await lstat(path); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function releaseSkillIds(release: string): Promise<string[]> {
+  try {
+    const manifest = JSON.parse(await readFile(resolve(release, 'BUNDLE.json'), 'utf8')) as { skillIds?: unknown };
+    return Array.isArray(manifest.skillIds) && manifest.skillIds.every((item) => typeof item === 'string') ? manifest.skillIds : [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function activateNativeSkills(input: {
+  nativeSkillDirectory: string;
+  release: string;
+  bundleId: string;
+  skillIds: string[];
+  removeSkillIds: string[];
+}) {
+  const affectedSkillIds = [...new Set([...input.removeSkillIds, ...input.skillIds])];
+  for (const skillId of affectedSkillIds) {
+    const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
+    if (await pathExists(target)) {
+      const marker = resolve(target, '.dharma-agent-fabric.json');
+      if (!await pathExists(marker)) throw new Error(`Refusing to replace unmanaged provider skill: ${skillId}`);
+    }
+  }
+  for (const skillId of affectedSkillIds) {
+    await rm(assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId)), { recursive: true, force: true });
+  }
+  for (const skillId of input.skillIds) {
+    const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
+    await cp(resolve(input.release, skillId), target, { recursive: true, errorOnExist: true, force: false });
+    await writeFile(resolve(target, '.dharma-agent-fabric.json'), `${JSON.stringify({ bundleId: input.bundleId, skillId })}\n`, { mode: 0o600 });
+  }
+}
+
+export async function getActiveSkillBundleId(nativeSkillDirectory: string) {
+  return readActiveBundleId(resolve(nativeSkillDirectory, '.dharma-managed'));
+}
+
 export async function installSkillBundle(input: {
   bundle: SkillBundle;
   sourceDirectory: string;
@@ -136,17 +183,29 @@ export async function installSkillBundle(input: {
   await mkdir(release, { recursive: true, mode: 0o700 });
   const checks: InstallReceipt['checks'] = [];
   for (const skill of input.bundle.skills) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skill.skillId)) throw new Error(`Invalid provider skill identifier: ${skill.skillId}`);
     const source = assertContained(input.sourceDirectory, resolve(input.sourceDirectory, skill.path));
     const actualHash = await contentHash(source);
     if (actualHash !== skill.contentHash) throw new Error(`Skill content hash mismatch: ${skill.skillId}`);
     await cp(source, resolve(release, skill.skillId), { recursive: true, errorOnExist: true, force: false });
     checks.push({ name: `content:${skill.skillId}`, status: 'pass', details: actualHash });
   }
+  const skillIds = input.bundle.skills.map((skill) => skill.skillId);
+  await writeFile(resolve(release, 'BUNDLE.json'), `${JSON.stringify({ bundleId: input.bundle.bundleId, skillIds })}\n`, { mode: 0o600 });
+  const previousRelease = previousBundleId ? resolve(releases, previousBundleId) : null;
+  const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
 
   await rm(rollback, { recursive: true, force: true });
   try { await rename(active, rollback); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await cp(release, active, { recursive: true, errorOnExist: true, force: false });
+  await activateNativeSkills({
+    nativeSkillDirectory: input.nativeSkillDirectory,
+    release,
+    bundleId: input.bundle.bundleId,
+    skillIds,
+    removeSkillIds: previousSkillIds,
+  });
   let status: InstallReceipt['status'] = 'active';
   if (input.smokeCommandId) {
     const check = await runSmoke(input.smokeCommandId, input.policy, active);
@@ -158,6 +217,13 @@ export async function installSkillBundle(input: {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         status = 'failed';
       }
+      await activateNativeSkills({
+        nativeSkillDirectory: input.nativeSkillDirectory,
+        release: previousRelease || release,
+        bundleId: previousBundleId || input.bundle.bundleId,
+        skillIds: previousBundleId ? previousSkillIds : [],
+        removeSkillIds: skillIds,
+      });
     }
   }
   if (status === 'active') {

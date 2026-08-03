@@ -25,7 +25,7 @@
     },
     "bundleId": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid"
     },
     "organizationId": {
       "type": "string",
@@ -94,7 +94,8 @@
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "format": "uuid"
     },
     "evaluationReceiptId": {
       "type": "string",

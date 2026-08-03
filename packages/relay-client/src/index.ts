@@ -167,6 +167,12 @@ export class AgentFabricClient {
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });
   }
+  pollSkill(body: { workspaceId: string; provider: 'codex' | 'claude'; installedBundleId: string | null }) {
+    return this.signedPost('/agent-fabric/skills/poll', body);
+  }
+  postInstallReceipt(bundleId: string, rolloutId: string, receipt: unknown) {
+    return this.signedPost(`/agent-fabric/skills/${encodeURIComponent(bundleId)}/receipts`, { rolloutId, receipt });
+  }
 
   signedPost(route: string, body: unknown): Promise<Record<string, unknown>> {
     const operation = this.#serial.then(() => this.#signedPostNow(route, body));

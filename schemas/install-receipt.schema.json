@@ -35,24 +35,25 @@
     },
     "deviceId": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid"
     },
     "workspaceId": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid"
     },
     "provider": {
       "type": "string"
     },
     "bundleId": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid"
     },
     "previousBundleId": {
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "format": "uuid"
     },
     "status": {
       "type": "string",
