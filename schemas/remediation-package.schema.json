@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/remediation-package/v1",
+  "title": "Dharma Remediation Package Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "packageId",
+    "organizationId",
+    "failureFamilyId",
+    "remediationId",
+    "artifacts",
+    "evidenceBoundary",
+    "createdAt",
+    "packageHash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.remediation-package/v1"
+    },
+    "packageId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "failureFamilyId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "remediationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "kind",
+          "contentHash",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "contentHash": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evidenceBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productionStatus",
+        "limitations"
+      ],
+      "properties": {
+        "productionStatus": {
+          "type": "string",
+          "enum": [
+            "synthetic",
+            "staged",
+            "production_path",
+            "customer_observed",
+            "production_verified"
+          ]
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "packageHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "signature": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

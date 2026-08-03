@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/policy" },
+    { "path": "packages/local-vault" },
+    { "path": "packages/provider-adapters" },
+    { "path": "packages/evidence-reduction" },
+    { "path": "packages/cli" }
+  ]
+}

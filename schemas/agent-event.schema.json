@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/agent-event/v1",
+  "title": "Dharma Agent Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "eventId",
+    "organizationId",
+    "deviceId",
+    "workspaceId",
+    "provider",
+    "sessionId",
+    "sequence",
+    "occurredAt",
+    "kind",
+    "coverage",
+    "payload"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.agent-event/v1"
+    },
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "claude",
+        "cursor",
+        "qoder",
+        "qwen",
+        "copilot",
+        "pi",
+        "workbuddy",
+        "managed"
+      ]
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "user_message",
+        "agent_message",
+        "tool_call",
+        "tool_result",
+        "command",
+        "file_read",
+        "file_write",
+        "git",
+        "validation",
+        "permission",
+        "subagent",
+        "error",
+        "retry",
+        "session_state",
+        "metadata",
+        "collapsed_output"
+      ]
+    },
+    "coverage": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "partial",
+        "unavailable",
+        "excluded",
+        "redacted",
+        "out_of_window",
+        "not_supported"
+      ]
+    },
+    "contentRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "payload": {
+      "type": "object"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nativeEventId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceKind": {
+          "type": "string"
+        },
+        "localLocatorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "skillBundleId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "providerModel": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

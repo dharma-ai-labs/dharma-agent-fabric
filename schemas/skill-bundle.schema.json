@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/skill-bundle/v1",
+  "title": "Signed Organization Skill Bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "bundleId",
+    "organizationId",
+    "version",
+    "skills",
+    "riskClass",
+    "targetSelectors",
+    "activationPolicy",
+    "rollbackBundleId",
+    "evaluationReceiptId",
+    "bundleHash",
+    "createdAt",
+    "signature"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.skill-bundle/v1"
+    },
+    "bundleId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string"
+    },
+    "skills": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skillId",
+          "version",
+          "commit",
+          "contentHash",
+          "path"
+        ],
+        "properties": {
+          "skillId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "contentHash": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "riskClass": {
+      "type": "string",
+      "enum": [
+        "R0",
+        "R1",
+        "R2",
+        "R3",
+        "R4"
+      ]
+    },
+    "targetSelectors": {
+      "type": "object"
+    },
+    "activationPolicy": {
+      "type": "string",
+      "enum": [
+        "next_task",
+        "next_session",
+        "host_restart",
+        "immediate_safe_reload"
+      ]
+    },
+    "rollbackBundleId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evaluationReceiptId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundleHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

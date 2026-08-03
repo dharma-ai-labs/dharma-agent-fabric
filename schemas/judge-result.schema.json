@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/judge-result/v1",
+  "title": "Semantic Judge Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "judgeResultId",
+    "judgeRequestId",
+    "status",
+    "output",
+    "confidence",
+    "usage",
+    "actualCostCents",
+    "createdAt",
+    "resultHash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.judge-result/v1"
+    },
+    "judgeResultId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "judgeRequestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "blocked"
+      ]
+    },
+    "output": {
+      "type": "object"
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "not_available"
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cachedTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "reasoningTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "actualCostCents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resultHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    }
+  }
+}

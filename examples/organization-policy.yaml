@@ -1,0 +1,41 @@
+schema: dharma.organization-policy/v1
+organizationId: org_local_pilot
+revision: pilot-1
+evidence:
+  defaultMode: deep
+  registeredWorkspaceOnly: true
+  excludePaths:
+    - .env
+    - .env.*
+    - node_modules/**
+    - .git/**
+    - dist/**
+  maximumCapsuleBytes: 2000000
+  maximumDailyUploadBytes: 100000000
+  maximumExpansionBytes: 5000000
+  pseudonymizeIdentity: true
+tasks:
+  defaultNetwork: deny
+  defaultGit: task_branch
+  allowedCommands:
+    test:
+      argv: [npm, test]
+      timeoutSeconds: 1200
+    lint:
+      argv: [npm, run, lint]
+      timeoutSeconds: 600
+  writePaths:
+    - packages/**
+    - apps/**
+    - test/**
+  requireLocalConfirmationFor:
+    - git.push
+skills:
+  automaticInstall: true
+  automaticPromotionMaxRisk: R2
+  canaryPercent: 10
+retention:
+  rawLocalDays: 30
+  capsuleServerDays: 90
+budgets:
+  dailyAnalysisCents: 1000

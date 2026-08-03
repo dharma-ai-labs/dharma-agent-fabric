@@ -1,0 +1,259 @@
+openapi: 3.1.0
+info:
+  title: Dharma Agent Fabric Organization API
+  version: 0.1.0
+  description: Organization-scoped API for devices, workspaces, trajectories, tasks, evaluations, remediations, Skills, rollouts, and usage.
+servers:
+  - url: https://api.dharma-ai.io
+security:
+  - oauth2: []
+paths:
+  /api/orgs/{orgId}/agent-fabric/devices:
+    get:
+      operationId: listDevices
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '200':
+          description: Device list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+  /api/orgs/{orgId}/agent-fabric/workspaces:
+    get:
+      operationId: listWorkspaces
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '200':
+          description: Workspace list
+    post:
+      operationId: registerWorkspace
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, repositoryIdentity, displayName]
+              properties:
+                deviceId: {type: string}
+                repositoryIdentity: {type: string}
+                displayName: {type: string}
+      responses:
+        '201':
+          description: Workspace registered
+  /api/orgs/{orgId}/agent-fabric/trajectories:
+    get:
+      operationId: listTrajectories
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: workspaceId
+          in: query
+          schema: {type: string}
+        - name: provider
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Trajectory summaries
+  /api/orgs/{orgId}/agent-fabric/trajectories/{trajectoryId}/evidence-requests:
+    post:
+      operationId: requestAdditionalEvidence
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: trajectoryId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './evidence-request.schema.json'
+      responses:
+        '202':
+          description: Evidence request queued
+  /api/orgs/{orgId}/agent-fabric/tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '200':
+          description: Task list
+    post:
+      operationId: dispatchTask
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './task-envelope.schema.json'
+      responses:
+        '202':
+          description: Task accepted for dispatch
+  /api/orgs/{orgId}/agent-fabric/tasks/{taskId}/cancel:
+    post:
+      operationId: cancelTask
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: taskId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Cancellation requested
+  /api/orgs/{orgId}/agent-fabric/conversations/{conversationId}/messages:
+    post:
+      operationId: sendAgentMessage
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: conversationId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './agent-message.schema.json'
+      responses:
+        '202':
+          description: Message queued
+  /api/orgs/{orgId}/agent-fabric/evaluation-runs:
+    post:
+      operationId: createEvaluation
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [evaluationContractId, inputSelector, maximumCostCents]
+              properties:
+                evaluationContractId: {type: string}
+                inputSelector: {type: object}
+                maximumCostCents: {type: integer, minimum: 0}
+      responses:
+        '202':
+          description: Evaluation queued
+  /api/orgs/{orgId}/agent-fabric/failure-families:
+    get:
+      operationId: listFailureFamilies
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      responses:
+        '200':
+          description: Failure families
+  /api/orgs/{orgId}/agent-fabric/failure-families/{failureFamilyId}/remediations:
+    post:
+      operationId: proposeRemediation
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: failureFamilyId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Remediation proposal queued
+  /api/orgs/{orgId}/agent-fabric/skill-bundles/{bundleId}/release:
+    post:
+      operationId: rolloutSkillRelease
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: bundleId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Rollout started
+  /api/orgs/{orgId}/agent-fabric/rollouts/{rolloutId}/rollback:
+    post:
+      operationId: rollbackSkillRelease
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - name: rolloutId
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Rollback started
+  /api/orgs/{orgId}/agent-fabric/cost-estimates:
+    post:
+      operationId: estimateCost
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose, executionMode]
+              properties:
+                purpose: {type: string}
+                executionMode: {type: string}
+                model: {type: string}
+                inputEstimate: {type: object}
+      responses:
+        '200':
+          description: Cost estimate
+components:
+  parameters:
+    OrgId:
+      name: orgId
+      in: path
+      required: true
+      schema: {type: string}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://api.dharma-ai.io/oauth/authorize
+          tokenUrl: https://api.dharma-ai.io/oauth/token
+          scopes:
+            agent_fabric.devices.read: Read connected devices
+            agent_fabric.workspaces.read: Read registered workspaces
+            agent_fabric.trajectories.read: Read trajectory summaries
+            agent_fabric.evidence.request: Request bounded additional evidence
+            agent_fabric.tasks.create: Dispatch bounded tasks
+            agent_fabric.tasks.cancel: Cancel tasks
+            agent_fabric.messages.send: Send A2A messages
+            agent_fabric.evals.create: Create evaluations
+            agent_fabric.remediations.propose: Propose remediations
+            agent_fabric.skills.release: Release Skill bundles
+            agent_fabric.skills.rollback: Roll back Skill rollouts
+            agent_fabric.billing.read: Read usage and estimates

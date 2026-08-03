@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../contracts" },
+    { "path": "../evidence-reduction" },
+    { "path": "../local-vault" },
+    { "path": "../policy" },
+    { "path": "../provider-adapters" }
+  ]
+}

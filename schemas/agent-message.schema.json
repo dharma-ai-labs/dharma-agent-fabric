@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/agent-message/v1",
+  "title": "Dharma Agent Message",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "messageId",
+    "organizationId",
+    "conversationId",
+    "source",
+    "target",
+    "content",
+    "state",
+    "evidenceRefs",
+    "authority",
+    "createdAt",
+    "expiresAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.agent-message/v1"
+    },
+    "messageId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "conversationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "taskId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "parentMessageId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentId",
+        "environment"
+      ],
+      "properties": {
+        "agentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment": {
+          "type": "string",
+          "enum": [
+            "local",
+            "managed",
+            "human",
+            "orchestrator"
+          ]
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "environment"
+      ],
+      "properties": {
+        "selector": {
+          "type": "object"
+        },
+        "environment": {
+          "type": "string",
+          "enum": [
+            "local",
+            "managed",
+            "human",
+            "any"
+          ]
+        }
+      }
+    },
+    "content": {
+      "type": "string"
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "failedGates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missingAuthority": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "permittedActions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbiddenActions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requiredRecovery": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evidenceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+      }
+    },
+    "authority": {
+      "type": "object"
+    },
+    "budget": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "signature": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

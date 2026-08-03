@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-capabilities/v1",
+  "title": "Device Capabilities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "deviceId",
+    "organizationId",
+    "platform",
+    "environmentKind",
+    "relayVersion",
+    "providers",
+    "workspaces",
+    "observedAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-capabilities/v1"
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "enum": [
+        "windows",
+        "wsl",
+        "macos",
+        "linux"
+      ]
+    },
+    "environmentKind": {
+      "type": "string"
+    },
+    "relayVersion": {
+      "type": "string"
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider",
+          "version",
+          "evidence",
+          "configuredAssets",
+          "taskExecution",
+          "sessionContinuation",
+          "skillInstall",
+          "activation",
+          "usageEvidence"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "configuredAssets": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "taskExecution": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "sessionContinuation": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "skillInstall": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "activation": {
+            "type": "string",
+            "enum": [
+              "next_task",
+              "next_session",
+              "host_restart",
+              "immediate_safe_reload",
+              "unavailable"
+            ]
+          },
+          "usageEvidence": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          }
+        }
+      }
+    },
+    "workspaces": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

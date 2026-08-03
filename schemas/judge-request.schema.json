@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/judge-request/v1",
+  "title": "Semantic Judge Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "judgeRequestId",
+    "organizationId",
+    "purpose",
+    "model",
+    "promptVersion",
+    "inputRefs",
+    "maximumCostCents",
+    "hiddenTruthIsolated",
+    "createdAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.judge-request/v1"
+    },
+    "judgeRequestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "taskId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evaluationRunId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "purpose": {
+      "type": "string",
+      "enum": [
+        "trajectory_judgment",
+        "rubric_proposal",
+        "failure_clustering",
+        "remediation_synthesis",
+        "held_out_judgment",
+        "scenario_generation",
+        "report_generation"
+      ]
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "id"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "promptVersion": {
+      "type": "string"
+    },
+    "inputRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+      }
+    },
+    "maximumCostCents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hiddenTruthIsolated": {
+      "const": true
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

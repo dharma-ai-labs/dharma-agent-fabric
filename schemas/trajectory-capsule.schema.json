@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/trajectory-capsule/v1",
+  "title": "Dharma Trajectory Capsule",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "trajectoryId",
+    "revision",
+    "organizationId",
+    "deviceId",
+    "workspaceId",
+    "provider",
+    "sessionId",
+    "timeRange",
+    "status",
+    "evidenceMode",
+    "coverage",
+    "events",
+    "contentIndex",
+    "redactionReceipt",
+    "localEvidenceAvailable",
+    "capsuleHash",
+    "createdAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.trajectory-capsule/v1"
+    },
+    "trajectoryId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "previousRevisionHash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "completed",
+        "failed",
+        "cancelled",
+        "partial"
+      ]
+    },
+    "evidenceMode": {
+      "type": "string",
+      "enum": [
+        "structured",
+        "deep",
+        "reduced_full_session",
+        "incident_capture"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "admittedSessions",
+        "excludedSessions",
+        "missingFields"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "observed",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "admittedSessions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excludedSessions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missingFields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "repoState": {
+      "type": "object"
+    },
+    "skillState": {
+      "type": "object"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.dharma-ai.io/agent-event/v1"
+      }
+    },
+    "contentIndex": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contentId",
+          "kind",
+          "bytes",
+          "uploaded",
+          "availableLocally"
+        ],
+        "properties": {
+          "contentId": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uploaded": {
+            "type": "boolean"
+          },
+          "availableLocally": {
+            "type": "boolean"
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "normalizedPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "validationResults": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
+    "redactionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policyRevision",
+        "classes",
+        "redactedValues",
+        "excludedPaths",
+        "inputBytes",
+        "outputBytes"
+      ],
+      "properties": {
+        "policyRevision": {
+          "type": "string"
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "redactedValues": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excludedPaths": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inputBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "localEvidenceAvailable": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contentId",
+          "kind",
+          "bytes"
+        ],
+        "properties": {
+          "contentId": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "capsuleHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

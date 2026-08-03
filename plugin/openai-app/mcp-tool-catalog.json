@@ -1,0 +1,32 @@
+{
+  "schema": "dharma.mcp-tool-catalog/v1",
+  "app": "dharma-agent-fabric",
+  "tools": [
+    {"name": "list_devices", "mode": "read", "scope": "agent_fabric.devices.read"},
+    {"name": "list_agents", "mode": "read", "scope": "agent_fabric.devices.read"},
+    {"name": "list_workspaces", "mode": "read", "scope": "agent_fabric.workspaces.read"},
+    {"name": "get_trajectory_summary", "mode": "read", "scope": "agent_fabric.trajectories.read"},
+    {"name": "request_additional_evidence", "mode": "write", "scope": "agent_fabric.evidence.request", "confirmation": "purpose_bytes_retention"},
+    {"name": "create_evaluation", "mode": "write", "scope": "agent_fabric.evals.create", "confirmation": "scope_and_cost"},
+    {"name": "get_evaluation", "mode": "read", "scope": "agent_fabric.evals.read"},
+    {"name": "dispatch_task", "mode": "write", "scope": "agent_fabric.tasks.create", "confirmation": "target_authority_cost"},
+    {"name": "cancel_task", "mode": "write", "scope": "agent_fabric.tasks.cancel", "confirmation": "task_target"},
+    {"name": "send_agent_message", "mode": "write", "scope": "agent_fabric.messages.send"},
+    {"name": "list_failure_families", "mode": "read", "scope": "agent_fabric.remediations.read"},
+    {"name": "propose_remediation", "mode": "write", "scope": "agent_fabric.remediations.propose", "confirmation": "target_and_git_write"},
+    {"name": "get_skill_release", "mode": "read", "scope": "agent_fabric.skills.read"},
+    {"name": "create_skill_release", "mode": "write", "scope": "agent_fabric.skills.release", "confirmation": "risk_evidence_targets"},
+    {"name": "rollout_skill_release", "mode": "write", "scope": "agent_fabric.skills.release", "confirmation": "cohort_and_rollback"},
+    {"name": "rollback_skill_release", "mode": "write", "scope": "agent_fabric.skills.rollback", "confirmation": "rollout_and_previous_bundle"},
+    {"name": "get_usage", "mode": "read", "scope": "agent_fabric.billing.read"},
+    {"name": "estimate_cost", "mode": "read", "scope": "agent_fabric.billing.read"}
+  ],
+  "forbiddenTools": [
+    "run_arbitrary_shell",
+    "read_any_local_file",
+    "upload_entire_home_directory",
+    "merge_any_branch",
+    "deploy_any_environment",
+    "retrieve_secret"
+  ]
+}

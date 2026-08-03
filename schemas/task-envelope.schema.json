@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/task/v1",
+  "title": "Dharma Task Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "taskId",
+    "organizationId",
+    "workspaceId",
+    "target",
+    "instructions",
+    "requiredSkills",
+    "authority",
+    "execution",
+    "acceptance",
+    "budget",
+    "createdAt",
+    "expiresAt",
+    "nonce"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.task/v1"
+    },
+    "taskId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deviceId",
+        "provider"
+      ],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string"
+        }
+      }
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requiredSkills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skillId",
+          "version",
+          "commit",
+          "contentHash"
+        ],
+        "properties": {
+          "skillId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "contentHash": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          }
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "readPaths",
+        "writePaths",
+        "commands",
+        "network",
+        "git"
+      ],
+      "properties": {
+        "readPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "writePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commandId"],
+            "properties": {
+              "commandId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              }
+            }
+          }
+        },
+        "network": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "package_registry_only",
+            "allowlisted_domains",
+            "inherit_local_provider"
+          ]
+        },
+        "git": {
+          "type": "string",
+          "enum": [
+            "read_only",
+            "task_branch",
+            "merge_allowed",
+            "deploy_allowed"
+          ]
+        },
+        "allowlistedDomains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "isolation",
+        "timeoutSeconds",
+        "leaseSeconds",
+        "maximumConcurrentAgents"
+      ],
+      "properties": {
+        "isolation": {
+          "const": "git_worktree"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leaseSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximumConcurrentAgents": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commands",
+        "requiredArtifacts"
+      ],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commandId"],
+            "properties": {
+              "commandId": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              }
+            }
+          }
+        },
+        "requiredArtifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "maximumDharmaCostCents"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "byok_local",
+            "byok_cloud",
+            "dharma_managed"
+          ]
+        },
+        "maximumDharmaCostCents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximumProviderCostCents": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 1
+    },
+    "signature": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

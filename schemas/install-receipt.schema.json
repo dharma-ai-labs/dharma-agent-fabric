@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/install-receipt/v1",
+  "title": "Skill Installation Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "installationId",
+    "organizationId",
+    "deviceId",
+    "workspaceId",
+    "provider",
+    "bundleId",
+    "previousBundleId",
+    "status",
+    "activationMode",
+    "checks",
+    "startedAt",
+    "completedAt",
+    "receiptHash",
+    "signature"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.install-receipt/v1"
+    },
+    "installationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string"
+    },
+    "bundleId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "previousBundleId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "staged",
+        "active",
+        "failed",
+        "rolled_back"
+      ]
+    },
+    "activationMode": {
+      "type": "string"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "unavailable"
+            ]
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "rollbackReceiptId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receiptHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "signature": {
+      "type": "string"
+    }
+  }
+}

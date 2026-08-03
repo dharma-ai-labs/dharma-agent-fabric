@@ -1,0 +1,32 @@
+{
+  "name": "dharma-agent-fabric",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.20.0 <25.0.0",
+    "npm": ">=10.9.3 <12.0.0"
+  },
+  "packageManager": "npm@10.9.3",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "lint": "tsc -b --pretty false",
+    "schema:validate": "node scripts/validate-schemas.mjs",
+    "test": "npm run schema:validate && npm run build && npm run test:unit",
+    "test:unit": "npm run test --workspaces --if-present",
+    "pack:verify": "node scripts/verify-package.mjs",
+    "check": "npm test && npm run pack:verify"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "typescript": "^5.8.3",
+    "yaml": "^2.8.1"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/evidence-response/v1",
+  "title": "Evidence Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "responseId",
+    "requestId",
+    "organizationId",
+    "deviceId",
+    "workspaceId",
+    "trajectoryId",
+    "approved",
+    "excluded",
+    "redactionReceipt",
+    "bytesPrepared",
+    "createdAt",
+    "responseHash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.evidence-response/v1"
+    },
+    "responseId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "requestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trajectoryId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "approved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contentId",
+          "bytes",
+          "chunkHash"
+        ],
+        "properties": {
+          "contentId": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chunkHash": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          }
+        }
+      }
+    },
+    "excluded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contentId",
+          "reasonCode"
+        ],
+        "properties": {
+          "contentId": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "reasonCode": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "redactionReceipt": {
+      "type": "object"
+    },
+    "bytesPrepared": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "responseHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "signature": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}
