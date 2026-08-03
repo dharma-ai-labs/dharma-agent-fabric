@@ -5,12 +5,17 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
 import { verifyCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
 import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
+import {
+  executeProviderTask,
+  type ProviderExecutionResult,
+} from '@dharma-ai/agent-fabric-provider-adapters';
 
 export interface TaskEnvelope {
   schema: 'dharma.task/v1';
   taskId: string;
   organizationId: string;
   workspaceId: string;
+  target: { deviceId: string; provider: 'codex' | 'claude' };
   instructions: string;
   authority: {
     readPaths: string[];
@@ -49,6 +54,15 @@ export interface TaskReceipt {
   startedAt: string;
   completedAt: string;
 }
+
+export type ProviderTaskExecutor = (input: {
+  provider: 'codex' | 'claude';
+  workspace: string;
+  instructions: string;
+  timeoutSeconds: number;
+  allowedCommandArgv: string[][];
+  signal?: AbortSignal;
+}) => Promise<ProviderExecutionResult>;
 
 function assertContained(root: string, candidate: string): string {
   const absolute = resolve(candidate);
@@ -149,6 +163,7 @@ export async function executeTask(input: {
   serverPublicKey: KeyObject;
   receiptStore: FileTaskReceiptStore;
   signal?: AbortSignal;
+  providerExecutor?: ProviderTaskExecutor;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey);
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
@@ -175,7 +190,28 @@ export async function executeTask(input: {
   const commandResults: CommandResult[] = [];
   let status: TaskReceipt['status'] = 'completed';
   try {
+    const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
+    const providerResult = await (input.providerExecutor ?? executeProviderTask)({
+      provider: input.task.target.provider,
+      workspace: worktree,
+      instructions: input.task.instructions,
+      timeoutSeconds: input.task.execution.timeoutSeconds,
+      allowedCommandArgv: allowedCommands,
+      signal: input.signal,
+    });
+    commandResults.push({
+      commandId: `provider.${input.task.target.provider}`,
+      exitCode: providerResult.exitCode,
+      signal: providerResult.signal,
+      timedOut: providerResult.timedOut,
+      stdout: providerResult.stdout,
+      stderr: providerResult.stderr,
+      stdoutSha256: providerResult.stdoutSha256,
+      stderrSha256: providerResult.stderrSha256,
+    });
+    if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
     for (const { commandId } of input.task.acceptance.commands) {
+      if (status !== 'completed') break;
       if (input.signal?.aborted) { status = 'cancelled'; break; }
       const command = resolveRegisteredCommand(input.policy, commandId);
       const cwd = command.workingDirectory

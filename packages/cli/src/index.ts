@@ -202,18 +202,23 @@ async function executeOneTask(
   const workspace = (await registry()).find((item) => item.workspaceId === task.workspaceId);
   if (!workspace) throw new Error('Task workspace is not registered on this device.');
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
   await fabric.postTaskEvent(task.taskId, 'started', { bundleHash: null });
   const heartbeats: Promise<unknown>[] = [];
   const heartbeat = setInterval(() => {
     heartbeats.push(fabric.postTaskEvent(task.taskId, 'lease_extended', { taskId: task.taskId }).catch(() => undefined));
   }, Math.max(15_000, Math.floor(leaseSeconds * 500)));
-  const receipt = await executeTask({
-    task, policy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
-    receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
-  });
-  clearInterval(heartbeat);
-  await Promise.allSettled(heartbeats);
+  let receipt;
+  try {
+    receipt = await executeTask({
+      task, policy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
+      receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
+    });
+  } finally {
+    clearInterval(heartbeat);
+    await Promise.allSettled(heartbeats);
+  }
   const summary = {
     status: receipt.status, branch: receipt.branch,
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),

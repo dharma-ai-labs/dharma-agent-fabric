@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { access, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -36,6 +37,84 @@ export interface ProviderAdapter {
   providerId: 'codex' | 'claude';
   capability(): Promise<ProviderCapability>;
   discover(request: DiscoveryRequest): Promise<ProviderSession[]>;
+}
+
+export interface ProviderExecutionResult {
+  provider: 'codex' | 'claude';
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  stdoutSha256: string;
+  stderrSha256: string;
+}
+
+export type ProviderProcessRunner = (input: {
+  command: string; argv: string[]; cwd: string; stdin: string; timeoutMs: number; signal?: AbortSignal;
+}) => Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: Buffer; stderr: Buffer }>;
+
+const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
+  const child = spawn(input.command, input.argv, {
+    cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, DHARMA_AGENT_FABRIC_TASK: '1' },
+  });
+  const maximum = 5_000_000;
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let timedOut = false;
+  const collect = (target: Buffer[], chunk: Buffer, current: number) => {
+    if (current < maximum) target.push(chunk.subarray(0, Math.max(0, maximum - current)));
+    return current + chunk.length;
+  };
+  child.stdout.on('data', (chunk: Buffer) => { stdoutBytes = collect(stdout, chunk, stdoutBytes); });
+  child.stderr.on('data', (chunk: Buffer) => { stderrBytes = collect(stderr, chunk, stderrBytes); });
+  const cancel = () => child.kill('SIGTERM');
+  input.signal?.addEventListener('abort', cancel, { once: true });
+  const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, input.timeoutMs);
+  child.once('error', reject);
+  child.once('close', (exitCode, signal) => {
+    clearTimeout(timeout);
+    input.signal?.removeEventListener('abort', cancel);
+    accept({ exitCode, signal, timedOut, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+  });
+  child.stdin.end(input.stdin);
+});
+
+export async function executeProviderTask(input: {
+  provider: 'codex' | 'claude';
+  workspace: string;
+  instructions: string;
+  timeoutSeconds: number;
+  allowedCommandArgv: string[][];
+  signal?: AbortSignal;
+  runner?: ProviderProcessRunner;
+}): Promise<ProviderExecutionResult> {
+  if (!insideWorkspace(input.workspace, input.workspace)) throw new Error('Provider workspace is invalid.');
+  if (!input.instructions.trim() || input.instructions.length > 20_000) throw new Error('Provider task instructions are invalid.');
+  const runner = input.runner || defaultProcessRunner;
+  let command: string;
+  let argv: string[];
+  if (input.provider === 'codex') {
+    command = 'codex';
+    argv = ['exec', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-'];
+  } else {
+    command = 'claude';
+    const bashTools = input.allowedCommandArgv.map((parts) => `Bash(${parts.join(' ')})`);
+    argv = ['--print', '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits', '--allowedTools', ['Read', 'Edit', 'Write', ...bashTools].join(','), '--disallowedTools', 'WebFetch,WebSearch'];
+  }
+  const result = await runner({
+    command, argv, cwd: input.workspace, stdin: input.instructions,
+    timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000, signal: input.signal,
+  });
+  return {
+    provider: input.provider, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
+    stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8'),
+    stdoutSha256: `sha256:${createHash('sha256').update(result.stdout).digest('hex')}`,
+    stderrSha256: `sha256:${createHash('sha256').update(result.stderr).digest('hex')}`,
+  };
 }
 
 async function executableVersion(command: string): Promise<string | null> {
@@ -158,9 +237,9 @@ function adapter(provider: 'codex' | 'claude', command: string): ProviderAdapter
         version,
         evidence: 'available',
         configuredAssets: 'partial',
-        taskExecution: version ? 'partial' : 'unavailable',
+        taskExecution: version ? 'available' : 'unavailable',
         sessionContinuation: 'unavailable',
-        skillInstall: 'partial',
+        skillInstall: version ? 'available' : 'unavailable',
         activation: 'next_session',
         usageEvidence: 'partial',
       };

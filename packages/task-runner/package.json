@@ -8,6 +8,7 @@
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
     "@dharma-ai/agent-fabric-contracts": "0.1.0",
-    "@dharma-ai/agent-fabric-policy": "0.1.0"
+    "@dharma-ai/agent-fabric-policy": "0.1.0",
+    "@dharma-ai/agent-fabric-provider-adapters": "0.1.0"
   }
 }

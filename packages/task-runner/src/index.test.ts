@@ -35,10 +35,26 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const task = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) } as TaskEnvelope;
   const store = new FileTaskReceiptStore(resolve(root, 'receipts'));
-  const first = await executeTask({ task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store });
-  const second = await executeTask({ task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store });
+  let providerExecutions = 0;
+  const providerExecutor = async () => {
+    providerExecutions += 1;
+    return {
+      provider: 'codex' as const,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: 'agent completed',
+      stderr: '',
+      stdoutSha256: `sha256:${'1'.repeat(64)}`,
+      stderrSha256: `sha256:${'0'.repeat(64)}`,
+    };
+  };
+  const first = await executeTask({ task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store, providerExecutor });
+  const second = await executeTask({ task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store, providerExecutor });
   assert.equal(first.status, 'completed');
-  assert.equal(first.commandResults[0]?.stdout, 'verified');
+  assert.equal(first.commandResults[0]?.commandId, 'provider.codex');
+  assert.equal(first.commandResults[1]?.stdout, 'verified');
+  assert.equal(providerExecutions, 1);
   assert.deepEqual(second, first);
   assert.equal(JSON.parse(await readFile(resolve(root, 'receipts', `${task.taskId}.json`), 'utf8')).taskId, task.taskId);
 });
