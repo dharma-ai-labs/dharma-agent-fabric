@@ -22,7 +22,7 @@ const policy: OrganizationPolicy = {
 };
 
 async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey']): Promise<SkillBundle> {
-  const skill = { skillId: 'dharma-boundary', version: '1.0.0', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
+  const skill = { skillId: 'dharma-boundary', version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
   const base = {
     schema: 'dharma.skill-bundle/v1' as const, bundleId, organizationId: 'org_test', version: '1.0.0', skills: [skill],
     riskClass: 'R2' as const, targetSelectors: { providers: ['codex'] }, activationPolicy: 'next_session' as const,

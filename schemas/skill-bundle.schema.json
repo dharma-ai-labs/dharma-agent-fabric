@@ -43,6 +43,7 @@
         "required": [
           "skillId",
           "version",
+          "repository",
           "commit",
           "contentHash",
           "path"
@@ -54,6 +55,10 @@
           },
           "version": {
             "type": "string"
+          },
+          "repository": {
+            "type": "string",
+            "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
           },
           "commit": {
             "type": "string"

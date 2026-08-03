@@ -260,16 +260,16 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   }
   const commits = [...new Set(bundle.skills.map((skill) => skill.commit))];
   if (commits.length !== 1 || !/^[a-f0-9]{40,64}$/i.test(commits[0]!)) throw new Error('Skill bundle must pin one full Git commit.');
+  const repositories = [...new Set(bundle.skills.map((skill) => skill.repository))];
+  if (repositories.length !== 1 || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositories[0]!)) {
+    throw new Error('Skill bundle must pin one credential-free GitHub repository.');
+  }
   const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
   await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
   await rm(sourceRoot, { recursive: true, force: true });
-  let hasCommit = true;
-  try { await execFileAsync('git', ['-C', workspace.path, 'cat-file', '-e', `${commits[0]}^{commit}`], { timeout: 10_000 }); }
-  catch { hasCommit = false; }
-  if (!hasCommit) {
-    await execFileAsync('git', ['-C', workspace.path, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
-  }
-  await execFileAsync('git', ['-C', workspace.path, 'worktree', 'add', '--detach', sourceRoot, commits[0]!], { timeout: 30_000 });
+  await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
+  await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
+  await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
   try {
     const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
@@ -289,7 +289,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
     return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };
   } finally {
-    await execFileAsync('git', ['-C', workspace.path, 'worktree', 'remove', '--force', sourceRoot], { timeout: 30_000 }).catch(() => undefined);
+    await rm(sourceRoot, { recursive: true, force: true });
   }
 }
 

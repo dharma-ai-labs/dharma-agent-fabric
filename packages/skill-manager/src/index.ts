@@ -10,7 +10,7 @@ export interface SkillBundle {
   bundleId: string;
   organizationId: string;
   version: string;
-  skills: Array<{ skillId: string; version: string; commit: string; contentHash: string; path: string }>;
+  skills: Array<{ skillId: string; version: string; repository: string; commit: string; contentHash: string; path: string }>;
   riskClass: 'R0' | 'R1' | 'R2' | 'R3' | 'R4';
   targetSelectors: Record<string, unknown>;
   activationPolicy: 'next_task' | 'next_session' | 'host_restart' | 'immediate_safe_reload';
