@@ -1,0 +1,269 @@
+---
+id: installation
+title: 安装
+sidebar_position: 2
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# 安装
+
+不同编码智能体的安装方式不同。除了 Qoder CLI 可以复用 Qoder Desktop 内置的
+版本之外，每个宿主都需要单独安装 Better Harness。安装或更新插件后，请开启
+新的会话或任务，让宿主重新加载插件清单。
+
+## 前置条件 {#prerequisites}
+
+通过宿主使用 Better Harness 时，请先安装下方任一受支持的编码智能体，并确认它
+能够打开要分析的仓库。宿主自身的系统要求和运行时仍然适用；除非对应标签页
+明确使用源码检出，否则请按宿主步骤操作，不要运行本仓库的开发环境安装流程。
+
+只有使用独立 CLI、从源码检出运行 Better Harness 或参与本仓库开发时，才需要
+Node.js 和 npm。这些路径支持 Windows、macOS 和 Linux，并要求：
+
+- Node.js `>=22.20.0 <25.0.0`
+- npm `>=10.9.3 <12.0.0`
+
+使用独立或源码 CLI 前，请检查当前运行时：
+
+```bash
+node --version
+npm --version
+```
+
+Cursor 使用源码本地插件，还需要 Git 来克隆本仓库。
+
+:::tip 没有找到你的 Coding Agent？
+
+下方六个标签页是已验证的快速开始路径，项目当前共跟踪九个宿主适配器。
+请先[比较全部适配器的支持边界](./hosts/adapter-matrix)；如果希望新增或补全
+一个集成，再[按照新增宿主贡献流程与 PR 示例操作](./hosts/contributing-new-coding-agent)。
+开始重复工作前，也可以先[查看仓库当前的 Pull Requests](https://github.com/QoderAI/better-harness/pulls)。
+
+:::
+
+<Tabs groupId="host" queryString>
+<TabItem value="claude-code" label="Claude Code">
+
+## Claude Code {#claude-code}
+
+把本仓库注册为 Claude Code marketplace：
+
+```text
+/plugin marketplace add QoderAI/better-harness
+```
+
+然后安装 Better Harness：
+
+```text
+/plugin install better-harness@better-harness
+```
+
+### 验证安装
+
+在终端里验证插件可被发现：
+
+```bash
+claude plugin details better-harness@better-harness
+```
+
+详情中应包含 `Skills (1) better-harness`。接着在要分析的仓库中开启新的
+Claude 会话，运行报告提示词：
+
+```text
+/better-harness analyze this project's AI coding workflow and generate an evidence-backed report
+```
+
+Claude Code 默认在仓库的 `.claude/better-harness` 报告根目录下产出自包含的
+`report.html`，并配套 `report.md` 与 `findings.json`。如果只想在对话中查看
+结果，可以明确要求 inline 或 no-files 输出。匹配当前工作区的本地 Claude
+会话在可用时会被纳入；缺失的证据保持显式标注，不做推断。
+
+</TabItem>
+<TabItem value="codex" label="Codex">
+
+## Codex {#codex}
+
+### Codex Desktop
+
+1. 打开 **Settings &gt; Plugins**。
+2. 选择 **+ Add &gt; From Marketplace**。
+3. 输入 Git 仓库 URL 并设置 Git ref；本仓库只含单个插件，**Sparse paths**
+   留空即可。
+4. 选择 **Add marketplace**，然后从新增的 marketplace 中安装
+   **Better Harness**。
+
+仓库 URL 使用 `https://github.com/QoderAI/better-harness.git`，Git ref 为
+`main`。
+
+![Codex 添加插件 marketplace 对话框，包含仓库、Git ref 和可选的 sparse paths](/img/codex-add-marketplace.jpg)
+
+### Codex CLI
+
+添加仓库源：
+
+```bash
+codex plugin marketplace add "https://github.com/QoderAI/better-harness.git" --ref main
+```
+
+然后查看并安装 Better Harness：
+
+```bash
+codex plugin list --marketplace better-harness
+codex plugin add better-harness@better-harness
+```
+
+### 验证安装
+
+对于 Codex Desktop，请先在 **Settings &gt; Plugins** 中确认
+**Better Harness** 已安装，然后在要分析的仓库中开启新任务并运行：
+
+```text
+@better-harness 分析此项目的 AI 编码工作流并生成基于证据的报告
+```
+
+对于 Codex CLI，请确认已配置的 marketplace 能发现插件：
+
+```bash
+codex plugin list --marketplace better-harness
+```
+
+然后在要分析的仓库中开启新的 Codex 任务并运行：
+
+```text
+$better-harness:better-harness 分析此项目的 AI 编码工作流并生成基于证据的报告
+```
+
+`marketplace add` 使用仓库 URL，而不是原始 `marketplace.json` URL。当前
+Codex 版本使用 `plugin add` 和 `--marketplace`；使用 `plugin install` 或
+`--source` 的示例针对的是另一套 CLI 契约。
+
+</TabItem>
+<TabItem value="qoder" label="Qoder">
+
+## Qoder {#qoder}
+
+Better Harness 已内置于 [Qoder](https://qoder.com/) 桌面应用，无需
+Marketplace 或本地插件安装。两个入口任选其一：
+
+1. **从会话进入：** 打开要分析的仓库，开启新会话，运行报告提示词：
+
+   ```text
+   /better-harness analyze this project's AI coding workflow and generate an evidence-backed report
+   ```
+
+2. **从 Quest 进入（Qoder 1.18.0+）：** 打开 Quest，在左侧边栏选择
+   **Better Harness (Beta)**。
+
+### Qoder CLI
+
+如果已安装 Qoder Desktop，Better Harness 在 Qoder CLI 中开箱即用，无需
+marketplace 或插件安装。
+
+只有在不安装 Qoder Desktop 而单独使用 Qoder CLI 时，才需要手动把本仓库
+添加为 marketplace 并安装：
+
+```bash
+qodercli plugin marketplace add "https://github.com/QoderAI/better-harness.git"
+qodercli plugin install better-harness@better-harness
+```
+
+### 验证安装
+
+对于 Qoder Desktop，请开启新会话并运行上方的报告提示词。使用 Qoder 1.18.0
+或更新版本时，Quest 左侧边栏出现 **Better Harness (Beta)** 也能确认内置入口
+可用。
+
+手动安装 Qoder CLI 插件后，用以下命令验证发现状态：
+
+```bash
+qodercli plugin list
+```
+
+然后开启新的 Qoder CLI 会话再使用 `/better-harness`。
+
+</TabItem>
+<TabItem value="cursor" label="Cursor">
+
+## Cursor {#cursor}
+
+Cursor 插件尚未发布到 marketplace。可在单次 Cursor Agent 会话中加载源码
+本地插件：
+
+```bash
+git clone https://github.com/QoderAI/better-harness.git
+cursor-agent --plugin-dir /path/to/better-harness
+```
+
+### 验证安装
+
+保持这个 Cursor Agent 会话处于打开状态，并运行：
+
+```text
+/better-harness 分析此项目的 AI 编码工作流并生成基于证据的报告
+```
+
+开始分析即表示源码本地 Skill 已在本次会话加载。Cursor 不会把这个检出目录安装
+到全局；后续会话仍需使用相同的 `--plugin-dir` 参数启动。
+
+Cursor 会话证据通过与工作区匹配的转录、元数据和审计日志提供支持。部分或
+不可用的覆盖范围会保持显式标注。
+
+</TabItem>
+<TabItem value="qwen-code" label="Qwen Code">
+
+## Qwen Code {#qwen-code}
+
+将 Better Harness 安装为 Qwen Code 扩展：
+
+```bash
+qwen extensions install QoderAI/better-harness
+```
+
+### 验证安装
+
+在要分析的仓库中启动新的 Qwen Code 会话，然后运行报告提示词：
+
+```text
+/better-harness 分析此项目的 AI 编码工作流并生成基于证据的报告
+```
+
+Qwen Code 产出自包含的 `report.html`，并配套 `report.md` 与 `findings.json`。
+会话证据覆盖范围取决于 Qwen Code 可用的会话记录路径；缺失或不完整的证据保持显式标注。
+
+</TabItem>
+<TabItem value="github-copilot" label="GitHub Copilot">
+
+## GitHub Copilot {#github-copilot}
+
+将本仓库注册为 Copilot 插件 Marketplace，然后安装 Better Harness：
+
+```bash
+copilot plugin marketplace add QoderAI/better-harness
+copilot plugin install better-harness@better-harness
+```
+
+### 验证安装
+
+确认插件已安装且其 Skill 可用：
+
+```bash
+copilot plugin list
+copilot skill list
+```
+
+输出中应包含 `better-harness`。请开启新的 Copilot CLI 会话，让它重新加载已安装的
+Skill。建议优先使用上方的 marketplace 路径，让发现与更新保持在同一个已注册源。
+
+Copilot 会话证据来自 `~/.copilot/session-state/` 下与工作区匹配的 Copilot CLI 会话记录。
+Copilot 不记录逐次响应的 token 用量，VS Code Copilot Chat 也没有受支持的持久化会话记录；
+两者均作为明确的证据边界保留。
+
+</TabItem>
+</Tabs>
+
+## 下一步
+
+生成[你的第一份报告](./your-first-report.md)。如果安装或发现失败，请使用
+[故障排查](./troubleshooting.md)中的限定范围检查。
