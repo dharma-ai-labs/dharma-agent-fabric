@@ -1,10 +1,13 @@
 {
-  "name": "@dharma-ai/agent-fabric-local-vault",
+  "name": "@dharma-ai/agent-fabric-task-runner",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": { ".": "./dist/index.js" },
   "scripts": { "test": "node --test dist/*.test.js" },
-  "dependencies": { "@dharma-ai/agent-fabric-secure-store": "0.1.0" }
+  "dependencies": {
+    "@dharma-ai/agent-fabric-contracts": "0.1.0",
+    "@dharma-ai/agent-fabric-policy": "0.1.0"
+  }
 }

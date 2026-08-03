@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { validateContract } from '@dharma-ai/agent-fabric-contracts';
 import { buildTrajectoryCapsule } from '@dharma-ai/agent-fabric-evidence-reduction';
-import { LocalVault, loadExplicitTestKey } from '@dharma-ai/agent-fabric-local-vault';
+import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai/agent-fabric-local-vault';
 import { loadOrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
 import { claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai/agent-fabric-provider-adapters';
 
@@ -51,7 +51,7 @@ async function capture(flags: Map<string, string | boolean>): Promise<Output> {
   const sessions = await adapter.discover({ workspace, roots: typeof root === 'string' ? [root] : undefined });
   if (sessions.length === 0) throw new Error('No workspace-qualified provider sessions were found.');
   const session = sessions.at(-1)!;
-  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: loadExplicitTestKey(process.env) });
+  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
   try {
     const raw = Buffer.from(session.records.map((record) => JSON.stringify(record.native)).join('\n'), 'utf8');
     const rawContentId = await vault.putBlob(raw, 'raw-provider-session');

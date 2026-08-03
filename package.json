@@ -17,10 +17,12 @@
     "clean": "tsc -b --clean",
     "lint": "tsc -b --pretty false",
     "schema:validate": "node scripts/validate-schemas.mjs",
+    "vendor:verify": "node scripts/verify-better-harness.mjs",
+    "smoke:secure-store": "node scripts/smoke-secure-store.mjs",
     "test": "npm run schema:validate && npm run build && npm run test:unit",
     "test:unit": "npm run test --workspaces --if-present",
     "pack:verify": "node scripts/verify-package.mjs",
-    "check": "npm test && npm run pack:verify"
+    "check": "npm run vendor:verify && npm test && npm run pack:verify"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

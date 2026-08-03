@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
 
 const BLOB_VERSION = 1;
 
@@ -135,5 +136,22 @@ export function loadExplicitTestKey(env: NodeJS.ProcessEnv): Buffer {
   }
   const key = Buffer.from(env.DHARMA_VAULT_KEY, 'base64');
   if (key.length !== 32) throw new Error('DHARMA_VAULT_KEY must be a base64-encoded 32-byte key.');
+  return key;
+}
+
+export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore): Promise<Buffer> {
+  if (process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
+  const secureStore = store ?? await createSystemSecureStore();
+  const account = 'vault-master-key-v1';
+  const current = await secureStore.get(account);
+  if (current) {
+    const key = Buffer.from(current, 'base64');
+    if (key.length !== 32) throw new Error('Stored vault master key is corrupt.');
+    return key;
+  }
+  const key = randomBytes(32);
+  await secureStore.put(account, key.toString('base64'));
+  const confirmed = await secureStore.get(account);
+  if (confirmed !== key.toString('base64')) throw new Error('Secure store did not confirm the vault key write.');
   return key;
 }

@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"]
-  ,"references": [{ "path": "../secure-store" }]
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../contracts" }, { "path": "../policy" }]
 }
