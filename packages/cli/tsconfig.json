@@ -7,6 +7,8 @@
     { "path": "../evidence-reduction" },
     { "path": "../local-vault" },
     { "path": "../policy" },
-    { "path": "../provider-adapters" }
+    { "path": "../provider-adapters" },
+    { "path": "../relay-client" },
+    { "path": "../task-runner" }
   ]
 }

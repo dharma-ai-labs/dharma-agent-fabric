@@ -8,8 +8,10 @@
     { "path": "packages/provider-adapters" },
     { "path": "packages/better-harness-bridge" },
     { "path": "packages/evidence-reduction" },
+    { "path": "packages/relay-client" },
     { "path": "packages/task-runner" },
     { "path": "packages/skill-manager" },
-    { "path": "packages/cli" }
+    { "path": "packages/cli" },
+    { "path": "apps/relay-gateway" }
   ]
 }
