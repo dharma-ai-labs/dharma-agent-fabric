@@ -1,15 +1,18 @@
 import { createServer } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { createRelayPresence } from './presence.js';
 import { parseRelayRequest, relayTarget } from './protocol.js';
 
 const port = Number(process.env.PORT || 8080);
 const hqInternalUrl = process.env.DHARMA_HQ_INTERNAL_URL?.trim();
 if (!hqInternalUrl) throw new Error('DHARMA_HQ_INTERNAL_URL is required.');
+const presence = await createRelayPresence();
 
 const server = createServer((request, response) => {
   if (request.method === 'GET' && request.url === '/healthz') {
-    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    response.end(JSON.stringify({ ok: true, service: 'dharma-agent-fabric-relay' }));
+    const ready = presence.ready();
+    response.writeHead(ready ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify({ ok: ready, service: 'dharma-agent-fabric-relay', presence: ready ? 'ready' : 'unavailable' }));
     return;
   }
   response.writeHead(404, { 'content-type': 'application/json' });
@@ -26,6 +29,7 @@ server.on('upgrade', (request, socket, head) => {
 
 websocket.on('connection', (socket) => {
   sockets.add(socket);
+  let lastPresence: { deviceId: string; value: string | null } | null = null;
   let chain = Promise.resolve();
   const ping = setInterval(() => { if (socket.readyState === socket.OPEN) socket.ping(); }, 25_000);
   socket.on('message', (data, binary) => {
@@ -35,6 +39,10 @@ websocket.on('connection', (socket) => {
         if (binary) throw new Error('binary_not_supported');
         const message = parseRelayRequest(JSON.parse(data.toString('utf8')));
         requestId = message.requestId;
+        const deviceId = message.headers['x-dharma-device-id']!;
+        const sessionId = message.headers['x-dharma-session-id']!;
+        const value = await presence.touch(deviceId, sessionId);
+        lastPresence = { deviceId, value };
         const upstream = await fetch(relayTarget(hqInternalUrl, message), {
           method: message.method, headers: message.headers, body: message.body, signal: AbortSignal.timeout(30_000),
         });
@@ -45,7 +53,11 @@ websocket.on('connection', (socket) => {
       }
     }).catch(() => undefined);
   });
-  socket.on('close', () => { clearInterval(ping); sockets.delete(socket); });
+  socket.on('close', () => {
+    clearInterval(ping);
+    sockets.delete(socket);
+    if (lastPresence) void presence.remove(lastPresence.deviceId, lastPresence.value).catch(() => undefined);
+  });
   socket.on('error', () => undefined);
 });
 
@@ -53,7 +65,7 @@ server.listen(port, '0.0.0.0', () => process.stdout.write(`${JSON.stringify({ ok
 
 const shutdown = () => {
   for (const socket of sockets) socket.close(1001, 'server_shutdown');
-  server.close(() => process.exit(0));
+  server.close(() => { void presence.close().finally(() => process.exit(0)); });
   setTimeout(() => process.exit(1), 10_000).unref();
 };
 process.once('SIGTERM', shutdown);
