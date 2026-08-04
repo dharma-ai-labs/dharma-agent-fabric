@@ -77,7 +77,11 @@ function deterministicUuid(value: string): string {
 
 function redactString(value: string, stats: RedactionStats): string {
   stats.inputBytes += Buffer.byteLength(value);
-  let output = value;
+  let output = value.replaceAll('\u0000', () => {
+    stats.classes.add('invalid_unicode_nul');
+    stats.redactedValues += 1;
+    return '[REMOVED:nul]';
+  });
   for (const rule of SECRET_PATTERNS) {
     output = output.replace(rule.pattern, () => {
       stats.classes.add(rule.name);

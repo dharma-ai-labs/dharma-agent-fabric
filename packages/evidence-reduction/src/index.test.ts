@@ -67,3 +67,27 @@ test('identical source sessions produce an identical capsule revision hash', () 
   assert.equal(first.createdAt, session.endedAt);
   assert.equal(second.capsuleHash, first.capsuleHash);
 });
+
+test('capsule removes NUL characters rejected by Postgres jsonb', () => {
+  const session = {
+    provider: 'codex' as const,
+    sessionId: 'session_nul',
+    sourcePath: '/private/nul.jsonl',
+    workspace: '/repo',
+    coverage: 'observed' as const,
+    startedAt: '2026-08-03T00:00:00.000Z',
+    endedAt: '2026-08-03T00:00:01.000Z',
+    records: [{
+      native: { type: 'assistant_message', text: 'before\u0000after' },
+      sourcePath: '/private/nul.jsonl', line: 1, workspace: '/repo',
+      timestamp: '2026-08-03T00:00:01.000Z', kind: 'assistant_message',
+    }],
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
+    policy, rawContentId: `sha256:${'c'.repeat(64)}`, rawBytes: 12,
+  });
+
+  assert.equal(JSON.stringify(capsule).includes('\\u0000'), false);
+  assert.equal(capsule.redactionReceipt.classes.includes('invalid_unicode_nul'), true);
+});
