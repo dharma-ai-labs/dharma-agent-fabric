@@ -12,6 +12,7 @@ export interface SourceRecord {
   workspace: string | null;
   timestamp: string | null;
   kind: string;
+  coverage?: EvidenceState;
 }
 
 export interface ProviderSession {
@@ -234,13 +235,17 @@ async function jsonlFiles(root: string): Promise<string[]> {
   return output.sort();
 }
 
-async function boundedJsonlLines(path: string, size: number, maximumBytes: number): Promise<string[]> {
+async function boundedJsonlLines(
+  path: string,
+  size: number,
+  maximumBytes: number,
+): Promise<{ lines: string[]; tailOffset: number | null }> {
   const handle = await open(path, 'r');
   try {
     if (size <= maximumBytes) {
       const buffer = Buffer.alloc(size);
       await handle.read(buffer, 0, size, 0);
-      return buffer.toString('utf8').split(/\r?\n/).filter(Boolean);
+      return { lines: buffer.toString('utf8').split(/\r?\n/).filter(Boolean), tailOffset: null };
     }
     const headSize = Math.min(1_048_576, Math.floor(maximumBytes / 2));
     const tailSize = maximumBytes - headSize;
@@ -252,7 +257,8 @@ async function boundedJsonlLines(path: string, size: number, maximumBytes: numbe
     headLines.pop();
     const tailLines = tail.toString('utf8').split(/\r?\n/);
     tailLines.shift();
-    return [...headLines, ...tailLines].filter(Boolean);
+    const boundedHead = headLines.filter(Boolean);
+    return { lines: [...boundedHead, ...tailLines.filter(Boolean)], tailOffset: boundedHead.length };
   } finally {
     await handle.close();
   }
@@ -270,15 +276,53 @@ async function parseSessionFile(
   const maximumRecordBytes = Math.min(Math.max(limits.maximumRecordBytes ?? 262_144, 4_096), 1_048_576);
   let line = 0;
   let omitted = fileStat.size > maximumBytes;
-  for (const value of await boundedJsonlLines(path, fileStat.size, maximumBytes)) {
+  const bounded = await boundedJsonlLines(path, fileStat.size, maximumBytes);
+  let tailTurnReady = bounded.tailOffset === null;
+  let currentTurnStart = 0;
+  const markCurrentTurnPartial = () => {
+    for (const record of records.slice(currentTurnStart)) record.coverage = 'partial';
+  };
+  for (const [index, value] of bounded.lines.entries()) {
     line += 1;
     if (!value.trim()) continue;
-    if (Buffer.byteLength(value) > maximumRecordBytes) { omitted = true; continue; }
+    if (Buffer.byteLength(value) > maximumRecordBytes) {
+      omitted = true;
+      markCurrentTurnPartial();
+      continue;
+    }
     let native: Record<string, unknown>;
-    try { native = JSON.parse(value) as Record<string, unknown>; } catch { omitted = true; continue; }
+    try { native = JSON.parse(value) as Record<string, unknown>; } catch {
+      omitted = true;
+      markCurrentTurnPartial();
+      continue;
+    }
+    const inTail = bounded.tailOffset !== null && index >= bounded.tailOffset;
+    if (inTail && !tailTurnReady) {
+      const candidate: SourceRecord = {
+        native,
+        sourcePath: path,
+        line,
+        workspace: null,
+        timestamp: null,
+        kind: 'metadata',
+      };
+      if (!recordTurnId(candidate)) continue;
+      tailTurnReady = true;
+    }
+    if (recordTurnId({ native, sourcePath: path, line, workspace: null, timestamp: null, kind: 'metadata' })) {
+      currentTurnStart = records.length;
+    }
     const cwd = findString(native, ['cwd', 'workspace', 'workspace_path', 'working_directory']);
     const timestamp = findString(native, ['timestamp', 'created_at', 'createdAt', 'time']);
-    records.push({ native, sourcePath: path, line, workspace: cwd, timestamp, kind: inferKind(native) });
+    records.push({
+      native,
+      sourcePath: path,
+      line,
+      workspace: cwd,
+      timestamp,
+      kind: inferKind(native),
+      coverage: bounded.tailOffset === null || (inTail && tailTurnReady) ? 'observed' : 'partial',
+    });
   }
   const bound = records.filter((record) => record.workspace && insideWorkspace(workspace, record.workspace));
   if (bound.length === 0) return null;
@@ -336,6 +380,7 @@ export function segmentProviderSession(session: ProviderSession): ProviderSessio
     ...session,
     sessionId: `${session.sessionId}:turn:${turnId}`,
     records,
+    coverage: records.every((record) => record.coverage === 'observed') ? 'observed' : 'partial',
     startedAt: normalizeTimestamp(records[0]?.timestamp ?? null, new Date(session.startedAt)),
     endedAt: normalizeTimestamp(records.at(-1)?.timestamp ?? null, new Date(session.endedAt)),
   }));

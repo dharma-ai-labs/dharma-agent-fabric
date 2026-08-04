@@ -73,6 +73,36 @@ test('discovery bounds oversized sessions and marks sampled evidence partial', a
   assert.ok((result[0]?.records.length ?? 0) <= 2);
 });
 
+test('oversized discovery admits only complete explicit turns from the bounded tail', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
+  const workspace = join(root, 'repo');
+  const sessions = join(root, 'sessions');
+  await mkdir(workspace);
+  await mkdir(sessions);
+  const firstTurn = '019fcaab-6c8e-7432-bfb7-fc63efa3d728';
+  const secondTurn = '019fcaac-6c8e-7432-bfb7-fc63efa3d729';
+  await writeFile(join(sessions, 'large-turns.jsonl'), [
+    { type: 'session_meta', payload: { cwd: workspace }, timestamp: '2026-08-03T01:00:00Z' },
+    { type: 'turn_context', payload: { turn_id: firstTurn, cwd: workspace }, timestamp: '2026-08-03T01:00:01Z' },
+    { type: 'tool_result', payload: { cwd: workspace, output: 'x'.repeat(150_000) } },
+    { type: 'turn_context', payload: { turn_id: secondTurn, cwd: workspace }, timestamp: '2026-08-03T02:00:00Z' },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'complete tail task' }, timestamp: '2026-08-03T02:00:01Z' },
+    { type: 'event_msg', payload: { type: 'agent_message', message: 'complete tail result' }, timestamp: '2026-08-03T02:00:02Z' },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+
+  const result = await codexAdapter.discover({
+    workspace,
+    roots: [sessions],
+    maximumBytesPerSession: 131_072,
+    maximumRecordBytes: 65_536,
+  });
+
+  const second = result.find((session) => session.sessionId.endsWith(secondTurn));
+  assert.equal(second?.coverage, 'observed');
+  assert.deepEqual(second?.records.map((record) => record.kind), ['metadata', 'user_message', 'agent_message']);
+  assert.ok(result.every((session) => session.sessionId.endsWith(secondTurn) || session.coverage === 'partial'));
+});
+
 test('Codex Desktop nested payloads retain semantic event kinds', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   const workspace = join(root, 'repo');

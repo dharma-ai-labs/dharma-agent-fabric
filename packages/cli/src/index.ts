@@ -157,7 +157,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const adapter = provider === 'codex' ? codexAdapter : provider === 'claude' ? claudeAdapter : null;
   if (!adapter) throw new Error(`Unsupported capture provider: ${provider}`);
   const root = flags.get('source-root');
-  const sessions = await adapter.discover({
+  let sessions = await adapter.discover({
     workspace,
     roots: typeof root === 'string' ? [root] : undefined,
     maximumSessions: batch ? Math.min(Math.max(Number(flags.get('maximum-sessions') || 100), 1), 1_000) : 1,
@@ -166,6 +166,16 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       67_108_864,
     ),
   });
+  const sessionIdsFile = flags.get('session-ids-file');
+  if (typeof sessionIdsFile === 'string') {
+    const values = JSON.parse(await readFile(resolve(sessionIdsFile), 'utf8')) as unknown;
+    if (!Array.isArray(values) || values.length === 0 || values.length > 1_000
+      || values.some((value) => typeof value !== 'string' || value.length > 160)) {
+      throw new Error('Session ID allowlist must be a non-empty JSON string array with at most 1,000 entries.');
+    }
+    const allowed = new Set(values);
+    sessions = sessions.filter((candidate) => allowed.has(candidate.sessionId));
+  }
   if (sessions.length === 0) throw new Error('No workspace-qualified provider sessions were found.');
   const session = sessions.at(-1)!;
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
