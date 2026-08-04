@@ -128,7 +128,11 @@ async function capture(flags: Map<string, string | boolean>): Promise<Output> {
   const adapter = provider === 'codex' ? codexAdapter : provider === 'claude' ? claudeAdapter : null;
   if (!adapter) throw new Error(`Unsupported capture provider: ${provider}`);
   const root = flags.get('source-root');
-  const sessions = await adapter.discover({ workspace, roots: typeof root === 'string' ? [root] : undefined });
+  const sessions = await adapter.discover({
+    workspace,
+    roots: typeof root === 'string' ? [root] : undefined,
+    maximumSessions: 1,
+  });
   if (sessions.length === 0) throw new Error('No workspace-qualified provider sessions were found.');
   const session = sessions.at(-1)!;
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
@@ -136,12 +140,11 @@ async function capture(flags: Map<string, string | boolean>): Promise<Output> {
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
   const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
   try {
-    const raw = Buffer.from(session.records.map((record) => JSON.stringify(record.native)).join('\n'), 'utf8');
-    const rawContentId = await vault.putBlob(raw, 'raw-provider-session');
+    const raw = await vault.putFile(session.sourcePath, 'raw-provider-session');
     vault.recordSession({ sessionId: session.sessionId, provider: session.provider, workspaceId: registered.workspaceId, sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt });
     const capsule = buildTrajectoryCapsule({
       organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
-      session, policy, rawContentId, rawBytes: raw.byteLength,
+      session, policy, rawContentId: raw.contentId, rawBytes: raw.bytes,
     });
     const validation = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
     if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);

@@ -32,6 +32,29 @@ test('cwd-less sessions are not inferred into a workspace', async () => {
   assert.deepEqual(await codexAdapter.discover({ workspace, roots: [sessions] }), []);
 });
 
+test('discovery bounds oversized sessions and marks sampled evidence partial', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
+  const workspace = join(root, 'repo');
+  const sessions = join(root, 'sessions');
+  await mkdir(workspace);
+  await mkdir(sessions);
+  await writeFile(join(sessions, 'large.jsonl'), [
+    JSON.stringify({ type: 'session_meta', payload: { cwd: workspace }, timestamp: '2026-08-03T01:00:00Z' }),
+    JSON.stringify({ type: 'tool_result', payload: { cwd: workspace, output: 'x'.repeat(300_000) } }),
+    JSON.stringify({ type: 'assistant_message', payload: { cwd: workspace, text: 'bounded result' }, timestamp: '2026-08-03T01:00:02Z' }),
+  ].join('\n'));
+  const result = await codexAdapter.discover({
+    workspace,
+    roots: [sessions],
+    maximumSessions: 1,
+    maximumBytesPerSession: 131_072,
+    maximumRecordBytes: 65_536,
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.coverage, 'partial');
+  assert.ok((result[0]?.records.length ?? 0) <= 2);
+});
+
 test('Codex task execution uses stdin, workspace sandboxing, and disabled network without a shell', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   let observed: Record<string, unknown> = {};

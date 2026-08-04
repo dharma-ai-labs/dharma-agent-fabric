@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -15,6 +15,18 @@ test('vault encrypts content and verifies it on read', async () => {
   const digest = contentId.slice('sha256:'.length);
   const stored = await readFile(join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`));
   assert.equal(stored.includes(secret), false);
+  vault.close();
+});
+
+test('vault streams large provider files without buffering the plaintext', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-'));
+  const source = join(root, 'provider.jsonl');
+  const plaintext = Buffer.alloc(4 * 1024 * 1024, 'x');
+  await writeFile(source, plaintext);
+  const vault = await LocalVault.open({ root: join(root, 'vault'), masterKey: randomBytes(32) });
+  const stored = await vault.putFile(source, 'raw-provider-session');
+  assert.equal(stored.bytes, plaintext.length);
+  assert.deepEqual(await vault.getBlob(stored.contentId), plaintext);
   vault.close();
 });
 

@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
@@ -79,6 +80,47 @@ export class LocalVault {
       'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
     ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
     return contentId;
+  }
+
+  async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
+    const source = await stat(sourcePath);
+    if (!source.isFile() || source.size < 1) throw new Error('Vault source must be a non-empty file.');
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    const hash = createHash('sha256');
+    const incoming = resolve(this.root, 'blobs', `.incoming-${process.pid}-${randomBytes(8).toString('hex')}`);
+    const destination = await open(incoming, 'wx', 0o600);
+    try {
+      await destination.write(Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, Buffer.alloc(16)]));
+      for await (const value of createReadStream(sourcePath, { highWaterMark: 1_048_576 })) {
+        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        hash.update(chunk);
+        const encrypted = cipher.update(chunk);
+        if (encrypted.length) await destination.write(encrypted);
+      }
+      const final = cipher.final();
+      if (final.length) await destination.write(final);
+      await destination.write(cipher.getAuthTag(), 0, 16, 13);
+    } catch (error) {
+      await destination.close().catch(() => undefined);
+      await rm(incoming, { force: true });
+      throw error;
+    }
+    await destination.close();
+
+    const contentId = `sha256:${hash.digest('hex')}`;
+    const path = this.#blobPath(contentId);
+    const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
+    if (existing) {
+      await rm(incoming, { force: true });
+      return { contentId, bytes: source.size };
+    }
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await rename(incoming, path);
+    this.#database.prepare(
+      'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
+    ).run(contentId, source.size, kind, new Date().toISOString());
+    return { contentId, bytes: source.size };
   }
 
   async getBlob(contentId: string): Promise<Buffer> {

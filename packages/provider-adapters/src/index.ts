@@ -1,10 +1,8 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { access, readdir, stat } from 'node:fs/promises';
+import { access, open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
 import type { EvidenceState, ProviderCapability } from '@dharma-ai/agent-fabric-contracts';
 
 export interface SourceRecord {
@@ -31,6 +29,9 @@ export interface DiscoveryRequest {
   workspace: string;
   roots?: string[];
   since?: Date;
+  maximumSessions?: number;
+  maximumBytesPerSession?: number;
+  maximumRecordBytes?: number;
 }
 
 export interface ProviderAdapter {
@@ -188,16 +189,48 @@ async function jsonlFiles(root: string): Promise<string[]> {
   return output.sort();
 }
 
-async function parseSessionFile(provider: 'codex' | 'claude', path: string, workspace: string): Promise<ProviderSession | null> {
+async function boundedJsonlLines(path: string, size: number, maximumBytes: number): Promise<string[]> {
+  const handle = await open(path, 'r');
+  try {
+    if (size <= maximumBytes) {
+      const buffer = Buffer.alloc(size);
+      await handle.read(buffer, 0, size, 0);
+      return buffer.toString('utf8').split(/\r?\n/).filter(Boolean);
+    }
+    const headSize = Math.min(1_048_576, Math.floor(maximumBytes / 2));
+    const tailSize = maximumBytes - headSize;
+    const head = Buffer.alloc(headSize);
+    const tail = Buffer.alloc(tailSize);
+    await handle.read(head, 0, headSize, 0);
+    await handle.read(tail, 0, tailSize, size - tailSize);
+    const headLines = head.toString('utf8').split(/\r?\n/);
+    headLines.pop();
+    const tailLines = tail.toString('utf8').split(/\r?\n/);
+    tailLines.shift();
+    return [...headLines, ...tailLines].filter(Boolean);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function parseSessionFile(
+  provider: 'codex' | 'claude',
+  path: string,
+  workspace: string,
+  limits: { maximumBytes?: number; maximumRecordBytes?: number } = {},
+): Promise<ProviderSession | null> {
   const fileStat = await stat(path);
   const records: SourceRecord[] = [];
+  const maximumBytes = Math.min(Math.max(limits.maximumBytes ?? 8_388_608, 65_536), 67_108_864);
+  const maximumRecordBytes = Math.min(Math.max(limits.maximumRecordBytes ?? 262_144, 4_096), 1_048_576);
   let line = 0;
-  const reader = createInterface({ input: createReadStream(path, { encoding: 'utf8' }), crlfDelay: Infinity });
-  for await (const value of reader) {
+  let omitted = fileStat.size > maximumBytes;
+  for (const value of await boundedJsonlLines(path, fileStat.size, maximumBytes)) {
     line += 1;
     if (!value.trim()) continue;
+    if (Buffer.byteLength(value) > maximumRecordBytes) { omitted = true; continue; }
     let native: Record<string, unknown>;
-    try { native = JSON.parse(value) as Record<string, unknown>; } catch { continue; }
+    try { native = JSON.parse(value) as Record<string, unknown>; } catch { omitted = true; continue; }
     const cwd = findString(native, ['cwd', 'workspace', 'workspace_path', 'working_directory']);
     const timestamp = findString(native, ['timestamp', 'created_at', 'createdAt', 'time']);
     records.push({ native, sourcePath: path, line, workspace: cwd, timestamp, kind: inferKind(native) });
@@ -214,7 +247,7 @@ async function parseSessionFile(provider: 'codex' | 'claude', path: string, work
     sourcePath: path,
     workspace: resolve(workspace),
     records: effective,
-    coverage: effective.length === records.length ? 'observed' : 'partial',
+    coverage: !omitted && effective.length === records.length ? 'observed' : 'partial',
     startedAt,
     endedAt,
   };
@@ -246,13 +279,22 @@ function adapter(provider: 'codex' | 'claude', command: string): ProviderAdapter
     },
     async discover(request) {
       const sessions: ProviderSession[] = [];
+      const maximumSessions = Math.min(Math.max(request.maximumSessions ?? 100, 1), 1_000);
+      const candidates: Array<{ path: string; modified: number }> = [];
       for (const root of request.roots ?? defaultRoots(provider)) {
         for (const path of await jsonlFiles(root)) {
           const fileStat = await stat(path);
-          if (request.since && fileStat.mtime < request.since) continue;
-          const session = await parseSessionFile(provider, path, request.workspace);
-          if (session) sessions.push(session);
+          if (!request.since || fileStat.mtime >= request.since) candidates.push({ path, modified: fileStat.mtimeMs });
         }
+      }
+      candidates.sort((left, right) => right.modified - left.modified);
+      for (const candidate of candidates) {
+        const session = await parseSessionFile(provider, candidate.path, request.workspace, {
+          maximumBytes: request.maximumBytesPerSession,
+          maximumRecordBytes: request.maximumRecordBytes,
+        });
+        if (session) sessions.push(session);
+        if (sessions.length >= maximumSessions) break;
       }
       return sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     },
