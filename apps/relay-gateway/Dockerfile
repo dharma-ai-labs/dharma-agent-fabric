@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps/relay-gateway ./apps/relay-gateway
-RUN npm ci && npm run build
+RUN npm ci && npm run clean && npm run build
 
 FROM node:22.22.0-bookworm-slim
 ENV NODE_ENV=production PORT=8080
