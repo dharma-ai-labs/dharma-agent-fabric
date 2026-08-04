@@ -53,9 +53,10 @@ export interface ProviderExecutionResult {
 
 export type ProviderProcessRunner = (input: {
   command: string; argv: string[]; cwd: string; stdin: string; timeoutMs: number; signal?: AbortSignal;
+  completeOnResultJson?: boolean;
 }) => Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: Buffer; stderr: Buffer }>;
 
-const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
+export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
   const child = spawn(input.command, input.argv, {
     cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, DHARMA_AGENT_FABRIC_TASK: '1' },
@@ -66,11 +67,34 @@ const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((acce
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let timedOut = false;
+  let terminalResultCode: number | null = null;
+  let pendingJson = '';
   const collect = (target: Buffer[], chunk: Buffer, current: number) => {
     if (current < maximum) target.push(chunk.subarray(0, Math.max(0, maximum - current)));
     return current + chunk.length;
   };
-  child.stdout.on('data', (chunk: Buffer) => { stdoutBytes = collect(stdout, chunk, stdoutBytes); });
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdoutBytes = collect(stdout, chunk, stdoutBytes);
+    if (!input.completeOnResultJson || terminalResultCode !== null) return;
+    pendingJson += chunk.toString('utf8');
+    const complete = (line: string): boolean => {
+      try {
+        const event = JSON.parse(line) as { type?: unknown; is_error?: unknown; subtype?: unknown };
+        if (event.type !== 'result') return false;
+        terminalResultCode = event.is_error === true || String(event.subtype || '').includes('error') ? 1 : 0;
+        child.kill('SIGTERM');
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const lines = pendingJson.split(/\r?\n/);
+    pendingJson = lines.pop() || '';
+    for (const line of lines) {
+      if (complete(line)) break;
+    }
+    if (terminalResultCode === null && complete(pendingJson)) pendingJson = '';
+  });
   child.stderr.on('data', (chunk: Buffer) => { stderrBytes = collect(stderr, chunk, stderrBytes); });
   const cancel = () => child.kill('SIGTERM');
   input.signal?.addEventListener('abort', cancel, { once: true });
@@ -79,7 +103,13 @@ const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((acce
   child.once('close', (exitCode, signal) => {
     clearTimeout(timeout);
     input.signal?.removeEventListener('abort', cancel);
-    accept({ exitCode, signal, timedOut, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    accept({
+      exitCode: terminalResultCode ?? exitCode,
+      signal: terminalResultCode === null ? signal : null,
+      timedOut,
+      stdout: Buffer.concat(stdout),
+      stderr: Buffer.concat(stderr),
+    });
   });
   child.stdin.end(input.stdin);
 });
@@ -104,11 +134,13 @@ export async function executeProviderTask(input: {
   } else {
     command = 'claude';
     const bashTools = input.allowedCommandArgv.map((parts) => `Bash(${parts.join(' ')})`);
-    argv = ['--print', '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits', '--allowedTools', ['Read', 'Edit', 'Write', ...bashTools].join(','), '--disallowedTools', 'WebFetch,WebSearch'];
+    argv = ['--print', '--verbose', '--bare', '--no-session-persistence', '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits', '--allowedTools', ['Read', 'Edit', 'Write', ...bashTools].join(','), '--disallowedTools', 'WebFetch,WebSearch'];
   }
   const result = await runner({
     command, argv, cwd: input.workspace, stdin: input.instructions,
-    timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000, signal: input.signal,
+    timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
+    signal: input.signal,
+    completeOnResultJson: input.provider === 'claude',
   });
   return {
     provider: input.provider, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,

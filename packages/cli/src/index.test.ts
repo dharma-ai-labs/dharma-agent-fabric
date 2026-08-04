@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,9 +19,10 @@ test('evidence preview counts native turns without disclosing paths or prompt bo
   const sessions = join(root, 'sessions');
   await mkdir(workspace);
   await mkdir(sessions);
+  const canonicalWorkspace = await realpath(workspace);
   await writeFile(join(sessions, 'desktop.jsonl'), [
-    { type: 'session_meta', payload: { cwd: workspace }, timestamp: '2026-08-03T01:00:00Z' },
-    { type: 'turn_context', payload: { turn_id: '019fcaab-6c8e-7432-bfb7-fc63efa3d728', cwd: workspace }, timestamp: '2026-08-03T01:00:01Z' },
+    { type: 'session_meta', payload: { cwd: canonicalWorkspace }, timestamp: '2026-08-03T01:00:00Z' },
+    { type: 'turn_context', payload: { turn_id: '019fcaab-6c8e-7432-bfb7-fc63efa3d728', cwd: canonicalWorkspace }, timestamp: '2026-08-03T01:00:01Z' },
     { type: 'event_msg', payload: { type: 'user_message', message: 'private prompt body' }, timestamp: '2026-08-03T01:00:02Z' },
   ].map((value) => JSON.stringify(value)).join('\n'));
   const result = await run([

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { codexAdapter, executeProviderTask } from './index.js';
+import { codexAdapter, defaultProcessRunner, executeProviderTask } from './index.js';
 
 test('Codex discovery admits only sessions bound to the requested workspace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
@@ -126,14 +126,35 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
 test('Claude task execution exposes only bounded edit tools and registered commands', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   let argv: string[] = [];
+  let completeOnResultJson = false;
   await executeProviderTask({
     provider: 'claude', workspace: root, instructions: 'Repair the test.', timeoutSeconds: 30, allowedCommandArgv: [['npm', 'test']],
     runner: async (input) => {
       argv = input.argv;
+      completeOnResultJson = input.completeOnResultJson === true;
       return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     },
   });
+  assert.ok(argv.includes('--verbose'));
+  assert.ok(argv.includes('--bare'));
+  assert.ok(argv.includes('--no-session-persistence'));
+  assert.equal(completeOnResultJson, true);
   assert.ok(argv.includes('Read,Edit,Write,Bash(npm test)'));
   assert.ok(argv.includes('WebFetch,WebSearch'));
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
+});
+
+test('provider runner completes on a terminal JSON result without a trailing newline', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
+  const result = await defaultProcessRunner({
+    command: process.execPath,
+    argv: ['-e', 'process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false}));setInterval(()=>{},1000)'],
+    cwd: root,
+    stdin: '',
+    timeoutMs: 5_000,
+    completeOnResultJson: true,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.signal, null);
+  assert.equal(result.timedOut, false);
 });
