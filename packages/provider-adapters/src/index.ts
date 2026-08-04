@@ -161,11 +161,21 @@ function normalizeTimestamp(value: string | null, fallback: Date): string {
 }
 
 function inferKind(record: Record<string, unknown>): string {
-  const raw = String(record.type ?? record.kind ?? record.event_type ?? record.role ?? 'metadata').toLowerCase();
+  const payload = record.payload && typeof record.payload === 'object'
+    ? record.payload as Record<string, unknown>
+    : {};
+  const item = payload.item && typeof payload.item === 'object'
+    ? payload.item as Record<string, unknown>
+    : {};
+  const raw = [payload.type, payload.role, item.type, item.role, record.type, record.kind, record.event_type, record.role]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
   if (raw.includes('user')) return 'user_message';
   if (raw.includes('assistant') || raw.includes('agent')) return 'agent_message';
-  if (raw.includes('tool') && raw.includes('result')) return 'tool_result';
-  if (raw.includes('tool')) return 'tool_call';
+  if (raw.includes('tool') && (raw.includes('result') || raw.includes('end') || raw.includes('output'))) return 'tool_result';
+  if (raw.includes('function_call_output') || raw.includes('patch_apply_end')) return 'tool_result';
+  if (raw.includes('tool') || raw.includes('function_call') || raw.includes('patch_apply')) return 'tool_call';
   if (raw.includes('command') || raw.includes('shell')) return 'command';
   if (raw.includes('error')) return 'error';
   if (raw.includes('retry')) return 'retry';

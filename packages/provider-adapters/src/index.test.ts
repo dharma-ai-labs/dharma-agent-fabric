@@ -55,6 +55,26 @@ test('discovery bounds oversized sessions and marks sampled evidence partial', a
   assert.ok((result[0]?.records.length ?? 0) <= 2);
 });
 
+test('Codex Desktop nested payloads retain semantic event kinds', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
+  const workspace = join(root, 'repo');
+  const sessions = join(root, 'sessions');
+  await mkdir(workspace);
+  await mkdir(sessions);
+  await writeFile(join(sessions, 'desktop.jsonl'), [
+    { type: 'session_meta', payload: { cwd: workspace } },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'fix it' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [] } },
+    { type: 'response_item', payload: { type: 'function_call', name: 'shell_command' } },
+    { type: 'response_item', payload: { type: 'function_call_output', output: 'ok' } },
+    { type: 'event_msg', payload: { type: 'error', message: 'failed' } },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+  const result = await codexAdapter.discover({ workspace, roots: [sessions] });
+  assert.deepEqual(result[0]?.records.map((record) => record.kind), [
+    'metadata', 'user_message', 'agent_message', 'tool_call', 'tool_result', 'error',
+  ]);
+});
+
 test('Codex task execution uses stdin, workspace sandboxing, and disabled network without a shell', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   let observed: Record<string, unknown> = {};
