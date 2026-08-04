@@ -175,6 +175,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   try {
     const capsules = [];
     const syncResults = [];
+    const fabric = flags.has('sync') ? await client() : null;
     for (const selected of batch ? sessions : [session]) {
       const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       const rawContentId = await vault.putBlob(rawTurn, 'raw-provider-turn');
@@ -188,7 +189,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       const capsuleBlob = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
       vault.recordCapsule(capsule.trajectoryId, capsule.revision, capsule.capsuleHash, capsuleBlob);
       capsules.push(capsule);
-      if (flags.has('sync')) syncResults.push(await (await client()).syncTrajectory(capsule));
+      if (fabric) syncResults.push(await fabric.syncTrajectory(capsule));
     }
     const output = flags.get('output');
     if (!batch) {
