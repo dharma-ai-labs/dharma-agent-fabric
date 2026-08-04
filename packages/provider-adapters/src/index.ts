@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { access, open, readdir, stat } from 'node:fs/promises';
+import { access, open, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { EvidenceState, ProviderCapability } from '@dharma-ai/agent-fabric-contracts';
@@ -225,9 +225,10 @@ async function jsonlFiles(root: string): Promise<string[]> {
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const path = resolve(current, entry.name);
       if (entry.isDirectory()) queue.push(path);
-      else if (entry.name.endsWith('.jsonl') && (
-        entry.isFile() || (entry.isSymbolicLink() && (await stat(path)).isFile())
-      )) output.push(path);
+      else if (entry.name.endsWith('.jsonl') && entry.isFile()) output.push(path);
+      else if (entry.name.endsWith('.jsonl') && entry.isSymbolicLink() && (await stat(path)).isFile()) {
+        output.push(await realpath(path));
+      }
     }
   }
   return output.sort();

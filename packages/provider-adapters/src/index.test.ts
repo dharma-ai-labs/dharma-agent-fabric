@@ -37,6 +37,7 @@ test('Codex discovery supports no-copy JSONL source selectors', async () => {
   const result = await codexAdapter.discover({ workspace, roots: [selector] });
   assert.equal(result.length, 1);
   assert.equal(result[0]?.records.length, 1);
+  assert.equal(result[0]?.sourcePath, session);
 });
 
 test('cwd-less sessions are not inferred into a workspace', async () => {
