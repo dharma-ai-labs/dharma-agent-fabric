@@ -55,6 +55,7 @@ function required(flags: Map<string, string | boolean>, name: string): string {
 function print(value: Output): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
 function dharmaHome(): string { return resolve(process.env.DHARMA_HOME || resolve(homedir(), '.dharma')); }
 function configPath() { return resolve(dharmaHome(), 'device.json'); }
+function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollment.json'); }
 function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-state.json'); }
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
 
@@ -93,32 +94,60 @@ async function client() {
 }
 
 async function login(flags: Map<string, string | boolean>): Promise<Output> {
-  const hqUrl = String(flags.get('hq-url') || 'https://hq.dharma-ai.io').replace(/\/$/, '');
-  const organizationId = required(flags, 'organization-id');
-  const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
-  const devicePlatform = await platform();
-  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });
-  const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519 });
-  if (flags.has('no-wait')) return { ok: true, status: 'pending', ...enrollment };
-  const deadline = Date.now() + enrollment.expiresInSeconds * 1_000;
+  type PendingEnrollment = {
+    hqUrl: string;
+    organizationId: string;
+    name: string;
+    platform: DeviceConfig['platform'];
+    publicKeyEd25519: string;
+    deviceCode: string;
+    verificationUri: string;
+    browserCode: string;
+    expiresAt: string;
+  };
+  let pending: PendingEnrollment;
+  if (flags.has('resume')) {
+    pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
+  } else {
+    const hqUrl = String(flags.get('hq-url') || 'https://hq.dharma-ai.io').replace(/\/$/, '');
+    const organizationId = required(flags, 'organization-id');
+    const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
+    const devicePlatform = await platform();
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });
+    const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519 });
+    pending = {
+      hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
+      deviceCode: enrollment.deviceCode, verificationUri: enrollment.verificationUri,
+      browserCode: enrollment.browserCode,
+      expiresAt: new Date(Date.now() + enrollment.expiresInSeconds * 1_000).toISOString(),
+    };
+    await mkdir(dharmaHome(), { recursive: true, mode: 0o700 });
+    await writeFile(pendingEnrollmentPath(), `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 });
+    if (flags.has('no-wait')) {
+      return { ok: true, status: 'pending', deviceCode: pending.deviceCode, verificationUri: pending.verificationUri, browserCode: pending.browserCode, expiresAt: pending.expiresAt };
+    }
+  }
+  const deadline = Date.parse(pending.expiresAt);
   while (Date.now() < deadline) {
-    const result = await pollEnrollment({ hqUrl, deviceCode: enrollment.deviceCode });
+    const result = await pollEnrollment({ hqUrl: pending.hqUrl, deviceCode: pending.deviceCode });
     if (result.status === 'approved') {
       if (typeof result.deviceId !== 'string' || typeof result.relayUrl !== 'string' || typeof result.serverPublicKeyEd25519 !== 'string') {
         throw new Error('Enrollment was approved but the relay or server signing key is not configured.');
       }
       const config: DeviceConfig = {
-        schema: 'dharma.device-config/v1', hqUrl, organizationId, deviceId: result.deviceId,
-        deviceName: name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
+        schema: 'dharma.device-config/v1', hqUrl: pending.hqUrl, organizationId: pending.organizationId, deviceId: result.deviceId,
+        deviceName: pending.name, platform: pending.platform, publicKeyEd25519: pending.publicKeyEd25519,
         serverPublicKeyEd25519: result.serverPublicKeyEd25519, relayUrl: result.relayUrl, enrolledAt: new Date().toISOString(),
       };
       await saveDeviceConfig(configPath(), config);
-      return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId, relayUrl: config.relayUrl };
+      await rm(pendingEnrollmentPath(), { force: true });
+      return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
     }
     if (result.status === 'denied' || result.status === 'expired') throw new Error(`Enrollment ${result.status}.`);
+    if (flags.has('no-wait')) return { ok: true, status: 'pending', verificationUri: pending.verificationUri, expiresAt: pending.expiresAt };
     await new Promise((accept) => setTimeout(accept, 2_000));
   }
-  throw new Error(`Enrollment timed out. Approve it at ${enrollment.verificationUri}`);
+  throw new Error(`Enrollment timed out. Approve it at ${pending.verificationUri}`);
 }
 
 async function capture(flags: Map<string, string | boolean>, batch = false): Promise<Output> {
