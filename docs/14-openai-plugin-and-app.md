@@ -1,170 +1,114 @@
 # OpenAI Plugin and App Distribution
 
-## Current platform model
+## Distribution boundary
 
-As of 2026-08-03, OpenAI describes plugins as the primary discovery unit for workflow capability in ChatGPT and Codex. A plugin may contain Skills, apps, and app templates. Apps remain the integration boundary for external data and actions, and app permissions continue to govern read, write, confirmation, and source-system access.
+Dharma Agent Fabric ships a public Codex Skill and a remote MCP app. The Skill
+provides workflow guidance. The app provides authenticated organization data
+and bounded actions. ChatGPT and Codex never connect directly to a customer
+relay, device, provider credential, or local filesystem.
 
-Official references:
-
-- https://help.openai.com/en/articles/20001256-plugins-in-codex/
-- https://help.openai.com/en/articles/11487775-apps-in-chatgpt
-- https://help.openai.com/en/articles/12584461
-
-OpenAI recommends the Apps SDK for app experiences, including MCP-backed tools. Public app-directory submission is possible, while managed workspaces can publish custom MCP apps under administrator controls.
-
-## Distribution architecture
-
-Publish one Dharma Agent Fabric plugin with:
-
-1. A public Skill usable in Codex.
-2. A remote Dharma app backed by MCP tools.
-3. An organization-configurable app template when the current OpenAI schema supports it.
-
-The Skill provides workflow guidance. The app provides authenticated organization data and actions. The local relay is never directly exposed to ChatGPT or Codex.
+The server implementation is in the private HQ repository. This public package
+contains the matching tool catalog, plugin manifest, Skill, reviewer checklist,
+and claim boundaries.
 
 ## Public Codex Skill
 
 The included Skill supports:
 
-- connecting a device;
-- registering a workspace;
-- inspecting provider capabilities;
-- previewing and synchronizing trajectories;
-- inspecting pending remote tasks;
-- requesting evaluations;
-- reviewing failure families;
-- proposing remediations;
-- inspecting Skill releases;
-- rolling back a local Skill bundle;
-- sending organization agent messages;
-- explaining BYOK and managed cost boundaries.
+- connecting and revoking a device;
+- registering a repository-qualified workspace;
+- inspecting Codex and Claude Code capabilities independently;
+- previewing and synchronizing bounded trajectory capsules;
+- inspecting and executing signed tasks in relay-owned worktrees;
+- reviewing exact 100-trajectory evaluation windows and Failure Atlas families;
+- installing, activating, receipting, and rolling back signed Skill bundles;
+- explaining local BYOK, cloud BYOK, and managed-runtime billing boundaries.
 
-## Plugin manifest scaffold
-
-The package includes `.codex-plugin/plugin.json` using the current public pattern demonstrated by Better Harness. Before publication, validate it with the installed Codex version and current OpenAI documentation. Do not assume a manifest field exists because an older plugin used it.
+Evidence capture, task execution, continuation, Skill installation, and Skill
+activation are separate capabilities. The package does not imply that every
+provider supports every capability.
 
 ## Remote MCP app
 
+The MCP resource is `https://mcp.dharma-ai.io/mcp`. Clerk OAuth requires
+`openid user:org:read`; every invocation is then authorized against the active
+Dharma organization membership and the underlying HQ route capability.
+
+The exact registered tools are maintained in
+`plugin/openai-app/mcp-tool-catalog.json` and checked during `npm run check`.
+
 ### Read tools
 
-- `list_organizations`
-- `list_devices`
-- `list_agents`
-- `list_workspaces`
-- `get_agent_status`
-- `get_trajectory_summary`
-- `get_evaluation`
-- `list_failure_families`
-- `get_remediation`
-- `get_skill_release`
-- `get_rollout_status`
-- `get_usage`
-- `estimate_cost`
+- `fabric_list_devices`
+- `fabric_list_agents`
+- `fabric_list_workspaces`
+- `fabric_list_trajectories`
+- `fabric_list_failure_atlas`
+- `fabric_list_tasks`
+- `fabric_list_a2a`
+- `fabric_list_skills`
+- `fabric_list_evals`
+- `fabric_list_usage`
 
-### Write tools
+### Confirmed sensitive read
 
-- `request_additional_evidence`
-- `create_evaluation`
-- `dispatch_task`
-- `send_agent_message`
-- `cancel_task`
-- `propose_remediation`
-- `create_skill_release`
-- `rollout_skill_release`
-- `rollback_skill_release`
+- `fabric_get_trajectory_evidence`
 
-### Forbidden tools
+### Confirmed actions
 
-Do not expose:
+- `fabric_dispatch_task`
+- `fabric_dispatch_a2a`
+- `fabric_run_analysis`
+- `fabric_release_skill`
+- `fabric_rollout_skill`
 
-- arbitrary shell execution;
-- arbitrary local file reads;
-- unbounded transcript upload;
-- generic branch merge;
-- generic deployment;
-- unrestricted secret access;
-- role or authority mutation without a dedicated reviewed workflow.
+`fabric_run_analysis` evaluates an exact 100-trajectory window and may incur a
+metered semantic-analysis charge. `fabric_release_skill` signs only an already
+evaluated managed remediation. `fabric_rollout_skill` is the atomic start,
+expand, or rollback transition; R3 and R4 releases require organization-admin
+approval.
 
-## OAuth scopes
+## Authorization and confirmation
 
-Suggested application scopes:
+Clerk OAuth proves the user identity. Active Dharma organization membership,
+not OAuth scope alone, decides access to the requested organization.
 
-```text
-agent_fabric.org.read
-agent_fabric.devices.read
-agent_fabric.devices.manage
-agent_fabric.workspaces.read
-agent_fabric.trajectories.read
-agent_fabric.evidence.request
-agent_fabric.tasks.read
-agent_fabric.tasks.create
-agent_fabric.tasks.cancel
-agent_fabric.messages.send
-agent_fabric.evals.read
-agent_fabric.evals.create
-agent_fabric.remediations.read
-agent_fabric.remediations.propose
-agent_fabric.skills.read
-agent_fabric.skills.release
-agent_fabric.skills.rollback
-agent_fabric.billing.read
-```
+- owners and admins may use the full catalog;
+- developers may use permitted read and execution scopes;
+- developers cannot release or roll out Skills;
+- inactive, absent, or cross-organization membership fails closed.
 
-The app must not grant more than the source Dharma organization membership permits.
+Explicit confirmation is required for every mutation and for evidence
+expansion. Mutations also require an idempotency key. The same HQ route handlers
+enforce capability flags, rate limits, audit correlation, KMS signing, and usage
+settlement.
 
-## Action confirmations
+## Forbidden tools
 
-OpenAI app permissions and the Dharma source system both apply.
-
-Require an explicit preview before:
-
-- evidence expansion;
-- task dispatch;
-- semantic evaluation with a cost;
-- remediation proposal that writes GitHub;
-- Skill release;
-- rollout expansion;
-- rollback.
-
-The preview shows target organization, workspace, provider, authority, evidence depth, cost cap, and expected effect.
-
-## MCP implementation
-
-Recommended stack:
-
-- TypeScript;
-- stateless MCP server;
-- OAuth to Dharma;
-- exact organization API client;
-- idempotency keys for writes;
-- tool-level input and output schemas;
-- audit correlation ID returned from every write;
-- no relay credentials or local device keys in the app.
+The app does not expose arbitrary shell execution, arbitrary local file reads,
+unbounded evidence upload, generic agent chat, branch merge, deployment, secret
+retrieval, role mutation, or direct provider access.
 
 ## Publication sequence
 
-1. Publish the Skill-only plugin internally.
-2. Validate Codex discovery and invocation.
-3. Deploy the MCP app in developer mode.
-4. Connect a test Dharma organization.
-5. Exercise read-only tools.
-6. Exercise low-risk writes with confirmations.
-7. Complete security and privacy review.
-8. Publish the custom app to the Dharma workspace.
-9. Package the Skill and app into the plugin model supported at submission time.
-10. Submit the public app or plugin with reviewer credentials and a test organization.
+1. Validate the public Skill package and exact tool catalog.
+2. Deploy the HQ MCP endpoint behind Clerk OAuth.
+3. Verify protected-resource metadata, dynamic client registration, and consent.
+4. Connect a reviewer tenant and exercise every read tool.
+5. Exercise every confirmed action with audit and idempotency proof.
+6. Complete cross-tenant, revocation, signed rollout, and forced rollback tests.
+7. Publish privacy, retention, deletion, terms, security, support, and reviewer
+   documentation.
+8. Submit to OpenAI review with a stable reviewer tenant.
 
-## Public listing claims
+Directory publication remains an external OpenAI review gate.
 
-Safe initial description:
+## Public listing claim
 
-> Connect local coding agents to organization-wide evaluation, remote task orchestration, agent communication, and signed Skill updates while keeping provider credentials local.
+> Connect local Codex and Claude Code workspaces to organization-wide evaluation,
+> bounded remote tasks, structured agent handoffs, and signed Skill updates while
+> keeping local provider credentials on the device.
 
-Do not claim:
-
-- universal host support;
-- zero-touch setup;
-- arbitrary autonomous code deployment;
-- complete secret elimination;
-- guaranteed improvement from every remediation;
-- production repair when only staged evidence exists.
+Do not claim universal provider support, zero-touch setup, arbitrary autonomous
+deployment, guaranteed improvement, or general availability before the live
+reviewer-tenant gates pass.

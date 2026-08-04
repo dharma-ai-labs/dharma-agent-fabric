@@ -22,7 +22,8 @@
     "test": "npm run schema:validate && npm run build && npm run test:unit",
     "test:unit": "npm run test --workspaces --if-present",
     "pack:verify": "node scripts/verify-package.mjs",
-    "check": "npm run vendor:verify && npm test && npm run pack:verify"
+    "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
+    "check": "npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

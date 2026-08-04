@@ -4,19 +4,19 @@ The public plugin Skill should connect to a remote Dharma app implemented with M
 
 The app authenticates the user to Dharma and exposes organization-level intent tools. It never connects directly to localhost and never receives device private keys.
 
-## Required implementation
+## Implemented server contract
 
-- OAuth to Dharma.
-- Organization and source-permission enforcement.
-- Tool-level JSON Schemas.
-- Idempotency for writes.
-- Cost previews.
-- Action confirmation metadata.
-- Audit correlation ID in every write result.
-- No arbitrary shell or file tools.
+- Clerk OAuth with dynamic client registration.
+- Active Dharma organization membership enforcement on every invocation.
+- Tool-level Zod input contracts.
+- Idempotency for every mutation.
+- Explicit confirmation for sensitive evidence and mutations.
+- Existing HQ audit, billing, KMS, rate-limit, and capability enforcement.
+- No arbitrary shell, filesystem, chat, merge, deployment, or secret tools.
 
-See `mcp-tool-catalog.json` for the proposed tool surface.
+See `mcp-tool-catalog.json` for the exact registered tool surface.
 
 ## Publication
 
-Revalidate the current OpenAI plugin, app, app-template, and MCP requirements before implementation and submission. OpenAI platform contracts may evolve after this package date.
+The endpoint and local contract are implemented, but deployment, reviewer-tenant
+proof, security review, and OpenAI directory review remain release gates.
