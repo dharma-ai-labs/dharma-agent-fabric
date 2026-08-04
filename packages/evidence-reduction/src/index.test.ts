@@ -30,11 +30,14 @@ test('capsule strips secrets and remains deterministic', () => {
   };
   const capsule = buildTrajectoryCapsule({
     organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
-    policy, rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 100, createdAt: '2026-08-03T00:00:02.000Z',
+    policy, rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 100, rawKind: 'raw-provider-turn',
+    createdAt: '2026-08-03T00:00:02.000Z',
   });
   const encoded = JSON.stringify(capsule);
   assert.equal(encoded.includes('secret-secret-secret'), false);
   assert.equal(encoded.includes('ghp_123'), false);
   assert.equal(encoded.includes('/private/source.jsonl'), false);
   assert.ok(capsule.redactionReceipt.redactedValues >= 2);
+  assert.equal(capsule.contentIndex[0]?.kind, 'raw-provider-turn');
+  assert.equal(capsule.localEvidenceAvailable[0]?.kind, 'raw-provider-turn');
 });

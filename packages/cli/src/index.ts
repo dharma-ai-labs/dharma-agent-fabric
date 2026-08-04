@@ -121,7 +121,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   throw new Error(`Enrollment timed out. Approve it at ${enrollment.verificationUri}`);
 }
 
-async function capture(flags: Map<string, string | boolean>): Promise<Output> {
+async function capture(flags: Map<string, string | boolean>, batch = false): Promise<Output> {
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
@@ -131,7 +131,11 @@ async function capture(flags: Map<string, string | boolean>): Promise<Output> {
   const sessions = await adapter.discover({
     workspace,
     roots: typeof root === 'string' ? [root] : undefined,
-    maximumSessions: 1,
+    maximumSessions: batch ? Math.min(Math.max(Number(flags.get('maximum-sessions') || 100), 1), 1_000) : 1,
+    maximumBytesPerSession: Math.min(
+      Math.max(Number(flags.get('maximum-bytes-per-session') || 8_388_608), 65_536),
+      67_108_864,
+    ),
   });
   if (sessions.length === 0) throw new Error('No workspace-qualified provider sessions were found.');
   const session = sessions.at(-1)!;
@@ -140,20 +144,49 @@ async function capture(flags: Map<string, string | boolean>): Promise<Output> {
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
   const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
   try {
-    const raw = await vault.putFile(session.sourcePath, 'raw-provider-session');
-    vault.recordSession({ sessionId: session.sessionId, provider: session.provider, workspaceId: registered.workspaceId, sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt });
-    const capsule = buildTrajectoryCapsule({
-      organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
-      session, policy, rawContentId: raw.contentId, rawBytes: raw.bytes,
-    });
-    const validation = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
-    if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
-    const capsuleBlob = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
-    vault.recordCapsule(capsule.trajectoryId, capsule.revision, capsule.capsuleHash, capsuleBlob);
+    const capsules = [];
+    const syncResults = [];
+    for (const selected of batch ? sessions : [session]) {
+      const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
+      const rawContentId = await vault.putBlob(rawTurn, 'raw-provider-turn');
+      vault.recordSession({ sessionId: selected.sessionId, provider: selected.provider, workspaceId: registered.workspaceId, sourceLocator: selected.sourcePath, status: selected.coverage, observedAt: selected.endedAt });
+      const capsule = buildTrajectoryCapsule({
+        organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
+        session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
+      });
+      const validation = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+      if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
+      const capsuleBlob = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
+      vault.recordCapsule(capsule.trajectoryId, capsule.revision, capsule.capsuleHash, capsuleBlob);
+      capsules.push(capsule);
+      if (flags.has('sync')) syncResults.push(await (await client()).syncTrajectory(capsule));
+    }
     const output = flags.get('output');
-    if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(capsule, null, 2)}\n`, { mode: 0o600 });
-    if (flags.has('sync')) return { capsule, sync: await (await client()).syncTrajectory(capsule) };
-    return capsule;
+    if (!batch) {
+      const capsule = capsules[0]!;
+      if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(capsule, null, 2)}\n`, { mode: 0o600 });
+      if (flags.has('sync')) return { capsule, sync: syncResults[0] };
+      return capsule;
+    }
+    const manifest = {
+      ok: true,
+      captured: capsules.length,
+      synced: syncResults.length,
+      coverage: {
+        observed: capsules.filter((capsule) => capsule.coverage.state === 'observed').length,
+        partial: capsules.filter((capsule) => capsule.coverage.state === 'partial').length,
+      },
+      trajectories: capsules.map((capsule) => ({
+        trajectoryId: capsule.trajectoryId,
+        sessionId: capsule.sessionId,
+        capsuleHash: capsule.capsuleHash,
+        status: capsule.status,
+        eventCount: capsule.events.length,
+        timeRange: capsule.timeRange,
+      })),
+    };
+    if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    return manifest;
   } finally { vault.close(); }
 }
 
@@ -380,6 +413,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));
   if (command === 'workspace' && subcommand === 'sync') return workspaceSync(flags, positional.slice(2));
   if (command === 'capture' || (command === 'evidence' && subcommand === 'capture')) return capture(flags);
+  if (command === 'evidence' && subcommand === 'capture-batch') return capture(flags, true);
   if (command === 'evidence' && subcommand === 'preview') return evidencePreview(flags);
   if (command === 'evidence' && subcommand === 'sync') return evidenceSync(flags);
   if (command === 'status') {
@@ -398,7 +432,7 @@ export async function run(argv: string[]): Promise<Output> {
     const root = nativeSkillDirectory(providerValue as 'codex' | 'claude');
     return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
   }
-  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence sync|relay start|tasks run-once|skills sync|skills status> [options]');
+  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|relay start|tasks run-once|skills sync|skills status> [options]');
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

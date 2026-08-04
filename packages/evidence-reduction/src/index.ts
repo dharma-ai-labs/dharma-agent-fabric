@@ -132,6 +132,7 @@ export function buildTrajectoryCapsule(input: {
   policy: OrganizationPolicy;
   rawContentId: string;
   rawBytes: number;
+  rawKind?: 'raw-provider-session' | 'raw-provider-turn';
   createdAt?: string;
 }): TrajectoryCapsule {
   const stats: RedactionStats = {
@@ -195,7 +196,7 @@ export function buildTrajectoryCapsule(input: {
     events,
     contentIndex: [{
       contentId: input.rawContentId,
-      kind: 'raw-provider-session',
+      kind: input.rawKind || 'raw-provider-session',
       bytes: input.rawBytes,
       uploaded: false,
       availableLocally: true,
@@ -211,7 +212,7 @@ export function buildTrajectoryCapsule(input: {
       inputBytes: stats.inputBytes,
       outputBytes: stats.outputBytes,
     },
-    localEvidenceAvailable: [{ contentId: input.rawContentId, kind: 'raw-provider-session', bytes: input.rawBytes }],
+    localEvidenceAvailable: [{ contentId: input.rawContentId, kind: input.rawKind || 'raw-provider-session', bytes: input.rawBytes }],
     createdAt,
   };
 
