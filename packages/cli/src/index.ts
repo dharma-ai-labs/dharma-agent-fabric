@@ -157,6 +157,53 @@ async function capture(flags: Map<string, string | boolean>): Promise<Output> {
   } finally { vault.close(); }
 }
 
+async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
+  const workspace = await realpath(required(flags, 'workspace'));
+  const provider = required(flags, 'provider');
+  const adapter = provider === 'codex' ? codexAdapter : provider === 'claude' ? claudeAdapter : null;
+  if (!adapter) throw new Error(`Unsupported preview provider: ${provider}`);
+  const root = flags.get('source-root');
+  const maximumSessions = Math.min(Math.max(Number(flags.get('maximum-sessions') || 100), 1), 1_000);
+  const maximumBytesPerSession = Math.min(
+    Math.max(Number(flags.get('maximum-bytes-per-session') || 8_388_608), 65_536),
+    67_108_864,
+  );
+  const sessions = await adapter.discover({
+    workspace,
+    roots: typeof root === 'string' ? [root] : undefined,
+    maximumSessions,
+    maximumBytesPerSession,
+  });
+  const eventKinds: Record<string, number> = {};
+  let records = 0;
+  for (const session of sessions) {
+    records += session.records.length;
+    for (const record of session.records) eventKinds[record.kind] = (eventKinds[record.kind] || 0) + 1;
+  }
+  return {
+    ok: true,
+    provider,
+    workspaceQualified: true,
+    trajectoryCount: sessions.length,
+    recordCount: records,
+    coverage: {
+      observed: sessions.filter((session) => session.coverage === 'observed').length,
+      partial: sessions.filter((session) => session.coverage === 'partial').length,
+    },
+    timeRange: sessions.length > 0
+      ? { start: sessions[0]!.startedAt, end: sessions.at(-1)!.endedAt }
+      : null,
+    eventKinds: Object.fromEntries(Object.entries(eventKinds).sort(([left], [right]) => left.localeCompare(right))),
+    sessions: sessions.map((session) => ({
+      sessionId: session.sessionId,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      coverage: session.coverage,
+      records: session.records.length,
+    })),
+  };
+}
+
 async function workspaceAdd(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
   const path = await realpath(positional[0] || required(flags, 'path'));
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
@@ -333,6 +380,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));
   if (command === 'workspace' && subcommand === 'sync') return workspaceSync(flags, positional.slice(2));
   if (command === 'capture' || (command === 'evidence' && subcommand === 'capture')) return capture(flags);
+  if (command === 'evidence' && subcommand === 'preview') return evidencePreview(flags);
   if (command === 'evidence' && subcommand === 'sync') return evidenceSync(flags);
   if (command === 'status') {
     try {
@@ -350,7 +398,7 @@ export async function run(argv: string[]): Promise<Output> {
     const root = nativeSkillDirectory(providerValue as 'codex' | 'claude');
     return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
   }
-  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence capture|evidence sync|relay start|tasks run-once|skills sync|skills status> [options]');
+  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence sync|relay start|tasks run-once|skills sync|skills status> [options]');
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

@@ -75,6 +75,37 @@ test('Codex Desktop nested payloads retain semantic event kinds', async () => {
   ]);
 });
 
+test('Codex Desktop discovery emits one session per real turn context', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
+  const workspace = join(root, 'repo');
+  const sessions = join(root, 'sessions');
+  await mkdir(workspace);
+  await mkdir(sessions);
+  const firstTurn = '019fcaab-6c8e-7432-bfb7-fc63efa3d728';
+  const secondTurn = '019fcaac-6c8e-7432-bfb7-fc63efa3d729';
+  await writeFile(join(sessions, 'desktop-turns.jsonl'), [
+    { type: 'session_meta', payload: { cwd: workspace }, timestamp: '2026-08-03T01:00:00Z' },
+    { type: 'turn_context', payload: { turn_id: firstTurn, cwd: workspace }, timestamp: '2026-08-03T01:00:01Z' },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'first task' }, timestamp: '2026-08-03T01:00:02Z' },
+    { type: 'turn_context', payload: { turn_id: firstTurn, cwd: workspace }, timestamp: '2026-08-03T01:00:03Z' },
+    { type: 'event_msg', payload: { type: 'agent_message', message: 'first result' }, timestamp: '2026-08-03T01:00:04Z' },
+    { type: 'turn_context', payload: { turn_id: secondTurn, cwd: workspace }, timestamp: '2026-08-03T02:00:00Z' },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'second task' }, timestamp: '2026-08-03T02:00:01Z' },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+
+  const result = await codexAdapter.discover({ workspace, roots: [sessions] });
+  assert.equal(result.length, 2);
+  assert.match(result[0]?.sessionId || '', new RegExp(`${firstTurn}$`));
+  assert.match(result[1]?.sessionId || '', new RegExp(`${secondTurn}$`));
+  assert.deepEqual(result.map((session) => session.records.filter((record) => record.kind === 'user_message').length), [1, 1]);
+  assert.equal(result[0]?.records[0]?.native.type, 'session_meta');
+  assert.equal(result[1]?.records[0]?.native.type, 'turn_context');
+
+  const latest = await codexAdapter.discover({ workspace, roots: [sessions], maximumSessions: 1 });
+  assert.equal(latest.length, 1);
+  assert.match(latest[0]?.sessionId || '', new RegExp(`${secondTurn}$`));
+});
+
 test('Codex task execution uses stdin, workspace sandboxing, and disabled network without a shell', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   let observed: Record<string, unknown> = {};

@@ -263,6 +263,49 @@ async function parseSessionFile(
   };
 }
 
+function recordTurnId(record: SourceRecord): string | null {
+  const payload = record.native.payload && typeof record.native.payload === 'object'
+    ? record.native.payload as Record<string, unknown>
+    : {};
+  const value = payload.turn_id ?? payload.turnId;
+  return typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+}
+
+export function segmentProviderSession(session: ProviderSession): ProviderSession[] {
+  const explicitTurns = session.records
+    .map((record) => recordTurnId(record))
+    .filter((value): value is string => Boolean(value));
+  if (explicitTurns.length === 0) return [session];
+
+  const prefix: SourceRecord[] = [];
+  const ordered: Array<{ turnId: string; records: SourceRecord[] }> = [];
+  const byTurn = new Map<string, SourceRecord[]>();
+  let currentTurnId: string | null = null;
+  for (const record of session.records) {
+    const turnId = recordTurnId(record);
+    if (turnId) currentTurnId = turnId;
+    if (!currentTurnId) {
+      prefix.push(record);
+      continue;
+    }
+    let records = byTurn.get(currentTurnId);
+    if (!records) {
+      records = ordered.length === 0 ? [...prefix] : [];
+      byTurn.set(currentTurnId, records);
+      ordered.push({ turnId: currentTurnId, records });
+    }
+    records.push(record);
+  }
+
+  return ordered.map(({ turnId, records }) => ({
+    ...session,
+    sessionId: `${session.sessionId}:turn:${turnId}`,
+    records,
+    startedAt: normalizeTimestamp(records[0]?.timestamp ?? null, new Date(session.startedAt)),
+    endedAt: normalizeTimestamp(records.at(-1)?.timestamp ?? null, new Date(session.endedAt)),
+  }));
+}
+
 function defaultRoots(provider: 'codex' | 'claude'): string[] {
   if (provider === 'codex') {
     return [resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'sessions')];
@@ -303,10 +346,12 @@ function adapter(provider: 'codex' | 'claude', command: string): ProviderAdapter
           maximumBytes: request.maximumBytesPerSession,
           maximumRecordBytes: request.maximumRecordBytes,
         });
-        if (session) sessions.push(session);
+        if (session) sessions.push(...segmentProviderSession(session));
         if (sessions.length >= maximumSessions) break;
       }
-      return sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+      return sessions
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+        .slice(-maximumSessions);
     },
   };
 }
