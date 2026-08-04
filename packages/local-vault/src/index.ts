@@ -149,10 +149,18 @@ export class LocalVault {
   }
 
   recordCapsule(trajectoryId: string, revision: number, capsuleHash: string, blobContentId: string): void {
-    this.#database.prepare(`
+    const result = this.#database.prepare(`
       insert into capsules(trajectory_id, revision, capsule_hash, blob_content_id, created_at)
       values (?, ?, ?, ?, ?)
+      on conflict(trajectory_id, revision) do nothing
     `).run(trajectoryId, revision, capsuleHash, blobContentId, new Date().toISOString());
+    if (result.changes > 0) return;
+    const existing = this.#database.prepare(`
+      select capsule_hash from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { capsule_hash: string } | undefined;
+    if (existing?.capsule_hash !== capsuleHash) {
+      throw new Error('Trajectory capsule revision hash conflict.');
+    }
   }
 
   listSessions(): unknown[] {

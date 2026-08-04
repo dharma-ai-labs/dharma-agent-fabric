@@ -44,6 +44,18 @@ test('vault master key is generated once in the operating-system store', async (
   assert.deepEqual(second, first);
 });
 
+test('vault accepts identical capsule retries and rejects revision drift', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  vault.recordCapsule('trajectory-1', 1, 'sha256:first', 'sha256:blob');
+  assert.doesNotThrow(() => vault.recordCapsule('trajectory-1', 1, 'sha256:first', 'sha256:blob'));
+  assert.throws(
+    () => vault.recordCapsule('trajectory-1', 1, 'sha256:changed', 'sha256:other'),
+    /revision hash conflict/,
+  );
+  vault.close();
+});
+
 test('environment keys fail closed unless explicitly enabled', () => {
   const value = randomBytes(32).toString('base64');
   assert.throws(() => loadExplicitTestKey({ DHARMA_VAULT_KEY: value }));
