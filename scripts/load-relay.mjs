@@ -128,7 +128,7 @@ relay.stderr.on('data', (chunk) => { relayStderr += chunk.toString('utf8'); });
 
 const startedAt = Date.now();
 try {
-  await waitForHealth(`http://127.0.0.1:${relayPort}/healthz`, relay);
+  await waitForHealth(`http://127.0.0.1:${relayPort}/health`, relay);
   const relayUrl = `ws://127.0.0.1:${relayPort}/v1/connect`;
   const first = await Promise.all(Array.from({ length: devices }, () => runDevice(relayUrl, messagesPerDevice)));
   const reconnect = await Promise.all(Array.from({ length: reconnectDevices }, () => runDevice(relayUrl, 1)));

@@ -9,7 +9,7 @@ if (!hqInternalUrl) throw new Error('DHARMA_HQ_INTERNAL_URL is required.');
 const presence = await createRelayPresence();
 
 const server = createServer((request, response) => {
-  if (request.method === 'GET' && request.url === '/healthz') {
+  if (request.method === 'GET' && (request.url === '/health' || request.url === '/healthz')) {
     const ready = presence.ready();
     response.writeHead(ready ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     response.end(JSON.stringify({ ok: ready, service: 'dharma-agent-fabric-relay', presence: ready ? 'ready' : 'unavailable' }));
