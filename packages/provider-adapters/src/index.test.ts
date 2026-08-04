@@ -158,7 +158,7 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   let observed: Record<string, unknown> = {};
   const result = await executeProviderTask({
-    provider: 'codex', workspace: root, instructions: 'Fix the parser test.', timeoutSeconds: 30, allowedCommandArgv: [['npm', 'test']],
+    provider: 'codex', workspace: root, instructions: 'Fix the parser test.', timeoutSeconds: 30, allowedCommandArgv: [['npm', 'test']], allowWrites: true,
     runner: async (input) => {
       observed = input;
       return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('{"type":"result"}\n'), stderr: Buffer.alloc(0) };
@@ -176,7 +176,7 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   let argv: string[] = [];
   let completeOnResultJson = false;
   await executeProviderTask({
-    provider: 'claude', workspace: root, instructions: 'Repair the test.', timeoutSeconds: 30, allowedCommandArgv: [['npm', 'test']],
+    provider: 'claude', workspace: root, instructions: 'Repair the test.', timeoutSeconds: 30, allowedCommandArgv: [['npm', 'test']], allowWrites: true,
     runner: async (input) => {
       argv = input.argv;
       completeOnResultJson = input.completeOnResultJson === true;
@@ -190,6 +190,29 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   assert.ok(argv.includes('Read,Edit,Write,Bash(npm test)'));
   assert.ok(argv.includes('WebFetch,WebSearch'));
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
+});
+
+test('knowledge queries remove write-capable provider tools', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-readonly-'));
+  const observed: Array<{ provider: string; argv: string[] }> = [];
+  for (const provider of ['codex', 'claude'] as const) {
+    await executeProviderTask({
+      provider,
+      workspace: root,
+      instructions: 'Summarize the repository architecture without changing files.',
+      timeoutSeconds: 30,
+      allowedCommandArgv: [],
+      allowWrites: false,
+      runner: async (input) => {
+        observed.push({ provider, argv: input.argv });
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+  }
+  assert.ok(observed[0]?.argv.includes('read-only'));
+  assert.equal(observed[0]?.argv.includes('workspace-write'), false);
+  const claudeAllowedTools = observed[1]?.argv[observed[1]?.argv.indexOf('--allowedTools') + 1];
+  assert.equal(claudeAllowedTools, 'Read');
 });
 
 test('provider runner completes on a terminal JSON result without a trailing newline', async () => {

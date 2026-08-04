@@ -61,6 +61,7 @@ export type ProviderTaskExecutor = (input: {
   instructions: string;
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
+  allowWrites: boolean;
   signal?: AbortSignal;
 }) => Promise<ProviderExecutionResult>;
 
@@ -197,6 +198,7 @@ export async function executeTask(input: {
       instructions: input.task.instructions,
       timeoutSeconds: input.task.execution.timeoutSeconds,
       allowedCommandArgv: allowedCommands,
+      allowWrites: input.task.authority.writePaths.length > 0,
       signal: input.signal,
     });
     commandResults.push({

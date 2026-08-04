@@ -121,6 +121,7 @@ export async function executeProviderTask(input: {
   instructions: string;
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
+  allowWrites: boolean;
   signal?: AbortSignal;
   runner?: ProviderProcessRunner;
 }): Promise<ProviderExecutionResult> {
@@ -131,11 +132,14 @@ export async function executeProviderTask(input: {
   let argv: string[];
   if (input.provider === 'codex') {
     command = 'codex';
-    argv = ['exec', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-'];
+    argv = input.allowWrites
+      ? ['exec', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
+      : ['exec', '--json', '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
   } else {
     command = 'claude';
     const bashTools = input.allowedCommandArgv.map((parts) => `Bash(${parts.join(' ')})`);
-    argv = ['--print', '--verbose', '--bare', '--no-session-persistence', '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits', '--allowedTools', ['Read', 'Edit', 'Write', ...bashTools].join(','), '--disallowedTools', 'WebFetch,WebSearch'];
+    const allowedTools = input.allowWrites ? ['Read', 'Edit', 'Write', ...bashTools] : ['Read', ...bashTools];
+    argv = ['--print', '--verbose', '--bare', '--no-session-persistence', '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits', '--allowedTools', allowedTools.join(','), '--disallowedTools', 'WebFetch,WebSearch'];
   }
   const result = await runner({
     command, argv, cwd: input.workspace, stdin: input.instructions,

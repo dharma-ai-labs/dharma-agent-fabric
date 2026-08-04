@@ -36,8 +36,10 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   const task = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) } as TaskEnvelope;
   const store = new FileTaskReceiptStore(resolve(root, 'receipts'));
   let providerExecutions = 0;
-  const providerExecutor = async () => {
+  let providerAllowWrites: boolean | null = null;
+  const providerExecutor = async (input: { allowWrites: boolean }) => {
     providerExecutions += 1;
+    providerAllowWrites = input.allowWrites;
     return {
       provider: 'codex' as const,
       exitCode: 0,
@@ -55,6 +57,7 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   assert.equal(first.commandResults[0]?.commandId, 'provider.codex');
   assert.equal(first.commandResults[1]?.stdout, 'verified');
   assert.equal(providerExecutions, 1);
+  assert.equal(providerAllowWrites, false);
   assert.deepEqual(second, first);
   assert.equal(JSON.parse(await readFile(resolve(root, 'receipts', `${task.taskId}.json`), 'utf8')).taskId, task.taskId);
 });
