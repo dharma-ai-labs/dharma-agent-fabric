@@ -25,10 +25,17 @@ that task execution, continuation, or Skill activation works for that host.
 mise exec node@22.22.3 -- npm install
 mise exec node@22.22.3 -- npm test
 mise exec node@22.22.3 -- npm run pack:verify
+mise exec node@22.22.3 -- npm run load:relay
 ```
 
 The `dharma` CLI is built from `packages/cli`. Use `--json` for parser-safe
 output; diagnostics are written to stderr.
+
+`load:relay` starts an isolated mock HQ and local relay, then proves 1,000
+concurrent device connections, 10,000 relayed request envelopes, and a
+1,000-device reconnect wave. Counts can be reduced for development with the
+`AGENT_FABRIC_LOAD_DEVICES`, `AGENT_FABRIC_LOAD_MESSAGES`, and
+`AGENT_FABRIC_LOAD_RECONNECT_DEVICES` environment variables.
 
 ## Security boundary
 

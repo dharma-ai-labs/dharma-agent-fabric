@@ -23,6 +23,7 @@
     "test:unit": "npm run test --workspaces --if-present",
     "pack:verify": "node scripts/verify-package.mjs",
     "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
+    "load:relay": "npm run build && node scripts/load-relay.mjs",
     "check": "npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify"
   },
   "devDependencies": {
