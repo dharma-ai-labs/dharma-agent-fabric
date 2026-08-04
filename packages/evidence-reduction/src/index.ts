@@ -170,7 +170,7 @@ export function buildTrajectoryCapsule(input: {
     });
   }
 
-  const createdAt = input.createdAt ?? new Date().toISOString();
+  const createdAt = input.createdAt ?? input.session.endedAt;
   const base = {
     schema: 'dharma.trajectory-capsule/v1' as const,
     trajectoryId,

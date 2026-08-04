@@ -41,3 +41,29 @@ test('capsule strips secrets and remains deterministic', () => {
   assert.equal(capsule.contentIndex[0]?.kind, 'raw-provider-turn');
   assert.equal(capsule.localEvidenceAvailable[0]?.kind, 'raw-provider-turn');
 });
+
+test('identical source sessions produce an identical capsule revision hash', () => {
+  const session = {
+    provider: 'codex' as const,
+    sessionId: 'session_retry',
+    sourcePath: '/private/retry.jsonl',
+    workspace: '/repo',
+    coverage: 'observed' as const,
+    startedAt: '2026-08-03T00:00:00.000Z',
+    endedAt: '2026-08-03T00:00:01.000Z',
+    records: [{
+      native: { type: 'assistant_message', text: 'deterministic evidence' },
+      sourcePath: '/private/retry.jsonl', line: 1, workspace: '/repo',
+      timestamp: '2026-08-03T00:00:01.000Z', kind: 'assistant_message',
+    }],
+  };
+  const input = {
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
+    policy, rawContentId: `sha256:${'b'.repeat(64)}`, rawBytes: 100,
+    rawKind: 'raw-provider-turn' as const,
+  };
+  const first = buildTrajectoryCapsule(input);
+  const second = buildTrajectoryCapsule(input);
+  assert.equal(first.createdAt, session.endedAt);
+  assert.equal(second.capsuleHash, first.capsuleHash);
+});
