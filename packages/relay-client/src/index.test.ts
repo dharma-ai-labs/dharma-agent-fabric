@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
@@ -53,6 +53,7 @@ test('signed outbox retries the exact message after an unknown network outcome',
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
   const messageIds: string[] = [];
+  const timestamps: string[] = [];
   let failAfterAccept = false;
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -60,6 +61,7 @@ test('signed outbox retries the exact message after an unknown network outcome',
     const body = String(init?.body || '');
     const messageId = headers.get('x-dharma-message-id')!;
     messageIds.push(messageId);
+    timestamps.push(headers.get('x-dharma-timestamp')!);
     const payload = Buffer.from(JSON.stringify({
       bodyHash: `sha256:${createHash('sha256').update(body).digest('hex')}`,
       deviceId: headers.get('x-dharma-device-id'), messageId, method: 'POST',
@@ -75,6 +77,11 @@ test('signed outbox retries the exact message after an unknown network outcome',
   await client.openSession();
   failAfterAccept = true;
   await assert.rejects(client.registerWorkspace({ workspaceId: 'workspace' }), /socket closed/);
-  await client.registerWorkspace({ workspaceId: 'ignored-until-pending-is-acked' });
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  state.pending.headers['x-dharma-timestamp'] = '2026-01-01T00:00:00.000Z';
+  await writeFile(statePath, JSON.stringify(state));
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.registerWorkspace({ workspaceId: 'ignored-until-pending-is-acked' });
   assert.equal(messageIds.at(-2), messageIds.at(-1));
+  assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });

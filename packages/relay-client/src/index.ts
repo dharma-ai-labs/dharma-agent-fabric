@@ -211,6 +211,32 @@ export class AgentFabricClient {
   async #sendPending(): Promise<Record<string, unknown>> {
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');
+    const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
+    if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
+      const timestamp = new Date().toISOString();
+      const nonce = randomBytes(24).toString('base64url');
+      const messageId = pending.headers['x-dharma-message-id']!;
+      const signingPayload = Buffer.from(JSON.stringify({
+        bodyHash: `sha256:${sha256(pending.body)}`,
+        deviceId: this.config.deviceId,
+        messageId,
+        method: pending.method,
+        nonce,
+        organizationId: this.config.organizationId,
+        pathname: pending.pathname,
+        sequence: Number(pending.headers['x-dharma-sequence']),
+        sessionId: pending.headers['x-dharma-session-id'],
+        timestamp,
+      }), 'utf8');
+      pending.headers['x-dharma-timestamp'] = timestamp;
+      pending.headers['x-dharma-nonce'] = nonce;
+      pending.headers['x-dharma-signature'] = sign(
+        null,
+        signingPayload,
+        { key: this.#privateJwk, format: 'jwk' },
+      ).toString('base64url');
+      await this.#persist();
+    }
     let status: number;
     let body: Record<string, unknown>;
     if (this.#directTransport) {

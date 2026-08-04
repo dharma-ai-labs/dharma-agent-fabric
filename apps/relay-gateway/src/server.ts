@@ -39,7 +39,9 @@ websocket.on('connection', (socket) => {
       const startedAt = Date.now();
       try {
         if (binary) throw new Error('binary_not_supported');
-        const message = parseRelayRequest(JSON.parse(data.toString('utf8')));
+        const rawMessage = JSON.parse(data.toString('utf8')) as { requestId?: unknown };
+        if (typeof rawMessage.requestId === 'string') requestId = rawMessage.requestId;
+        const message = parseRelayRequest(rawMessage);
         requestId = message.requestId;
         const deviceId = message.headers['x-dharma-device-id']!;
         const sessionId = message.headers['x-dharma-session-id']!;
