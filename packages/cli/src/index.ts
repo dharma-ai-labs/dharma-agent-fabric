@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { basename, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { validateContract } from '@dharma-ai/agent-fabric-contracts';
-import { buildTrajectoryCapsule } from '@dharma-ai/agent-fabric-evidence-reduction';
+import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai/agent-fabric-evidence-reduction';
 import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai/agent-fabric-local-vault';
 import { loadOrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
 import { claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai/agent-fabric-provider-adapters';
@@ -14,7 +14,7 @@ import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, pollEnrollment, saveDeviceConfig, type DeviceConfig,
 } from '@dharma-ai/agent-fabric-relay-client';
 import { getActiveSkillBundleId, installSkillBundle, type SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
-import { executeTask, FileTaskReceiptStore, type TaskEnvelope } from '@dharma-ai/agent-fabric-task-runner';
+import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai/agent-fabric-task-runner';
 
 const VERSION = '0.1.0';
 const execFileAsync = promisify(execFile);
@@ -65,6 +65,49 @@ function deterministicUuid(value: string) {
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function responseTextFromEvent(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const event = value as Record<string, unknown>;
+  const item = event.item && typeof event.item === 'object' && !Array.isArray(event.item)
+    ? event.item as Record<string, unknown>
+    : {};
+  if (item.type === 'agent_message' && typeof item.text === 'string') return item.text;
+  if (event.type === 'result' && typeof event.result === 'string') return event.result;
+  const message = event.message && typeof event.message === 'object' && !Array.isArray(event.message)
+    ? event.message as Record<string, unknown>
+    : {};
+  const content = Array.isArray(message.content) ? message.content : [];
+  const parts = content.flatMap((part) => {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return [];
+    const text = (part as Record<string, unknown>).text;
+    return typeof text === 'string' ? [text] : [];
+  });
+  return parts.length ? parts.join('\n') : null;
+}
+
+export function taskResponsePreview(receipt: TaskReceipt) {
+  const provider = receipt.commandResults.find((result) => result.commandId.startsWith('provider.'));
+  if (!provider?.stdout) return null;
+  const candidates: string[] = [];
+  for (const line of provider.stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const response = responseTextFromEvent(JSON.parse(line));
+      if (response?.trim()) candidates.push(response.trim());
+    } catch {}
+  }
+  const selected = candidates.at(-1);
+  if (!selected) return null;
+  const stats: RedactionStats = { classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const redacted = String(redactValue(selected, stats));
+  return {
+    text: redacted.slice(0, 8_000),
+    truncated: redacted.length > 8_000,
+    redactionClasses: [...stats.classes].sort(),
+    redactedValues: stats.redactedValues,
+  };
 }
 
 async function platform(): Promise<DeviceConfig['platform']> {
@@ -345,6 +388,7 @@ async function executeOneTask(
   }
   const summary = {
     status: receipt.status, branch: receipt.branch,
+    response: taskResponsePreview(receipt),
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),
     startedAt: receipt.startedAt, completedAt: receipt.completedAt,
   };

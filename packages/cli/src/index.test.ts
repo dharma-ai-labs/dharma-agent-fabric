@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { run } from './index.js';
+import { run, taskResponsePreview } from './index.js';
 
 test('version is parser-safe structured output', async () => {
   assert.deepEqual(await run(['version']), { version: '0.1.0' });
@@ -32,4 +32,23 @@ test('evidence preview counts native turns without disclosing paths or prompt bo
   assert.equal(result.trajectoryCount, 1);
   assert.equal(encoded.includes(root), false);
   assert.equal(encoded.includes('private prompt body'), false);
+});
+
+test('task response preview extracts the final agent message and removes secrets', () => {
+  const receipt = {
+    taskId: 'task', status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/task',
+    startedAt: '2026-08-04T00:00:00Z', completedAt: '2026-08-04T00:00:01Z',
+    commandResults: [{
+      commandId: 'provider.codex', exitCode: 0, signal: null, timedOut: false,
+      stdout: [
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'First draft' } }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Architecture summary. api_key=secret-secret-secret' } }),
+      ].join('\n'),
+      stderr: '', stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+  const preview = taskResponsePreview(receipt);
+  assert.match(preview?.text || '', /Architecture summary/);
+  assert.equal(preview?.text.includes('secret-secret-secret'), false);
+  assert.ok((preview?.redactedValues || 0) >= 1);
 });
