@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -20,6 +20,23 @@ test('Codex discovery admits only sessions bound to the requested workspace', as
   const result = await codexAdapter.discover({ workspace, roots: [sessions] });
   assert.equal(result.length, 1);
   assert.equal(result[0]?.records.length, 2);
+});
+
+test('Codex discovery supports no-copy JSONL source selectors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-adapter-symlink-'));
+  const workspace = join(root, 'repo');
+  const source = join(root, 'source');
+  const selector = join(root, 'selector');
+  await mkdir(workspace);
+  await mkdir(source);
+  await mkdir(selector);
+  const session = join(source, 'session.jsonl');
+  await writeFile(session, JSON.stringify({ cwd: workspace, timestamp: '2026-08-04T00:00:00Z', type: 'event_msg' }));
+  await symlink(session, join(selector, 'selected.jsonl'));
+
+  const result = await codexAdapter.discover({ workspace, roots: [selector] });
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.records.length, 1);
 });
 
 test('cwd-less sessions are not inferred into a workspace', async () => {

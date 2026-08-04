@@ -225,7 +225,9 @@ async function jsonlFiles(root: string): Promise<string[]> {
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const path = resolve(current, entry.name);
       if (entry.isDirectory()) queue.push(path);
-      else if (entry.isFile() && entry.name.endsWith('.jsonl')) output.push(path);
+      else if (entry.name.endsWith('.jsonl') && (
+        entry.isFile() || (entry.isSymbolicLink() && (await stat(path)).isFile())
+      )) output.push(path);
     }
   }
   return output.sort();
