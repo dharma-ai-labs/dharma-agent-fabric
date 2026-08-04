@@ -1,0 +1,55 @@
+name: Agent Fabric CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-fabric-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run package validation
+        run: npm run check
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Generate CycloneDX SBOM
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          npm sbom --workspaces --include-workspace-root --sbom-format cyclonedx > agent-fabric.cdx.json
+          node -e "const fs=require('fs'); const bom=JSON.parse(fs.readFileSync('agent-fabric.cdx.json')); if (bom.bomFormat !== 'CycloneDX' || !Array.isArray(bom.components)) process.exit(1)"

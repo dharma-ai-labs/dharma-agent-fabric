@@ -11,6 +11,8 @@
 - [ ] Privacy policy and terms published.
 - [ ] Data retention and deletion documented.
 - [ ] Security review completed.
+- [ ] Linux, Windows, and macOS CI validation passed at the release commit.
+- [ ] CycloneDX SBOM generated from the release lockfile.
 - [ ] No arbitrary shell, file, secret, merge, or deployment tool exposed.
 - [ ] All write tools return an audit correlation ID.
 - [ ] Public description matches actual provider support.
