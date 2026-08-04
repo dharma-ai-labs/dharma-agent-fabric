@@ -10,6 +10,7 @@ export interface SkillBundle {
   bundleId: string;
   organizationId: string;
   version: string;
+  operation: 'install' | 'clear';
   skills: Array<{ skillId: string; version: string; repository: string; commit: string; contentHash: string; path: string }>;
   riskClass: 'R0' | 'R1' | 'R2' | 'R3' | 'R4';
   targetSelectors: Record<string, unknown>;
@@ -167,6 +168,8 @@ export async function installSkillBundle(input: {
   const startedAt = new Date().toISOString();
   verifySkillBundle(input.bundle, input.serverPublicKey);
   if (input.bundle.organizationId !== input.policy.organizationId) throw new Error('Bundle organization does not match policy.');
+  if (input.bundle.operation === 'clear' && input.bundle.skills.length !== 0) throw new Error('Clear bundles cannot contain skills.');
+  if (input.bundle.operation === 'install' && input.bundle.skills.length === 0) throw new Error('Install bundles must contain at least one skill.');
   if ((input.bundle.riskClass === 'R3' || input.bundle.riskClass === 'R4') && !input.organizationApprovalId) {
     throw new Error(`${input.bundle.riskClass} skill bundles require organization approval.`);
   }

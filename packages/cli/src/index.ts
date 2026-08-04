@@ -422,21 +422,29 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   if (!rollout) return { ok: true, rollout: null, changed: false };
   if (typeof rollout.id !== 'string' || !rollout.bundle || typeof rollout.bundle !== 'object') throw new Error('Skill rollout response is invalid.');
   const bundle = rollout.bundle as SkillBundle;
-  if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills) || bundle.skills.length === 0) {
+  if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills)
+    || (bundle.operation === 'install' && bundle.skills.length === 0)
+    || (bundle.operation === 'clear' && bundle.skills.length !== 0)) {
     throw new Error('Skill bundle does not match local organization policy.');
   }
   const commits = [...new Set(bundle.skills.map((skill) => skill.commit))];
-  if (commits.length !== 1 || !/^[a-f0-9]{40,64}$/i.test(commits[0]!)) throw new Error('Skill bundle must pin one full Git commit.');
   const repositories = [...new Set(bundle.skills.map((skill) => skill.repository))];
-  if (repositories.length !== 1 || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositories[0]!)) {
-    throw new Error('Skill bundle must pin one credential-free GitHub repository.');
+  if (bundle.operation === 'install') {
+    if (commits.length !== 1 || !/^[a-f0-9]{40,64}$/i.test(commits[0]!)) throw new Error('Skill bundle must pin one full Git commit.');
+    if (repositories.length !== 1 || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositories[0]!)) {
+      throw new Error('Skill bundle must pin one credential-free GitHub repository.');
+    }
   }
   const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
   await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
   await rm(sourceRoot, { recursive: true, force: true });
-  await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
-  await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
-  await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
+  await mkdir(sourceRoot, { recursive: true, mode: 0o700 });
+  if (bundle.operation === 'install') {
+    await rm(sourceRoot, { recursive: true, force: true });
+    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
+    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
+    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
+  }
   try {
     const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });

@@ -24,7 +24,7 @@ const policy: OrganizationPolicy = {
 async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey']): Promise<SkillBundle> {
   const skill = { skillId: 'dharma-boundary', version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
   const base = {
-    schema: 'dharma.skill-bundle/v1' as const, bundleId, organizationId: 'org_test', version: '1.0.0', skills: [skill],
+    schema: 'dharma.skill-bundle/v1' as const, bundleId, organizationId: 'org_test', version: '1.0.0', operation: 'install' as const, skills: [skill],
     riskClass: 'R2' as const, targetSelectors: { providers: ['codex'] }, activationPolicy: 'next_session' as const,
     rollbackBundleId: null, evaluationReceiptId: 'eval-1', createdAt: new Date().toISOString(), expiresAt: null,
   };
@@ -70,4 +70,36 @@ test('R3 bundles cannot install without explicit organization approval', async (
   const bundleHash = calculateBundleHash(unsigned);
   const signed = { ...unsigned, bundleHash, signature: signCanonicalObject({ ...unsigned, bundleHash }, server.privateKey) };
   await assert.rejects(() => installSkillBundle({ bundle: signed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: resolve(root, 'native'), policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: randomUUID(), workspaceId: randomUUID(), provider: 'codex' }), /require organization approval/);
+});
+
+test('signed clear baseline removes managed skills and preserves unmanaged provider skills', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-clear-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await mkdir(resolve(native, 'customer-skill'), { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Managed boundary\n');
+  await writeFile(resolve(native, 'customer-skill', 'SKILL.md'), '# Customer owned\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const installed = await signedBundle(source, randomUUID(), server.privateKey);
+  await installSkillBundle({ bundle: installed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, workspaceId, provider: 'codex' });
+
+  const clearBase = {
+    schema: 'dharma.skill-bundle/v1' as const, bundleId: randomUUID(), organizationId: 'org_test', version: '0.0.0',
+    operation: 'clear' as const, skills: [], riskClass: 'R0' as const, targetSelectors: { providers: ['codex'] },
+    activationPolicy: 'immediate_safe_reload' as const, rollbackBundleId: null, evaluationReceiptId: 'baseline:no-managed-skills',
+    createdAt: new Date().toISOString(), expiresAt: null,
+  };
+  const bundleHash = calculateBundleHash(clearBase);
+  const clear = { ...clearBase, bundleHash, signature: signCanonicalObject({ ...clearBase, bundleHash }, server.privateKey) };
+  const receipt = await installSkillBundle({ bundle: clear, sourceDirectory: resolve(root, 'empty'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, workspaceId, provider: 'codex' });
+
+  assert.equal(receipt.status, 'active');
+  assert.equal(receipt.previousBundleId, installed.bundleId);
+  await assert.rejects(readFile(resolve(native, 'dharma-boundary', 'SKILL.md')), /ENOENT/);
+  assert.match(await readFile(resolve(native, 'customer-skill', 'SKILL.md'), 'utf8'), /Customer owned/);
+  assert.equal((await readFile(resolve(native, '.dharma-managed/ACTIVE_BUNDLE'), 'utf8')).trim(), clear.bundleId);
 });
