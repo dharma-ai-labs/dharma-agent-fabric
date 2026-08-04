@@ -35,21 +35,36 @@ websocket.on('connection', (socket) => {
   socket.on('message', (data, binary) => {
     chain = chain.then(async () => {
       let requestId: string | null = null;
+      let stage = 'parse';
+      const startedAt = Date.now();
       try {
         if (binary) throw new Error('binary_not_supported');
         const message = parseRelayRequest(JSON.parse(data.toString('utf8')));
         requestId = message.requestId;
         const deviceId = message.headers['x-dharma-device-id']!;
         const sessionId = message.headers['x-dharma-session-id']!;
+        process.stdout.write(`${JSON.stringify({ level: 'info', event: 'relay.request_started', requestId, deviceId })}\n`);
+        stage = 'presence';
         const value = await presence.touch(deviceId, sessionId);
         lastPresence = { deviceId, value };
+        stage = 'upstream';
         const upstream = await fetch(relayTarget(hqInternalUrl, message), {
           method: message.method, headers: message.headers, body: message.body, signal: AbortSignal.timeout(30_000),
         });
         const body = await upstream.text();
+        process.stdout.write(`${JSON.stringify({
+          level: 'info', event: 'relay.request_completed', requestId, deviceId,
+          status: upstream.status, durationMs: Date.now() - startedAt,
+        })}\n`);
         socket.send(JSON.stringify({ requestId, status: upstream.status, headers: { 'content-type': upstream.headers.get('content-type') }, body }));
       } catch (error) {
-        socket.send(JSON.stringify({ requestId, status: 400, body: JSON.stringify({ ok: false, error: { code: error instanceof Error ? error.message : 'relay_error', message: 'Relay request was rejected.' } }) }));
+        const code = error instanceof Error ? error.message : 'relay_error';
+        const status = stage === 'parse' ? 400 : 503;
+        process.stderr.write(`${JSON.stringify({
+          level: 'error', event: 'relay.request_failed', requestId, stage, code,
+          durationMs: Date.now() - startedAt,
+        })}\n`);
+        socket.send(JSON.stringify({ requestId, status, body: JSON.stringify({ ok: false, error: { code, message: 'Relay request was rejected.' } }) }));
       }
     }).catch(() => undefined);
   });

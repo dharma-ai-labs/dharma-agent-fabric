@@ -8,6 +8,20 @@ export interface RelayPresenceConfig {
   ca: string | null;
 }
 
+export async function withTimeout<T>(operation: Promise<T>, milliseconds: number, code: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(code)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function relayPresenceConfig(env: NodeJS.ProcessEnv = process.env): RelayPresenceConfig {
   const required = env.AGENT_FABRIC_PRESENCE_REQUIRED === 'true';
   const host = env.REDIS_HOST?.trim() || null;
@@ -47,7 +61,11 @@ export async function createRelayPresence(config = relayPresenceConfig()) {
     async touch(deviceId: string, sessionId: string) {
       const key = `agent-fabric:presence:${deviceId}`;
       const value = JSON.stringify({ sessionId, touchedAt: new Date().toISOString() });
-      await client.set(key, value, { expiration: { type: 'EX', value: 90 } });
+      await withTimeout(
+        client.set(key, value, { expiration: { type: 'EX', value: 90 } }),
+        5_000,
+        'presence_touch_timeout',
+      );
       return value;
     },
     async remove(deviceId: string, expected: string | null) {
