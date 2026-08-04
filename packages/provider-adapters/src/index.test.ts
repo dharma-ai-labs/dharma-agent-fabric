@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -37,7 +37,7 @@ test('Codex discovery supports no-copy JSONL source selectors', async () => {
   const result = await codexAdapter.discover({ workspace, roots: [selector] });
   assert.equal(result.length, 1);
   assert.equal(result[0]?.records.length, 1);
-  assert.equal(result[0]?.sourcePath, session);
+  assert.equal(result[0]?.sourcePath, await realpath(session));
 });
 
 test('cwd-less sessions are not inferred into a workspace', async () => {
