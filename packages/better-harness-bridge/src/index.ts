@@ -58,16 +58,25 @@ export async function summarizeHarnessEvidence(input: {
   repositoryRoot: string;
   workspace: string;
   provider: HarnessProvider;
+  providerHome?: string;
 }): Promise<HarnessEvidenceSummary> {
   const vendorRoot = resolve(input.repositoryRoot, 'vendor/better-harness');
   const script = resolve(vendorRoot, 'scripts/session-analysis.mjs');
-  const output = await runJson(process.execPath, [
+  const argv = [
     script,
     'sources',
     '--platform', input.provider,
     '--workspace', resolve(input.workspace),
     '--json',
-  ], vendorRoot) as { sources?: HarnessSource[]; sessions?: HarnessSession[]; warnings?: unknown[] };
+  ];
+  if (input.providerHome) {
+    argv.push(input.provider === 'codex' ? '--codex-home' : '--claude-home', resolve(input.providerHome));
+  }
+  const output = await runJson(process.execPath, argv, vendorRoot) as {
+    sources?: HarnessSource[];
+    sessions?: HarnessSession[];
+    warnings?: unknown[];
+  };
 
   const sourceCounts: Record<string, number> = {};
   for (const source of output.sources ?? []) {
