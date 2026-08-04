@@ -29,6 +29,10 @@ for (const line of result.stdout.split(/\r?\n/)) {
       semanticMarkerObserved ||= typeof event.result === 'string' && event.result.includes('dharma-agent-fabric');
     }
     if (event.type === 'assistant') semanticMarkerObserved ||= JSON.stringify(event.message || {}).includes('dharma-agent-fabric');
+    if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
+      semanticMarkerObserved ||= typeof event.item.text === 'string' && event.item.text.includes('dharma-agent-fabric');
+    }
+    if (event.type === 'turn.completed') terminalSubtype = 'turn.completed';
   } catch {
     // Provider diagnostics are excluded from semantic proof.
   }
