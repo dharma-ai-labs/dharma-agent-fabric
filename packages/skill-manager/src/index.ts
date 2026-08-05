@@ -11,7 +11,15 @@ export interface SkillBundle {
   organizationId: string;
   version: string;
   operation: 'install' | 'clear';
-  skills: Array<{ skillId: string; version: string; repository: string; commit: string; contentHash: string; path: string }>;
+  skills: Array<{
+    skillId: string;
+    version: string;
+    repository: string;
+    commit: string;
+    contentHash: string;
+    path: string;
+    files?: Array<{ path: string; contentBase64: string; sha256: string }>;
+  }>;
   riskClass: 'R0' | 'R1' | 'R2' | 'R3' | 'R4';
   targetSelectors: Record<string, unknown>;
   activationPolicy: 'next_task' | 'next_session' | 'host_restart' | 'immediate_safe_reload';

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { run, taskResponsePreview } from './index.js';
+import { materializeInlineSkillFiles, run, taskResponsePreview } from './index.js';
+import type { SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
 
 test('version is parser-safe structured output', async () => {
   assert.deepEqual(await run(['version']), { version: '0.1.0' });
@@ -11,6 +13,26 @@ test('version is parser-safe structured output', async () => {
 
 test('unknown commands fail as usage errors', async () => {
   await assert.rejects(() => run(['unknown']), /Usage:/);
+});
+
+test('materializes signed inline files without repository credentials and rejects traversal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-inline-skill-'));
+  const content = Buffer.from('# Private remediation\n');
+  const file = {
+    path: 'SKILL.md',
+    contentBase64: content.toString('base64'),
+    sha256: `sha256:${createHash('sha256').update(content).digest('hex')}`,
+  };
+  const bundle = {
+    operation: 'install',
+    skills: [{ path: 'skills/remediation', files: [file] }],
+  } as unknown as SkillBundle;
+  assert.equal(await materializeInlineSkillFiles(bundle, root), true);
+  assert.equal(await readFile(join(root, 'skills/remediation/SKILL.md'), 'utf8'), '# Private remediation\n');
+  await assert.rejects(
+    () => materializeInlineSkillFiles({ ...bundle, skills: [{ path: 'skills/remediation', files: [{ ...file, path: '../secret' }] }] } as unknown as SkillBundle, root),
+    /path is invalid/,
+  );
 });
 
 test('evidence preview counts native turns without disclosing paths or prompt bodies', async () => {

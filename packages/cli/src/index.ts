@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai/agent-fabric-evidence-reduction';
@@ -13,7 +13,7 @@ import { claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai/agent-
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, pollEnrollment, saveDeviceConfig, type DeviceConfig,
 } from '@dharma-ai/agent-fabric-relay-client';
-import { getActiveSkillBundleId, installSkillBundle, type SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
+import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai/agent-fabric-task-runner';
 
 const VERSION = '0.1.0';
@@ -530,6 +530,51 @@ function nativeSkillDirectory(provider: 'codex' | 'claude') {
     : resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude'), 'skills');
 }
 
+function containedInlinePath(root: string, value: string) {
+  if (!value || value.includes('\\') || isAbsolute(value)) throw new Error('Inline skill file path is invalid.');
+  const segments = value.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) throw new Error('Inline skill file path is invalid.');
+  const candidate = resolve(root, ...segments);
+  const route = relative(resolve(root), candidate);
+  if (route === '..' || route.startsWith('../') || route.startsWith('..\\') || isAbsolute(route)) {
+    throw new Error('Inline skill file path escapes its skill root.');
+  }
+  return candidate;
+}
+
+export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoot: string) {
+  if (bundle.operation === 'clear') return false;
+  const inline = bundle.skills.map((skill) => skill.files);
+  if (inline.every((files) => files === undefined)) return false;
+  if (!inline.every((files) => Array.isArray(files) && files.length > 0 && files.length <= 32)) {
+    throw new Error('Every skill in an inline bundle must contain 1-32 signed files.');
+  }
+  let totalBytes = 0;
+  for (const skill of bundle.skills) {
+    const skillRoot = containedInlinePath(sourceRoot, skill.path);
+    const seen = new Set<string>();
+    for (const file of skill.files || []) {
+      if (!file || typeof file.path !== 'string' || typeof file.contentBase64 !== 'string' || typeof file.sha256 !== 'string') {
+        throw new Error('Inline skill file metadata is invalid.');
+      }
+      if (seen.has(file.path)) throw new Error('Inline skill bundle contains duplicate file paths.');
+      seen.add(file.path);
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.contentBase64)) {
+        throw new Error('Inline skill file encoding is invalid.');
+      }
+      const content = Buffer.from(file.contentBase64, 'base64');
+      totalBytes += content.length;
+      if (totalBytes > 1_048_576) throw new Error('Inline skill bundle exceeds the 1 MiB limit.');
+      const digest = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+      if (digest !== file.sha256) throw new Error(`Inline skill file hash mismatch: ${file.path}`);
+      const destination = containedInlinePath(skillRoot, file.path);
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      await writeFile(destination, content, { mode: 0o600 });
+    }
+  }
+  return true;
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
@@ -559,17 +604,19 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     }
   }
   const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
+  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  verifySkillBundle(bundle, createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }));
   await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
   await rm(sourceRoot, { recursive: true, force: true });
   await mkdir(sourceRoot, { recursive: true, mode: 0o700 });
-  if (bundle.operation === 'install') {
+  const materializedInline = await materializeInlineSkillFiles(bundle, sourceRoot);
+  if (bundle.operation === 'install' && !materializedInline) {
     await rm(sourceRoot, { recursive: true, force: true });
     await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
     await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
     await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
   }
   try {
-    const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
     const receipt = await installSkillBundle({
       bundle,
