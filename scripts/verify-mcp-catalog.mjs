@@ -6,6 +6,8 @@ const expectedTools = [
   'fabric_get_identity',
   'fabric_list_devices',
   'fabric_list_agents',
+  'fabric_create_agent',
+  'fabric_bind_local_endpoint',
   'fabric_list_workspaces',
   'fabric_list_trajectories',
   'fabric_get_trajectory_evidence',
@@ -25,6 +27,8 @@ const expectedTools = [
 
 const confirmationTools = new Set([
   'fabric_get_trajectory_evidence',
+  'fabric_create_agent',
+  'fabric_bind_local_endpoint',
   'fabric_request_trajectory_evidence',
   'fabric_dispatch_task',
   'fabric_dispatch_a2a',

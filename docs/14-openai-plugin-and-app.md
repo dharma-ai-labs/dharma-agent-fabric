@@ -58,6 +58,8 @@ during `npm run check`.
 
 ### Confirmed actions
 
+- `fabric_create_agent`
+- `fabric_bind_local_endpoint`
 - `fabric_request_trajectory_evidence`
 - `fabric_dispatch_task`
 - `fabric_dispatch_a2a`
@@ -65,9 +67,13 @@ during `npm run check`.
 - `fabric_release_skill`
 - `fabric_rollout_skill`
 
+`fabric_create_agent` creates only the logical organization identity;
+`fabric_bind_local_endpoint` then attaches one enrolled, task-capable
+workspace/provider without exposing its local path or credentials.
 `fabric_run_analysis` evaluates an exact 100-trajectory window and may incur a
 metered semantic-analysis charge. `fabric_release_skill` signs only an already
-evaluated managed remediation. `fabric_rollout_skill` is the atomic start,
+evaluated managed remediation or a signed empty rollback baseline.
+`fabric_rollout_skill` is the atomic start,
 expand, or rollback transition; R3 and R4 releases require organization-admin
 approval.
 

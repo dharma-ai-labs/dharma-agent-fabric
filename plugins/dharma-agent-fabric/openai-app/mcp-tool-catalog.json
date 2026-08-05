@@ -7,6 +7,8 @@
     {"name": "fabric_get_identity", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},
     {"name": "fabric_list_devices", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},
     {"name": "fabric_list_agents", "mode": "read", "backendScope": "agents:read", "confirmation": false},
+    {"name": "fabric_create_agent", "mode": "write", "backendScope": "agents:run", "confirmation": true},
+    {"name": "fabric_bind_local_endpoint", "mode": "write", "backendScope": "agents:run", "confirmation": true},
     {"name": "fabric_list_workspaces", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},
     {"name": "fabric_list_trajectories", "mode": "read", "backendScope": "traces:read", "confirmation": false},
     {"name": "fabric_get_trajectory_evidence", "mode": "sensitive_read", "backendScope": "traces:read", "confirmation": true},
