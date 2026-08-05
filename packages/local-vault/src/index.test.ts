@@ -56,6 +56,19 @@ test('vault accepts identical capsule retries and rejects revision drift', async
   vault.close();
 });
 
+test('vault resolves the latest capsule and records idempotent disclosure receipts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const firstBlob = await vault.putBlob(Buffer.from(JSON.stringify({ revision: 1 })), 'trajectory-capsule');
+  const secondBlob = await vault.putBlob(Buffer.from(JSON.stringify({ revision: 2 })), 'trajectory-capsule');
+  vault.recordCapsule('trajectory-1', 1, `sha256:${'1'.repeat(64)}`, firstBlob);
+  vault.recordCapsule('trajectory-1', 2, `sha256:${'2'.repeat(64)}`, secondBlob);
+  assert.deepEqual(await vault.getLatestCapsule('trajectory-1'), { revision: 2 });
+  assert.doesNotThrow(() => vault.recordDisclosure('response-1', `sha256:${'3'.repeat(64)}`, 42));
+  assert.doesNotThrow(() => vault.recordDisclosure('response-1', `sha256:${'3'.repeat(64)}`, 42));
+  vault.close();
+});
+
 test('environment keys fail closed unless explicitly enabled', () => {
   const value = randomBytes(32).toString('base64');
   assert.throws(() => loadExplicitTestKey({ DHARMA_VAULT_KEY: value }));

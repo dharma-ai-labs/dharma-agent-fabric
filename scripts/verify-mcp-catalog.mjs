@@ -8,6 +8,7 @@ const expectedTools = [
   'fabric_list_workspaces',
   'fabric_list_trajectories',
   'fabric_get_trajectory_evidence',
+  'fabric_request_trajectory_evidence',
   'fabric_list_failure_atlas',
   'fabric_list_tasks',
   'fabric_list_a2a',
@@ -23,6 +24,7 @@ const expectedTools = [
 
 const confirmationTools = new Set([
   'fabric_get_trajectory_evidence',
+  'fabric_request_trajectory_evidence',
   'fabric_dispatch_task',
   'fabric_dispatch_a2a',
   'fabric_run_analysis',
@@ -31,7 +33,6 @@ const confirmationTools = new Set([
 ]);
 
 const removedSpeculativeTools = [
-  'request_additional_evidence',
   'create_evaluation',
   'cancel_task',
   'send_agent_message',

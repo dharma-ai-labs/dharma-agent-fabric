@@ -163,6 +163,10 @@ export class AgentFabricClient {
 
   registerWorkspace(body: unknown) { return this.signedPost('/agent-fabric/workspaces', body); }
   syncTrajectory(body: unknown) { return this.signedPost('/agent-fabric/trajectories', body); }
+  pollEvidence(body: { workspaceId: string }) { return this.signedPost('/agent-fabric/evidence-requests/poll', body); }
+  postEvidenceResponse(requestId: string, body: unknown) {
+    return this.signedPost(`/agent-fabric/evidence-requests/${encodeURIComponent(requestId)}/responses`, body);
+  }
   pollTask(leaseSeconds = 120) { return this.signedPost('/agent-fabric/tasks/poll', { leaseSeconds }); }
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });

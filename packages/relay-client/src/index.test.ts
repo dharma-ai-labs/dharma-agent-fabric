@@ -85,3 +85,29 @@ test('signed outbox retries the exact message after an unknown network outcome',
   assert.equal(messageIds.at(-2), messageIds.at(-1));
   assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });
+
+test('evidence poll and response remain device-signed organization routes', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-evidence-client-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const paths: string[] = [];
+  const fetcher = async (url: string | URL | Request) => {
+    paths.push(new URL(String(url)).pathname);
+    return new Response(JSON.stringify({ ok: true, request: null }), { status: 200 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath: resolve(root, 'state.json'), store, fetcher });
+  await client.openSession();
+  await client.pollEvidence({ workspaceId: 'workspace-1' });
+  await client.postEvidenceResponse('request-1', { responseId: 'response-1' });
+  assert.deepEqual(paths.slice(-2), [
+    '/api/v1/orgs/org_a/agent-fabric/evidence-requests/poll',
+    '/api/v1/orgs/org_a/agent-fabric/evidence-requests/request-1/responses',
+  ]);
+});

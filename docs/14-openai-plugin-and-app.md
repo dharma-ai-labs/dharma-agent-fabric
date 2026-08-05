@@ -56,6 +56,7 @@ The exact registered tools are maintained in
 
 ### Confirmed actions
 
+- `fabric_request_trajectory_evidence`
 - `fabric_dispatch_task`
 - `fabric_dispatch_a2a`
 - `fabric_run_analysis`

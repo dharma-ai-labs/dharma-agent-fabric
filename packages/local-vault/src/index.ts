@@ -163,6 +163,27 @@ export class LocalVault {
     }
   }
 
+  async getLatestCapsule<T = Record<string, unknown>>(trajectoryId: string): Promise<T> {
+    const record = this.#database.prepare(`
+      select blob_content_id from capsules where trajectory_id = ? order by revision desc limit 1
+    `).get(trajectoryId) as { blob_content_id: string } | undefined;
+    if (!record) throw new Error('Trajectory capsule is not available in the local vault.');
+    return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
+  }
+
+  recordDisclosure(disclosureId: string, receiptHash: string, bytesUploaded: number): void {
+    if (!/^sha256:[a-f0-9]{64}$/.test(receiptHash) || !Number.isSafeInteger(bytesUploaded) || bytesUploaded < 0) {
+      throw new Error('Disclosure receipt is invalid.');
+    }
+    this.#database.prepare(`
+      insert into disclosures(disclosure_id, receipt_hash, bytes_uploaded, created_at)
+      values (?, ?, ?, ?)
+      on conflict(disclosure_id) do update set
+        receipt_hash = excluded.receipt_hash,
+        bytes_uploaded = excluded.bytes_uploaded
+    `).run(disclosureId, receiptHash, bytesUploaded, new Date().toISOString());
+  }
+
   listSessions(): unknown[] {
     return this.#database.prepare(`
       select session_id, provider, workspace_id, status, observed_at from sessions order by observed_at desc

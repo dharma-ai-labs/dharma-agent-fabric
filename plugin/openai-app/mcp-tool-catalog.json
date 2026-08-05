@@ -9,6 +9,7 @@
     {"name": "fabric_list_workspaces", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},
     {"name": "fabric_list_trajectories", "mode": "read", "backendScope": "traces:read", "confirmation": false},
     {"name": "fabric_get_trajectory_evidence", "mode": "sensitive_read", "backendScope": "traces:read", "confirmation": true},
+    {"name": "fabric_request_trajectory_evidence", "mode": "write", "backendScope": "traces:read", "confirmation": true},
     {"name": "fabric_list_failure_atlas", "mode": "read", "backendScope": "evals:read", "confirmation": false},
     {"name": "fabric_list_tasks", "mode": "read", "backendScope": "agents:read", "confirmation": false},
     {"name": "fabric_list_a2a", "mode": "read", "backendScope": "agents:read", "confirmation": false},

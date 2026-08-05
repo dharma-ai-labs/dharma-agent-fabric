@@ -37,6 +37,21 @@ test('relay accepts bundle-qualified skill receipts', () => {
   assert.match(parsed.pathname, /skills\/d327bcce.*\/receipts$/);
 });
 
+test('relay accepts only bounded evidence poll and response routes', () => {
+  assert.doesNotThrow(() => parseRelayRequest({
+    ...request,
+    pathname: '/api/v1/orgs/org_customer/agent-fabric/evidence-requests/poll',
+  }));
+  assert.doesNotThrow(() => parseRelayRequest({
+    ...request,
+    pathname: '/api/v1/orgs/org_customer/agent-fabric/evidence-requests/d327bcce-2314-4c92-a6b7-13ec5570c1ee/responses',
+  }));
+  assert.throws(() => parseRelayRequest({
+    ...request,
+    pathname: '/api/v1/orgs/org_customer/agent-fabric/evidence-requests/all/raw',
+  }), /route_not_allowed/);
+});
+
 test('relay rejects incomplete, stale, and mismatched signed envelopes', () => {
   const missingTimestamp = { ...request, headers: { ...request.headers, 'x-dharma-timestamp': '' } };
   assert.throws(() => parseRelayRequest(missingTimestamp), /signed_headers_required/);

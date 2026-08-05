@@ -1,5 +1,5 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(sessions|workspaces|trajectories|tasks\/poll|tasks\/[0-9a-f-]{36}\/events|skills\/poll|skills\/[0-9a-f-]{36}\/receipts)$/i;
+const ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(sessions|workspaces|trajectories|evidence-requests\/poll|evidence-requests\/[0-9a-f-]{36}\/responses|tasks\/poll|tasks\/[0-9a-f-]{36}\/events|skills\/poll|skills\/[0-9a-f-]{36}\/receipts)$/i;
 const FORWARDED_HEADERS = new Set([
   'content-type', 'x-dharma-correlation-id', 'x-dharma-device-id', 'x-dharma-session-id',
   'x-dharma-message-id', 'x-dharma-timestamp', 'x-dharma-nonce', 'x-dharma-sequence', 'x-dharma-signature',

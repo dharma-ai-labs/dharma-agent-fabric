@@ -55,7 +55,8 @@
         "required": [
           "contentId",
           "bytes",
-          "chunkHash"
+          "chunkHash",
+          "contentBase64"
         ],
         "properties": {
           "contentId": {
@@ -64,11 +65,16 @@
           },
           "bytes": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 1
           },
           "chunkHash": {
             "type": "string",
             "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "contentBase64": {
+            "type": "string",
+            "minLength": 4,
+            "contentEncoding": "base64"
           }
         }
       }

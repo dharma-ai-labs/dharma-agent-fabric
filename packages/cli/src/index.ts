@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { validateContract } from '@dharma-ai/agent-fabric-contracts';
+import { canonicalize, sha256, validateContract, verifyCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai/agent-fabric-evidence-reduction';
 import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai/agent-fabric-local-vault';
 import { loadOrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
@@ -357,6 +357,124 @@ async function evidenceSync(flags: Map<string, string | boolean>): Promise<Outpu
   return (await client()).syncTrajectory(capsule);
 }
 
+type EvidenceRequest = {
+  schema: 'dharma.evidence-request/v1';
+  requestId: string;
+  organizationId: string;
+  deviceId: string;
+  workspaceId: string;
+  trajectoryId: string;
+  purpose: string;
+  selectors: Array<{ contentId: string; range?: { start: number; end: number } | null; reason?: string | null }>;
+  maximumBytes: number;
+  retentionClass: string;
+  requestedBy: string;
+  authorityDecisionId: string;
+  createdAt: string;
+  expiresAt: string;
+  nonce: string;
+  signature: string;
+};
+
+async function processEvidenceRequest(
+  fabric: AgentFabricClient,
+  policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
+  workspaceId?: string,
+): Promise<Record<string, unknown>> {
+  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  const workspaces = (await registry()).filter((item) => !workspaceId || item.workspaceId === workspaceId);
+  if (workspaces.length === 0) throw new Error('Evidence workspace is not registered locally.');
+  let request: EvidenceRequest | null = null;
+  let workspace: WorkspaceRecord | null = null;
+  for (const item of workspaces) {
+    const polled = await fabric.pollEvidence({ workspaceId: item.workspaceId });
+    if (polled.request && typeof polled.request === 'object') {
+      request = polled.request as EvidenceRequest;
+      workspace = item;
+      break;
+    }
+  }
+  if (!request || !workspace) return { ok: true, request: null };
+  const contract = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
+  if (!contract.ok) throw new Error(`Evidence request failed schema validation: ${JSON.stringify(contract.errors)}`);
+  const { signature, ...unsignedRequest } = request;
+  const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
+  if (!verifyCanonicalObject(unsignedRequest, signature, serverPublicKey)) throw new Error('Evidence request signature is invalid.');
+  if (request.organizationId !== config.organizationId || request.deviceId !== config.deviceId
+    || request.workspaceId !== workspace.workspaceId || policy.organizationId !== config.organizationId) {
+    throw new Error('Evidence request does not match the enrolled organization, device, workspace, or policy.');
+  }
+  if (Date.parse(request.expiresAt) <= Date.now()) throw new Error('Evidence request has expired.');
+  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
+  try {
+    const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
+    const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
+    const available = new Set(contentIndex.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const record = item as Record<string, unknown>;
+      return record.availableLocally === true && record.uploaded !== true && typeof record.contentId === 'string'
+        ? [record.contentId] : [];
+    }));
+    const stats: RedactionStats = { classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+    const approved: Array<{ contentId: string; bytes: number; chunkHash: string; contentBase64: string }> = [];
+    const excluded: Array<{ contentId: string; reasonCode: string }> = [];
+    const authorizedBytes = Math.min(request.maximumBytes, policy.evidence.maximumExpansionBytes);
+    let bytesPrepared = 0;
+    for (const selector of request.selectors) {
+      if (!available.has(selector.contentId)) { excluded.push({ contentId: selector.contentId, reasonCode: 'not_available_in_capsule' }); continue; }
+      try {
+        const source = await vault.getBlob(selector.contentId);
+        const start = selector.range?.start ?? 0;
+        const end = selector.range?.end ?? source.byteLength;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > source.byteLength) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'invalid_range' });
+          continue;
+        }
+        const redacted = Buffer.from(String(redactValue(source.subarray(start, end).toString('utf8'), stats)), 'utf8');
+        if (redacted.byteLength === 0) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'redacted_empty' });
+          continue;
+        }
+        if (bytesPrepared + redacted.byteLength > authorizedBytes) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'byte_limit_exceeded' });
+          continue;
+        }
+        approved.push({
+          contentId: selector.contentId, bytes: redacted.byteLength,
+          chunkHash: sha256(redacted), contentBase64: redacted.toString('base64'),
+        });
+        bytesPrepared += redacted.byteLength;
+      } catch {
+        excluded.push({ contentId: selector.contentId, reasonCode: 'vault_content_unavailable' });
+      }
+    }
+    const unsignedResponse = {
+      schema: 'dharma.evidence-response/v1', responseId: randomUUID(), requestId: request.requestId,
+      organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: workspace.workspaceId,
+      trajectoryId: request.trajectoryId, approved, excluded,
+      redactionReceipt: { policyRevision: policy.revision, classes: [...stats.classes].sort(), redactedValues: stats.redactedValues },
+      bytesPrepared, createdAt: new Date().toISOString(),
+    };
+    const response = { ...unsignedResponse, responseHash: sha256(canonicalize(unsignedResponse)), signature: null };
+    const responseContract = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
+    if (!responseContract.ok) throw new Error(`Evidence response failed schema validation: ${JSON.stringify(responseContract.errors)}`);
+    const accepted = await fabric.postEvidenceResponse(request.requestId, response);
+    const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};
+    const receiptHash = typeof receipt.hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(receipt.hash)
+      ? receipt.hash : response.responseHash;
+    vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
+    return {
+      ok: true, requestId: request.requestId, responseId: unsignedResponse.responseId,
+      approved: approved.length, excluded: excluded.length, bytesPrepared, receipt,
+    };
+  } finally { vault.close(); }
+}
+
+async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Promise<Output> {
+  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  return processEvidenceRequest(await client(), policy, typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+}
+
 async function executeOneTask(
   fabric: AgentFabricClient,
   policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
@@ -481,19 +599,22 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
+  let evidenceResponsesCompleted = 0;
   try {
     do {
+      const evidence = await processEvidenceRequest(fabric, policy);
+      if (evidence.requestId) evidenceResponsesCompleted += 1;
       const result = await executeOneTask(fabric, policy, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
       if (flags.has('once')) break;
-      if (!result.taskId) await new Promise((accept) => setTimeout(accept, pollMs));
+      if (!result.taskId && !evidence.requestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     await rm(pidPath, { force: true });
   }
-  return { ok: true, stopped: true, tasksCompleted };
+  return { ok: true, stopped: true, tasksCompleted, evidenceResponsesCompleted };
 }
 
 export async function run(argv: string[]): Promise<Output> {
@@ -508,6 +629,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'evidence' && subcommand === 'capture-batch') return capture(flags, true);
   if (command === 'evidence' && subcommand === 'preview') return evidencePreview(flags);
   if (command === 'evidence' && subcommand === 'sync') return evidenceSync(flags);
+  if (command === 'evidence' && subcommand === 'run-request') return runOneEvidenceRequest(flags);
   if (command === 'status') {
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
@@ -524,7 +646,7 @@ export async function run(argv: string[]): Promise<Output> {
     const root = nativeSkillDirectory(providerValue as 'codex' | 'claude');
     return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
   }
-  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|relay start|tasks run-once|skills sync|skills status> [options]');
+  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]');
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
