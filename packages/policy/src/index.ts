@@ -37,6 +37,8 @@ export interface OrganizationPolicy {
   budgets: Record<string, unknown>;
 }
 
+export const MAXIMUM_TRAJECTORY_CAPSULE_BYTES = 1_048_576;
+
 export async function loadOrganizationPolicy(path: string): Promise<OrganizationPolicy> {
   const policy = parse(await readFile(path, 'utf8')) as OrganizationPolicy;
   assertPolicy(policy);
@@ -48,6 +50,11 @@ export function assertPolicy(policy: OrganizationPolicy): void {
   if (!policy.organizationId || !policy.revision) throw new Error('Policy identity is required.');
   if (policy.evidence.registeredWorkspaceOnly !== true) {
     throw new Error('registeredWorkspaceOnly must remain true.');
+  }
+  if (!Number.isInteger(policy.evidence.maximumCapsuleBytes)
+    || policy.evidence.maximumCapsuleBytes < 1
+    || policy.evidence.maximumCapsuleBytes > MAXIMUM_TRAJECTORY_CAPSULE_BYTES) {
+    throw new Error(`maximumCapsuleBytes must be between 1 and ${MAXIMUM_TRAJECTORY_CAPSULE_BYTES}.`);
   }
   if (policy.skills.automaticPromotionMaxRisk === 'R3' || policy.skills.automaticPromotionMaxRisk === 'R4') {
     throw new Error('Automatic promotion cannot grant R3 or R4 authority.');

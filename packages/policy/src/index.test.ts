@@ -33,6 +33,13 @@ test('policy forbids automatic authority promotion', () => {
   }));
 });
 
+test('policy rejects capsule sizes above the HQ persistence boundary', () => {
+  assert.throws(() => assertPolicy({
+    ...policy,
+    evidence: { ...policy.evidence, maximumCapsuleBytes: 1_048_577 },
+  }), /maximumCapsuleBytes/);
+});
+
 test('workspace path checks reject traversal', () => {
   assert.match(assertPathWithinWorkspace('/repo', 'src/index.ts'), /repo/);
   assert.throws(() => assertPathWithinWorkspace('/repo', '../secret'));

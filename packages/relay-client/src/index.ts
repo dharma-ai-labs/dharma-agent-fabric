@@ -255,7 +255,18 @@ export class AgentFabricClient {
       try { body = JSON.parse(response.body) as Record<string, unknown>; }
       catch { body = { ok: false, error: { code: 'invalid_relay_response', message: 'Relay returned invalid JSON.' } }; }
     }
-    if (status < 200 || status >= 300) throw new Error(errorMessage(body, status));
+    if (status < 200 || status >= 300) {
+      // A deterministic client rejection is an acknowledgement, not an unknown
+      // delivery outcome. Retaining it would permanently block the device
+      // outbox. Retryable timeout and throttling responses keep the exact
+      // signed request, as do upstream failures whose commit state is unknown.
+      if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+        this.#state.nextSequence += 1;
+        this.#state.pending = null;
+        await this.#persist();
+      }
+      throw new Error(errorMessage(body, status));
+    }
     this.#state.nextSequence += 1;
     this.#state.pending = null;
     await this.#persist();

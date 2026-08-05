@@ -86,6 +86,42 @@ test('signed outbox retries the exact message after an unknown network outcome',
   assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });
 
+test('deterministic client rejection advances the outbox instead of blocking the device', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-rejection-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const sequences: number[] = [];
+  let rejectNext = false;
+  const fetcher = async (_url: string | URL | Request, init?: RequestInit) => {
+    sequences.push(Number(new Headers(init?.headers).get('x-dharma-sequence')));
+    if (rejectNext) {
+      rejectNext = false;
+      return new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'trajectory_capsule_too_large', message: 'Trajectory capsule exceeds the server limit.' },
+      }), { status: 413 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  rejectNext = true;
+  await assert.rejects(client.registerWorkspace({ workspaceId: 'oversized' }), /trajectory_capsule_too_large/);
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(state.pending, null);
+  assert.equal(state.nextSequence, 3);
+  await client.registerWorkspace({ workspaceId: 'bounded' });
+  assert.deepEqual(sequences, [1, 2, 3]);
+});
+
 test('evidence poll and response remain device-signed organization routes', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-evidence-client-'));
