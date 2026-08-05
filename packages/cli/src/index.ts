@@ -116,11 +116,21 @@ export function assertTaskSkillPin(
 ): void {
   if (pinned === undefined) throw new Error('Task is missing its signed skill bundle pin.');
   if ((pinned?.bundleId || null) !== activeBundleId) {
-    throw new Error('Task skill bundle does not match the active local bundle.');
+    throw new Error(
+      `Task skill bundle does not match the active local bundle (task=${pinned?.bundleId || 'none'}, local=${activeBundleId || 'none'}).`,
+    );
   }
   if (pinned && !/^sha256:[a-f0-9]{64}$/.test(pinned.bundleHash)) {
     throw new Error('Task skill bundle hash is invalid.');
   }
+}
+
+export function taskSkillPinFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  if (message.includes('missing its signed skill bundle pin')) return 'skill_bundle_pin_missing';
+  if (message.includes('does not match the active local bundle')) return 'skill_bundle_mismatch';
+  if (message.includes('bundle hash is invalid')) return 'skill_bundle_hash_invalid';
+  return 'skill_bundle_preflight_failed';
 }
 
 async function platform(): Promise<DeviceConfig['platform']> {
@@ -508,7 +518,17 @@ async function executeOneTask(
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
   const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider));
-  assertTaskSkillPin(task.skillBundle, activeBundleId);
+  try {
+    assertTaskSkillPin(task.skillBundle, activeBundleId);
+  } catch (error) {
+    await fabric.postTaskEvent(task.taskId, 'failed', {
+      phase: 'preflight',
+      code: taskSkillPinFailureCode(error),
+      taskBundleId: task.skillBundle?.bundleId || null,
+      localBundleId: activeBundleId,
+    }).catch(() => undefined);
+    throw error;
+  }
   await fabric.postTaskEvent(task.taskId, 'started', {
     bundleId: task.skillBundle?.bundleId || null,
     bundleHash: task.skillBundle?.bundleHash || null,
