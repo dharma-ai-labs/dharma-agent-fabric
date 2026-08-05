@@ -194,6 +194,14 @@ Required:
 - 10,000 device rollout fanout;
 - local relay CPU and memory at idle and capture.
 
+The rollout fanout gate runs the production client implementation for every simulated device: signed bundle verification, isolated native skill activation, active-bundle marker, unique installation receipt, device signature, and receipt verification. Run it with:
+
+```bash
+npm run load:skill-rollout
+```
+
+The harness deletes its temporary device roots after the result is recorded. Pair this client fanout gate with the live relay connection/reconnect benchmark; neither substitutes for the other.
+
 ## Release evidence
 
 Every release records:

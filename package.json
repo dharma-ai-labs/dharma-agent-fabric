@@ -25,6 +25,7 @@
     "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
     "load:relay": "npm run build && node scripts/load-relay.mjs",
     "load:relay:live": "npm run build && node scripts/load-live-relay.mjs",
+    "load:skill-rollout": "npm run build && node scripts/load-skill-rollout.mjs",
     "proof:large-capture": "npm run build && node scripts/proof-large-capture.mjs",
     "proof:relay": "node scripts/proof-live-relay.mjs",
     "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
