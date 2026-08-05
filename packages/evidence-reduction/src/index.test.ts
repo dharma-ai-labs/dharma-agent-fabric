@@ -8,6 +8,7 @@ const policy: OrganizationPolicy = {
   evidence: {
     defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 100_000,
     maximumDailyUploadBytes: 1_000_000, maximumExpansionBytes: 100_000,
+    pseudonymizeIdentity: true,
   },
   tasks: { defaultNetwork: 'deny', defaultGit: 'task_branch', allowedCommands: {}, writePaths: [], requireLocalConfirmationFor: [] },
   skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
@@ -37,9 +38,27 @@ test('capsule strips secrets and remains deterministic', () => {
   assert.equal(encoded.includes('secret-secret-secret'), false);
   assert.equal(encoded.includes('ghp_123'), false);
   assert.equal(encoded.includes('/private/source.jsonl'), false);
+  assert.equal(encoded.includes('/repo'), false);
+  assert.equal(capsule.redactionReceipt.classes.includes('local_path'), true);
   assert.ok(capsule.redactionReceipt.redactedValues >= 2);
   assert.equal(capsule.contentIndex[0]?.kind, 'raw-provider-turn');
   assert.equal(capsule.localEvidenceAvailable[0]?.kind, 'raw-provider-turn');
+});
+
+test('bounded expansion redacts Unix, Windows, and WSL-local paths when identity is pseudonymized', async () => {
+  const { redactValue } = await import('./index.js');
+  const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const raw = [
+    '{"cwd":"/home/alice/company/private-repo"}',
+    '{"cwd":"C:\\\\Users\\\\alice\\\\company\\\\private-repo"}',
+    '{"cwd":"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\alice\\\\private-repo"}',
+  ].join('\n');
+  const redacted = String(redactValue(raw, stats, '', { pseudonymizeIdentity: true }));
+  assert.equal(redacted.includes('/home/alice'), false);
+  assert.equal(redacted.includes('C:\\\\Users'), false);
+  assert.equal(redacted.includes('wsl.localhost'), false);
+  assert.equal(stats.classes.has('local_path'), true);
+  assert.equal(stats.redactedValues, 3);
 });
 
 test('identical source sessions produce an identical capsule revision hash', () => {

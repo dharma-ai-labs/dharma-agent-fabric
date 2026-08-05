@@ -430,7 +430,12 @@ async function processEvidenceRequest(
           excluded.push({ contentId: selector.contentId, reasonCode: 'invalid_range' });
           continue;
         }
-        const redacted = Buffer.from(String(redactValue(source.subarray(start, end).toString('utf8'), stats)), 'utf8');
+        const redacted = Buffer.from(String(redactValue(
+          source.subarray(start, end).toString('utf8'),
+          stats,
+          '',
+          { pseudonymizeIdentity: policy.evidence.pseudonymizeIdentity },
+        )), 'utf8');
         if (redacted.byteLength === 0) {
           excluded.push({ contentId: selector.contentId, reasonCode: 'redacted_empty' });
           continue;
