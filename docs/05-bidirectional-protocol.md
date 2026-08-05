@@ -4,6 +4,12 @@
 
 Use an outbound-initiated WebSocket as the primary channel and HTTPS as the bulk-upload and recovery channel.
 
+Signed trajectory capsule requests are bounded to 2 MB by organization policy
+and to 2.1 MB by the relay body parser. The WebSocket envelope has a separate
+4.5 MB hard ceiling to account for JSON escaping. Larger raw evidence and
+artifacts never traverse the control channel and require the pre-authorized
+HTTPS upload flow.
+
 ```text
 wss://relay.dharma-ai.io/v1/connect
 https://api.dharma-ai.io/v1/agent-fabric/...

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createRelayPresence } from './presence.js';
-import { parseRelayRequest, relayTarget } from './protocol.js';
+import { MAX_RELAY_MESSAGE_BYTES, parseRelayRequest, relayTarget } from './protocol.js';
 
 const port = Number(process.env.PORT || 8080);
 const hqInternalUrl = process.env.DHARMA_HQ_INTERNAL_URL?.trim();
@@ -20,7 +20,7 @@ const server = createServer((request, response) => {
 });
 
 const sockets = new Set<WebSocket>();
-const websocket = new WebSocketServer({ noServer: true, maxPayload: 1_200_000, perMessageDeflate: false });
+const websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_RELAY_MESSAGE_BYTES, perMessageDeflate: false });
 
 server.on('upgrade', (request, socket, head) => {
   if (request.url !== '/v1/connect') { socket.destroy(); return; }

@@ -1,4 +1,6 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const MAX_RELAY_BODY_BYTES = 2_100_000;
+export const MAX_RELAY_MESSAGE_BYTES = 4_500_000;
 const ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(sessions|workspaces|trajectories|evidence-requests\/poll|evidence-requests\/[0-9a-f-]{36}\/responses|tasks\/poll|tasks\/[0-9a-f-]{36}\/events|skills\/poll|skills\/[0-9a-f-]{36}\/receipts)$/i;
 const FORWARDED_HEADERS = new Set([
   'content-type', 'x-dharma-correlation-id', 'x-dharma-device-id', 'x-dharma-session-id',
@@ -18,7 +20,7 @@ export function parseRelayRequest(value: unknown): RelayRequest {
   const input = value as Record<string, unknown>;
   if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) throw new Error('invalid_request_id');
   if (input.method !== 'POST' || typeof input.pathname !== 'string' || !ROUTE.test(input.pathname)) throw new Error('route_not_allowed');
-  if (typeof input.body !== 'string' || Buffer.byteLength(input.body) > 1_048_576) throw new Error('body_too_large');
+  if (typeof input.body !== 'string' || Buffer.byteLength(input.body) > MAX_RELAY_BODY_BYTES) throw new Error('body_too_large');
   const source = input.headers && typeof input.headers === 'object' && !Array.isArray(input.headers) ? input.headers as Record<string, unknown> : {};
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {

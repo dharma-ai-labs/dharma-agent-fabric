@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseRelayRequest } from './protocol.js';
+import { MAX_RELAY_BODY_BYTES, parseRelayRequest } from './protocol.js';
 
 const request = {
   requestId: '8eca231c-e9d2-40e5-bf9c-445ddfeee094', method: 'POST',
@@ -50,6 +50,17 @@ test('relay accepts only bounded evidence poll and response routes', () => {
     ...request,
     pathname: '/api/v1/orgs/org_customer/agent-fabric/evidence-requests/all/raw',
   }), /route_not_allowed/);
+});
+
+test('relay accepts the organization capsule ceiling and rejects larger bodies', () => {
+  assert.doesNotThrow(() => parseRelayRequest({
+    ...request,
+    body: 'x'.repeat(2_000_000),
+  }));
+  assert.throws(() => parseRelayRequest({
+    ...request,
+    body: 'x'.repeat(MAX_RELAY_BODY_BYTES + 1),
+  }), /body_too_large/);
 });
 
 test('relay rejects incomplete, stale, and mismatched signed envelopes', () => {
