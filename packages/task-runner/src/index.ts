@@ -16,6 +16,7 @@ export interface TaskEnvelope {
   organizationId: string;
   workspaceId: string;
   target: { deviceId: string; provider: 'codex' | 'claude' };
+  skillBundle: { bundleId: string; bundleHash: string } | null;
   instructions: string;
   authority: {
     readPaths: string[];

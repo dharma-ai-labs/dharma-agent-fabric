@@ -25,7 +25,8 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   };
   const unsigned = {
     schema: 'dharma.task/v1' as const, taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace',
-    target: { deviceId: 'device', provider: 'codex' }, instructions: 'Verify the repository.', requiredSkills: [],
+    target: { deviceId: 'device', provider: 'codex' }, skillBundle: null,
+    instructions: 'Verify the repository.', requiredSkills: [],
     authority: { readPaths: ['.'], writePaths: [], commands: [{ commandId: 'verify' }], network: 'deny', git: 'task_branch' as const },
     execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
     acceptance: { commands: [{ commandId: 'verify' }], requiredArtifacts: [] },

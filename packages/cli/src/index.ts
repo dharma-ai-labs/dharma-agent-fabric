@@ -110,6 +110,19 @@ export function taskResponsePreview(receipt: TaskReceipt) {
   };
 }
 
+export function assertTaskSkillPin(
+  pinned: TaskEnvelope['skillBundle'],
+  activeBundleId: string | null,
+): void {
+  if (pinned === undefined) throw new Error('Task is missing its signed skill bundle pin.');
+  if ((pinned?.bundleId || null) !== activeBundleId) {
+    throw new Error('Task skill bundle does not match the active local bundle.');
+  }
+  if (pinned && !/^sha256:[a-f0-9]{64}$/.test(pinned.bundleHash)) {
+    throw new Error('Task skill bundle hash is invalid.');
+  }
+}
+
 async function platform(): Promise<DeviceConfig['platform']> {
   if (process.platform === 'win32') return 'windows';
   if (process.platform === 'darwin') return 'macos';
@@ -494,7 +507,12 @@ async function executeOneTask(
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  await fabric.postTaskEvent(task.taskId, 'started', { bundleHash: null });
+  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider));
+  assertTaskSkillPin(task.skillBundle, activeBundleId);
+  await fabric.postTaskEvent(task.taskId, 'started', {
+    bundleId: task.skillBundle?.bundleId || null,
+    bundleHash: task.skillBundle?.bundleHash || null,
+  });
   const heartbeats: Promise<unknown>[] = [];
   const heartbeat = setInterval(() => {
     heartbeats.push(fabric.postTaskEvent(task.taskId, 'lease_extended', { taskId: task.taskId }).catch(() => undefined));

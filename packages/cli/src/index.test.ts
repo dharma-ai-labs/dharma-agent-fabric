@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { materializeInlineSkillFiles, run, taskResponsePreview } from './index.js';
+import { assertTaskSkillPin, materializeInlineSkillFiles, run, taskResponsePreview } from './index.js';
 import type { SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
 
 test('version is parser-safe structured output', async () => {
@@ -73,4 +73,13 @@ test('task response preview extracts the final agent message and removes secrets
   assert.match(preview?.text || '', /Architecture summary/);
   assert.equal(preview?.text.includes('secret-secret-secret'), false);
   assert.ok((preview?.redactedValues || 0) >= 1);
+});
+
+test('task execution requires the signed bundle pin to match the active native bundle', () => {
+  const pin = { bundleId: 'bundle-1', bundleHash: `sha256:${'a'.repeat(64)}` };
+  assert.doesNotThrow(() => assertTaskSkillPin(pin, 'bundle-1'));
+  assert.doesNotThrow(() => assertTaskSkillPin(null, null));
+  assert.throws(() => assertTaskSkillPin(pin, 'bundle-2'), /does not match/);
+  assert.throws(() => assertTaskSkillPin(undefined as never, 'bundle-1'), /missing its signed/);
+  assert.throws(() => assertTaskSkillPin({ ...pin, bundleHash: 'invalid' }, 'bundle-1'), /hash is invalid/);
 });
