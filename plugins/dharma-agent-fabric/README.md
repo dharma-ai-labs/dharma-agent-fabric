@@ -1,20 +1,26 @@
-# Dharma Agent Fabric Plugin Scaffold
+# Dharma Agent Fabric for Codex
 
-This directory is the proposed public Codex plugin surface.
+This directory is the public Codex plugin package for Dharma Agent Fabric.
 
 It contains:
 
 - `.codex-plugin/plugin.json`
+- `.mcp.json` for the OAuth-protected remote MCP server
 - `skills/dharma-agent-fabric/SKILL.md`
 - Skill-local references
-- `openai-app/` documentation for the remote MCP app
+- `openai-app/` publication, security, and reviewer documentation
 
-Before publication:
+The plugin connects Codex to `https://mcp.dharma-ai.io/mcp`. The MCP server
+authenticates with Clerk OAuth, enforces active Dharma organization membership,
+and preserves the authority of the underlying organization APIs.
 
-1. Validate the manifest against the installed Codex version and current OpenAI plugin documentation.
-2. Replace the repository URL only if the public repository differs.
-3. Publish and verify the remote Dharma MCP app.
-4. Configure OAuth scopes and action confirmations.
-5. Exercise the plugin with a low-risk test organization.
-6. Verify that app permissions do not exceed the user's Dharma source permissions.
-7. Complete privacy, terms, security, and reviewer-access materials.
+## Release verification
+
+```bash
+python /path/to/plugin-creator/scripts/validate_plugin.py ./plugins/dharma-agent-fabric
+npm run mcp:catalog:verify
+```
+
+Publication remains subject to OpenAI review. Passing local validation and
+reviewer-tenant proof does not imply that the plugin is listed in the Codex
+directory.

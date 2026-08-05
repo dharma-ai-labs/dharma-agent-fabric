@@ -7,8 +7,10 @@ const required = [
   'LICENSE',
   'THIRD_PARTY_NOTICES.md',
   'LICENSES/Qoder-Better-Harness-MIT.txt',
-  'plugin/.codex-plugin/plugin.json',
-  'plugin/skills/dharma-agent-fabric/SKILL.md',
+  '.agents/plugins/marketplace.json',
+  'plugins/dharma-agent-fabric/.codex-plugin/plugin.json',
+  'plugins/dharma-agent-fabric/.mcp.json',
+  'plugins/dharma-agent-fabric/skills/dharma-agent-fabric/SKILL.md',
   'packages/cli/dist/index.js',
 ];
 

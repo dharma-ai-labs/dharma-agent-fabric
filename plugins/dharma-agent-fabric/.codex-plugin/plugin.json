@@ -20,12 +20,13 @@
     "a2a"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Dharma Agent Fabric",
     "shortDescription": "Connect and improve coding agents across a company.",
     "longDescription": "Connect local coding agents to Dharma for real-trajectory evaluation, bounded remote tasks, organization-wide failure intelligence, agent-to-agent communication, and signed automatic Skill updates.",
     "developerName": "Dharma AI Labs",
-    "category": "Coding",
+    "category": "Developer Tools",
     "capabilities": [
       "Interactive",
       "Read",
@@ -39,6 +40,8 @@
       "Review and roll out the latest signed Skill bundle."
     ],
     "websiteURL": "https://www.dharma-ai.io",
+    "privacyPolicyURL": "https://www.dharma-ai.io/privacy",
+    "termsOfServiceURL": "https://www.dharma-ai.io/terms",
     "brandColor": "#2057E8",
     "screenshots": []
   }

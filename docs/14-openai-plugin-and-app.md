@@ -35,7 +35,8 @@ The MCP resource is `https://mcp.dharma-ai.io/mcp`. Clerk OAuth requires
 Dharma organization membership and the underlying HQ route capability.
 
 The exact registered tools are maintained in
-`plugin/openai-app/mcp-tool-catalog.json` and checked during `npm run check`.
+`plugins/dharma-agent-fabric/openai-app/mcp-tool-catalog.json` and checked
+during `npm run check`.
 
 ### Read tools
 

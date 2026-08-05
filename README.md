@@ -19,6 +19,21 @@ localhost shell or unrestricted file interface.
 Each capability is verified independently. Evidence discovery does not imply
 that task execution, continuation, or Skill activation works for that host.
 
+## Codex plugin
+
+After the release branch is merged, install the public marketplace and plugin:
+
+```bash
+codex plugin marketplace add dharma-ai-labs/dharma-agent-fabric
+codex plugin add dharma-agent-fabric@dharma-ai-labs
+codex mcp login dharma-agent-fabric
+```
+
+The plugin connects to the OAuth-protected MCP resource at
+`https://mcp.dharma-ai.io/mcp`. Evidence expansion and every mutation require
+explicit confirmation; organization membership and the underlying HQ API
+capabilities remain authoritative.
+
 ## Development
 
 ```bash

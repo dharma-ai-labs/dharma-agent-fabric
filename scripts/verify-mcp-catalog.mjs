@@ -41,7 +41,7 @@ const removedSpeculativeTools = [
 ];
 
 const root = resolve(import.meta.dirname, '..');
-const path = resolve(root, 'plugin/openai-app/mcp-tool-catalog.json');
+const path = resolve(root, 'plugins/dharma-agent-fabric/openai-app/mcp-tool-catalog.json');
 const catalog = JSON.parse(await readFile(path, 'utf8'));
 const actualTools = catalog.tools.map((tool) => tool.name);
 

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dharma-agent-fabric": {
+      "type": "http",
+      "url": "https://mcp.dharma-ai.io/mcp",
+      "note": "Dharma Agent Fabric organization control plane. Uses Clerk OAuth and requires explicit confirmation for evidence expansion, paid analysis, task dispatch, GitHub writes, Skill release, rollout, and rollback."
+    }
+  }
+}
