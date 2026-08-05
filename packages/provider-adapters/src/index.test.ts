@@ -192,6 +192,42 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
 });
 
+test('Claude task execution pins a validated configured model', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
+  const previous = process.env.DHARMA_CLAUDE_MODEL;
+  let argv: string[] = [];
+  process.env.DHARMA_CLAUDE_MODEL = 'claude-sonnet-5';
+  try {
+    await executeProviderTask({
+      provider: 'claude', workspace: root, instructions: 'Read package.json.', timeoutSeconds: 30,
+      allowedCommandArgv: [], allowWrites: false,
+      runner: async (input) => {
+        argv = input.argv;
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_CLAUDE_MODEL;
+    else process.env.DHARMA_CLAUDE_MODEL = previous;
+  }
+  assert.deepEqual(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2), ['--model', 'claude-sonnet-5']);
+});
+
+test('Claude task execution rejects an unsafe model selector', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
+  const previous = process.env.DHARMA_CLAUDE_MODEL;
+  process.env.DHARMA_CLAUDE_MODEL = 'claude-sonnet-5 --dangerously-skip-permissions';
+  try {
+    await assert.rejects(() => executeProviderTask({
+      provider: 'claude', workspace: root, instructions: 'Read package.json.', timeoutSeconds: 30,
+      allowedCommandArgv: [], allowWrites: false,
+    }), /DHARMA_CLAUDE_MODEL is invalid/);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_CLAUDE_MODEL;
+    else process.env.DHARMA_CLAUDE_MODEL = previous;
+  }
+});
+
 test('knowledge queries remove write-capable provider tools', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-readonly-'));
   const observed: Array<{ provider: string; argv: string[] }> = [];
