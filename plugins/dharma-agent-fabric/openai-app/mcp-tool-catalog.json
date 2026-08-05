@@ -4,6 +4,7 @@
   "resource": "https://mcp.dharma-ai.io/mcp",
   "oauthScopes": ["openid", "user:org:read"],
   "tools": [
+    {"name": "fabric_get_identity", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},
     {"name": "fabric_list_devices", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},
     {"name": "fabric_list_agents", "mode": "read", "backendScope": "agents:read", "confirmation": false},
     {"name": "fabric_list_workspaces", "mode": "read", "backendScope": "fabric:devices", "confirmation": false},

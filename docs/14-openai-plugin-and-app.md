@@ -40,6 +40,7 @@ during `npm run check`.
 
 ### Read tools
 
+- `fabric_get_identity`
 - `fabric_list_devices`
 - `fabric_list_agents`
 - `fabric_list_workspaces`
@@ -79,6 +80,10 @@ not OAuth scope alone, decides access to the requested organization.
 - developers may use permitted read and execution scopes;
 - developers cannot release or roll out Skills;
 - inactive, absent, or cross-organization membership fails closed.
+
+`fabric_get_identity` returns only the signed-in Clerk identity and that user's
+membership-binding state for the requested organization. It is a bounded
+reviewer diagnostic and does not enumerate organization members.
 
 Explicit confirmation is required for every mutation and for evidence
 expansion. Mutations also require an idempotency key. The same HQ route handlers

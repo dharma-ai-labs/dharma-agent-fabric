@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 const expectedTools = [
+  'fabric_get_identity',
   'fabric_list_devices',
   'fabric_list_agents',
   'fabric_list_workspaces',

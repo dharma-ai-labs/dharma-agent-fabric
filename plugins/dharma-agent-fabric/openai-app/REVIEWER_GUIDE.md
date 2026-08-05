@@ -15,8 +15,9 @@ private review channel. They are never committed to this repository.
 ## Review sequence
 
 1. Install the plugin and complete Clerk OAuth.
-2. List devices, agents, workspaces, trajectories, Failure Atlas families,
-   tasks, A2A handoffs, Skills, eval windows, and usage for the reviewer org.
+2. Verify the signed-in identity and membership binding, then list devices,
+   agents, workspaces, trajectories, Failure Atlas families, tasks, A2A
+   handoffs, Skills, eval windows, and usage for the reviewer org.
 3. Open one bounded trajectory only after accepting the evidence confirmation.
 4. Dispatch the prepared low-risk task and verify its audit correlation ID.
 5. Run the prepared 100-trajectory analysis and verify the metered usage event.
