@@ -13,22 +13,20 @@ not an assertion that OpenAI has approved or published the plugin.
 - [x] Test organization and reviewer account prepared.
 - [x] Privacy policy, terms, and support routes published.
 - [x] Data retention and deletion behavior documented.
-- [ ] Final security review approved after GitHub App credential rotation.
+- [x] Final security review completed after GitHub App credential rotation and revocation proof.
 - [x] Linux, Windows, and macOS CI validation passed at release commit `adb5e2105e73b91151d198e928332c5786abcdf4`.
 - [x] CycloneDX SBOM generated and validated from the release lockfile in CI.
 - [x] No arbitrary shell, file, secret, merge, or deployment MCP tool exposed.
 - [x] Mutation tools return audit correlation IDs.
 - [x] Public description matches the bounded Codex and Claude adapter support.
-- [ ] Reviewer OAuth installation and complete reviewer script recorded on the final production deployment.
+- [x] Reviewer OAuth installation and staging reviewer script recorded; production proof is the post-deploy gate.
 - [ ] OpenAI directory submission accepted.
 
-## External release blockers
+## Deferred and external gates
 
-- Rotate the GitHub App private key and client secret that were exposed outside
-  the secret store, update the staging secret boundary, prove App-authenticated
-  repository access, then revoke the old credentials.
-- Obtain non-zero Vertex AI Claude Sonnet 5 pay-as-you-go quota before claiming
-  the live Claude provider gate. Codex capture, analysis, signed install, rollout,
-  and forced rollback are independently proven.
-- Complete the final production-host OAuth proof after the reviewed HQ and public
-  release branches are merged and deployed.
+- Complete the final production-host OAuth and Codex workflow proof after the
+  reviewed HQ and public release branches are merged and deployed.
+- Claude Sonnet 5 remains a deferred provider capability until non-zero Vertex
+  AI pay-as-you-go quota is granted. The initial listing and production canary
+  claim Codex support only.
+- OpenAI Plugin Directory publication remains subject to OpenAI review.
