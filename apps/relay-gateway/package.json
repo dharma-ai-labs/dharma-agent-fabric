@@ -1,0 +1,18 @@
+{
+  "name": "@dharma-ai/agent-fabric-relay-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "start": "node dist/server.js",
+    "test": "node --test dist/*.test.js"
+  },
+  "dependencies": {
+    "redis": "6.2.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

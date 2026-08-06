@@ -2,10 +2,16 @@
   "files": [],
   "references": [
     { "path": "packages/contracts" },
+    { "path": "packages/secure-store" },
     { "path": "packages/policy" },
     { "path": "packages/local-vault" },
     { "path": "packages/provider-adapters" },
+    { "path": "packages/better-harness-bridge" },
     { "path": "packages/evidence-reduction" },
-    { "path": "packages/cli" }
+    { "path": "packages/relay-client" },
+    { "path": "packages/task-runner" },
+    { "path": "packages/skill-manager" },
+    { "path": "packages/cli" },
+    { "path": "apps/relay-gateway" }
   ]
 }

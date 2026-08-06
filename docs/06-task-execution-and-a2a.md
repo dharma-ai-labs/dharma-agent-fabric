@@ -115,6 +115,17 @@ export interface ProviderTaskAdapter {
 
 A provider implementation must pin and test the installed host version or version range. Do not copy another provider's command invocation by analogy.
 
+For Claude Code on Vertex AI, authenticate the host with Google Application Default Credentials and configure the execution shell explicitly:
+
+```bash
+export CLAUDE_CODE_USE_VERTEX=1
+export ANTHROPIC_VERTEX_PROJECT_ID=<customer-project-id>
+export CLOUD_ML_REGION=global
+export DHARMA_CLAUDE_MODEL=claude-sonnet-5
+```
+
+`DHARMA_CLAUDE_MODEL` is passed as a single validated `claude --model` argument and is included in the execution setup rather than inferred from a mutable Claude default. Provider credentials remain local to the device.
+
 ## Command policy
 
 A task does not receive unrestricted shell text. It receives one of:

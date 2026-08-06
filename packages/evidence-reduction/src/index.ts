@@ -75,9 +75,21 @@ function deterministicUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function redactString(value: string, stats: RedactionStats): string {
+type RedactionOptions = { pseudonymizeIdentity?: boolean };
+
+const LOCAL_PATH_PATTERNS = [
+  /\/(?:home|Users)\/[A-Za-z0-9._-]+(?:\/[^\s"'<>|,}\]]+)*/g,
+  /\b[A-Za-z]:\\{1,}[^\s"'<>|,}\]]+/g,
+  /\\{2,}(?:wsl(?:\.localhost)?\\{1,})?[^\s"'<>|,}\]]+/gi,
+];
+
+function redactString(value: string, stats: RedactionStats, options: RedactionOptions): string {
   stats.inputBytes += Buffer.byteLength(value);
-  let output = value;
+  let output = value.replaceAll('\u0000', () => {
+    stats.classes.add('invalid_unicode_nul');
+    stats.redactedValues += 1;
+    return '[REMOVED:nul]';
+  });
   for (const rule of SECRET_PATTERNS) {
     output = output.replace(rule.pattern, () => {
       stats.classes.add(rule.name);
@@ -85,11 +97,20 @@ function redactString(value: string, stats: RedactionStats): string {
       return `[REDACTED:${rule.name}]`;
     });
   }
+  if (options.pseudonymizeIdentity) {
+    for (const pattern of LOCAL_PATH_PATTERNS) {
+      output = output.replace(pattern, () => {
+        stats.classes.add('local_path');
+        stats.redactedValues += 1;
+        return '[REDACTED:local_path]';
+      });
+    }
+  }
   stats.outputBytes += Buffer.byteLength(output);
   return output;
 }
 
-function redactValue(value: unknown, stats: RedactionStats, key = ''): unknown {
+function redactValue(value: unknown, stats: RedactionStats, key = '', options: RedactionOptions = {}): unknown {
   if (/^(authorization|cookie|set-cookie|password|secret|token|api[_-]?key)$/i.test(key)) {
     if (value !== null && value !== undefined) {
       stats.classes.add('sensitive_field');
@@ -97,12 +118,19 @@ function redactValue(value: unknown, stats: RedactionStats, key = ''): unknown {
     }
     return '[REDACTED:sensitive_field]';
   }
-  if (typeof value === 'string') return redactString(value, stats);
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, stats));
+  if (options.pseudonymizeIdentity && /^(cwd|source[_-]?path|workspace[_-]?path|local[_-]?path)$/i.test(key) && typeof value === 'string') {
+    stats.inputBytes += Buffer.byteLength(value);
+    stats.outputBytes += Buffer.byteLength('[REDACTED:local_path]');
+    stats.classes.add('local_path');
+    stats.redactedValues += 1;
+    return '[REDACTED:local_path]';
+  }
+  if (typeof value === 'string') return redactString(value, stats, options);
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, stats, '', options));
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([childKey, child]) => [
       childKey,
-      redactValue(child, stats, childKey),
+      redactValue(child, stats, childKey, options),
     ]));
   }
   return value;
@@ -132,6 +160,7 @@ export function buildTrajectoryCapsule(input: {
   policy: OrganizationPolicy;
   rawContentId: string;
   rawBytes: number;
+  rawKind?: 'raw-provider-session' | 'raw-provider-turn';
   createdAt?: string;
 }): TrajectoryCapsule {
   const stats: RedactionStats = {
@@ -141,7 +170,9 @@ export function buildTrajectoryCapsule(input: {
   const seen = new Set<string>();
   const events: AgentEvent[] = [];
   for (const [index, record] of input.session.records.entries()) {
-    const payload = redactValue(record.native, stats) as Record<string, unknown>;
+    const payload = redactValue(record.native, stats, '', {
+      pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
+    }) as Record<string, unknown>;
     const fingerprint = sha256(canonicalize({ kind: record.kind, payload }));
     if (seen.has(fingerprint)) continue;
     seen.add(fingerprint);
@@ -169,7 +200,7 @@ export function buildTrajectoryCapsule(input: {
     });
   }
 
-  const createdAt = input.createdAt ?? new Date().toISOString();
+  const createdAt = input.createdAt ?? input.session.endedAt;
   const base = {
     schema: 'dharma.trajectory-capsule/v1' as const,
     trajectoryId,
@@ -195,7 +226,7 @@ export function buildTrajectoryCapsule(input: {
     events,
     contentIndex: [{
       contentId: input.rawContentId,
-      kind: 'raw-provider-session',
+      kind: input.rawKind || 'raw-provider-session',
       bytes: input.rawBytes,
       uploaded: false,
       availableLocally: true,
@@ -211,7 +242,7 @@ export function buildTrajectoryCapsule(input: {
       inputBytes: stats.inputBytes,
       outputBytes: stats.outputBytes,
     },
-    localEvidenceAvailable: [{ contentId: input.rawContentId, kind: 'raw-provider-session', bytes: input.rawBytes }],
+    localEvidenceAvailable: [{ contentId: input.rawContentId, kind: input.rawKind || 'raw-provider-session', bytes: input.rawBytes }],
     createdAt,
   };
 

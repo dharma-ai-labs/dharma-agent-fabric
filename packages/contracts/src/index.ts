@@ -74,6 +74,19 @@ export function sha256(value: string | Uint8Array): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
+export function signCanonicalObject(value: unknown, privateKey: KeyObject): string {
+  return sign(null, Buffer.from(canonicalize(value), 'utf8'), privateKey).toString('base64url');
+}
+
+export function verifyCanonicalObject(value: unknown, signature: string, publicKey: KeyObject): boolean {
+  return verify(
+    null,
+    Buffer.from(canonicalize(value), 'utf8'),
+    publicKey,
+    Buffer.from(signature, 'base64url'),
+  );
+}
+
 export function envelopeSigningPayload(envelope: Omit<ProtocolEnvelope, 'signature'>): Buffer {
   return Buffer.from(canonicalize(envelope), 'utf8');
 }

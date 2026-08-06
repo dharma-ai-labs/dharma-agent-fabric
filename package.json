@@ -17,10 +17,19 @@
     "clean": "tsc -b --clean",
     "lint": "tsc -b --pretty false",
     "schema:validate": "node scripts/validate-schemas.mjs",
+    "vendor:verify": "node scripts/verify-better-harness.mjs",
+    "smoke:secure-store": "node scripts/smoke-secure-store.mjs",
     "test": "npm run schema:validate && npm run build && npm run test:unit",
     "test:unit": "npm run test --workspaces --if-present",
     "pack:verify": "node scripts/verify-package.mjs",
-    "check": "npm test && npm run pack:verify"
+    "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
+    "load:relay": "npm run build && node scripts/load-relay.mjs",
+    "load:relay:live": "npm run build && node scripts/load-live-relay.mjs",
+    "load:skill-rollout": "npm run build && node scripts/load-skill-rollout.mjs",
+    "proof:large-capture": "npm run build && node scripts/proof-large-capture.mjs",
+    "proof:relay": "node scripts/proof-live-relay.mjs",
+    "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
+    "check": "npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

@@ -9,6 +9,7 @@
     "bundleId",
     "organizationId",
     "version",
+    "operation",
     "skills",
     "riskClass",
     "targetSelectors",
@@ -25,7 +26,7 @@
     },
     "bundleId": {
       "type": "string",
-      "minLength": 1
+      "format": "uuid"
     },
     "organizationId": {
       "type": "string",
@@ -34,15 +35,22 @@
     "version": {
       "type": "string"
     },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "install",
+        "clear"
+      ]
+    },
     "skills": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": [
           "skillId",
           "version",
+          "repository",
           "commit",
           "contentHash",
           "path"
@@ -54,6 +62,10 @@
           },
           "version": {
             "type": "string"
+          },
+          "repository": {
+            "type": "string",
+            "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
           },
           "commit": {
             "type": "string"
@@ -94,7 +106,8 @@
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "format": "uuid"
     },
     "evaluationReceiptId": {
       "type": "string",
@@ -119,5 +132,32 @@
       "type": "string",
       "minLength": 1
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "clear"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "skills": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "skills": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
 }

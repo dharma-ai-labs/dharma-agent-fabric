@@ -1,0 +1,119 @@
+import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+
+export interface SecureSecretStore {
+  backend: 'windows-credential-manager' | 'macos-keychain' | 'linux-secret-service';
+  get(account: string): Promise<string | null>;
+  put(account: string, secret: string): Promise<void>;
+  delete(account: string): Promise<void>;
+}
+
+interface ProcessResult { code: number | null; stdout: string; stderr: string }
+
+function run(command: string, argv: string[], input?: string): Promise<ProcessResult> {
+  return new Promise((accept, reject) => {
+    const child = spawn(command, argv, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.once('error', reject);
+    child.once('close', (code) => accept({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') }));
+    if (input !== undefined) child.stdin.end(input);
+    else child.stdin.end();
+  });
+}
+
+function assertAccount(account: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(account)) throw new Error('Invalid secure-store account.');
+}
+
+const windowsPreamble = '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Runtime.WindowsRuntime; $vault=[Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]::new(); ';
+const windowsRead = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $credential.RetrievePassword(); [Console]::Out.Write($credential.Password)} catch {exit 3}`;
+const windowsWrite = `${windowsPreamble}$value=[Console]::In.ReadToEnd(); try {$old=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($old)} catch {}; $credential=[Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime]::new("Dharma Agent Fabric",$args[0],$value); $vault.Add($credential)`;
+const windowsDelete = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($credential)} catch {exit 3}`;
+
+function windowsStore(command = process.platform === 'win32' ? 'powershell.exe' : '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'): SecureSecretStore {
+  const invoke = (script: string, account: string, secret?: string) => run(command, ['-NoProfile', '-NonInteractive', '-Command', `& { ${script} }`, account], secret);
+  return {
+    backend: 'windows-credential-manager',
+    async get(account) {
+      assertAccount(account);
+      const result = await invoke(windowsRead, account);
+      if (result.code === 3) return null;
+      if (result.code !== 0) throw new Error(`Windows Credential Manager failed: ${result.stderr.trim()}`);
+      return result.stdout;
+    },
+    async put(account, secret) {
+      assertAccount(account);
+      const result = await invoke(windowsWrite, account, secret);
+      if (result.code !== 0) throw new Error(`Windows Credential Manager failed: ${result.stderr.trim()}`);
+    },
+    async delete(account) {
+      assertAccount(account);
+      const result = await invoke(windowsDelete, account);
+      if (result.code !== 0 && result.code !== 3) throw new Error(`Windows Credential Manager failed: ${result.stderr.trim()}`);
+    },
+  };
+}
+
+function linuxStore(): SecureSecretStore {
+  return {
+    backend: 'linux-secret-service',
+    async get(account) {
+      assertAccount(account);
+      const result = await run('secret-tool', ['lookup', 'service', 'dharma-agent-fabric', 'account', account]);
+      if (result.code === 1) return null;
+      if (result.code !== 0) throw new Error(`Linux Secret Service failed: ${result.stderr.trim()}`);
+      return result.stdout.trimEnd();
+    },
+    async put(account, secret) {
+      assertAccount(account);
+      const result = await run('secret-tool', ['store', '--label=Dharma Agent Fabric', 'service', 'dharma-agent-fabric', 'account', account], secret);
+      if (result.code !== 0) throw new Error(`Linux Secret Service failed: ${result.stderr.trim()}`);
+    },
+    async delete(account) {
+      assertAccount(account);
+      const result = await run('secret-tool', ['clear', 'service', 'dharma-agent-fabric', 'account', account]);
+      if (result.code !== 0 && result.code !== 1) throw new Error(`Linux Secret Service failed: ${result.stderr.trim()}`);
+    },
+  };
+}
+
+function macosStore(): SecureSecretStore {
+  return {
+    backend: 'macos-keychain',
+    async get(account) {
+      assertAccount(account);
+      const result = await run('security', ['find-generic-password', '-s', 'Dharma Agent Fabric', '-a', account, '-w']);
+      if (result.code === 44) return null;
+      if (result.code !== 0) throw new Error(`macOS Keychain failed: ${result.stderr.trim()}`);
+      return result.stdout.trimEnd();
+    },
+    async put(account, secret) {
+      assertAccount(account);
+      const result = await run('security', ['add-generic-password', '-U', '-s', 'Dharma Agent Fabric', '-a', account, '-w', secret]);
+      if (result.code !== 0) throw new Error(`macOS Keychain failed: ${result.stderr.trim()}`);
+    },
+    async delete(account) {
+      assertAccount(account);
+      const result = await run('security', ['delete-generic-password', '-s', 'Dharma Agent Fabric', '-a', account]);
+      if (result.code !== 0 && result.code !== 44) throw new Error(`macOS Keychain failed: ${result.stderr.trim()}`);
+    },
+  };
+}
+
+async function isWsl(): Promise<boolean> {
+  if (process.platform !== 'linux') return false;
+  try { return /microsoft|wsl/i.test(await readFile('/proc/version', 'utf8')); } catch { return false; }
+}
+
+export async function createSystemSecureStore(): Promise<SecureSecretStore> {
+  if (process.platform === 'win32') return windowsStore();
+  if (process.platform === 'darwin') return macosStore();
+  if (await isWsl()) return windowsStore();
+  if (process.platform === 'linux') return linuxStore();
+  throw new Error(`No supported secure secret store for ${process.platform}.`);
+}
+
+export const secureStoreInternals = { windowsStore, linuxStore, macosStore };

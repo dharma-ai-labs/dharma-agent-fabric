@@ -160,6 +160,7 @@ dharma workspace pause <id>
 dharma workspace remove <id> --preserve-vault
 dharma evidence preview --workspace <id> --session <id>
 dharma evidence sync --workspace <id>
+dharma evidence run-request --policy <policy.json> --workspace-id <id>
 dharma evidence disclosures --workspace <id>
 dharma tasks list
 dharma tasks inspect <id>
@@ -181,3 +182,9 @@ A local user may always:
 - preserve or delete local data according to organization and legal policy.
 
 A local user may not silently broaden organization policy or grant the server new write, network, merge, or deployment authority.
+
+`relay start` polls for one signed evidence request before task delivery. The explicit
+`evidence run-request` command runs the same verifier once for operator proof. In both
+cases, the client verifies the server signature and request identity, decrypts only the
+selected local-vault objects, applies the installed organization redaction policy and
+the lower of the local/server byte caps, then records an idempotent disclosure receipt.

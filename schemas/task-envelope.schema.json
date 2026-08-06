@@ -10,6 +10,7 @@
     "organizationId",
     "workspaceId",
     "target",
+    "skillBundle",
     "instructions",
     "requiredSkills",
     "authority",
@@ -52,6 +53,28 @@
           "type": "string"
         }
       }
+    },
+    "skillBundle": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bundleId", "bundleHash"],
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "bundleHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "instructions": {
       "type": "string",

@@ -56,6 +56,7 @@ dharma evidence sources --workspace <id> --provider <id> --json
 dharma evidence preview --workspace <id> --latest --json
 dharma evidence capture --workspace <id> --provider <id> --json
 dharma evidence sync --workspace <id> --provider <id> --json
+dharma evidence run-request --policy <policy.json> --workspace-id <id> --json
 dharma evidence disclosures --workspace <id> --json
 dharma evidence export-local <trajectory-id> --output <path> --json
 ```

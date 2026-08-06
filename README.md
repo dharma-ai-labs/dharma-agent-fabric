@@ -19,16 +19,38 @@ localhost shell or unrestricted file interface.
 Each capability is verified independently. Evidence discovery does not imply
 that task execution, continuation, or Skill activation works for that host.
 
+## Codex plugin
+
+After the release branch is merged, install the public marketplace and plugin:
+
+```bash
+codex plugin marketplace add dharma-ai-labs/dharma-agent-fabric
+codex plugin add dharma-agent-fabric@dharma-ai-labs
+codex mcp login dharma-agent-fabric
+```
+
+The plugin connects to the OAuth-protected MCP resource at
+`https://mcp.dharma-ai.io/mcp`. Evidence expansion and every mutation require
+explicit confirmation; organization membership and the underlying HQ API
+capabilities remain authoritative.
+
 ## Development
 
 ```bash
 mise exec node@22.22.3 -- npm install
 mise exec node@22.22.3 -- npm test
 mise exec node@22.22.3 -- npm run pack:verify
+mise exec node@22.22.3 -- npm run load:relay
 ```
 
 The `dharma` CLI is built from `packages/cli`. Use `--json` for parser-safe
 output; diagnostics are written to stderr.
+
+`load:relay` starts an isolated mock HQ and local relay, then proves 1,000
+concurrent device connections, 10,000 relayed request envelopes, and a
+1,000-device reconnect wave. Counts can be reduced for development with the
+`AGENT_FABRIC_LOAD_DEVICES`, `AGENT_FABRIC_LOAD_MESSAGES`, and
+`AGENT_FABRIC_LOAD_RECONNECT_DEVICES` environment variables.
 
 ## Security boundary
 

@@ -1,0 +1,20 @@
+{
+  "name": "dharma-ai-labs",
+  "interface": {
+    "displayName": "Dharma AI Labs"
+  },
+  "plugins": [
+    {
+      "name": "dharma-agent-fabric",
+      "source": {
+        "source": "local",
+        "path": "./plugins/dharma-agent-fabric"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
