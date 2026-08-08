@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { access, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { canonicalize, sha256, validateContract, verifyCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai/agent-fabric-evidence-reduction';
-import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai/agent-fabric-local-vault';
-import { loadOrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
-import { claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai/agent-fabric-provider-adapters';
+import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai-labs/agent-fabric-local-vault';
+import { loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
-  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, pollEnrollment, saveDeviceConfig, type DeviceConfig,
-} from '@dharma-ai/agent-fabric-relay-client';
-import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
-import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai/agent-fabric-task-runner';
+  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment, saveDeviceConfig, type DeviceConfig,
+} from '@dharma-ai-labs/agent-fabric-relay-client';
+import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
 const VERSION = '0.1.0';
 const execFileAsync = promisify(execFile);
@@ -53,11 +55,90 @@ function required(flags: Map<string, string | boolean>, name: string): string {
 }
 
 function print(value: Output): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+
+export function isDirectExecution(argvPath: string | undefined, moduleUrl: string): boolean {
+  if (!argvPath) return false;
+  try {
+    return realpathSync(argvPath) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
 function dharmaHome(): string { return resolve(process.env.DHARMA_HOME || resolve(homedir(), '.dharma')); }
 function configPath() { return resolve(dharmaHome(), 'device.json'); }
 function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollment.json'); }
 function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-state.json'); }
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
+
+async function pathExists(path: string) {
+  try { await access(path); return true; } catch { return false; }
+}
+
+export async function materializeWorkspacePolicy(input: {
+  workspace: string;
+  organizationId: string;
+  revision: string;
+}) {
+  const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
+  try {
+    const packageJson = JSON.parse(await readFile(resolve(input.workspace, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, unknown>;
+    };
+    const scripts = packageJson.scripts || {};
+    for (const [script, commandId, timeoutSeconds] of [
+      ['test', 'repo.test', 1_200],
+      ['lint', 'repo.lint', 600],
+      ['typecheck', 'repo.typecheck', 600],
+      ['type-check', 'repo.typecheck', 600],
+      ['build', 'repo.build', 1_200],
+    ] as const) {
+      if (typeof scripts[script] === 'string' && !allowedCommands[commandId]) {
+        allowedCommands[commandId] = { argv: ['npm', 'run', script], timeoutSeconds };
+      }
+    }
+  } catch {}
+
+  const writePaths: string[] = [];
+  for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
+    if (await pathExists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
+  }
+  const policy: OrganizationPolicy = {
+    schema: 'dharma.organization-policy/v1',
+    organizationId: input.organizationId,
+    revision: input.revision,
+    evidence: {
+      defaultMode: 'deep',
+      registeredWorkspaceOnly: true,
+      excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
+      maximumCapsuleBytes: 1_000_000,
+      maximumDailyUploadBytes: 50_000_000,
+      maximumExpansionBytes: 65_536,
+      pseudonymizeIdentity: true,
+    },
+    tasks: {
+      defaultNetwork: 'deny',
+      defaultGit: 'task_branch',
+      allowedCommands,
+      writePaths,
+      requireLocalConfirmationFor: ['network.allowlisted_domains', 'git.push', 'merge', 'deploy'],
+    },
+    skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
+    retention: { rawLocalDays: 30, capsuleServerDays: 90 },
+    budgets: { dailyAnalysisCents: 1_000 },
+  };
+  const relativePath = '.dharma/approved-policy.json';
+  await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
+  await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+  return { relativePath, policy };
+}
+
+function providerAdapter(provider: string) {
+  if (provider === 'codex') return codexAdapter;
+  if (provider === 'claude') return claudeAdapter;
+  if (provider === 'agy') return agyAdapter;
+  return null;
+}
 
 function deterministicUuid(value: string) {
   const bytes = createHash('sha256').update(value).digest().subarray(0, 16);
@@ -175,7 +256,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   if (flags.has('resume')) {
     pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
   } else {
-    const hqUrl = String(flags.get('hq-url') || 'https://hq.dharma-ai.io').replace(/\/$/, '');
+    const hqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
     const organizationId = required(flags, 'organization-id');
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
@@ -220,7 +301,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
-  const adapter = provider === 'codex' ? codexAdapter : provider === 'claude' ? claudeAdapter : null;
+  const adapter = providerAdapter(provider);
   if (!adapter) throw new Error(`Unsupported capture provider: ${provider}`);
   const root = flags.get('source-root');
   let sessions = await adapter.discover({
@@ -260,7 +341,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
       });
-      const validation = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
       if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
       const capsuleBlob = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
       vault.recordCapsule(capsule.trajectoryId, capsule.revision, capsule.capsuleHash, capsuleBlob);
@@ -299,7 +380,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
 async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
-  const adapter = provider === 'codex' ? codexAdapter : provider === 'claude' ? claudeAdapter : null;
+  const adapter = providerAdapter(provider);
   if (!adapter) throw new Error(`Unsupported preview provider: ${provider}`);
   const root = flags.get('source-root');
   const maximumSessions = Math.min(Math.max(Number(flags.get('maximum-sessions') || 100), 1), 1_000);
@@ -375,6 +456,153 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
   });
 }
 
+async function readDeviceConfig(): Promise<DeviceConfig | null> {
+  try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
+  catch { return null; }
+}
+
+export async function installRepositoryAgentFabricSkill(input: {
+  workspace: string;
+  hqUrl: string;
+  organizationId: string;
+  workspaceId: string;
+  policyRevision: string;
+}) {
+  const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
+  const marker = resolve(skillRoot, '.dharma-agent-fabric.json');
+  let skillRootExists = true;
+  try { await access(skillRoot); } catch { skillRootExists = false; }
+  if (skillRootExists) {
+    try { await access(marker); }
+    catch { throw new Error('Refusing to replace an unmanaged repository skill at .agents/skills/dharma-agent-fabric.'); }
+  }
+  await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
+  await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
+  const skill = `---
+name: dharma-agent-fabric
+description: Connect this repository's coding agents to the organization's Dharma Agent Fabric control plane.
+---
+
+# Dharma Agent Fabric
+
+Use the installed \`dharma\` CLI for organization-scoped agent work. Never print, commit, or transmit provider credentials, developer tokens, local paths, or raw private trajectories.
+
+## Required flow
+
+1. Run \`dharma status\` and \`dharma providers list\` before accepting a remote task.
+2. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
+3. Capture reduced evidence with \`dharma evidence capture-batch --workspace . --provider <provider> --policy .dharma/approved-policy.json --sync\`.
+4. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
+5. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
+6. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
+
+The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
+`;
+  const reference = `# Organization connection
+
+- HQ API: ${input.hqUrl}
+- Organization: ${input.organizationId}
+- Workspace: ${input.workspaceId}
+- Policy revision: ${input.policyRevision}
+- OpenAPI: ${input.hqUrl}/api/v1/agent-fabric/openapi.json
+
+The CLI enrolls this device through browser-confirmed Clerk organization consent. Local provider credentials remain on this device. Managed and cloud BYOK execution are brokered by Dharma HQ and expose neither private runtime URLs nor cloud credentials.
+`;
+  const connection = {
+    schema: 'dharma.repository-connection/v1',
+    hqUrl: input.hqUrl,
+    organizationId: input.organizationId,
+    workspaceId: input.workspaceId,
+    policyRevision: input.policyRevision,
+    openapiUrl: `${input.hqUrl}/api/v1/agent-fabric/openapi.json`,
+  };
+  await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
+  await writeFile(resolve(skillRoot, 'references', 'organization.md'), reference, { mode: 0o600 });
+  await writeFile(marker, `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(resolve(input.workspace, '.dharma', 'agent-fabric.json'), `${JSON.stringify(connection, null, 2)}\n`, { mode: 0o600 });
+  return {
+    skillPath: '.agents/skills/dharma-agent-fabric/SKILL.md',
+    connectionPath: '.dharma/agent-fabric.json',
+  };
+}
+
+async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
+  const workspace = await realpath(String(flags.get('workspace') || flags.get('path') || '.'));
+  const organizationId = required(flags, 'organization-id');
+  const policyRevision = required(flags, 'policy-revision');
+  const requestedHqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
+  let config = await readDeviceConfig();
+  if (!config) {
+    const loginFlags = new Map(flags);
+    loginFlags.set('hq-url', requestedHqUrl);
+    loginFlags.set('organization-id', organizationId);
+    if (!flags.has('resume')) loginFlags.set('no-wait', true);
+    const enrollment = await login(loginFlags) as Record<string, unknown>;
+    if (enrollment.status !== 'approved') {
+      return {
+        ok: true,
+        stage: 'approve_device',
+        enrollment,
+        nextCommand: `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+      };
+    }
+    config = await readDeviceConfig();
+  }
+  if (!config) throw new Error('Device enrollment did not produce a local device configuration.');
+  if (config.organizationId !== organizationId) {
+    throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
+  }
+  if (flags.has('hq-url') && config.hqUrl !== requestedHqUrl) {
+    throw new Error('This device is enrolled to a different Dharma HQ origin. Use a separate DHARMA_HOME for each HQ origin.');
+  }
+  const hqUrl = config.hqUrl;
+  let registered = (await registry()).find((item) => item.path === workspace);
+  if (!registered) {
+    await workspaceAdd(new Map<string, string | boolean>([
+      ['organization-id', organizationId],
+      ['path', workspace],
+      ['name', String(flags.get('name') || basename(workspace))],
+    ]), [workspace]);
+    registered = (await registry()).find((item) => item.path === workspace);
+  }
+  if (!registered) throw new Error('Workspace registration failed.');
+  const generatedPolicy = await materializeWorkspacePolicy({
+    workspace,
+    organizationId,
+    revision: policyRevision,
+  });
+  const installed = await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl,
+    organizationId,
+    workspaceId: registered.workspaceId,
+    policyRevision,
+  });
+  const synced = await workspaceSync(new Map([['policy-revision', policyRevision]]), [registered.workspaceId]);
+  const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
+  return {
+    ok: true,
+    stage: 'ready',
+    organizationId,
+    workspaceId: registered.workspaceId,
+    deviceId: config.deviceId,
+    providers,
+    organizationPolicy: {
+      path: generatedPolicy.relativePath,
+      revision: generatedPolicy.policy.revision,
+      commandIds: Object.keys(generatedPolicy.policy.tasks.allowedCommands).sort(),
+      writePaths: generatedPolicy.policy.tasks.writePaths,
+    },
+    repositorySkill: installed,
+    workspaceSync: synced,
+    next: {
+      preview: 'dharma evidence preview --workspace . --provider codex',
+      sync: 'dharma evidence capture-batch --workspace . --provider codex --policy .dharma/approved-policy.json --sync',
+      relay: 'dharma relay start --policy .dharma/approved-policy.json',
+    },
+  };
+}
+
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
   const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8'));
   return (await client()).syncTrajectory(capsule);
@@ -418,7 +646,7 @@ async function processEvidenceRequest(
     }
   }
   if (!request || !workspace) return { ok: true, request: null };
-  const contract = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
+  const contract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
   if (!contract.ok) throw new Error(`Evidence request failed schema validation: ${JSON.stringify(contract.errors)}`);
   const { signature, ...unsignedRequest } = request;
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
@@ -484,7 +712,7 @@ async function processEvidenceRequest(
       bytesPrepared, createdAt: new Date().toISOString(),
     };
     const response = { ...unsignedResponse, responseHash: sha256(canonicalize(unsignedResponse)), signature: null };
-    const responseContract = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
+    const responseContract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
     if (!responseContract.ok) throw new Error(`Evidence response failed schema validation: ${JSON.stringify(responseContract.errors)}`);
     const accepted = await fabric.postEvidenceResponse(request.requestId, response);
     const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};
@@ -562,10 +790,31 @@ async function runOneTask(flags: Map<string, string | boolean>): Promise<Output>
   return executeOneTask(await client(), policy, Number(flags.get('lease-seconds') || 120));
 }
 
-function nativeSkillDirectory(provider: 'codex' | 'claude') {
-  return provider === 'codex'
-    ? resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'skills')
-    : resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude'), 'skills');
+export function nativeSkillDirectory(
+  provider: ProviderId,
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+) {
+  if (provider === 'codex') return resolve(env.CODEX_HOME || resolve(home, '.codex'), 'skills');
+  if (provider === 'claude') return resolve(env.CLAUDE_CONFIG_DIR || resolve(home, '.claude'), 'skills');
+  return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
+}
+
+type AgyPluginExecutor = (executable: string, argv: string[], options: { timeout: number }) => Promise<unknown>;
+
+export async function activateAgyPlugin(input: {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  execute?: AgyPluginExecutor;
+} = {}) {
+  const root = resolve(nativeSkillDirectory('agy', input.env, input.home), '..');
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const manifest = resolve(root, 'plugin.json');
+  try { await access(manifest); }
+  catch { await writeFile(manifest, `${JSON.stringify({ name: 'dharma-agent-fabric' }, null, 2)}\n`, { mode: 0o600 }); }
+  await execute('agy', ['plugin', 'validate', root], { timeout: 30_000 });
+  await execute('agy', ['plugin', 'enable', 'dharma-agent-fabric'], { timeout: 30_000 });
 }
 
 function containedInlinePath(root: string, value: string) {
@@ -616,8 +865,8 @@ export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoo
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
-  if (!['codex', 'claude'].includes(providerValue)) throw new Error('Skill provider must be codex or claude.');
-  const provider = providerValue as 'codex' | 'claude';
+  if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
+  const provider = providerValue as ProviderId;
   const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
   if (!workspace) throw new Error('Skill workspace is not registered locally.');
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
@@ -669,6 +918,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
       organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
     });
+    if (provider === 'agy' && receipt.status === 'active') await activateAgyPlugin();
     await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
     return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };
   } finally {
@@ -711,6 +961,7 @@ export async function run(argv: string[]): Promise<Output> {
   const { positional, flags } = options(argv);
   const [command, subcommand] = positional;
   if (flags.has('version') || command === 'version') return { version: VERSION };
+  if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return { providers: await Promise.all(providerAdapters.map((adapter) => adapter.capability())) };
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));
@@ -732,14 +983,14 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
   if (command === 'skills' && subcommand === 'status') {
     const providerValue = required(flags, 'provider');
-    if (!['codex', 'claude'].includes(providerValue)) throw new Error('Skill provider must be codex or claude.');
-    const root = nativeSkillDirectory(providerValue as 'codex' | 'claude');
+    if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
+    const root = nativeSkillDirectory(providerValue as ProviderId);
     return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
   }
-  throw new Error('Usage: dharma <login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]');
+  throw new Error('Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]');
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (isDirectExecution(process.argv[1], import.meta.url)) {
   run(process.argv.slice(2)).then(print).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);

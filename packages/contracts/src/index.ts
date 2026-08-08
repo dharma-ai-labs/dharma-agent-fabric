@@ -3,10 +3,12 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import type { ErrorObject } from 'ajv';
+import taskEnvelopeSchema from './task-envelope.schema.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const Ajv2020 = require('ajv/dist/2020').default as new (options: Record<string, unknown>) => {
   addSchema(schema: unknown): void;
+  compile(schema: unknown): ((value: unknown) => boolean) & { errors?: ErrorObject[] | null };
   getSchema(id: string): ((value: unknown) => boolean) & { errors?: ErrorObject[] | null } | undefined;
 };
 const addFormats = require('ajv-formats').default as (ajv: unknown) => void;
@@ -19,6 +21,8 @@ export type EvidenceState =
   | 'redacted'
   | 'out_of_window'
   | 'not_supported';
+
+export type ProviderId = 'codex' | 'claude' | 'agy';
 
 export interface ProtocolEnvelope<T extends Record<string, unknown> = Record<string, unknown>> {
   schema: 'dharma.protocol-envelope/v1';
@@ -87,6 +91,18 @@ export function verifyCanonicalObject(value: unknown, signature: string, publicK
   );
 }
 
+const taskEnvelopeAjv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+addFormats(taskEnvelopeAjv);
+const taskEnvelopeValidator = taskEnvelopeAjv.compile(taskEnvelopeSchema);
+
+export function validateTaskEnvelopeContract(
+  value: unknown,
+): { ok: true } | { ok: false; errors: ErrorObject[] } {
+  return taskEnvelopeValidator(value)
+    ? { ok: true }
+    : { ok: false, errors: [...(taskEnvelopeValidator.errors ?? [])] };
+}
+
 export function envelopeSigningPayload(envelope: Omit<ProtocolEnvelope, 'signature'>): Buffer {
   return Buffer.from(canonicalize(envelope), 'utf8');
 }
@@ -125,7 +141,7 @@ export async function validateContract(
   schemaId: string,
   value: unknown,
 ): Promise<{ ok: true } | { ok: false; errors: ErrorObject[] }> {
-  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
   addFormats(ajv);
   for (const name of (await readdir(schemaDirectory)).filter((item) => item.endsWith('.schema.json'))) {
     ajv.addSchema(JSON.parse(await readFile(resolve(schemaDirectory, name), 'utf8')));

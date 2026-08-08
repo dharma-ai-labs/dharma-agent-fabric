@@ -1,14 +1,17 @@
 {
-  "name": "@dharma-ai/agent-fabric-evidence-reduction",
+  "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/evidence-reduction" },
   "exports": { ".": "./dist/index.js" },
+  "files": ["dist"],
+  "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
-    "@dharma-ai/agent-fabric-contracts": "0.1.0",
-    "@dharma-ai/agent-fabric-policy": "0.1.0",
-    "@dharma-ai/agent-fabric-provider-adapters": "0.1.0"
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-policy": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.0"
   }
 }

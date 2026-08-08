@@ -5,7 +5,7 @@
 Use the published package or approved source build:
 
 ```text
-npm install --global @dharma-ai/agent-fabric
+npm install --global @dharma-ai-labs/agent-fabric
 dharma --version
 ```
 

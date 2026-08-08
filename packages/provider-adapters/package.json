@@ -1,10 +1,13 @@
 {
-  "name": "@dharma-ai/agent-fabric-provider-adapters",
+  "name": "@dharma-ai-labs/agent-fabric-provider-adapters",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/provider-adapters" },
   "exports": { ".": "./dist/index.js" },
+  "files": ["dist"],
+  "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
-  "dependencies": { "@dharma-ai/agent-fabric-contracts": "0.1.0" }
+  "dependencies": { "@dharma-ai-labs/agent-fabric-contracts": "0.1.0" }
 }

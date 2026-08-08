@@ -12,6 +12,9 @@ const required = [
   'plugins/dharma-agent-fabric/.mcp.json',
   'plugins/dharma-agent-fabric/skills/dharma-agent-fabric/SKILL.md',
   'packages/cli/dist/index.js',
+  'packages/cli/dist/schemas/trajectory-capsule.schema.json',
+  'packages/cli/dist/schemas/evidence-request.schema.json',
+  'packages/cli/dist/schemas/evidence-response.schema.json',
 ];
 
 for (const path of required) await access(resolve(root, path), constants.R_OK);

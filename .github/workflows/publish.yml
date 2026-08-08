@@ -1,0 +1,84 @@
+name: Publish Agent Fabric
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.0"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - run: npm ci
+      - run: npm run check
+      - name: Build release artifacts
+        run: |
+          mkdir -p release
+          npm pack --workspace packages/cli --pack-destination release
+          npm pack --workspace packages/sdk --pack-destination release
+          npm sbom --all --sbom-format cyclonedx > release/dharma-agent-fabric.cdx.json
+          cp openapi/agent-fabric.openapi.json release/
+          sha256sum release/* > release/SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: release/*
+      - name: Publish public workspaces
+        run: |
+          for workspace in \
+            packages/contracts \
+            packages/secure-store \
+            packages/policy \
+            packages/provider-adapters \
+            packages/better-harness-bridge \
+            packages/evidence-reduction \
+            packages/relay-client \
+            packages/local-vault \
+            packages/task-runner \
+            packages/skill-manager \
+            packages/sdk \
+            packages/cli
+          do
+            name=$(node -p "require('./${workspace}/package.json').name")
+            version=$(node -p "require('./${workspace}/package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} already exists; preserving immutable release."
+            else
+              npm publish --workspace "${workspace}"
+            fi
+          done
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --generate-notes
+  publish-python:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build
+      - run: PYTHONPATH=sdks/python/src python -m unittest discover -s sdks/python/tests -v
+      - run: python -m build sdks/python --outdir dist-python
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist-python/

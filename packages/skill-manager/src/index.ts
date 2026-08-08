@@ -2,8 +2,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID, createHash, type KeyObject } from 'node:crypto';
 import { cp, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
-import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
-import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
+import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 
 export interface SkillBundle {
   schema: 'dharma.skill-bundle/v1';
@@ -139,6 +139,7 @@ async function activateNativeSkills(input: {
   removeSkillIds: string[];
 }) {
   const affectedSkillIds = [...new Set([...input.removeSkillIds, ...input.skillIds])];
+  await mkdir(input.nativeSkillDirectory, { recursive: true, mode: 0o700 });
   for (const skillId of affectedSkillIds) {
     const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
     if (await pathExists(target)) {
@@ -146,13 +147,55 @@ async function activateNativeSkills(input: {
       if (!await pathExists(marker)) throw new Error(`Refusing to replace unmanaged provider skill: ${skillId}`);
     }
   }
-  for (const skillId of affectedSkillIds) {
-    await rm(assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId)), { recursive: true, force: true });
-  }
-  for (const skillId of input.skillIds) {
-    const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
-    await cp(resolve(input.release, skillId), target, { recursive: true, errorOnExist: true, force: false });
-    await writeFile(resolve(target, '.dharma-agent-fabric.json'), `${JSON.stringify({ bundleId: input.bundleId, skillId })}\n`, { mode: 0o600 });
+
+  const transactionRoot = assertContained(
+    input.nativeSkillDirectory,
+    resolve(input.nativeSkillDirectory, `.dharma-activation-${randomUUID()}`),
+  );
+  const stagedRoot = resolve(transactionRoot, 'staged');
+  const backupRoot = resolve(transactionRoot, 'backup');
+  const backedUp: string[] = [];
+  const activated: string[] = [];
+  await mkdir(stagedRoot, { recursive: true, mode: 0o700 });
+  await mkdir(backupRoot, { recursive: true, mode: 0o700 });
+  try {
+    for (const skillId of input.skillIds) {
+      const source = assertContained(input.release, resolve(input.release, skillId));
+      const staged = assertContained(stagedRoot, resolve(stagedRoot, skillId));
+      await cp(source, staged, { recursive: true, errorOnExist: true, force: false });
+      await writeFile(
+        resolve(staged, '.dharma-agent-fabric.json'),
+        `${JSON.stringify({ bundleId: input.bundleId, skillId })}\n`,
+        { mode: 0o600 },
+      );
+    }
+    for (const skillId of affectedSkillIds) {
+      const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
+      if (!await pathExists(target)) continue;
+      await rename(target, assertContained(backupRoot, resolve(backupRoot, skillId)));
+      backedUp.push(skillId);
+    }
+    for (const skillId of input.skillIds) {
+      const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
+      await rename(assertContained(stagedRoot, resolve(stagedRoot, skillId)), target);
+      activated.push(skillId);
+    }
+  } catch (error) {
+    for (const skillId of activated.reverse()) {
+      await rm(assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId)), {
+        recursive: true,
+        force: true,
+      });
+    }
+    for (const skillId of backedUp.reverse()) {
+      await rename(
+        assertContained(backupRoot, resolve(backupRoot, skillId)),
+        assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId)),
+      );
+    }
+    throw error;
+  } finally {
+    await rm(transactionRoot, { recursive: true, force: true });
   }
 }
 
@@ -169,7 +212,7 @@ export async function installSkillBundle(input: {
   devicePrivateKey: KeyObject;
   deviceId: string;
   workspaceId: string;
-  provider: 'codex' | 'claude';
+  provider: ProviderId;
   smokeCommandId?: string;
   organizationApprovalId?: string;
 }): Promise<InstallReceipt> {

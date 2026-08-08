@@ -187,7 +187,7 @@ Each service owns one business capability and a stable API. Avoid one large `age
 
 ## Shared contract strategy
 
-The canonical schemas live in the public repository. The private control plane consumes an exact released version of `@dharma-ai/agent-fabric-contracts`.
+The canonical schemas live in the public repository. The private control plane consumes an exact released version of `@dharma-ai-labs/agent-fabric-contracts`.
 
 Rules:
 

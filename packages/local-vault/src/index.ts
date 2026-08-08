@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
+import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 const BLOB_VERSION = 1;
 

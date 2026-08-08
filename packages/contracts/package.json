@@ -1,11 +1,13 @@
 {
-  "name": "@dharma-ai/agent-fabric-contracts",
+  "name": "@dharma-ai-labs/agent-fabric-contracts",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/contracts" },
   "exports": { ".": "./dist/index.js" },
   "files": ["dist"],
+  "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
     "ajv": "^8.17.1",

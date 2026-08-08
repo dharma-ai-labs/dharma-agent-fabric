@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { access, open, readdir, realpath, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { access, mkdtemp, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
-import type { EvidenceState, ProviderCapability } from '@dharma-ai/agent-fabric-contracts';
+import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 
 export interface SourceRecord {
   native: Record<string, unknown>;
@@ -16,7 +16,7 @@ export interface SourceRecord {
 }
 
 export interface ProviderSession {
-  provider: 'codex' | 'claude';
+  provider: ProviderId;
   sessionId: string;
   sourcePath: string;
   workspace: string;
@@ -36,13 +36,13 @@ export interface DiscoveryRequest {
 }
 
 export interface ProviderAdapter {
-  providerId: 'codex' | 'claude';
+  providerId: ProviderId;
   capability(): Promise<ProviderCapability>;
   discover(request: DiscoveryRequest): Promise<ProviderSession[]>;
 }
 
 export interface ProviderExecutionResult {
-  provider: 'codex' | 'claude';
+  provider: ProviderId;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
@@ -57,10 +57,25 @@ export type ProviderProcessRunner = (input: {
   completeOnResultJson?: boolean;
 }) => Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: Buffer; stderr: Buffer }>;
 
+export function providerProcessEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const allowed = [
+    'PATH', 'Path', 'HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TMP', 'TEMP', 'TMPDIR',
+    'SHELL', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'PATHEXT', 'LANG', 'LC_ALL', 'TERM',
+    'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'AGY_CONFIG_DIR',
+  ];
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of allowed) {
+    if (typeof source[name] === 'string') env[name] = source[name];
+  }
+  env.NO_COLOR = '1';
+  env.DHARMA_AGENT_FABRIC_TASK = '1';
+  return env;
+}
+
 export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
   const child = spawn(input.command, input.argv, {
     cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, DHARMA_AGENT_FABRIC_TASK: '1' },
+    env: providerProcessEnvironment(),
   });
   const maximum = 5_000_000;
   const stdout: Buffer[] = [];
@@ -116,7 +131,7 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
 });
 
 export async function executeProviderTask(input: {
-  provider: 'codex' | 'claude';
+  provider: ProviderId;
   workspace: string;
   instructions: string;
   timeoutSeconds: number;
@@ -130,12 +145,15 @@ export async function executeProviderTask(input: {
   const runner = input.runner || defaultProcessRunner;
   let command: string;
   let argv: string[];
+  let stdin = input.instructions;
+  let temporaryDirectory: string | null = null;
+  let agyLogPath: string | null = null;
   if (input.provider === 'codex') {
     command = 'codex';
     argv = input.allowWrites
-      ? ['exec', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
-      : ['exec', '--json', '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
-  } else {
+      ? ['exec', '--ignore-user-config', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
+      : ['exec', '--ignore-user-config', '--json', '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
+  } else if (input.provider === 'claude') {
     command = 'claude';
     const configuredModel = (process.env.DHARMA_CLAUDE_MODEL || '').trim();
     if (configuredModel && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(configuredModel)) {
@@ -149,19 +167,53 @@ export async function executeProviderTask(input: {
       '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits',
       '--allowedTools', allowedTools.join(','), '--disallowedTools', 'WebFetch,WebSearch',
     ];
+  } else {
+    if (input.allowWrites) {
+      throw new Error('Agy write tasks are disabled because its supported CLI does not expose a path and command allowlist.');
+    }
+    if (input.allowedCommandArgv.length > 0) {
+      throw new Error('Agy tasks cannot receive registered shell commands.');
+    }
+    command = 'agy';
+    temporaryDirectory = await mkdtemp(resolve(tmpdir(), 'dharma-agy-task-'));
+    agyLogPath = resolve(temporaryDirectory, 'agy.log');
+    argv = [
+      '--print',
+      '--sandbox',
+      '--log-file', agyLogPath,
+      '--print-timeout', `${Math.min(Math.max(input.timeoutSeconds, 1), 3_600)}s`,
+      input.instructions,
+    ];
+    stdin = '';
   }
-  const result = await runner({
-    command, argv, cwd: input.workspace, stdin: input.instructions,
-    timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
-    signal: input.signal,
-    completeOnResultJson: input.provider === 'claude',
-  });
-  return {
-    provider: input.provider, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
-    stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8'),
-    stdoutSha256: `sha256:${createHash('sha256').update(result.stdout).digest('hex')}`,
-    stderrSha256: `sha256:${createHash('sha256').update(result.stderr).digest('hex')}`,
-  };
+  try {
+    const result = await runner({
+      command, argv, cwd: input.workspace, stdin,
+      timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
+      signal: input.signal,
+      completeOnResultJson: input.provider === 'claude',
+    });
+    let stderr = result.stderr.toString('utf8');
+    let exitCode = result.exitCode;
+    if (input.provider === 'agy') {
+      let log = '';
+      try { log = await readFile(agyLogPath!, 'utf8'); } catch {}
+      const diagnostic = `${result.stdout.toString('utf8')}\n${stderr}\n${log}`;
+      if (/not logged into antigravity|auth(?:entication)? (?:timed out|required|failed)|please (?:log in|authenticate)|oauth.*(?:failed|expired)|error:/i.test(diagnostic)) {
+        exitCode = 1;
+        stderr = `${stderr}${stderr ? '\n' : ''}Agy authentication or execution failed. Run agy interactively to authenticate this device.`;
+      }
+    }
+    const stderrBuffer = Buffer.from(stderr, 'utf8');
+    return {
+      provider: input.provider, exitCode, signal: result.signal, timedOut: result.timedOut,
+      stdout: result.stdout.toString('utf8'), stderr,
+      stdoutSha256: `sha256:${createHash('sha256').update(result.stdout).digest('hex')}`,
+      stderrSha256: `sha256:${createHash('sha256').update(stderrBuffer).digest('hex')}`,
+    };
+  } finally {
+    if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 async function executableVersion(command: string): Promise<string | null> {
@@ -278,7 +330,7 @@ async function boundedJsonlLines(
 }
 
 async function parseSessionFile(
-  provider: 'codex' | 'claude',
+  provider: Exclude<ProviderId, 'agy'>,
   path: string,
   workspace: string,
   limits: { maximumBytes?: number; maximumRecordBytes?: number } = {},
@@ -399,14 +451,55 @@ export function segmentProviderSession(session: ProviderSession): ProviderSessio
   }));
 }
 
-function defaultRoots(provider: 'codex' | 'claude'): string[] {
+async function parseAgyHistoryFile(path: string, workspace: string): Promise<ProviderSession[]> {
+  const fileStat = await stat(path);
+  const bounded = await boundedJsonlLines(path, fileStat.size, 8_388_608);
+  const sessions: ProviderSession[] = [];
+  for (const [index, value] of bounded.lines.entries()) {
+    let native: Record<string, unknown>;
+    try { native = JSON.parse(value) as Record<string, unknown>; } catch { continue; }
+    const recordedWorkspace = typeof native.workspace === 'string' ? native.workspace : null;
+    if (!recordedWorkspace || !insideWorkspace(workspace, recordedWorkspace)) continue;
+    const rawTimestamp = native.timestamp;
+    const timestamp = typeof rawTimestamp === 'number'
+      ? new Date(rawTimestamp > 10_000_000_000 ? rawTimestamp : rawTimestamp * 1_000).toISOString()
+      : normalizeTimestamp(typeof rawTimestamp === 'string' ? rawTimestamp : null, fileStat.mtime);
+    const conversationId = typeof native.conversationId === 'string' ? native.conversationId : null;
+    const identity = conversationId || `${recordedWorkspace}:${timestamp}:${String(native.display || '')}:${index}`;
+    const sessionId = `agy-${createHash('sha256').update(identity).digest('hex').slice(0, 24)}`;
+    sessions.push({
+      provider: 'agy',
+      sessionId,
+      sourcePath: path,
+      workspace: resolve(workspace),
+      records: [{
+        native,
+        sourcePath: path,
+        line: index + 1,
+        workspace: recordedWorkspace,
+        timestamp,
+        kind: 'metadata',
+        coverage: 'partial',
+      }],
+      coverage: 'partial',
+      startedAt: timestamp,
+      endedAt: timestamp,
+    });
+  }
+  return sessions;
+}
+
+function defaultRoots(provider: ProviderId): string[] {
   if (provider === 'codex') {
     return [resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'sessions')];
   }
-  return [resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude'), 'projects')];
+  if (provider === 'claude') {
+    return [resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude'), 'projects')];
+  }
+  return [resolve(process.env.AGY_CONFIG_DIR || resolve(homedir(), '.gemini', 'antigravity-cli'), 'history.jsonl')];
 }
 
-function adapter(provider: 'codex' | 'claude', command: string): ProviderAdapter {
+function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): ProviderAdapter {
   return {
     providerId: provider,
     async capability() {
@@ -449,7 +542,38 @@ function adapter(provider: 'codex' | 'claude', command: string): ProviderAdapter
   };
 }
 
+export const agyAdapter: ProviderAdapter = {
+  providerId: 'agy',
+  async capability() {
+    const version = await executableVersion('agy');
+    return {
+      provider: 'agy',
+      version,
+      evidence: version ? 'partial' : 'unavailable',
+      configuredAssets: version ? 'partial' : 'unavailable',
+      taskExecution: version ? 'partial' : 'unavailable',
+      sessionContinuation: version ? 'partial' : 'unavailable',
+      skillInstall: version ? 'available' : 'unavailable',
+      activation: version ? 'next_session' : 'unavailable',
+      usageEvidence: 'unavailable',
+    };
+  },
+  async discover(request) {
+    const maximumSessions = Math.min(Math.max(request.maximumSessions ?? 100, 1), 1_000);
+    const sessions: ProviderSession[] = [];
+    for (const root of request.roots ?? defaultRoots('agy')) {
+      for (const path of await jsonlFiles(root)) {
+        sessions.push(...await parseAgyHistoryFile(path, request.workspace));
+      }
+    }
+    return sessions
+      .filter((session) => !request.since || Date.parse(session.endedAt) >= request.since.getTime())
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+      .slice(-maximumSessions);
+  },
+};
+
 export const codexAdapter = adapter('codex', 'codex');
 export const claudeAdapter = adapter('claude', 'claude');
-export const providerAdapters: ProviderAdapter[] = [codexAdapter, claudeAdapter];
-export { insideWorkspace, parseSessionFile };
+export const providerAdapters: ProviderAdapter[] = [codexAdapter, claudeAdapter, agyAdapter];
+export { insideWorkspace, parseAgyHistoryFile, parseSessionFile };

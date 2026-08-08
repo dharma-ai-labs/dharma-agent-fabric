@@ -1,20 +1,23 @@
 {
-  "name": "@dharma-ai/agent-fabric",
+  "name": "@dharma-ai-labs/agent-fabric",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": { "dharma": "dist/index.js" },
+  "engines": { "node": ">=22.20.0 <25.0.0", "npm": ">=10.9.3 <12.0.0" },
+  "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/cli" },
   "files": ["dist"],
+  "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
-    "@dharma-ai/agent-fabric-contracts": "0.1.0",
-    "@dharma-ai/agent-fabric-evidence-reduction": "0.1.0",
-    "@dharma-ai/agent-fabric-local-vault": "0.1.0",
-    "@dharma-ai/agent-fabric-policy": "0.1.0",
-    "@dharma-ai/agent-fabric-provider-adapters": "0.1.0",
-    "@dharma-ai/agent-fabric-relay-client": "0.1.0",
-    "@dharma-ai/agent-fabric-skill-manager": "0.1.0",
-    "@dharma-ai/agent-fabric-task-runner": "0.1.0"
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-evidence-reduction": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-local-vault": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-policy": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-relay-client": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-skill-manager": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-task-runner": "0.1.0"
   }
 }

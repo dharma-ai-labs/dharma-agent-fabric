@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
-import { canonicalize, sha256, type EvidenceState } from '@dharma-ai/agent-fabric-contracts';
-import type { OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
-import type { ProviderSession, SourceRecord } from '@dharma-ai/agent-fabric-provider-adapters';
+import { canonicalize, sha256, type EvidenceState } from '@dharma-ai-labs/agent-fabric-contracts';
+import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import type { ProviderSession, SourceRecord } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 
 const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   { name: 'private_key', pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g },

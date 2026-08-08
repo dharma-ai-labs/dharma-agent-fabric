@@ -43,6 +43,7 @@
       "enum": [
         "codex",
         "claude",
+        "agy",
         "cursor",
         "qoder",
         "qwen",
