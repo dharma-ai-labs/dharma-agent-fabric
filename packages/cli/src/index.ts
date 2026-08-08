@@ -341,7 +341,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
       });
-      const validation = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
       if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
       const capsuleBlob = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
       vault.recordCapsule(capsule.trajectoryId, capsule.revision, capsule.capsuleHash, capsuleBlob);
@@ -646,7 +646,7 @@ async function processEvidenceRequest(
     }
   }
   if (!request || !workspace) return { ok: true, request: null };
-  const contract = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
+  const contract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
   if (!contract.ok) throw new Error(`Evidence request failed schema validation: ${JSON.stringify(contract.errors)}`);
   const { signature, ...unsignedRequest } = request;
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
@@ -712,7 +712,7 @@ async function processEvidenceRequest(
       bytesPrepared, createdAt: new Date().toISOString(),
     };
     const response = { ...unsignedResponse, responseHash: sha256(canonicalize(unsignedResponse)), signature: null };
-    const responseContract = await validateContract(resolve(import.meta.dirname, '../../../schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
+    const responseContract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
     if (!responseContract.ok) throw new Error(`Evidence response failed schema validation: ${JSON.stringify(responseContract.errors)}`);
     const accepted = await fabric.postEvidenceResponse(request.requestId, response);
     const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};

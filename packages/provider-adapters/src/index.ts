@@ -151,8 +151,8 @@ export async function executeProviderTask(input: {
   if (input.provider === 'codex') {
     command = 'codex';
     argv = input.allowWrites
-      ? ['exec', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
-      : ['exec', '--json', '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
+      ? ['exec', '--ignore-user-config', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
+      : ['exec', '--ignore-user-config', '--json', '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
   } else if (input.provider === 'claude') {
     command = 'claude';
     const configuredModel = (process.env.DHARMA_CLAUDE_MODEL || '').trim();

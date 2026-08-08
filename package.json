@@ -17,7 +17,7 @@
     "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node scripts/copy-cli-schemas.mjs",
     "clean": "tsc -b --clean",
     "lint": "tsc -b --pretty false",
     "schema:validate": "node scripts/validate-schemas.mjs",

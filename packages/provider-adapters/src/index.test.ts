@@ -204,7 +204,7 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   });
   assert.equal(observed.command, 'codex');
   assert.equal(observed.stdin, 'Fix the parser test.');
-  assert.deepEqual((observed.argv as string[]).slice(0, 2), ['exec', '--json']);
+  assert.deepEqual((observed.argv as string[]).slice(0, 3), ['exec', '--ignore-user-config', '--json']);
   assert.ok((observed.argv as string[]).includes('sandbox_workspace_write.network_access=false'));
   assert.equal(result.exitCode, 0);
 });
