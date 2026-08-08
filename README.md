@@ -28,7 +28,7 @@ the private remediation repository and selected runtime, then provides one
 organization-scoped command:
 
 ```bash
-npx @dharma-ai/agent-fabric@0.1.0 onboard \
+npx @dharma-ai-labs/agent-fabric@0.1.0 onboard \
   --hq-url https://www.dharma-ai.io \
   --organization-id <organization-id> \
   --policy-revision <dashboard-policy-revision> \
@@ -46,7 +46,7 @@ start the outbound relay. Full raw trajectories remain encrypted in the local
 vault. A customer can revoke the device from the dashboard without gaining or
 granting inbound shell access.
 
-The versioned TypeScript client is `@dharma-ai/agent-fabric-sdk`; the Python
+The versioned TypeScript client is `@dharma-ai-labs/agent-fabric-sdk`; the Python
 client is `dharma-agent-fabric-sdk`. Both call the organization-scoped Dharma
 HQ API rather than customer cloud or internal worker endpoints.
 

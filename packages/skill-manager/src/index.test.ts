@@ -4,8 +4,8 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { signCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
-import type { OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
+import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { calculateBundleHash, contentHash, installSkillBundle, type SkillBundle } from './index.js';
 
 const policy: OrganizationPolicy = {

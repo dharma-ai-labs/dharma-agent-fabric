@@ -1,8 +1,8 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { canonicalize, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
-import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
+import { canonicalize, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';

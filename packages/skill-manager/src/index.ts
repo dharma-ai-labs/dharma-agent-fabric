@@ -2,8 +2,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID, createHash, type KeyObject } from 'node:crypto';
 import { cp, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
-import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
-import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
+import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 
 export interface SkillBundle {
   schema: 'dharma.skill-bundle/v1';

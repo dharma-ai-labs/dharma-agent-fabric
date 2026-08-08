@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-secure-store",
+  "name": "@dharma-ai-labs/agent-fabric-secure-store",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",

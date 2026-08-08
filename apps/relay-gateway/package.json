@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-relay-gateway",
+  "name": "@dharma-ai-labs/agent-fabric-relay-gateway",
   "version": "0.1.0",
   "private": true,
   "type": "module",

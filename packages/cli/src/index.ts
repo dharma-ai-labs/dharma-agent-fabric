@@ -7,16 +7,16 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai/agent-fabric-evidence-reduction';
-import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai/agent-fabric-local-vault';
-import { loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai/agent-fabric-provider-adapters';
+import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai-labs/agent-fabric-local-vault';
+import { loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment, saveDeviceConfig, type DeviceConfig,
-} from '@dharma-ai/agent-fabric-relay-client';
-import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
-import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai/agent-fabric-task-runner';
+} from '@dharma-ai-labs/agent-fabric-relay-client';
+import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
 const VERSION = '0.1.0';
 const execFileAsync = promisify(execFile);

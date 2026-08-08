@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-better-harness-bridge",
+  "name": "@dharma-ai-labs/agent-fabric-better-harness-bridge",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",

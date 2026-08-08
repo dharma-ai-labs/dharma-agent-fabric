@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
-import { validateTaskEnvelopeContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
-import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
+import { validateTaskEnvelopeContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   executeProviderTask,
   type ProviderExecutionResult,
-} from '@dharma-ai/agent-fabric-provider-adapters';
+} from '@dharma-ai-labs/agent-fabric-provider-adapters';
 
 export interface TaskEnvelope {
   schema: 'dharma.task/v1';

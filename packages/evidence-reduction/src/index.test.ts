@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
+import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { buildTrajectoryCapsule } from './index.js';
 
 const policy: OrganizationPolicy = {

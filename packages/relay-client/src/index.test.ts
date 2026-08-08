@@ -12,7 +12,7 @@ import {
   normalizeRelayUrl,
   saveDeviceConfig,
 } from './index.js';
-import type { SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
+import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 function memoryStore(): SecureSecretStore {
   const values = new Map<string, string>();

@@ -17,7 +17,7 @@ import {
   taskResponsePreview,
   taskSkillPinFailureCode,
 } from './index.js';
-import type { SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
+import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 
 test('version is parser-safe structured output', async () => {
   assert.deepEqual(await run(['version']), { version: '0.1.0' });

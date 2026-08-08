@@ -7,7 +7,7 @@ This guide is for a company administrator connecting local coding agents and pro
 - an organization workspace at `https://www.dharma-ai.io/portal`;
 - a private, organization-owned agent-control repository created through the Dharma Remediation GitHub App;
 - a scoped organization API key for the public HQ API;
-- the open-source `@dharma-ai/agent-fabric` CLI;
+- the open-source `@dharma-ai-labs/agent-fabric` CLI;
 - repository-local instructions and policy for Codex, Claude Code, and Agy;
 - one selected execution boundary: Dharma-managed ADK, GCP Vertex BYOK, or local BYOK;
 - encrypted local evidence capture and reduced trajectory synchronization;
@@ -116,7 +116,7 @@ Prerequisites:
 Install the public CLI:
 
 ```bash
-npm install --global @dharma-ai/agent-fabric
+npm install --global @dharma-ai-labs/agent-fabric
 dharma --version
 ```
 
@@ -173,7 +173,7 @@ The relay has no inbound listener. It verifies signed task authority, leases, bu
 Install the TypeScript client:
 
 ```bash
-npm install @dharma-ai/agent-fabric-sdk
+npm install @dharma-ai-labs/agent-fabric-sdk
 ```
 
 Submit a multimodal garment appraisal:
@@ -181,7 +181,7 @@ Submit a multimodal garment appraisal:
 ```ts
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { AgentFabricClient } from '@dharma-ai/agent-fabric-sdk';
+import { AgentFabricClient } from '@dharma-ai-labs/agent-fabric-sdk';
 
 const image = await readFile('./evidence/jacket-front.jpg');
 const client = new AgentFabricClient({

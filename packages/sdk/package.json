@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-sdk",
+  "name": "@dharma-ai-labs/agent-fabric-sdk",
   "version": "0.1.0",
   "description": "Organization-scoped SDK for Dharma Agent Fabric",
   "type": "module",

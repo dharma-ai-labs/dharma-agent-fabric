@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-skill-manager",
+  "name": "@dharma-ai-labs/agent-fabric-skill-manager",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -10,7 +10,7 @@
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
-    "@dharma-ai/agent-fabric-contracts": "0.1.0",
-    "@dharma-ai/agent-fabric-policy": "0.1.0"
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.0",
+    "@dharma-ai-labs/agent-fabric-policy": "0.1.0"
   }
 }

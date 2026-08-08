@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-policy",
+  "name": "@dharma-ai-labs/agent-fabric-policy",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",

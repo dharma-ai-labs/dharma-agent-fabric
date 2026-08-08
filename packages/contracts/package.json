@@ -1,5 +1,5 @@
 {
-  "name": "@dharma-ai/agent-fabric-contracts",
+  "name": "@dharma-ai-labs/agent-fabric-contracts",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
