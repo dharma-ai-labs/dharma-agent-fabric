@@ -91,7 +91,7 @@ export class AgentFabricApiError extends Error {
 }
 
 function normalizedBaseUrl(value: string | undefined) {
-  const raw = String(value || 'https://hq.dharma-ai.io');
+  const raw = String(value || 'https://www.dharma-ai.io');
   let parsed: URL;
   try { parsed = new URL(raw); } catch { throw new Error('Agent Fabric baseUrl must be a valid URL.'); }
   const localhostHttp = parsed.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);

@@ -4,7 +4,7 @@ This guide is for a company administrator connecting local coding agents and pro
 
 ## What the customer receives
 
-- an organization workspace at `https://hq.dharma-ai.io/portal`;
+- an organization workspace at `https://www.dharma-ai.io/portal`;
 - a private, organization-owned agent-control repository created through the Dharma Remediation GitHub App;
 - a scoped organization API key for the public HQ API;
 - the open-source `@dharma-ai/agent-fabric` CLI;
@@ -126,7 +126,7 @@ Copy the organization-specific command from the dashboard and run it inside the 
 
 ```bash
 dharma onboard \
-  --hq-url https://hq.dharma-ai.io \
+  --hq-url https://www.dharma-ai.io \
   --organization-id <organization-id> \
   --policy-revision agent-fabric-policy-v1 \
   --workspace .

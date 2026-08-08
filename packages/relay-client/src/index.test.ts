@@ -25,7 +25,7 @@ function memoryStore(): SecureSecretStore {
 }
 
 test('HQ and relay origins fail closed for deceptive hosts, credentials, and plaintext non-loopback transport', () => {
-  assert.equal(normalizeHqUrl('https://hq.dharma-ai.io/'), 'https://hq.dharma-ai.io');
+  assert.equal(normalizeHqUrl('https://www.dharma-ai.io/'), 'https://www.dharma-ai.io');
   assert.equal(normalizeHqUrl('http://localhost:3000'), 'http://localhost:3000');
   assert.equal(normalizeRelayUrl('wss://relay.dharma-ai.io/v1/connect'), 'wss://relay.dharma-ai.io');
   assert.throws(() => normalizeHqUrl('http://localhost.evil.example'), /HTTPS/);

@@ -14,7 +14,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/dharma-ai-labs/dharma-agent-fabric"
-Documentation = "https://hq.dharma-ai.io/api/v1/agent-fabric/openapi.json"
+Documentation = "https://www.dharma-ai.io/api/v1/agent-fabric/openapi.json"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dharma_agent_fabric"]

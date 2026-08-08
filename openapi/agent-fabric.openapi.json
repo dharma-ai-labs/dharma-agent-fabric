@@ -5,7 +5,7 @@
     "version": "0.1.0",
     "description": "Organization-scoped control-plane API for onboarding, local agents, managed ADK, cloud BYOK, trajectories, evaluation, remediation, skills, A2A tasks, and usage. Customer credentials authenticate only to Dharma HQ."
   },
-  "servers": [{ "url": "https://hq.dharma-ai.io" }],
+  "servers": [{ "url": "https://www.dharma-ai.io" }],
   "security": [{ "organizationToken": [] }],
   "paths": {
     "/api/v1/orgs/{orgId}/agent-fabric/onboarding": {

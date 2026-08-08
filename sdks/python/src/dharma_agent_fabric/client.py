@@ -41,7 +41,7 @@ class AgentFabricClient:
         self,
         organization_id: str,
         token: str | Callable[[], str],
-        base_url: str = "https://hq.dharma-ai.io",
+        base_url: str = "https://www.dharma-ai.io",
         timeout_seconds: float = 30.0,
     ) -> None:
         if not organization_id.strip():

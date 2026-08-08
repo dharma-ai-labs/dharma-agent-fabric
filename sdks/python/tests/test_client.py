@@ -21,7 +21,7 @@ class _Response:
 
 class AgentFabricClientTest(unittest.TestCase):
     def test_base_url_accepts_https_and_exact_loopback_hosts_only(self):
-        AgentFabricClient("org", "token", "https://hq.dharma-ai.io")
+        AgentFabricClient("org", "token", "https://www.dharma-ai.io")
         AgentFabricClient("org", "token", "http://localhost:3000")
         AgentFabricClient("org", "token", "http://127.0.0.1:3000")
         with self.assertRaisesRegex(ValueError, "HTTPS or localhost"):
@@ -46,7 +46,7 @@ class AgentFabricClientTest(unittest.TestCase):
                 "stateEnvelope": {"intent": "bounded help"},
             })
 
-        self.assertEqual(captured[0][0].full_url, "https://hq.dharma-ai.io/api/v1/orgs/org%20Northstar/agent-fabric/byok/gcp")
+        self.assertEqual(captured[0][0].full_url, "https://www.dharma-ai.io/api/v1/orgs/org%20Northstar/agent-fabric/byok/gcp")
         self.assertEqual(json.loads(captured[0][0].data), {"action": "verify"})
         self.assertEqual(captured[1][0].headers["Authorization"], "Bearer dharma_org_test")
 
@@ -71,7 +71,7 @@ class AgentFabricClientTest(unittest.TestCase):
             })
 
         request = captured[0][0]
-        self.assertEqual(request.full_url, "https://hq.dharma-ai.io/api/orgs/org_northstar/agent-runs")
+        self.assertEqual(request.full_url, "https://www.dharma-ai.io/api/orgs/org_northstar/agent-runs")
         self.assertEqual(json.loads(request.data)["attachments"][0]["mimeType"], "image/png")
         self.assertNotIn("run.app", request.full_url)
 

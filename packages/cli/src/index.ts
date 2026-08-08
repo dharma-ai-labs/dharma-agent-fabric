@@ -256,7 +256,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   if (flags.has('resume')) {
     pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
   } else {
-    const hqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://hq.dharma-ai.io'));
+    const hqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
     const organizationId = required(flags, 'organization-id');
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
@@ -530,7 +530,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const workspace = await realpath(String(flags.get('workspace') || flags.get('path') || '.'));
   const organizationId = required(flags, 'organization-id');
   const policyRevision = required(flags, 'policy-revision');
-  const requestedHqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://hq.dharma-ai.io'));
+  const requestedHqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
   let config = await readDeviceConfig();
   if (!config) {
     const loginFlags = new Map(flags);

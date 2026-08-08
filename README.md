@@ -29,7 +29,7 @@ organization-scoped command:
 
 ```bash
 npx @dharma-ai/agent-fabric@0.1.0 onboard \
-  --hq-url https://hq.dharma-ai.io \
+  --hq-url https://www.dharma-ai.io \
   --organization-id <organization-id> \
   --policy-revision <dashboard-policy-revision> \
   --workspace "$PWD"

@@ -42,7 +42,7 @@ test('repository onboarding skill records scoped API metadata without local path
   const workspace = await mkdtemp(join(tmpdir(), 'dharma-repository-skill-'));
   const result = await installRepositoryAgentFabricSkill({
     workspace,
-    hqUrl: 'https://hq.dharma-ai.io',
+    hqUrl: 'https://www.dharma-ai.io',
     organizationId: 'org_northstar',
     workspaceId: 'workspace-northstar',
     policyRevision: 'policy-v1',
@@ -55,7 +55,7 @@ test('repository onboarding skill records scoped API metadata without local path
   assert.equal(/token|secret/i.test(connection), false);
   await installRepositoryAgentFabricSkill({
     workspace,
-    hqUrl: 'https://hq.dharma-ai.io',
+    hqUrl: 'https://www.dharma-ai.io',
     organizationId: 'org_northstar',
     workspaceId: 'workspace-northstar',
     policyRevision: 'policy-v2',
@@ -70,7 +70,7 @@ test('repository onboarding refuses to overwrite an unmanaged skill', async () =
   await writeFile(join(root, 'SKILL.md'), '# Customer-owned skill\n');
   await assert.rejects(() => installRepositoryAgentFabricSkill({
     workspace,
-    hqUrl: 'https://hq.dharma-ai.io',
+    hqUrl: 'https://www.dharma-ai.io',
     organizationId: 'org_northstar',
     workspaceId: 'workspace-northstar',
     policyRevision: 'policy-v1',

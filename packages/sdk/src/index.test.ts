@@ -13,7 +13,7 @@ test('SDK sends organization-scoped bearer requests and idempotency keys without
     },
   });
   await client.startOnboarding({ companyName: 'Northstar Commerce Lab', runtimeMode: 'dharma_managed' }, { idempotencyKey: 'idem-1' });
-  assert.equal(request.url, 'https://hq.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/onboarding');
+  assert.equal(request.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/onboarding');
   const headers = new Headers(request.init?.headers);
   assert.equal(headers.get('authorization'), 'Bearer dharma_org_secret');
   assert.equal(headers.get('idempotency-key'), 'idem-1');
@@ -21,7 +21,7 @@ test('SDK sends organization-scoped bearer requests and idempotency keys without
 });
 
 test('SDK accepts HTTPS and exact loopback origins but rejects credential-bearing or deceptive hosts', () => {
-  assert.equal(new AgentFabricClient({ organizationId: 'org', token: 'token' }).baseUrl, 'https://hq.dharma-ai.io');
+  assert.equal(new AgentFabricClient({ organizationId: 'org', token: 'token' }).baseUrl, 'https://www.dharma-ai.io');
   assert.equal(new AgentFabricClient({ organizationId: 'org', token: 'token', baseUrl: 'http://localhost:3000' }).baseUrl, 'http://localhost:3000');
   assert.throws(() => new AgentFabricClient({ organizationId: 'org', token: 'token', baseUrl: 'http://localhost.evil.example' }), /HTTPS or localhost/);
   assert.throws(() => new AgentFabricClient({ organizationId: 'org', token: 'token', baseUrl: 'https://user:pass@hq.dharma-ai.io' }), /credential-free origin/);
@@ -86,7 +86,7 @@ test('SDK sends the server handoff contract and keyless GCP BYOK verification', 
       tool_results: [],
     },
   });
-  assert.equal(byokRequest.url, 'https://hq.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/byok/gcp');
+  assert.equal(byokRequest.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/byok/gcp');
   assert.deepEqual(JSON.parse(await byokRequest.text()), { action: 'verify' });
 });
 
@@ -113,7 +113,7 @@ test('SDK submits the bounded multimodal managed-run contract to HQ only', async
 
   const captured = requests[0];
   assert.ok(captured);
-  assert.equal(captured.url, 'https://hq.dharma-ai.io/api/orgs/org_northstar/agent-runs');
+  assert.equal(captured.url, 'https://www.dharma-ai.io/api/orgs/org_northstar/agent-runs');
   const payload = JSON.parse(await captured.text());
   assert.equal(payload.attachments[0].mimeType, 'image/png');
   assert.equal(captured.url.includes('run.app'), false);
