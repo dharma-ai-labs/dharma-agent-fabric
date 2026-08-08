@@ -39,6 +39,18 @@ jobs:
           subject-path: release/*
       - name: Publish public workspaces
         run: |
+          package_exists() {
+            local package="$1"
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if npm view "${package}" version >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep $((attempt * 2))
+            done
+            return 1
+          }
+
           for workspace in \
             packages/contracts \
             packages/secure-store \
@@ -55,10 +67,22 @@ jobs:
           do
             name=$(node -p "require('./${workspace}/package.json').name")
             version=$(node -p "require('./${workspace}/package.json').version")
-            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            package="${name}@${version}"
+            if package_exists "${package}"; then
               echo "${name}@${version} already exists; preserving immutable release."
             else
-              npm publish --workspace "${workspace}"
+              set +e
+              publish_output=$(npm publish --workspace "${workspace}" 2>&1)
+              publish_status=$?
+              set -e
+              if [ "${publish_status}" -eq 0 ]; then
+                printf '%s\n' "${publish_output}"
+              elif printf '%s' "${publish_output}" | grep -q 'previously published versions'; then
+                echo "${package} became visible during publication; preserving immutable release."
+              else
+                printf '%s\n' "${publish_output}" >&2
+                exit "${publish_status}"
+              fi
             fi
           done
       - name: Publish GitHub Release
