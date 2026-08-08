@@ -4,7 +4,14 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
-import { AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, saveDeviceConfig } from './index.js';
+import {
+  AgentFabricClient,
+  beginEnrollment,
+  loadOrCreateDeviceIdentity,
+  normalizeHqUrl,
+  normalizeRelayUrl,
+  saveDeviceConfig,
+} from './index.js';
 import type { SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
 
 function memoryStore(): SecureSecretStore {
@@ -16,6 +23,16 @@ function memoryStore(): SecureSecretStore {
     async delete(account) { values.delete(account); },
   };
 }
+
+test('HQ and relay origins fail closed for deceptive hosts, credentials, and plaintext non-loopback transport', () => {
+  assert.equal(normalizeHqUrl('https://hq.dharma-ai.io/'), 'https://hq.dharma-ai.io');
+  assert.equal(normalizeHqUrl('http://localhost:3000'), 'http://localhost:3000');
+  assert.equal(normalizeRelayUrl('wss://relay.dharma-ai.io/v1/connect'), 'wss://relay.dharma-ai.io');
+  assert.throws(() => normalizeHqUrl('http://localhost.evil.example'), /HTTPS/);
+  assert.throws(() => normalizeHqUrl('https://user:pass@hq.dharma-ai.io'), /credential-free/);
+  assert.throws(() => normalizeRelayUrl('ws://relay.dharma-ai.io'), /WSS/);
+  assert.throws(() => normalizeRelayUrl('wss://user:pass@relay.dharma-ai.io'), /credentials/);
+});
 
 test('device identity remains stable in the OS secret store', async () => {
   const store = memoryStore();

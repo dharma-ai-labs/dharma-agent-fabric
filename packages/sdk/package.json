@@ -1,0 +1,14 @@
+{
+  "name": "@dharma-ai/agent-fabric-sdk",
+  "version": "0.1.0",
+  "description": "Organization-scoped SDK for Dharma Agent Fabric",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/sdk" },
+  "files": ["dist"],
+  "publishConfig": { "access": "public", "provenance": true },
+  "engines": { "node": ">=22.20.0 <25.0.0" },
+  "scripts": { "test": "node --test dist/*.test.js" }
+}

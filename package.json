@@ -12,6 +12,10 @@
     "npm": ">=10.9.3 <12.0.0"
   },
   "packageManager": "npm@10.9.3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git"
+  },
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
@@ -23,15 +27,17 @@
     "test:unit": "npm run test --workspaces --if-present",
     "pack:verify": "node scripts/verify-package.mjs",
     "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
+    "openapi:verify": "node scripts/verify-agent-fabric-openapi.mjs",
     "load:relay": "npm run build && node scripts/load-relay.mjs",
     "load:relay:live": "npm run build && node scripts/load-live-relay.mjs",
     "load:skill-rollout": "npm run build && node scripts/load-skill-rollout.mjs",
     "proof:large-capture": "npm run build && node scripts/proof-large-capture.mjs",
     "proof:relay": "node scripts/proof-live-relay.mjs",
     "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
-    "check": "npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify"
+    "check": "npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify && npm run openapi:verify"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^12.1.0",
     "@types/node": "^22.15.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",

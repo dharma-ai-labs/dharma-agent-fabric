@@ -3,7 +3,29 @@ import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { codexAdapter, defaultProcessRunner, executeProviderTask } from './index.js';
+import {
+  agyAdapter,
+  codexAdapter,
+  defaultProcessRunner,
+  executeProviderTask,
+  providerProcessEnvironment,
+} from './index.js';
+
+test('provider subprocess environment excludes cloud and model credentials', () => {
+  const env = providerProcessEnvironment({
+    PATH: '/usr/bin', HOME: '/home/customer', CODEX_HOME: '/home/customer/.codex',
+    OPENAI_API_KEY: 'openai-secret', ANTHROPIC_API_KEY: 'anthropic-secret',
+    GOOGLE_APPLICATION_CREDENTIALS: '/tmp/gcp-key.json', AWS_SECRET_ACCESS_KEY: 'aws-secret',
+  });
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.HOME, '/home/customer');
+  assert.equal(env.CODEX_HOME, '/home/customer/.codex');
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
+  assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(env.DHARMA_AGENT_FABRIC_TASK, '1');
+});
 
 test('Codex discovery admits only sessions bound to the requested workspace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
@@ -20,6 +42,22 @@ test('Codex discovery admits only sessions bound to the requested workspace', as
   const result = await codexAdapter.discover({ workspace, roots: [sessions] });
   assert.equal(result.length, 1);
   assert.equal(result[0]?.records.length, 2);
+});
+
+test('Agy discovery uses supported workspace history and reports partial evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-history-'));
+  const workspace = join(root, 'repo');
+  const history = join(root, 'history.jsonl');
+  await mkdir(workspace);
+  await writeFile(history, [
+    JSON.stringify({ display: 'Inspect checkout', timestamp: 1_786_000_000_000, workspace, conversationId: 'conversation-one' }),
+    JSON.stringify({ display: 'Foreign checkout', timestamp: 1_786_000_001_000, workspace: join(root, 'foreign'), conversationId: 'conversation-two' }),
+  ].join('\n'));
+  const result = await agyAdapter.discover({ workspace, roots: [history] });
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.provider, 'agy');
+  assert.equal(result[0]?.coverage, 'partial');
+  assert.equal(result[0]?.records[0]?.native.display, 'Inspect checkout');
 });
 
 test('Codex discovery supports no-copy JSONL source selectors', async () => {
@@ -190,6 +228,48 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   assert.ok(argv.includes('Read,Edit,Write,Bash(npm test)'));
   assert.ok(argv.includes('WebFetch,WebSearch'));
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
+});
+
+test('Agy task execution uses supported print, sandbox, timeout, and log arguments', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-task-'));
+  let observed: Record<string, unknown> = {};
+  const result = await executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Summarize this repository.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async (input) => {
+      observed = input;
+      return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('Summary'), stderr: Buffer.alloc(0) };
+    },
+  });
+  assert.equal(observed.command, 'agy');
+  assert.equal(observed.stdin, '');
+  assert.ok((observed.argv as string[]).includes('--print'));
+  assert.ok((observed.argv as string[]).includes('--sandbox'));
+  assert.ok((observed.argv as string[]).includes('--log-file'));
+  assert.ok((observed.argv as string[]).includes('30s'));
+  assert.equal(result.exitCode, 0);
+});
+
+test('Agy fails closed for writes, registered commands, and zero-exit authentication errors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-guard-'));
+  await assert.rejects(() => executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Edit a file.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: true,
+  }), /write tasks are disabled/);
+  await assert.rejects(() => executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Run tests.', timeoutSeconds: 30,
+    allowedCommandArgv: [['npm', 'test']], allowWrites: false,
+  }), /cannot receive registered shell commands/);
+  const result = await executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Read the repository.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: Buffer.from('You are not logged into Antigravity. Authentication timed out.'), stderr: Buffer.alloc(0),
+    }),
+  });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /authenticate this device/);
 });
 
 test('Claude task execution pins a validated configured model', async () => {

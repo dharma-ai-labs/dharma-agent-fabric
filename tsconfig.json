@@ -11,6 +11,7 @@
     { "path": "packages/relay-client" },
     { "path": "packages/task-runner" },
     { "path": "packages/skill-manager" },
+    { "path": "packages/sdk" },
     { "path": "packages/cli" },
     { "path": "apps/relay-gateway" }
   ]

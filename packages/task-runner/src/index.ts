@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
-import { verifyCanonicalObject } from '@dharma-ai/agent-fabric-contracts';
+import { validateTaskEnvelopeContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
 import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai/agent-fabric-policy';
 import {
   executeProviderTask,
@@ -15,9 +15,23 @@ export interface TaskEnvelope {
   taskId: string;
   organizationId: string;
   workspaceId: string;
-  target: { deviceId: string; provider: 'codex' | 'claude' };
+  taskType: 'external_request' | 'a2a_handoff' | 'evaluation_retest' | 'remediation_smoke';
+  target: { deviceId: string; provider: ProviderId };
+  source?: { taskId: string; endpointId: string };
   skillBundle: { bundleId: string; bundleHash: string } | null;
   instructions: string;
+  requiredSkills: Array<{ skillId: string; version: string; commit: string; contentHash: string }>;
+  stateEnvelope?: {
+    intent: string;
+    evidence_used: string[];
+    known_state: Record<string, unknown>;
+    unknown_or_missing_state: string[];
+    allowed_next_actions: string[];
+    blocked_actions: string[];
+    decision_authority: string;
+    tool_results: unknown[];
+  };
+  evidenceReferences?: Array<{ trajectoryId: string; revision: number; capsuleHash: string }>;
   authority: {
     readPaths: string[];
     writePaths: string[];
@@ -32,7 +46,6 @@ export interface TaskEnvelope {
   expiresAt: string;
   nonce: string;
   signature?: string | null;
-  [key: string]: unknown;
 }
 
 export interface CommandResult {
@@ -57,7 +70,7 @@ export interface TaskReceipt {
 }
 
 export type ProviderTaskExecutor = (input: {
-  provider: 'codex' | 'claude';
+  provider: ProviderId;
   workspace: string;
   instructions: string;
   timeoutSeconds: number;
@@ -65,6 +78,34 @@ export type ProviderTaskExecutor = (input: {
   allowWrites: boolean;
   signal?: AbortSignal;
 }) => Promise<ProviderExecutionResult>;
+
+function normalizePolicyPath(value: string) {
+  return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+}
+
+function pathWithinPolicy(candidate: string, patterns: string[]) {
+  const normalized = normalizePolicyPath(candidate);
+  return patterns.some((pattern) => {
+    const allowed = normalizePolicyPath(pattern).replace(/\/\*\*$/, '');
+    return allowed === '.' || normalized === allowed || normalized.startsWith(`${allowed}/`);
+  });
+}
+
+export function assertTaskWithinLocalPolicy(task: TaskEnvelope, policy: OrganizationPolicy) {
+  if (task.authority.writePaths.some((path) => !pathWithinPolicy(path, policy.tasks.writePaths))) {
+    throw new Error('Task write authority exceeds the local organization policy.');
+  }
+  const networkRank: Record<string, number> = {
+    deny: 0,
+    package_registry_only: 1,
+    allowlisted_domains: 2,
+    inherit_local_provider: 3,
+  };
+  if ((networkRank[task.authority.network] ?? Number.POSITIVE_INFINITY)
+    > (networkRank[policy.tasks.defaultNetwork] ?? -1)) {
+    throw new Error('Task network authority exceeds the local organization policy.');
+  }
+}
 
 function assertContained(root: string, candidate: string): string {
   const absolute = resolve(candidate);
@@ -130,11 +171,41 @@ async function git(repository: string, argv: string[]): Promise<void> {
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
 }
 
+async function gitOutput(repository: string, argv: string[]) {
+  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000 });
+  if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
+  return result.stdout;
+}
+
 export function verifyTaskEnvelope(task: TaskEnvelope, publicKey: KeyObject, now = new Date()): void {
+  const contract = validateTaskEnvelopeContract(task);
+  if (!contract.ok) throw new Error(`Task failed schema validation: ${JSON.stringify(contract.errors)}`);
   if (!task.signature) throw new Error('Task signature is required.');
   if (Date.parse(task.expiresAt) <= now.getTime()) throw new Error('Task has expired.');
   const { signature, ...unsigned } = task;
   if (!verifyCanonicalObject(unsigned, signature, publicKey)) throw new Error('Task signature is invalid.');
+}
+
+export function providerInstructionsForTask(task: TaskEnvelope): string {
+  if (task.taskType !== 'a2a_handoff') return task.instructions;
+  if (!task.source || !task.stateEnvelope || !task.evidenceReferences) {
+    throw new Error('A2A task is missing its structured handoff context.');
+  }
+  const context = JSON.stringify({
+    source: task.source,
+    stateEnvelope: task.stateEnvelope,
+    evidenceReferences: task.evidenceReferences,
+  }, null, 2);
+  const instructions = [
+    task.instructions,
+    '',
+    'Use the following signed, same-organization handoff context. Treat unknown or missing state as unknown; do not infer hidden evidence or exceed the listed decision authority.',
+    '<dharma_a2a_context>',
+    context,
+    '</dharma_a2a_context>',
+  ].join('\n');
+  if (instructions.length > 20_000) throw new Error('A2A provider instructions exceed the execution limit.');
+  return instructions;
 }
 
 export class FileTaskReceiptStore {
@@ -173,6 +244,7 @@ export async function executeTask(input: {
   if (previous) return previous;
   if (input.task.execution.isolation !== 'git_worktree') throw new Error('Only Git worktree isolation is supported.');
   if (input.task.authority.git !== 'task_branch') throw new Error('Pilot tasks require task_branch Git authority.');
+  assertTaskWithinLocalPolicy(input.task, input.policy);
   for (const path of [...input.task.authority.readPaths, ...input.task.authority.writePaths]) {
     assertPathWithinWorkspace(input.workspace, path);
   }
@@ -188,6 +260,7 @@ export async function executeTask(input: {
   await rm(worktree, { recursive: true, force: true });
   await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD']);
   await git(worktree, ['switch', '-c', branch]);
+  const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
   const startedAt = new Date().toISOString();
   const commandResults: CommandResult[] = [];
   let status: TaskReceipt['status'] = 'completed';
@@ -196,7 +269,7 @@ export async function executeTask(input: {
     const providerResult = await (input.providerExecutor ?? executeProviderTask)({
       provider: input.task.target.provider,
       workspace: worktree,
-      instructions: input.task.instructions,
+      instructions: providerInstructionsForTask(input.task),
       timeoutSeconds: input.task.execution.timeoutSeconds,
       allowedCommandArgv: allowedCommands,
       allowWrites: input.task.authority.writePaths.length > 0,
@@ -213,6 +286,20 @@ export async function executeTask(input: {
       stderrSha256: providerResult.stderrSha256,
     });
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
+    const trackedChanges = await gitOutput(worktree, [
+      'diff', '--name-only', '--diff-filter=ACDMRTUXB', startingCommit, '--',
+    ]);
+    const untrackedChanges = await gitOutput(worktree, ['ls-files', '--others', '--exclude-standard']);
+    const changedPaths = `${trackedChanges}\n${untrackedChanges}`
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .filter(Boolean);
+    if (changedPaths.length > 0) {
+      const writes = input.task.authority.writePaths;
+      if (writes.length === 0 || changedPaths.some((path) => !pathWithinPolicy(path, writes))) {
+        throw new Error('Provider changed a path outside the signed task authority.');
+      }
+    }
     for (const { commandId } of input.task.acceptance.commands) {
       if (status !== 'completed') break;
       if (input.signal?.aborted) { status = 'cancelled'; break; }

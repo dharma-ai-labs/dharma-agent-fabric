@@ -4,8 +4,8 @@ import { executeProviderTask } from '../packages/provider-adapters/dist/index.js
 
 const provider = process.argv[2];
 const workspace = resolve(process.argv[3] || '.');
-if (!['codex', 'claude'].includes(provider)) {
-  throw new Error('Usage: node scripts/proof-provider-task.mjs <codex|claude> [workspace]');
+if (!['codex', 'claude', 'agy'].includes(provider)) {
+  throw new Error('Usage: node scripts/proof-provider-task.mjs <codex|claude|agy> [workspace]');
 }
 
 const result = await executeProviderTask({
@@ -14,6 +14,7 @@ const result = await executeProviderTask({
   instructions: 'Read package.json only. Reply with the package name dharma-agent-fabric and do not modify any file.',
   timeoutSeconds: 180,
   allowedCommandArgv: [],
+  allowWrites: false,
 });
 
 let semanticMarkerObserved = false;

@@ -10,18 +10,55 @@ localhost shell or unrestricted file interface.
 
 ## Initial host support
 
-| Host | Evidence | Remote task | Skill install | Activation |
-| --- | --- | --- | --- | --- |
-| Codex CLI/Desktop | available | pilot | pilot | next session |
-| Claude Code | available | pilot | pilot | next session |
-| Other Better Harness hosts | evidence adapter work | unavailable | unavailable | unavailable |
+| Host | Evidence | Remote task | Continuation | Skill install | Activation |
+| --- | --- | --- | --- | --- | --- |
+| Codex CLI/Desktop | available | available when installed | unavailable | available when installed | next session |
+| Claude Code | available | available when installed | unavailable | available when installed | next session |
+| Agy 1.0.1 | partial | read-only partial | partial | available when installed | next session |
+| Other Better Harness hosts | evidence adapter work | unavailable | unavailable | unavailable | unavailable |
 
 Each capability is verified independently. Evidence discovery does not imply
 that task execution, continuation, or Skill activation works for that host.
 
+## Customer onboarding
+
+An organization starts in the Dharma dashboard after a paid offer or an
+explicit sponsored canary entitlement is recorded. The dashboard provisions
+the private remediation repository and selected runtime, then provides one
+organization-scoped command:
+
+```bash
+npx @dharma-ai/agent-fabric@0.1.0 onboard \
+  --hq-url https://hq.dharma-ai.io \
+  --organization-id <organization-id> \
+  --policy-revision <dashboard-policy-revision> \
+  --workspace "$PWD"
+```
+
+The command opens browser approval against the customer's Clerk session,
+enrolls an Ed25519 device identity, registers the workspace, discovers each
+provider independently, and installs a repository-local Agent Fabric Skill and
+API specification. It never writes a bearer token, local path, provider key,
+or runtime identity into the repository.
+
+After approval, the CLI prints the exact commands to sync reduced evidence and
+start the outbound relay. Full raw trajectories remain encrypted in the local
+vault. A customer can revoke the device from the dashboard without gaining or
+granting inbound shell access.
+
+The versioned TypeScript client is `@dharma-ai/agent-fabric-sdk`; the Python
+client is `dharma-agent-fabric-sdk`. Both call the organization-scoped Dharma
+HQ API rather than customer cloud or internal worker endpoints.
+
+See [the company onboarding and operations guide](docs/onboarding/customer-guide.md)
+for the purchase, GitHub, CLI, managed ADK, GCP BYOK, evaluation, remediation,
+cross-agent handoff, and offboarding flow.
+
 ## Codex plugin
 
-After the release branch is merged, install the public marketplace and plugin:
+The OpenAI plugin is submitted for review. Developer and reviewer tenants can
+install the repository package while directory approval remains an external
+gate:
 
 ```bash
 codex plugin marketplace add dharma-ai-labs/dharma-agent-fabric
@@ -37,10 +74,10 @@ capabilities remain authoritative.
 ## Development
 
 ```bash
-mise exec node@22.22.3 -- npm install
-mise exec node@22.22.3 -- npm test
-mise exec node@22.22.3 -- npm run pack:verify
-mise exec node@22.22.3 -- npm run load:relay
+mise exec node@22 -- npm install
+mise exec node@22 -- npm test
+mise exec node@22 -- npm run pack:verify
+mise exec node@22 -- npm run load:relay
 ```
 
 The `dharma` CLI is built from `packages/cli`. Use `--json` for parser-safe

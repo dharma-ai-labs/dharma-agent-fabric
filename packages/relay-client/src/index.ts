@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { canonicalize } from '@dharma-ai/agent-fabric-contracts';
+import { canonicalize, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai/agent-fabric-secure-store';
 
 export interface DeviceConfig {
@@ -42,8 +42,33 @@ function sha256(value: string | Uint8Array) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+export function normalizeHqUrl(value: string) {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error('HQ URL must be a valid URL.'); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new Error('HQ URL must use HTTPS or exact loopback HTTP.');
+  }
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) {
+    throw new Error('HQ URL must be a credential-free origin.');
+  }
+  return url.origin;
+}
+
+export function normalizeRelayUrl(value: string) {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error('Relay URL must be a valid URL.'); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && loopback)) {
+    throw new Error('Relay URL must use WSS or exact loopback WS.');
+  }
+  if (url.username || url.password || url.search || url.hash) throw new Error('Relay URL must not contain credentials or query state.');
+  url.pathname = '';
+  return url.origin;
+}
+
 function accountFor(hqUrl: string, organizationId: string) {
-  return `device-key-${sha256(`${hqUrl}:${organizationId}`).slice(0, 32)}`;
+  return `device-key-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
 }
 
 async function atomicJson(path: string, value: unknown) {
@@ -93,7 +118,7 @@ export async function beginEnrollment(input: {
   idempotencyKey?: string;
   fetcher?: typeof fetch;
 }): Promise<EnrollmentResult> {
-  const response = await (input.fetcher || fetch)(`${input.hqUrl.replace(/\/$/, '')}/api/v1/agent-fabric/enrollments`, {
+  const response = await (input.fetcher || fetch)(`${normalizeHqUrl(input.hqUrl)}/api/v1/agent-fabric/enrollments`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': input.idempotencyKey || randomUUID() },
     body: JSON.stringify({ organizationId: input.organizationId, name: input.name, platform: input.platform, publicKeyEd25519: input.publicKeyEd25519 }),
   });
@@ -107,14 +132,14 @@ export async function pollEnrollment(input: {
   deviceCode: string;
   fetcher?: typeof fetch;
 }): Promise<Record<string, unknown>> {
-  const response = await (input.fetcher || fetch)(`${input.hqUrl.replace(/\/$/, '')}/api/v1/agent-fabric/enrollments/${encodeURIComponent(input.deviceCode)}`);
+  const response = await (input.fetcher || fetch)(`${normalizeHqUrl(input.hqUrl)}/api/v1/agent-fabric/enrollments/${encodeURIComponent(input.deviceCode)}`);
   const body = await response.json() as Record<string, unknown>;
   if (!response.ok) throw new Error(errorMessage(body, response.status));
   return body;
 }
 
 export async function saveDeviceConfig(path: string, config: DeviceConfig) {
-  await atomicJson(path, config);
+  await atomicJson(path, { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) });
 }
 
 export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
@@ -122,7 +147,7 @@ export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
   if (config.schema !== 'dharma.device-config/v1' || !config.deviceId || !config.organizationId || !config.hqUrl) {
     throw new Error('Device is not enrolled. Run dharma login.');
   }
-  return config;
+  return { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) };
 }
 
 export class AgentFabricClient {
@@ -171,7 +196,7 @@ export class AgentFabricClient {
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });
   }
-  pollSkill(body: { workspaceId: string; provider: 'codex' | 'claude'; installedBundleId: string | null }) {
+  pollSkill(body: { workspaceId: string; provider: ProviderId; installedBundleId: string | null }) {
     return this.signedPost('/agent-fabric/skills/poll', body);
   }
   postInstallReceipt(bundleId: string, rolloutId: string, receipt: unknown) {
@@ -275,8 +300,7 @@ export class AgentFabricClient {
 
   #sendViaRelay(pending: PendingRequest): Promise<{ status: number; body: string }> {
     return new Promise((accept, reject) => {
-      const relay = new URL(this.config.relayUrl);
-      if (!['ws:', 'wss:'].includes(relay.protocol)) { reject(new Error('Relay URL must use ws or wss.')); return; }
+      const relay = new URL(normalizeRelayUrl(this.config.relayUrl));
       relay.pathname = '/v1/connect';
       relay.search = '';
       const socket = new WebSocket(relay);
