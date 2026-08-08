@@ -120,6 +120,8 @@ npm install --global @dharma-ai/agent-fabric
 dharma --version
 ```
 
+The dashboard shows this install command only after the exact version is available from npm and its signed GitHub Release. A **CLI release gate pending** notice means the operator proof may use a reviewed source checkout, but the customer installation path is not yet released and onboarding must not be described as GA.
+
 Copy the organization-specific command from the dashboard and run it inside the source repository:
 
 ```bash
