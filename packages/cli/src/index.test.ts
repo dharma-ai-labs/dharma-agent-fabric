@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import {
   activateAgyPlugin,
   assertTaskSkillPin,
   installRepositoryAgentFabricSkill,
+  isDirectExecution,
   materializeWorkspacePolicy,
   materializeInlineSkillFiles,
   nativeSkillDirectory,
@@ -19,6 +21,17 @@ import type { SkillBundle } from '@dharma-ai/agent-fabric-skill-manager';
 
 test('version is parser-safe structured output', async () => {
   assert.deepEqual(await run(['version']), { version: '0.1.0' });
+});
+
+test('global npm symlinks still execute the CLI entrypoint', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-cli-entrypoint-'));
+  const target = join(root, 'dist', 'index.js');
+  const link = join(root, 'bin', 'dharma');
+  await mkdir(join(root, 'dist'), { recursive: true });
+  await mkdir(join(root, 'bin'), { recursive: true });
+  await writeFile(target, '#!/usr/bin/env node\n');
+  await symlink(target, link);
+  assert.equal(isDirectExecution(link, pathToFileURL(target).href), true);
 });
 
 test('unknown commands fail as usage errors', async () => {

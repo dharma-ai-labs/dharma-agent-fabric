@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { access, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai/agent-fabric-evidence-reduction';
@@ -53,6 +55,16 @@ function required(flags: Map<string, string | boolean>, name: string): string {
 }
 
 function print(value: Output): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+
+export function isDirectExecution(argvPath: string | undefined, moduleUrl: string): boolean {
+  if (!argvPath) return false;
+  try {
+    return realpathSync(argvPath) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
 function dharmaHome(): string { return resolve(process.env.DHARMA_HOME || resolve(homedir(), '.dharma')); }
 function configPath() { return resolve(dharmaHome(), 'device.json'); }
 function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollment.json'); }
@@ -978,7 +990,7 @@ export async function run(argv: string[]): Promise<Output> {
   throw new Error('Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]');
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (isDirectExecution(process.argv[1], import.meta.url)) {
   run(process.argv.slice(2)).then(print).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
