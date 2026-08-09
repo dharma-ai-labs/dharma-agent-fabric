@@ -53,6 +53,10 @@ The dashboard performs or monitors the remaining work.
 
 Agent Fabric activates only after the paid invoice webhook records an eligible package. The default package gate is USD 1,000 and 5,000,000 Dharma credits. A separately recorded sponsored canary can replace payment for an approved proof tenant.
 
+Clerk and Stripe have separate responsibilities in this flow. Clerk establishes the person, organization membership, and administrator authority. Stripe hosts payment collection and supplies the signed payment event. Dharma HQ verifies that event and writes the immutable order, invoice, credit-pool, and activation records. This separation avoids adding a Clerk Billing fee to Agent Fabric usage and preserves Dharma's per-run credit settlement.
+
+After payment, return to the same organization in the dashboard. The onboarding stage advances automatically after the verified Stripe webhook is processed; the customer does not upload a receipt or ask an operator to mark the order paid.
+
 The onboarding page shows the exact order if payment is incomplete. It does not treat an issued or accepted order as paid.
 
 ## 2. Connect GitHub
