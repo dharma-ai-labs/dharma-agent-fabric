@@ -1,5 +1,7 @@
 # Evaluation, Remediation, and Failure Atlas
 
+> **Implementation status:** The evaluation model below is the product contract. Current HQ deterministic analysis is narrower: it detects secret-boundary violations, missing redaction receipts, partial or empty evidence, and runtime-failure signals. Current semantic analysis returns rubric proposals, failure clusters, and unvalidated remediation hypotheses after trajectory capture. It does not make a real-time release decision. See [Runtime truth and semantic escalation](23-runtime-truth-and-semantic-escalation.md).
+
 ## Objective
 
 Turn real organization trajectories into precise failure identities, custom evaluation criteria, verified remediation candidates, signed skill releases, and measurable post-rollout outcomes.

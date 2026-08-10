@@ -1,6 +1,6 @@
 # Dharma Agent Fabric: company onboarding and operation
 
-This guide is for a company administrator connecting local coding agents and production agents to Dharma. It covers the customer-controlled journey from an accepted offer to observable execution, automatic evaluation, remediation, signed rollout, and rollback.
+This guide is for a company administrator connecting local coding agents and production agents to Dharma. It covers the customer-controlled journey from self-service registration to observable execution, automatic evaluation, remediation, signed rollout, and rollback.
 
 ## What the customer receives
 
@@ -21,7 +21,7 @@ Customer tokens authenticate only to Dharma HQ. They never expose a GCP service 
 
 ```mermaid
 flowchart LR
-  A[Purchase eligible offer] --> B[Accept Clerk invite]
+  A[Open dharma-ai.io/subscribe] --> B[Register account and select trial or production]
   B --> C[Install GitHub App]
   C --> D[Private control repo created]
   D --> E[Choose managed, GCP BYOK, or local BYOK]
@@ -44,18 +44,22 @@ Two steps require explicit customer consent because GitHub and Google forbid a v
 
 The dashboard performs or monitors the remaining work.
 
-## 1. Purchase and sign in
+## 1. Register, start a trial, or purchase production access
 
-1. Open the signed Dharma offer link supplied by the account owner.
-2. Accept the order and complete the Stripe payment page.
-3. Open the organization invitation sent to the designated first admin.
-4. Sign in with that identity and select the new organization in the HQ portal.
+1. Open [dharma-ai.io/subscribe](https://www.dharma-ai.io/subscribe).
+2. Select **Start local-agent trial** or **Register full account**.
+3. Create or sign in to the Clerk account that will become the first organization owner.
+4. For a trial, accept the 50,000-credit local-BYOK entitlement. No payment or invitation is required.
+5. For production, complete the Stripe checkout for the USD 1,000 package containing 5,000,000 Dharma credits.
+6. Return to the same organization in the HQ portal. The onboarding workspace resumes at its durable current stage.
 
-Agent Fabric activates only after the paid invoice webhook records an eligible package. The default package gate is USD 1,000 and 5,000,000 Dharma credits. A separately recorded sponsored canary can replace payment for an approved proof tenant.
+The trial is limited to local BYOK execution. Managed environments, cloud BYOK, or a bespoke BigLaw/TypeDB integration require production activation or a separately recorded sponsored canary. Bespoke integration work is quoted as a fixed fee after the initial seam audit; it is not included in the platform credit package.
+
+Production Agent Fabric activates only after the signed Stripe webhook records the eligible paid package. A separately recorded sponsored canary can replace payment for an approved proof tenant.
 
 Clerk and Stripe have separate responsibilities in this flow. Clerk establishes the person, organization membership, and administrator authority. Stripe hosts payment collection and supplies the signed payment event. Dharma HQ verifies that event and writes the immutable order, invoice, credit-pool, and activation records. This separation avoids adding a Clerk Billing fee to Agent Fabric usage and preserves Dharma's per-run credit settlement.
 
-After payment, return to the same organization in the dashboard. The onboarding stage advances automatically after the verified Stripe webhook is processed; the customer does not upload a receipt or ask an operator to mark the order paid.
+After payment, return to the same organization in the dashboard. The onboarding stage advances automatically after the verified Stripe webhook is processed; the customer does not upload a receipt or ask an operator to mark the order paid. Clerk establishes identity and organization authority; it does not substitute for the Stripe payment record.
 
 The onboarding page shows the exact order if payment is incomplete. It does not treat an issued or accepted order as paid.
 
@@ -170,7 +174,9 @@ Start the outbound relay:
 dharma relay start --policy .dharma/approved-policy.json
 ```
 
-The relay has no inbound listener. It verifies signed task authority, leases, budgets, paths, registered command IDs, and the task's pinned skill bundle before using a relay-owned Git worktree.
+The relay has no inbound listener. Its local execution gate deterministically verifies the signed task identity, organization and workspace binding, target device and provider, signature, expiry, replay nonce, read and write paths, registered command IDs and canonical arguments, network policy, Git mode, budget, execution lease, pinned skill bundle, and relay-owned Git-worktree isolation.
+
+That gate enforces delegated authority. It does not semantically determine whether the agent's rationale is valid or whether its conclusion follows from the evidence.
 
 ## 6. Call a managed or BYOK agent through the SDK
 
@@ -241,16 +247,22 @@ await client.dispatchHandoff({
 
 The broker enforces same-organization endpoint ownership, expiry, requested response type, evidence references, and authority. The local coding agent returns a signed task result. A support agent can consume that result only within the original workflow.
 
+The `stateEnvelope` is mandatory only for a signed task whose `taskType` is `a2a_handoff`. It records `intent`, `evidence_used`, `known_state`, `unknown_or_missing_state`, `allowed_next_actions`, `blocked_actions`, `decision_authority`, and `tool_results`. Schema validity preserves a structured handoff; it does not prove the evidence is true, the reasoning is valid, or the next action is safe. The current task schema has no `final_action` field.
+
+Current local A2A dispatch is further constrained to the same organization and workspace, a different active local endpoint, and a structured response type. The default authority is read-only, no registered commands, no network, and no merge or deployment authority.
+
 ## 8. Automatic evaluation and improvement
 
-Every completed trajectory receives deterministic checks. The daily scheduler closes exact 100-trajectory windows; incomplete trajectories carry forward. An incident or authorized API request may create a smaller, explicitly labeled window.
+Every completed trajectory is eligible for deterministic checks. The current deterministic analyzer detects secret-boundary violations, missing redaction receipts, partial or empty evidence, and runtime-failure signals. It does not semantically score the A2A envelope or validate an agent rationale.
 
-Semantic judging is invoked only when deterministic checks cannot author a rubric, score a nuanced outcome, cluster a failure, or synthesize a remediation. Each judge event records the rubric version, model, prompt version, confidence threshold, usage, and cost.
+The scheduler closes bounded analysis windows, with 100 trajectories as the default exact remediation window. It persists deterministic artifacts, verifies semantic-analysis configuration and billing, and may invoke the semantic judge. Incident or authorized manual analysis can use a smaller explicitly labeled window.
+
+The current semantic judge receives bounded redacted evidence and returns rubric proposals, failure clusters, and unvalidated remediation hypotheses. These are post-trajectory analysis outputs. It does not issue a real-time `accept`, `withhold`, `revise`, or `escalate` decision, and it does not by itself authorize a release.
 
 The company sees:
 
 1. the visible evidence capsule and lineage;
-2. deterministic findings and semantic judge rationale;
+2. deterministic findings and, when configured, semantic rubric, cluster, and remediation-hypothesis outputs;
 3. the Failure Atlas family, recurrence, affected endpoints, and business consequence;
 4. the proposed policy or skill diff;
 5. historical replay, held-out, regression, and canary results;

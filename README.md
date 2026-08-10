@@ -15,17 +15,24 @@ localhost shell or unrestricted file interface.
 | Codex CLI/Desktop | available | available when installed | unavailable | available when installed | next session |
 | Claude Code | available | available when installed | unavailable | available when installed | next session |
 | Agy 1.0.1 | partial | read-only partial | partial | available when installed | next session |
-| Other Better Harness hosts | evidence adapter work | unavailable | unavailable | unavailable | unavailable |
+| Other Better Harness hosts | planned | unavailable | unavailable | unavailable | unavailable |
 
 Each capability is verified independently. Evidence discovery does not imply
 that task execution, continuation, or Skill activation works for that host.
+Only Codex, Claude Code, and Agy have adapters in the current package. The
+remaining Better Harness hosts are design inputs, not supported runtime
+integrations.
 
 ## Customer onboarding
 
-An organization starts in the Dharma dashboard after a paid offer or an
-explicit sponsored canary entitlement is recorded. The dashboard provisions
-the private remediation repository and selected runtime, then provides one
-organization-scoped command:
+An organization starts at [dharma-ai.io/subscribe](https://www.dharma-ai.io/subscribe).
+The launch trial includes 50,000 Dharma credits for local BYOK execution. The
+production platform package is USD 1,000 for 5,000,000 Dharma credits. Bespoke
+integration work is scoped and quoted separately after a seam audit.
+
+After account creation and package activation, the dashboard provisions the
+organization boundary, prepares the private remediation repository and
+selected runtime, and provides one organization-scoped command:
 
 ```bash
 npx @dharma-ai-labs/agent-fabric@0.1.0 onboard \
@@ -53,6 +60,10 @@ HQ API rather than customer cloud or internal worker endpoints.
 See [the company onboarding and operations guide](docs/onboarding/customer-guide.md)
 for the purchase, GitHub, CLI, managed ADK, GCP BYOK, evaluation, remediation,
 cross-agent handoff, and offboarding flow.
+
+See [Runtime truth and semantic escalation](docs/23-runtime-truth-and-semantic-escalation.md)
+for the exact boundary between deterministic local authority enforcement,
+post-trajectory semantic analysis, and the proposed real-time decision API.
 
 ## Codex plugin
 

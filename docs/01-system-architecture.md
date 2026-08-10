@@ -1,5 +1,7 @@
 # System Architecture
 
+> **Status boundary:** This document describes the intended full architecture. The current package implements the local relay, vault, signed task runner, Codex/Claude/Agy adapters, Skill manager, and associated contracts. Current HQ behavior and unimplemented target interfaces are enumerated in [Runtime truth and semantic escalation](23-runtime-truth-and-semantic-escalation.md). A component shown here is not an availability claim by itself.
+
 ## Architectural thesis
 
 Dharma Agent Fabric is a federated control plane. Raw evidence and provider credentials remain local. Organization policy, evaluation, orchestration, skill source, and cross-team learning live in the remote control plane. The two sides communicate through signed, typed, auditable envelopes over an outbound-only connection.
