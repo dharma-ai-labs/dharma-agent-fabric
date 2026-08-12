@@ -17,7 +17,7 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.5';
+const VERSION = '0.1.6';
 const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -666,10 +666,14 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
 
 ## Required flow
 
-1. Run \`dharma status\` and \`dharma skills verify --provider <provider> --workspace .\` before accepting work. Restart the provider after the first installation so it discovers the native skill.
+1. Run \`dharma status\`, then run the verification command for the current agent before accepting work:
+   - Codex: \`dharma skills verify --provider codex --workspace .\`
+   - Claude Code: \`dharma skills verify --provider claude --workspace .\`
+   - Agy: \`dharma skills verify --provider agy --workspace .\`
+   Do not substitute a placeholder or shell variable. Stop unless the result reports \`ready: true\`. Restart the provider after the first installation so it discovers the native skill.
 2. Run \`dharma providers list\` to confirm the provider's independently tested evidence, task, continuation, skill, activation, and rollback capabilities.
 3. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20\`, then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
+4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\` or \`agy\` when that is the current agent. Then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
 5. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
 6. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
 7. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
