@@ -1,8 +1,9 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 const BLOB_VERSION = 1;
@@ -10,6 +11,7 @@ const BLOB_VERSION = 1;
 export interface VaultOptions {
   root: string;
   masterKey: Buffer;
+  rawLocalDays?: number;
 }
 
 export interface VaultCaptureInput {
@@ -75,8 +77,31 @@ export class LocalVault {
         bytes_uploaded integer not null,
         created_at text not null
       );
+      create table if not exists capsule_sync_queue (
+        trajectory_id text not null,
+        revision integer not null,
+        blob_content_id text not null,
+        created_at text not null,
+        primary key (trajectory_id, revision)
+      );
+      create table if not exists capsule_content_refs (
+        trajectory_id text not null,
+        revision integer not null,
+        content_id text not null,
+        available_locally integer not null,
+        primary key (trajectory_id, revision, content_id)
+      );
+      create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
+      create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
+      create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
+      create index if not exists capsule_content_refs_lookup_idx
+        on capsule_content_refs(content_id, available_locally, trajectory_id, revision);
     `);
-    return new LocalVault(options, database);
+    const vault = new LocalVault(options, database);
+    await vault.#recoverRetentionQuarantine();
+    await vault.#backfillCapsuleContentRefs();
+    await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
+    return vault;
   }
 
   async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
@@ -222,6 +247,11 @@ export class LocalVault {
         input.capsule.capsuleHash,
         capsule.contentId,
       );
+      this.#recordCapsuleContentRefs(
+        input.capsule.trajectoryId,
+        input.capsule.revision,
+        JSON.parse(Buffer.from(input.capsule.plaintext).toString('utf8')) as Record<string, unknown>,
+      );
       this.#database.exec('commit');
       return { rawContentId: raw.contentId, capsuleContentId: capsule.contentId };
     } catch (error) {
@@ -237,6 +267,33 @@ export class LocalVault {
     `).get(trajectoryId) as { blob_content_id: string } | undefined;
     if (!record) throw new Error('Trajectory capsule is not available in the local vault.');
     return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
+  }
+
+  async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100): Promise<Array<{
+    trajectoryId: string;
+    revision: number;
+    capsule: T;
+  }>> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new Error('Pending capsule sync limit must be between 1 and 1000.');
+    }
+    const records = this.#database.prepare(`
+      select trajectory_id, revision, blob_content_id
+      from capsule_sync_queue
+      order by created_at asc, trajectory_id asc, revision asc
+      limit ?
+    `).all(limit) as Array<{ trajectory_id: string; revision: number; blob_content_id: string }>;
+    return Promise.all(records.map(async (record) => ({
+      trajectoryId: record.trajectory_id,
+      revision: record.revision,
+      capsule: JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T,
+    })));
+  }
+
+  markCapsuleSynced(trajectoryId: string, revision: number): void {
+    this.#database.prepare(`
+      delete from capsule_sync_queue where trajectory_id = ? and revision = ?
+    `).run(trajectoryId, revision);
   }
 
   recordDisclosure(disclosureId: string, receiptHash: string, bytesUploaded: number): void {
@@ -266,6 +323,45 @@ export class LocalVault {
     return { blobs: count('blobs'), sessions: count('sessions'), capsules: count('capsules') };
   }
 
+  async enforceRawEvidenceRetention(input: {
+    retentionDays?: number;
+    now?: Date;
+    limit?: number;
+  } = {}): Promise<{ examined: number; deleted: number; cutoff: string }> {
+    const retentionDays = input.retentionDays ?? 30;
+    const limit = input.limit ?? 10_000;
+    if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 3_650) {
+      throw new Error('Raw evidence retention must be between 1 and 3650 days.');
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+      throw new Error('Raw evidence retention limit must be between 1 and 10000.');
+    }
+    const now = input.now ?? new Date();
+    if (!Number.isFinite(now.getTime())) throw new Error('Raw evidence retention time is invalid.');
+    const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
+    await this.#backfillCapsuleContentRefs();
+    let examined = 0;
+    let deleted = 0;
+    for (;;) {
+      const expired = this.#database.prepare(`
+        select content_id
+        from blobs
+        where kind in ('raw-provider-turn', 'raw-provider-session')
+          and created_at < ?
+          and not exists (
+            select 1 from capsules where capsules.blob_content_id = blobs.content_id
+          )
+        order by created_at asc, content_id asc
+        limit ?
+      `).all(cutoff, limit) as Array<{ content_id: string }>;
+      if (expired.length === 0) break;
+      examined += expired.length;
+      await this.#expireRawEvidenceBatch(expired.map((row) => row.content_id), now.toISOString());
+      deleted += expired.length;
+    }
+    return { examined, deleted, cutoff };
+  }
+
   close(): void {
     this.#database.close();
   }
@@ -274,6 +370,149 @@ export class LocalVault {
     if (!/^sha256:[a-f0-9]{64}$/.test(contentId)) throw new Error('Invalid content ID.');
     const digest = contentId.slice('sha256:'.length);
     return resolve(this.root, 'blobs', digest.slice(0, 2), `${digest}.blob`);
+  }
+
+  async #expireRawEvidenceBatch(contentIds: string[], createdAt: string): Promise<void> {
+    const quarantined: Array<{ original: string; quarantine: string }> = [];
+    const createdCapsuleIds = new Set<string>();
+    this.#database.exec('begin immediate');
+    try {
+      for (const contentId of contentIds) {
+        const original = this.#blobPath(contentId);
+        const quarantine = `${original}.expired-${process.pid}-${randomBytes(4).toString('hex')}`;
+        await rename(original, quarantine);
+        quarantined.push({ original, quarantine });
+
+        const capsuleRows = this.#database.prepare(`
+          select c.trajectory_id, c.revision, c.capsule_hash, c.blob_content_id
+          from capsules c
+          join capsule_content_refs refs
+            on refs.trajectory_id = c.trajectory_id and refs.revision = c.revision
+          where c.revision = (
+            select max(latest.revision) from capsules latest where latest.trajectory_id = c.trajectory_id
+          )
+            and refs.content_id = ?
+            and refs.available_locally = 1
+          order by c.trajectory_id asc
+        `).all(contentId) as Array<{
+          trajectory_id: string;
+          revision: number;
+          capsule_hash: string;
+          blob_content_id: string;
+        }>;
+        for (const row of capsuleRows) {
+          const current = JSON.parse((await this.getBlob(row.blob_content_id)).toString('utf8')) as Record<string, unknown>;
+          const contentIndex = Array.isArray(current.contentIndex) ? current.contentIndex : [];
+          const referencesExpired = contentIndex.some((item) => item && typeof item === 'object'
+            && !Array.isArray(item) && (item as Record<string, unknown>).contentId === contentId
+            && (item as Record<string, unknown>).availableLocally === true);
+          if (!referencesExpired) continue;
+          const nextBase = {
+            ...current,
+            revision: row.revision + 1,
+            previousRevisionHash: row.capsule_hash,
+            contentIndex: contentIndex.map((item) => item && typeof item === 'object' && !Array.isArray(item)
+              && (item as Record<string, unknown>).contentId === contentId
+              ? { ...(item as Record<string, unknown>), availableLocally: false }
+              : item),
+            localEvidenceAvailable: Array.isArray(current.localEvidenceAvailable)
+              ? current.localEvidenceAvailable.filter((item) => !item || typeof item !== 'object'
+                || Array.isArray(item) || (item as Record<string, unknown>).contentId !== contentId)
+              : [],
+            createdAt,
+          } as Record<string, unknown>;
+          delete nextBase.capsuleHash;
+          const revised = { ...nextBase, capsuleHash: sha256(canonicalize(nextBase)) };
+          const capsuleBlob = await this.#putBlob(Buffer.from(JSON.stringify(revised)), 'trajectory-capsule');
+          if (capsuleBlob.created) createdCapsuleIds.add(capsuleBlob.contentId);
+          this.recordCapsule(row.trajectory_id, row.revision + 1, revised.capsuleHash, capsuleBlob.contentId);
+          this.#recordCapsuleContentRefs(row.trajectory_id, row.revision + 1, revised);
+          this.#database.prepare(`
+            insert into capsule_sync_queue(trajectory_id, revision, blob_content_id, created_at)
+            values (?, ?, ?, ?)
+            on conflict(trajectory_id, revision) do nothing
+          `).run(row.trajectory_id, row.revision + 1, capsuleBlob.contentId, createdAt);
+        }
+
+        const result = this.#database.prepare(`
+          delete from blobs
+          where content_id = ?
+            and kind in ('raw-provider-turn', 'raw-provider-session')
+            and not exists (
+              select 1 from capsules where capsules.blob_content_id = blobs.content_id
+            )
+        `).run(contentId);
+        if (result.changes !== 1) throw new Error('Raw evidence changed during retention enforcement.');
+      }
+      this.#database.exec('commit');
+      await Promise.all(quarantined.map((entry) => rm(entry.quarantine, { force: true })));
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      await Promise.all([...createdCapsuleIds].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
+      await Promise.all(quarantined.map(async (entry) => {
+        try { await rename(entry.quarantine, entry.original); } catch {}
+      }));
+      throw error;
+    }
+  }
+
+  #recordCapsuleContentRefs(trajectoryId: string, revision: number, capsule: Record<string, unknown>): void {
+    const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
+    const insert = this.#database.prepare(`
+      insert into capsule_content_refs(trajectory_id, revision, content_id, available_locally)
+      values (?, ?, ?, ?)
+      on conflict(trajectory_id, revision, content_id) do update set
+        available_locally = excluded.available_locally
+    `);
+    for (const item of contentIndex) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const record = item as Record<string, unknown>;
+      if (typeof record.contentId !== 'string') continue;
+      insert.run(trajectoryId, revision, record.contentId, record.availableLocally === true ? 1 : 0);
+    }
+  }
+
+  async #backfillCapsuleContentRefs(): Promise<void> {
+    const records = this.#database.prepare(`
+      select c.trajectory_id, c.revision, c.blob_content_id
+      from capsules c
+      where not exists (
+        select 1 from capsule_content_refs refs
+        where refs.trajectory_id = c.trajectory_id and refs.revision = c.revision
+      )
+      order by c.trajectory_id asc, c.revision asc
+    `).all() as Array<{ trajectory_id: string; revision: number; blob_content_id: string }>;
+    for (const record of records) {
+      const capsule = JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as Record<string, unknown>;
+      this.#recordCapsuleContentRefs(record.trajectory_id, record.revision, capsule);
+    }
+  }
+
+  async #recoverRetentionQuarantine(): Promise<void> {
+    const blobsRoot = resolve(this.root, 'blobs');
+    const prefixes = await readdir(blobsRoot, { withFileTypes: true });
+    for (const prefix of prefixes) {
+      if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
+      const directory = resolve(blobsRoot, prefix.name);
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !/^[a-f0-9]{64}\.blob\.expired-/.test(entry.name)) continue;
+        const quarantine = resolve(directory, entry.name);
+        const original = resolve(directory, entry.name.replace(/\.expired-.+$/, ''));
+        const digest = basename(original, '.blob');
+        const contentId = `sha256:${digest}`;
+        const retained = this.#database.prepare('select 1 from blobs where content_id = ?').get(contentId);
+        if (retained) {
+          try { await rename(quarantine, original); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') await rm(quarantine, { force: true });
+            else throw error;
+          }
+        } else {
+          await rm(quarantine, { force: true });
+        }
+      }
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-local-vault",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,5 +9,8 @@
   "files": ["dist"],
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
-  "dependencies": { "@dharma-ai-labs/agent-fabric-secure-store": "0.1.0" }
+  "dependencies": {
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.1",
+    "@dharma-ai-labs/agent-fabric-secure-store": "0.1.0"
+  }
 }

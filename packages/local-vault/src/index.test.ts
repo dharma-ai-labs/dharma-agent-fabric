@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey } from './index.js';
 
 test('vault encrypts content and verifies it on read', async () => {
@@ -102,6 +104,91 @@ test('failed capture commit rolls back session metadata and removes newly writte
   assert.deepEqual(vault.stats(), before);
   await assert.rejects(() => vault.getBlob(changedRawContentId), /ENOENT/);
   vault.close();
+});
+
+test('vault expires raw evidence, retains capsule history, and queues an unavailable revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const rawContentId = await vault.putBlob(Buffer.from('expired raw provider evidence'), 'raw-provider-turn');
+  const capsuleBase = {
+    trajectoryId: 'trajectory-retention', revision: 1, previousRevisionHash: null,
+    contentIndex: [{ contentId: rawContentId, kind: 'raw-provider-turn', bytes: 29, uploaded: false, availableLocally: true }],
+    localEvidenceAvailable: [{ contentId: rawContentId, kind: 'raw-provider-turn', bytes: 29 }],
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+  const capsule = { ...capsuleBase, capsuleHash: sha256(canonicalize(capsuleBase)) };
+  const capsuleContentId = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
+  vault.recordCapsule('trajectory-retention', 1, capsule.capsuleHash, capsuleContentId);
+
+  const result = await vault.enforceRawEvidenceRetention({
+    retentionDays: 30,
+    now: new Date(Date.now() + 31 * 86_400_000),
+  });
+
+  assert.equal(result.deleted, 1);
+  await assert.rejects(() => vault.getBlob(rawContentId), /ENOENT/);
+  assert.deepEqual(await vault.getBlob(capsuleContentId), Buffer.from(JSON.stringify(capsule)));
+  const latest = await vault.getLatestCapsule<Record<string, unknown>>('trajectory-retention');
+  assert.equal(latest.revision, 2);
+  assert.equal(latest.previousRevisionHash, capsule.capsuleHash);
+  assert.deepEqual(latest.localEvidenceAvailable, []);
+  assert.equal((latest.contentIndex as Array<{ availableLocally: boolean }>)[0]?.availableLocally, false);
+  const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.trajectoryId, 'trajectory-retention');
+  assert.equal(pending[0]?.revision, 2);
+  vault.markCapsuleSynced('trajectory-retention', 2);
+  assert.deepEqual(await vault.listPendingCapsuleSyncs(), []);
+  vault.close();
+});
+
+test('raw retention drains every expired batch and creates lookup indexes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const rawIds = [];
+  for (const value of ['expired one', 'expired two', 'expired three']) {
+    rawIds.push(await vault.putBlob(Buffer.from(value), 'raw-provider-session'));
+  }
+  const result = await vault.enforceRawEvidenceRetention({
+    retentionDays: 30,
+    now: new Date(Date.now() + 31 * 86_400_000),
+    limit: 1,
+  });
+  assert.deepEqual({ examined: result.examined, deleted: result.deleted }, { examined: 3, deleted: 3 });
+  for (const contentId of rawIds) await assert.rejects(() => vault.getBlob(contentId), /ENOENT/);
+  vault.close();
+
+  const database = new DatabaseSync(join(root, 'vault.sqlite'), { readOnly: true });
+  const indexes = database.prepare(`select name from sqlite_master where type = 'index'`).all()
+    .map((row) => (row as { name: string }).name);
+  assert.ok(indexes.includes('blobs_raw_retention_idx'));
+  assert.ok(indexes.includes('capsules_blob_content_id_idx'));
+  assert.ok(indexes.includes('capsules_latest_revision_idx'));
+  assert.ok(indexes.includes('capsule_content_refs_lookup_idx'));
+  database.close();
+});
+
+test('raw retention rejects invalid policy bounds', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  await assert.rejects(() => vault.enforceRawEvidenceRetention({ retentionDays: 0 }), /between 1 and 3650 days/);
+  await assert.rejects(() => vault.enforceRawEvidenceRetention({ limit: 10_001 }), /between 1 and 10000/);
+  vault.close();
+});
+
+test('vault recovers interrupted retention quarantine before enforcing policy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-recovery-'));
+  const key = randomBytes(32);
+  const vault = await LocalVault.open({ root, masterKey: key });
+  const contentId = await vault.putBlob(Buffer.from('retained after interrupted transaction'), 'raw-provider-turn');
+  vault.close();
+  const digest = contentId.slice('sha256:'.length);
+  const original = join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`);
+  const quarantine = `${original}.expired-test`;
+  await rename(original, quarantine);
+  const reopened = await LocalVault.open({ root, masterKey: key, rawLocalDays: 3_650 });
+  assert.deepEqual(await reopened.getBlob(contentId), Buffer.from('retained after interrupted transaction'));
+  reopened.close();
 });
 
 test('environment keys fail closed unless explicitly enabled', () => {

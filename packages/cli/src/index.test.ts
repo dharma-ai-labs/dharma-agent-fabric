@@ -15,6 +15,7 @@ import {
   materializeWorkspacePolicy,
   materializeInlineSkillFiles,
   nativeSkillDirectory,
+  rawLocalRetentionDays,
   relayProcessState,
   run,
   taskResponsePreview,
@@ -23,6 +24,13 @@ import {
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 
 const execFileAsync = promisify(execFile);
+
+test('organization raw evidence retention is validated and defaults explicitly', () => {
+  assert.equal(rawLocalRetentionDays({ retention: {} }), 30);
+  assert.equal(rawLocalRetentionDays({ retention: { rawLocalDays: 7 } }), 7);
+  assert.throws(() => rawLocalRetentionDays({ retention: { rawLocalDays: 0 } }), /between 1 and 3650/);
+  assert.throws(() => rawLocalRetentionDays({ retention: { rawLocalDays: 1.5 } }), /between 1 and 3650/);
+});
 
 test('version is parser-safe structured output', async () => {
   assert.deepEqual(await run(['version']), { version: '0.1.2' });
