@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
   assertTaskSkillPin,
+  installNativeAgentFabricBootstrap,
   installRepositoryAgentFabricSkill,
   isDirectExecution,
   materializeWorkspacePolicy,
@@ -20,6 +21,7 @@ import {
   run,
   taskResponsePreview,
   taskSkillPinFailureCode,
+  verifyAgentFabricSkillInstallation,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 
@@ -33,7 +35,7 @@ test('organization raw evidence retention is validated and defaults explicitly',
 });
 
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.4' });
+  assert.deepEqual(await run(['version']), { version: '0.1.5' });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
@@ -73,7 +75,7 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.4', enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: '0.1.5', enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -254,6 +256,53 @@ test('provider skill roots map to each host native discovery directory', async (
     nativeSkillDirectory('agy', { AGY_CONFIG_DIR: join(home, 'custom-agy') }, home),
     join(home, 'custom-agy', 'plugins', 'dharma-agent-fabric', 'skills'),
   );
+});
+
+test('native bootstrap installation makes the repository skill verifiable by Codex', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-native-skill-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(workspace, { recursive: true });
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId: 'workspace_test',
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const installed = await installNativeAgentFabricBootstrap({
+    provider: 'codex',
+    workspace,
+    workspaceId: 'workspace_test',
+    organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io',
+    home,
+  });
+  assert.equal(installed.verified, true);
+  assert.equal(installed.activation, 'next_session');
+  assert.match(await readFile(installed.skillPath, 'utf8'), /dharma skills verify --provider codex/);
+  const verified = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace, home });
+  assert.equal(verified.ready, true);
+  assert.equal(verified.repositoryInstalled, true);
+  assert.equal(verified.nativeInstalled, true);
+});
+
+test('native bootstrap installation refuses to overwrite an unmanaged provider skill', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-native-skill-unmanaged-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  const unmanaged = join(home, '.codex', 'skills', 'dharma-agent-fabric');
+  await mkdir(unmanaged, { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(unmanaged, 'SKILL.md'), '# Customer-owned skill\n');
+  await assert.rejects(() => installNativeAgentFabricBootstrap({
+    provider: 'codex',
+    workspace,
+    workspaceId: 'workspace_test',
+    organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io',
+    home,
+  }), /Refusing to replace an unmanaged codex skill/);
 });
 
 test('Agy activation validates the generated plugin before enabling it', async () => {

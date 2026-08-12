@@ -1,10 +1,10 @@
 {
   "name": "@dharma-ai-labs/agent-fabric",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "bin": { "dharma": "dist/index.js" },
+  "bin": { "dharma": "dist/bin.js" },
   "engines": { "node": ">=22.20.0 <25.0.0", "npm": ">=10.9.3 <12.0.0" },
   "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/cli" },
   "files": ["dist"],
