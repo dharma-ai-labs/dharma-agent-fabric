@@ -28,7 +28,7 @@ the private remediation repository and selected runtime, then provides one
 organization-scoped command:
 
 ```bash
-npx @dharma-ai-labs/agent-fabric@0.1.2 onboard \
+npx --yes @dharma-ai-labs/agent-fabric@latest onboard \
   --hq-url https://www.dharma-ai.io \
   --organization-id <organization-id> \
   --policy-revision <dashboard-policy-revision> \
@@ -37,9 +37,20 @@ npx @dharma-ai-labs/agent-fabric@0.1.2 onboard \
 
 The command opens browser approval against the customer's Clerk session,
 enrolls an Ed25519 device identity, registers the workspace, discovers each
-provider independently, and installs a repository-local Agent Fabric Skill and
-API specification. It never writes a bearer token, local path, provider key,
-or runtime identity into the repository.
+provider independently, and installs both the repository-scoped Agent Fabric
+Skill and a managed bootstrap Skill in every detected provider's native Skill
+directory. It never writes a bearer token, local path, provider key, or runtime
+identity into the repository.
+
+The command waits for browser approval and completes without a second resume
+command. Verify Codex installation immediately afterwards:
+
+```bash
+dharma skills verify --provider codex --workspace .
+```
+
+Start a new Codex session from the connected repository after verification so
+Codex reloads its Skill inventory. The Skill is named `dharma-agent-fabric`.
 
 After approval, the CLI prints the exact commands to preview and sync a
 metadata-only automatic capsule and start the outbound relay. Prompt text,

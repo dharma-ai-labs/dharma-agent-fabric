@@ -142,8 +142,17 @@ The CLI opens a short-lived browser approval page. After the company user approv
 2. registers a workspace using hashes rather than disclosing its absolute local path;
 3. detects Codex, Claude Code, and Agy independently;
 4. writes `.dharma/approved-policy.json` with registered commands and bounded write paths;
-5. installs `.agents/skills/dharma-agent-fabric/SKILL.md` and the organization API coordinates;
-6. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
+5. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill in every detected provider's native Skill directory;
+6. waits for browser approval and continues automatically without a manual resume command;
+7. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
+
+Verify the Codex installation before capturing evidence:
+
+```bash
+dharma skills verify --provider codex --workspace .
+```
+
+The command must report `ready: true`, `repositoryInstalled: true`, and `nativeInstalled: true`. Then start a new Codex session from this repository and invoke the `dharma-agent-fabric` Skill. A session that was already open before onboarding will not reload newly installed Skills.
 
 Preview what can leave the device:
 

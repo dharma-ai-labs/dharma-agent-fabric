@@ -17,8 +17,8 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.4';
-const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]';
+const VERSION = '0.1.5';
+const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
 
@@ -320,6 +320,25 @@ async function client() {
   return instance;
 }
 
+async function openVerificationUri(url: string) {
+  const attempts: Array<[string, string[]]> = process.platform === 'darwin'
+    ? [['open', [url]]]
+    : process.platform === 'win32'
+      ? [['rundll32.exe', ['url.dll,FileProtocolHandler', url]]]
+      : [
+          ['wslview', [url]],
+          ['rundll32.exe', ['url.dll,FileProtocolHandler', url]],
+          ['xdg-open', [url]],
+        ];
+  for (const [command, argv] of attempts) {
+    try {
+      await execFileAsync(command, argv, { timeout: 10_000 });
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
 async function login(flags: Map<string, string | boolean>): Promise<Output> {
   type PendingEnrollment = {
     hqUrl: string;
@@ -350,9 +369,11 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     };
     await mkdir(dharmaHome(), { recursive: true, mode: 0o700 });
     await writeFile(pendingEnrollmentPath(), `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 });
+    const browserOpened = flags.has('no-browser') ? false : await openVerificationUri(pending.verificationUri);
     if (flags.has('no-wait')) {
-      return { ok: true, status: 'pending', deviceCode: pending.deviceCode, verificationUri: pending.verificationUri, browserCode: pending.browserCode, expiresAt: pending.expiresAt };
+      return { ok: true, status: 'pending', deviceCode: pending.deviceCode, verificationUri: pending.verificationUri, browserCode: pending.browserCode, browserOpened, expiresAt: pending.expiresAt };
     }
+    process.stderr.write(`Approve this device in your browser: ${pending.verificationUri}\n`);
   }
   const deadline = Date.parse(pending.expiresAt);
   while (Date.now() < deadline) {
@@ -645,12 +666,13 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
 
 ## Required flow
 
-1. Run \`dharma status\` and \`dharma providers list\` before accepting a remote task.
-2. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-3. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20\`, then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
-4. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
-5. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
-6. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
+1. Run \`dharma status\` and \`dharma skills verify --provider <provider> --workspace .\` before accepting work. Restart the provider after the first installation so it discovers the native skill.
+2. Run \`dharma providers list\` to confirm the provider's independently tested evidence, task, continuation, skill, activation, and rollback capabilities.
+3. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
+4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20\`, then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
+5. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
+6. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
+7. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
 
 The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
 `;
@@ -692,7 +714,6 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     const loginFlags = new Map(flags);
     loginFlags.set('hq-url', requestedHqUrl);
     loginFlags.set('organization-id', organizationId);
-    if (!flags.has('resume')) loginFlags.set('no-wait', true);
     const enrollment = await login(loginFlags) as Record<string, unknown>;
     if (enrollment.status !== 'approved') {
       return {
@@ -736,6 +757,17 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   });
   const synced = await workspaceSync(new Map([['policy-revision', policyRevision]]), [registered.workspaceId]);
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
+  const nativeSkills = [];
+  for (const capability of providers) {
+    if (capability.skillInstall !== 'available') continue;
+    nativeSkills.push(await installNativeAgentFabricBootstrap({
+      provider: capability.provider as ProviderId,
+      workspace,
+      workspaceId: registered.workspaceId,
+      organizationId,
+      hqUrl,
+    }));
+  }
   return {
     ok: true,
     stage: 'ready',
@@ -750,11 +782,13 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       writePaths: generatedPolicy.policy.tasks.writePaths,
     },
     repositorySkill: installed,
+    nativeSkills,
     workspaceSync: synced,
     next: {
       preview: 'dharma evidence preview --workspace . --provider codex',
       sync: 'dharma evidence capture-batch --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20 --sync',
       relay: 'dharma relay start --policy .dharma/approved-policy.json',
+      verifySkill: 'dharma skills verify --provider codex --workspace .',
     },
   };
 }
@@ -962,6 +996,90 @@ export function nativeSkillDirectory(
   return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
 }
 
+export async function installNativeAgentFabricBootstrap(input: {
+  provider: ProviderId;
+  workspace: string;
+  workspaceId: string;
+  organizationId: string;
+  hqUrl: string;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+}) {
+  const root = nativeSkillDirectory(input.provider, input.env, input.home);
+  const skillRoot = resolve(root, 'dharma-agent-fabric');
+  const marker = resolve(skillRoot, '.dharma-agent-fabric-bootstrap.json');
+  if (await pathExists(skillRoot) && !await pathExists(marker)) {
+    throw new Error(`Refusing to replace an unmanaged ${input.provider} skill at ${skillRoot}.`);
+  }
+  const skill = `---
+name: dharma-agent-fabric
+description: Connect the current repository to Dharma Agent Fabric for signed tasks, bounded evidence, and verified skill releases.
+---
+
+# Dharma Agent Fabric
+
+Use this skill only inside a repository containing \`.dharma/agent-fabric.json\` and \`.dharma/approved-policy.json\`.
+
+1. Run \`dharma status\` and \`dharma skills verify --provider ${input.provider} --workspace .\` before accepting work.
+2. Start \`dharma relay start --policy .dharma/approved-policy.json\` for signed task, evidence, and skill delivery.
+3. Preview evidence before sync. Never expose provider credentials, developer tokens, raw private trajectories, hidden evaluation truth, or unrelated local files.
+4. Accept only organization-scoped tasks whose workspace, path, command, network, Git, budget, expiry, replay, and skill-pin checks pass locally.
+5. Treat cross-agent requests as structured, task-bound handoffs. Never infer shell, merge, deploy, secret, or unrelated-file authority.
+
+The repository-local skill and connection manifest are authoritative for the active organization. Signed remediation bundles replace this bootstrap only after server-side evaluation, held-out, approval, signing, and rollout gates pass.
+`;
+  await mkdir(skillRoot, { recursive: true, mode: 0o700 });
+  await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
+  await writeFile(marker, `${JSON.stringify({
+    schema: 'dharma.native-skill-bootstrap/v1',
+    managedBy: 'dharma-agent-fabric',
+    provider: input.provider,
+    organizationId: input.organizationId,
+    workspaceId: input.workspaceId,
+    workspaceRouteHash: sha256(resolve(input.workspace)),
+    hqUrl: input.hqUrl,
+    installedAt: new Date().toISOString(),
+  }, null, 2)}\n`, { mode: 0o600 });
+  if (input.provider === 'agy') await activateAgyPlugin({ env: input.env, home: input.home });
+  return {
+    provider: input.provider,
+    nativeSkillDirectory: root,
+    skillPath: resolve(skillRoot, 'SKILL.md'),
+    activation: 'next_session',
+    verified: await pathExists(resolve(skillRoot, 'SKILL.md')) && await pathExists(marker),
+  };
+}
+
+export async function verifyAgentFabricSkillInstallation(input: {
+  provider: ProviderId;
+  workspace: string;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+}) {
+  const workspace = await realpath(input.workspace);
+  const repositorySkillPath = resolve(workspace, '.agents', 'skills', 'dharma-agent-fabric', 'SKILL.md');
+  const connectionPath = resolve(workspace, '.dharma', 'agent-fabric.json');
+  const nativeRoot = nativeSkillDirectory(input.provider, input.env, input.home);
+  const nativeSkillPath = resolve(nativeRoot, 'dharma-agent-fabric', 'SKILL.md');
+  const nativeMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
+  const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
+  const nativeInstalled = await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath);
+  return {
+    provider: input.provider,
+    ready: repositoryInstalled && nativeInstalled,
+    repositoryInstalled,
+    nativeInstalled,
+    repositorySkillPath,
+    connectionPath,
+    nativeSkillPath,
+    activeBundleId: await getActiveSkillBundleId(nativeRoot),
+    activation: 'next_session',
+    nextAction: repositoryInstalled && nativeInstalled
+      ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
+      : 'Run dharma onboard again from the repository root.',
+  };
+}
+
 type AgyPluginExecutor = (executable: string, argv: string[], options: { timeout: number }) => Promise<unknown>;
 
 export async function activateAgyPlugin(input: {
@@ -1158,6 +1276,16 @@ export async function run(argv: string[]): Promise<Output> {
     if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
     const root = nativeSkillDirectory(providerValue as ProviderId);
     return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
+  }
+  if (command === 'skills' && subcommand === 'verify') {
+    const providerValue = required(flags, 'provider');
+    if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
+    const result = await verifyAgentFabricSkillInstallation({
+      provider: providerValue as ProviderId,
+      workspace: String(flags.get('workspace') || '.'),
+    });
+    if (!result.ready) throw new Error(`Agent Fabric skill verification failed: ${JSON.stringify(result)}`);
+    return result;
   }
   throw new Error(USAGE);
 }
