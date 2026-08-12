@@ -35,7 +35,7 @@ test('organization raw evidence retention is validated and defaults explicitly',
 });
 
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.5' });
+  assert.deepEqual(await run(['version']), { version: '0.1.6' });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
@@ -75,7 +75,7 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.5', enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: '0.1.6', enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -177,6 +177,10 @@ test('repository onboarding skill records scoped API metadata without local path
   const skill = await readFile(join(workspace, result.skillPath), 'utf8');
   const connection = await readFile(join(workspace, result.connectionPath), 'utf8');
   assert.match(skill, /structured, task-bound handoff/);
+  assert.match(skill, /dharma skills verify --provider codex --workspace \./);
+  assert.match(skill, /dharma skills verify --provider claude --workspace \./);
+  assert.match(skill, /dharma skills verify --provider agy --workspace \./);
+  assert.equal(skill.includes('<provider>'), false);
   assert.match(connection, /workspace-northstar/);
   assert.equal(connection.includes(workspace), false);
   assert.equal(/token|secret/i.test(connection), false);
