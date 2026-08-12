@@ -22,6 +22,15 @@ Current provider adapters are Codex, Claude Code, and Agy. Run
 `dharma providers list` because evidence, task, continuation, Skill installation,
 activation, and usage capabilities are reported independently.
 
+Signed workspace registration returns the organization-admin-approved evidence
+policy from Dharma HQ. The CLI applies that server revision to
+`.dharma/approved-policy.json` automatically. Without an active content grant,
+the policy remains `local_analysis`; with a current bounded grant, it switches
+to `customer_authorized_content` with the server-issued receipt and upload
+limits. A local flag or hand-edited receipt cannot grant content disclosure.
+The running relay refreshes this policy from signed workspace registration every
+minute, so an admin grant or withdrawal does not require a manual sync command.
+
 Local metadata analysis is operational triage, not semantic Cognitive Integrity
 evaluation. Nuanced scoring and remediation require approved, redacted evidence;
 missing evidence must produce `insufficient_evidence`.

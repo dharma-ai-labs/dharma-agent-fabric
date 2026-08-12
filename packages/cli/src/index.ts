@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import { loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { assertPolicy, loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment, saveDeviceConfig, type DeviceConfig,
@@ -17,7 +17,7 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.6';
+const VERSION = '0.1.8';
 const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -159,6 +159,7 @@ export async function materializeWorkspacePolicy(input: {
   workspace: string;
   organizationId: string;
   revision: string;
+  serverPolicy?: unknown;
 }) {
   const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
   try {
@@ -183,7 +184,7 @@ export async function materializeWorkspacePolicy(input: {
   for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
     if (await pathExists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
   }
-  const policy: OrganizationPolicy = {
+  let policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1',
     organizationId: input.organizationId,
     revision: input.revision,
@@ -208,10 +209,66 @@ export async function materializeWorkspacePolicy(input: {
     retention: { rawLocalDays: 30, capsuleServerDays: 90 },
     budgets: { dailyAnalysisCents: 1_000 },
   };
+  if (input.serverPolicy !== undefined && input.serverPolicy !== null) {
+    policy = applyServerEvidencePolicy(policy, input.serverPolicy);
+  }
+  assertPolicy(policy);
   const relativePath = '.dharma/approved-policy.json';
   await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
   await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
   return { relativePath, policy };
+}
+
+export function applyServerEvidencePolicy(base: OrganizationPolicy, value: unknown): OrganizationPolicy {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Server workspace policy must be an object.');
+  }
+  const fragment = value as Record<string, unknown>;
+  const evidence = fragment.evidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    throw new Error('Server workspace policy evidence must be an object.');
+  }
+  const grant = evidence as Record<string, unknown>;
+  const disclosure = grant.automaticDisclosure;
+  if (!disclosure || typeof disclosure !== 'object' || Array.isArray(disclosure)) {
+    throw new Error('Server workspace policy disclosure grant is required.');
+  }
+  const automaticDisclosure = disclosure as Record<string, unknown>;
+  const localAnalysis = automaticDisclosure.mode === 'local_analysis'
+    && automaticDisclosure.consentReceiptId === undefined
+    && automaticDisclosure.allowedContentClasses === undefined;
+  const authorizedContent = automaticDisclosure.mode === 'customer_authorized_content'
+    && typeof automaticDisclosure.consentReceiptId === 'string'
+    && Array.isArray(automaticDisclosure.allowedContentClasses)
+    && automaticDisclosure.allowedContentClasses.length === 1
+    && automaticDisclosure.allowedContentClasses[0] === 'native_provider_payload';
+  if (!localAnalysis && !authorizedContent) {
+    throw new Error('Server workspace policy contains an invalid content disclosure grant.');
+  }
+  const revision = fragment.revision;
+  const maximumCapsuleBytes = Number(grant.maximumCapsuleBytes);
+  const maximumDailyUploadBytes = Number(grant.maximumDailyUploadBytes);
+  if (typeof revision !== 'string' || !revision.trim()
+    || !Number.isSafeInteger(maximumCapsuleBytes)
+    || !Number.isSafeInteger(maximumDailyUploadBytes)) {
+    throw new Error('Server workspace policy limits or revision are invalid.');
+  }
+  const policy: OrganizationPolicy = {
+    ...structuredClone(base),
+    revision,
+    evidence: {
+      ...structuredClone(base.evidence),
+      automaticDisclosure: authorizedContent ? {
+        mode: 'customer_authorized_content',
+        consentReceiptId: String(automaticDisclosure.consentReceiptId),
+        allowedContentClasses: ['native_provider_payload'],
+      } : { mode: 'local_analysis' },
+      maximumCapsuleBytes,
+      maximumDailyUploadBytes,
+    },
+  };
+  assertPolicy(policy);
+  return policy;
 }
 
 function providerAdapter(provider: string) {
@@ -633,12 +690,30 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
   const workspaceId = positional[0] || required(flags, 'workspace-id');
   const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
   if (!item) throw new Error('Workspace is not registered locally.');
+  return syncWorkspacePolicy(await client(), item, required(flags, 'policy-revision'));
+}
+
+async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string) {
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
-  return (await client()).registerWorkspace({
+  const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
-    policyRevision: required(flags, 'policy-revision'), providers,
+    policyRevision, providers,
   });
+  const generated = await materializeWorkspacePolicy({
+    workspace: item.path,
+    organizationId: item.organizationId,
+    revision: String((response.workspace as Record<string, unknown> | undefined)?.policyRevision || policyRevision),
+    serverPolicy: response.organizationPolicy,
+  });
+  return {
+    ...response,
+    localPolicy: {
+      path: generated.relativePath,
+      revision: generated.policy.revision,
+      disclosureMode: generated.policy.evidence.automaticDisclosure?.mode || 'local_analysis',
+    },
+  };
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
@@ -756,19 +831,17 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     registered = (await registry()).find((item) => item.path === workspace);
   }
   if (!registered) throw new Error('Workspace registration failed.');
-  const generatedPolicy = await materializeWorkspacePolicy({
-    workspace,
-    organizationId,
-    revision: policyRevision,
-  });
+  const synced = await workspaceSync(new Map([['policy-revision', policyRevision]]), [registered.workspaceId]) as Record<string, unknown>;
+  const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
+  const authoritativeRevision = String(localPolicy?.revision || policyRevision);
+  const generatedPolicy = await loadOrganizationPolicy(resolve(workspace, '.dharma', 'approved-policy.json'));
   const installed = await installRepositoryAgentFabricSkill({
     workspace,
     hqUrl,
     organizationId,
     workspaceId: registered.workspaceId,
-    policyRevision,
+    policyRevision: authoritativeRevision,
   });
-  const synced = await workspaceSync(new Map([['policy-revision', policyRevision]]), [registered.workspaceId]);
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
   const nativeSkills = [];
   for (const capability of providers) {
@@ -789,10 +862,11 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     deviceId: config.deviceId,
     providers,
     organizationPolicy: {
-      path: generatedPolicy.relativePath,
-      revision: generatedPolicy.policy.revision,
-      commandIds: Object.keys(generatedPolicy.policy.tasks.allowedCommands).sort(),
-      writePaths: generatedPolicy.policy.tasks.writePaths,
+      path: '.dharma/approved-policy.json',
+      revision: generatedPolicy.revision,
+      disclosureMode: generatedPolicy.evidence.automaticDisclosure?.mode || 'local_analysis',
+      commandIds: Object.keys(generatedPolicy.tasks.allowedCommands).sort(),
+      writePaths: generatedPolicy.tasks.writePaths,
     },
     repositorySkill: installed,
     nativeSkills,
@@ -1220,7 +1294,8 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
 }
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policyPath = resolve(required(flags, 'policy'));
+  let policy = await loadOrganizationPolicy(policyPath);
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
@@ -1233,8 +1308,20 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
   let evidenceResponsesCompleted = 0;
+  let nextPolicyRefreshAt = 0;
   try {
     do {
+      if (Date.now() >= nextPolicyRefreshAt) {
+        for (const workspace of (await registry()).filter((item) => item.organizationId === policy.organizationId)) {
+          try {
+            await syncWorkspacePolicy(fabric, workspace, policy.revision);
+            if (policyPath === resolve(workspace.path, '.dharma', 'approved-policy.json')) {
+              policy = await loadOrganizationPolicy(policyPath);
+            }
+          } catch {}
+        }
+        nextPolicyRefreshAt = Date.now() + 60_000;
+      }
       const evidence = await processEvidenceRequest(fabric, policy);
       if (evidence.requestId) evidenceResponsesCompleted += 1;
       const result = await executeOneTask(fabric, policy, leaseSeconds);

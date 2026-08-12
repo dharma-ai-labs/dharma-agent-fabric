@@ -14,6 +14,7 @@ import {
   installRepositoryAgentFabricSkill,
   isDirectExecution,
   materializeWorkspacePolicy,
+  applyServerEvidencePolicy,
   materializeInlineSkillFiles,
   nativeSkillDirectory,
   rawLocalRetentionDays,
@@ -35,7 +36,7 @@ test('organization raw evidence retention is validated and defaults explicitly',
 });
 
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.6' });
+  assert.deepEqual(await run(['version']), { version: '0.1.8' });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
@@ -75,7 +76,7 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.6', enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: '0.1.8', enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -226,6 +227,58 @@ test('blank-slate onboarding creates a conservative executable workspace policy'
   assert.deepEqual(generated.policy.evidence.automaticDisclosure, { mode: 'local_analysis' });
   const persisted = JSON.parse(await readFile(join(workspace, generated.relativePath), 'utf8'));
   assert.equal(persisted.organizationId, 'org_northstar');
+});
+
+test('applies only a server-issued bounded content grant to the local workspace policy', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-server-policy-'));
+  const generated = await materializeWorkspacePolicy({
+    workspace,
+    organizationId: 'org_northstar',
+    revision: 'portal-bootstrap',
+    serverPolicy: {
+      revision: 'agent-fabric-content-11111111-1111-4111-8111-111111111111',
+      evidence: {
+        automaticDisclosure: {
+          mode: 'customer_authorized_content',
+          consentReceiptId: 'consent_11111111-1111-4111-8111-111111111111',
+          allowedContentClasses: ['native_provider_payload'],
+        },
+        maximumCapsuleBytes: 500_000,
+        maximumDailyUploadBytes: 50_000_000,
+      },
+    },
+  });
+  assert.equal(generated.policy.revision, 'agent-fabric-content-11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(generated.policy.evidence.automaticDisclosure, {
+    mode: 'customer_authorized_content',
+    consentReceiptId: 'consent_11111111-1111-4111-8111-111111111111',
+    allowedContentClasses: ['native_provider_payload'],
+  });
+  assert.equal(generated.policy.evidence.maximumCapsuleBytes, 500_000);
+  assert.equal(generated.policy.tasks.defaultNetwork, 'deny');
+  assert.throws(() => applyServerEvidencePolicy(generated.policy, {
+    revision: 'untrusted',
+    evidence: { automaticDisclosure: { mode: 'customer_authorized_content' } },
+  }), /invalid content disclosure grant/);
+});
+
+test('server withdrawal resets a workspace to local analysis without retaining a consent receipt', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-local-policy-'));
+  const generated = await materializeWorkspacePolicy({
+    workspace,
+    organizationId: 'org_northstar',
+    revision: 'content-policy-old',
+    serverPolicy: {
+      revision: 'agent-fabric-local-analysis-v1',
+      evidence: {
+        automaticDisclosure: { mode: 'local_analysis' },
+        maximumCapsuleBytes: 1_048_576,
+        maximumDailyUploadBytes: 50_000_000,
+      },
+    },
+  });
+  assert.equal(generated.policy.revision, 'agent-fabric-local-analysis-v1');
+  assert.deepEqual(generated.policy.evidence.automaticDisclosure, { mode: 'local_analysis' });
 });
 
 test('materializes signed inline files without repository credentials and rejects traversal', async () => {
