@@ -1,17 +1,21 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
-  "version": "0.1.2",
+  "version": "0.1.3",
+  "description": "Policy-bound local trajectory reduction and deterministic analysis for Dharma Agent Fabric",
+  "license": "MIT",
+  "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/evidence-reduction#readme",
+  "bugs": { "url": "https://github.com/dharma-ai-labs/dharma-agent-fabric/issues" },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/evidence-reduction" },
   "exports": { ".": "./dist/index.js" },
-  "files": ["dist"],
+  "files": ["dist", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
-    "@dharma-ai-labs/agent-fabric-contracts": "0.1.1",
-    "@dharma-ai-labs/agent-fabric-policy": "0.1.0",
-    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.1"
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.2",
+    "@dharma-ai-labs/agent-fabric-policy": "0.1.1",
+    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.2"
   }
 }

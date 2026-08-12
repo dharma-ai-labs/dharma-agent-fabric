@@ -1,12 +1,16 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-secure-store",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "description": "Fail-closed OS credential storage abstraction for Dharma Agent Fabric",
+  "license": "MIT",
+  "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/secure-store#readme",
+  "bugs": { "url": "https://github.com/dharma-ai-labs/dharma-agent-fabric/issues" },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/secure-store" },
   "exports": { ".": "./dist/index.js" },
-  "files": ["dist"],
+  "files": ["dist", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" }
 }
