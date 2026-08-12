@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
   assertTaskSkillPin,
@@ -13,14 +15,27 @@ import {
   materializeWorkspacePolicy,
   materializeInlineSkillFiles,
   nativeSkillDirectory,
+  relayProcessState,
   run,
   taskResponsePreview,
   taskSkillPinFailureCode,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 
+const execFileAsync = promisify(execFile);
+
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.0' });
+  assert.deepEqual(await run(['version']), { version: '0.1.1' });
+});
+
+test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
+  assert.match(String(await run(['--help'])), /^Usage: dharma/);
+  const entrypoint = new URL('./index.js', import.meta.url);
+  for (const argv of [['--help'], ['--version']]) {
+    const result = await execFileAsync(process.execPath, [fileURLToPath(entrypoint), ...argv], { encoding: 'utf8' });
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout.includes('ExperimentalWarning'), false);
+  }
 });
 
 test('global npm symlinks still execute the CLI entrypoint', async () => {
@@ -36,6 +51,108 @@ test('global npm symlinks still execute the CLI entrypoint', async () => {
 
 test('unknown commands fail as usage errors', async () => {
   await assert.rejects(() => run(['unknown']), /Usage:/);
+});
+
+test('status reports verified relay state and hides local identifiers by default', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-cli-status-'));
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    assert.equal(await relayProcessState(home), 'stopped');
+    await mkdir(join(home, 'relay'), { recursive: true });
+    await writeFile(join(home, 'relay', 'relay.pid'), `${process.pid}\n`);
+    await writeFile(join(home, 'device.json'), JSON.stringify({
+      organizationId: 'org_private', deviceId: 'device_private',
+    }));
+    const status = await run(['status']) as Record<string, unknown>;
+    assert.deepEqual(status, { version: '0.1.1', enrolled: true, relay: 'running' });
+    const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
+    assert.equal(diagnostic.organizationId, 'org_private');
+    assert.equal(diagnostic.deviceId, 'device_private');
+    assert.equal(diagnostic.home, home);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('batch capture requires an explicit bound before touching the workspace', async () => {
+  await assert.rejects(() => run(['evidence', 'capture-batch']), /requires --maximum-sessions or --session-ids-file/);
+});
+
+test('single capture selects an older session exactly and advances a changing session revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-cli-capture-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  const sessions = join(root, 'sessions');
+  await mkdir(join(home, 'registry'), { recursive: true });
+  await mkdir(workspace);
+  await mkdir(sessions);
+  const canonicalWorkspace = await realpath(workspace);
+  const source = join(sessions, 'desktop.jsonl');
+  const firstTurn = '019fcaab-6c8e-7432-bfb7-fc63efa3d728';
+  const secondTurn = '019fcaac-6c8e-7432-bfb7-fc63efa3d729';
+  const events = [
+    { type: 'session_meta', payload: { cwd: canonicalWorkspace }, timestamp: '2026-08-12T01:00:00Z' },
+    { type: 'turn_context', payload: { turn_id: firstTurn, cwd: canonicalWorkspace }, timestamp: '2026-08-12T01:00:01Z' },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'older task' }, timestamp: '2026-08-12T01:00:02Z' },
+    { type: 'turn_context', payload: { turn_id: secondTurn, cwd: canonicalWorkspace }, timestamp: '2026-08-12T02:00:00Z' },
+    { type: 'event_msg', payload: { type: 'user_message', message: 'newer task' }, timestamp: '2026-08-12T02:00:01Z' },
+  ];
+  await writeFile(source, events.map((value) => JSON.stringify(value)).join('\n'));
+  const sourceHash = createHash('sha256').update(source).digest('hex');
+  const selectedSessionId = `codex-${sourceHash.slice(0, 24)}:turn:${firstTurn}`;
+  const allowlist = join(root, 'sessions.json');
+  await writeFile(allowlist, JSON.stringify([selectedSessionId]));
+  await writeFile(join(home, 'device.json'), JSON.stringify({
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_test', deviceId: 'device_test',
+    deviceName: 'test', platform: 'linux', publicKeyEd25519: 'test', serverPublicKeyEd25519: 'test',
+    relayUrl: 'wss://relay.invalid', enrolledAt: '2026-08-12T00:00:00.000Z',
+  }));
+  await writeFile(join(home, 'registry', 'workspaces.json'), JSON.stringify([{
+    workspaceId: 'workspace_test', organizationId: 'org_test', name: 'repo', path: canonicalWorkspace,
+    routeHash: 'route', repositoryRemoteHash: null, defaultBranch: null, status: 'active',
+  }]));
+  const generated = await materializeWorkspacePolicy({ workspace, organizationId: 'org_test', revision: 'policy_test' });
+  const policyPath = join(workspace, generated.relativePath);
+  const previous = {
+    home: process.env.DHARMA_HOME,
+    allow: process.env.DHARMA_ALLOW_ENV_KEY,
+    key: process.env.DHARMA_VAULT_KEY,
+  };
+  process.env.DHARMA_HOME = home;
+  process.env.DHARMA_ALLOW_ENV_KEY = '1';
+  process.env.DHARMA_VAULT_KEY = Buffer.alloc(32, 7).toString('base64');
+  try {
+    const first = await run([
+      'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
+      '--policy', policyPath, '--session-ids-file', allowlist,
+    ]) as Record<string, unknown>;
+    assert.equal(first.sessionId, selectedSessionId);
+    assert.equal(first.revision, 1);
+    events.push(
+      { type: 'turn_context', payload: { turn_id: firstTurn, cwd: canonicalWorkspace }, timestamp: '2026-08-12T03:00:00Z' },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'older task completed later' }, timestamp: '2026-08-12T03:00:01Z' },
+    );
+    await writeFile(source, events.map((value) => JSON.stringify(value)).join('\n'));
+    const second = await run([
+      'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
+      '--policy', policyPath, '--session-ids-file', allowlist,
+    ]) as Record<string, unknown>;
+    assert.equal(second.sessionId, selectedSessionId);
+    assert.equal(second.revision, 2);
+    assert.equal(second.previousRevisionHash, first.capsuleHash);
+    const retry = await run([
+      'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
+      '--policy', policyPath, '--session-ids-file', allowlist,
+    ]) as Record<string, unknown>;
+    assert.equal(retry.revision, 2);
+    assert.equal(retry.capsuleHash, second.capsuleHash);
+  } finally {
+    if (previous.home === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous.home;
+    if (previous.allow === undefined) delete process.env.DHARMA_ALLOW_ENV_KEY; else process.env.DHARMA_ALLOW_ENV_KEY = previous.allow;
+    if (previous.key === undefined) delete process.env.DHARMA_VAULT_KEY; else process.env.DHARMA_VAULT_KEY = previous.key;
+  }
 });
 
 test('repository onboarding skill records scoped API metadata without local paths or credentials', async () => {

@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import { LocalVault, loadOrCreateVaultMasterKey } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
@@ -18,7 +17,8 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
+const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
 
@@ -54,7 +54,23 @@ function required(flags: Map<string, string | boolean>, name: string): string {
   return value;
 }
 
-function print(value: Output): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+function print(value: Output): void {
+  process.stdout.write(typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function loadVaultModule() {
+  const original = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    const warningName = warning instanceof Error ? warning.name : args.find((value) => value === 'ExperimentalWarning');
+    if (warningName === 'ExperimentalWarning') return;
+    return (original as (...values: unknown[]) => void).call(process, warning, ...args);
+  }) as typeof process.emitWarning;
+  try {
+    return await import('@dharma-ai-labs/agent-fabric-local-vault');
+  } finally {
+    process.emitWarning = original;
+  }
+}
 
 export function isDirectExecution(argvPath: string | undefined, moduleUrl: string): boolean {
   if (!argvPath) return false;
@@ -73,6 +89,43 @@ function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'wor
 
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
+}
+
+async function readSessionAllowlist(flags: Map<string, string | boolean>): Promise<string[] | null> {
+  const path = flags.get('session-ids-file');
+  if (typeof path !== 'string') return null;
+  const values = JSON.parse(await readFile(resolve(path), 'utf8')) as unknown;
+  if (!Array.isArray(values) || values.length === 0 || values.length > 1_000
+    || values.some((value) => typeof value !== 'string' || value.length > 160)) {
+    throw new Error('Session ID allowlist must be a non-empty JSON string array with at most 1,000 entries.');
+  }
+  return [...new Set(values as string[])];
+}
+
+function boundedInteger(value: string | boolean | undefined, fallback: number, minimum: number, maximum: number, name: string) {
+  const parsed = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+  return parsed;
+}
+
+export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
+  let pid: number;
+  try {
+    pid = Number((await readFile(resolve(home, 'relay', 'relay.pid'), 'utf8')).trim());
+    if (!Number.isSafeInteger(pid) || pid < 1) return 'unknown';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'stopped' : 'unknown';
+  }
+  try {
+    process.kill(pid, 0);
+    return 'running';
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return 'stopped';
+    return code === 'EPERM' ? 'unknown' : 'stopped';
+  }
 }
 
 export async function materializeWorkspacePolicy(input: {
@@ -298,36 +351,40 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
 }
 
 async function capture(flags: Map<string, string | boolean>, batch = false): Promise<Output> {
+  const sessionIds = await readSessionAllowlist(flags);
+  if (batch && !sessionIds && !flags.has('maximum-sessions')) {
+    throw new Error('Batch capture requires --maximum-sessions or --session-ids-file. Run evidence preview first.');
+  }
+  if (!batch && sessionIds && sessionIds.length !== 1) {
+    throw new Error('Single capture requires exactly one session ID when --session-ids-file is used.');
+  }
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
   const adapter = providerAdapter(provider);
   if (!adapter) throw new Error(`Unsupported capture provider: ${provider}`);
   const root = flags.get('source-root');
-  let sessions = await adapter.discover({
+  const maximumSessions = batch
+    ? boundedInteger(flags.get('maximum-sessions'), sessionIds?.length || 1, 1, 1_000, '--maximum-sessions')
+    : 1;
+  const sessions = await adapter.discover({
     workspace,
     roots: typeof root === 'string' ? [root] : undefined,
-    maximumSessions: batch ? Math.min(Math.max(Number(flags.get('maximum-sessions') || 100), 1), 1_000) : 1,
-    maximumBytesPerSession: Math.min(
-      Math.max(Number(flags.get('maximum-bytes-per-session') || 8_388_608), 65_536),
-      67_108_864,
+    sessionIds: sessionIds || undefined,
+    maximumSessions,
+    maximumBytesPerSession: boundedInteger(
+      flags.get('maximum-bytes-per-session'), 8_388_608, 65_536, 67_108_864, '--maximum-bytes-per-session',
     ),
   });
-  const sessionIdsFile = flags.get('session-ids-file');
-  if (typeof sessionIdsFile === 'string') {
-    const values = JSON.parse(await readFile(resolve(sessionIdsFile), 'utf8')) as unknown;
-    if (!Array.isArray(values) || values.length === 0 || values.length > 1_000
-      || values.some((value) => typeof value !== 'string' || value.length > 160)) {
-      throw new Error('Session ID allowlist must be a non-empty JSON string array with at most 1,000 entries.');
-    }
-    const allowed = new Set(values);
-    sessions = sessions.filter((candidate) => allowed.has(candidate.sessionId));
-  }
   if (sessions.length === 0) throw new Error('No workspace-qualified provider sessions were found.');
+  if (sessionIds && sessions.length !== sessionIds.length) {
+    throw new Error(`Only ${sessions.length} of ${sessionIds.length} explicitly selected sessions were found in this workspace.`);
+  }
   const session = sessions.at(-1)!;
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
   try {
     const capsules = [];
@@ -335,16 +392,43 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     const fabric = flags.has('sync') ? await client() : null;
     for (const selected of batch ? sessions : [session]) {
       const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
-      const rawContentId = await vault.putBlob(rawTurn, 'raw-provider-turn');
-      vault.recordSession({ sessionId: selected.sessionId, provider: selected.provider, workspaceId: registered.workspaceId, sourceLocator: selected.sourcePath, status: selected.coverage, observedAt: selected.endedAt });
-      const capsule = buildTrajectoryCapsule({
+      const rawContentId = sha256(rawTurn);
+      const firstRevision = buildTrajectoryCapsule({
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
       });
+      const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
+      const latestCapsule = latestMetadata
+        ? await vault.getLatestCapsule<ReturnType<typeof buildTrajectoryCapsule>>(firstRevision.trajectoryId)
+        : null;
+      const evidenceHash = (value: ReturnType<typeof buildTrajectoryCapsule>) => {
+        const { revision: _revision, previousRevisionHash: _previous, capsuleHash: _hash, ...evidence } = value;
+        return sha256(canonicalize(evidence));
+      };
+      const capsule = latestCapsule && evidenceHash(latestCapsule) === evidenceHash(firstRevision)
+        ? latestCapsule
+        : latestMetadata
+          ? buildTrajectoryCapsule({
+            organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
+            session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
+            revision: latestMetadata.revision + 1, previousRevisionHash: latestMetadata.capsuleHash,
+          })
+          : firstRevision;
       const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
       if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
-      const capsuleBlob = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
-      vault.recordCapsule(capsule.trajectoryId, capsule.revision, capsule.capsuleHash, capsuleBlob);
+      if (!latestCapsule || latestCapsule.capsuleHash !== capsule.capsuleHash) {
+        await vault.commitCapture({
+          raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
+          capsule: {
+            plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
+            revision: capsule.revision, capsuleHash: capsule.capsuleHash,
+          },
+          session: {
+            sessionId: selected.sessionId, provider: selected.provider, workspaceId: registered.workspaceId,
+            sourceLocator: selected.sourcePath, status: selected.coverage, observedAt: selected.endedAt,
+          },
+        });
+      }
       capsules.push(capsule);
       if (fabric) syncResults.push(await fabric.syncTrajectory(capsule));
     }
@@ -491,7 +575,7 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
 
 1. Run \`dharma status\` and \`dharma providers list\` before accepting a remote task.
 2. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-3. Capture reduced evidence with \`dharma evidence capture-batch --workspace . --provider <provider> --policy .dharma/approved-policy.json --sync\`.
+3. Preview first, then capture reduced evidence with \`dharma evidence capture-batch --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20 --sync\` or an exact \`--session-ids-file\`.
 4. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
 5. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
 6. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
@@ -597,7 +681,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     workspaceSync: synced,
     next: {
       preview: 'dharma evidence preview --workspace . --provider codex',
-      sync: 'dharma evidence capture-batch --workspace . --provider codex --policy .dharma/approved-policy.json --sync',
+      sync: 'dharma evidence capture-batch --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20 --sync',
       relay: 'dharma relay start --policy .dharma/approved-policy.json',
     },
   };
@@ -656,6 +740,7 @@ async function processEvidenceRequest(
     throw new Error('Evidence request does not match the enrolled organization, device, workspace, or policy.');
   }
   if (Date.parse(request.expiresAt) <= Date.now()) throw new Error('Evidence request has expired.');
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
   try {
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
@@ -960,6 +1045,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
 export async function run(argv: string[]): Promise<Output> {
   const { positional, flags } = options(argv);
   const [command, subcommand] = positional;
+  if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
@@ -972,10 +1058,19 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'evidence' && subcommand === 'sync') return evidenceSync(flags);
   if (command === 'evidence' && subcommand === 'run-request') return runOneEvidenceRequest(flags);
   if (command === 'status') {
+    const relay = await relayProcessState();
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-      return { version: VERSION, home: dharmaHome(), enrolled: true, organizationId: config.organizationId, deviceId: config.deviceId, relay: 'on_demand' };
-    } catch { return { version: VERSION, home: dharmaHome(), enrolled: false, relay: 'stopped' }; }
+      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay };
+      if (flags.has('verbose') || flags.has('diagnostic')) {
+        Object.assign(status, { home: dharmaHome(), organizationId: config.organizationId, deviceId: config.deviceId });
+      }
+      return status;
+    } catch {
+      const status: Record<string, unknown> = { version: VERSION, enrolled: false, relay };
+      if (flags.has('verbose') || flags.has('diagnostic')) status.home = dharmaHome();
+      return status;
+    }
   }
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);
@@ -987,7 +1082,7 @@ export async function run(argv: string[]): Promise<Output> {
     const root = nativeSkillDirectory(providerValue as ProviderId);
     return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
   }
-  throw new Error('Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]');
+  throw new Error(USAGE);
 }
 
 if (isDirectExecution(process.argv[1], import.meta.url)) {

@@ -12,6 +12,24 @@ export interface VaultOptions {
   masterKey: Buffer;
 }
 
+export interface VaultCaptureInput {
+  raw: { plaintext: Uint8Array; kind: string; expectedContentId: string };
+  capsule: {
+    plaintext: Uint8Array;
+    trajectoryId: string;
+    revision: number;
+    capsuleHash: string;
+  };
+  session: {
+    sessionId: string;
+    provider: string;
+    workspaceId: string;
+    sourceLocator: string;
+    status: string;
+    observedAt: string;
+  };
+}
+
 export class LocalVault {
   readonly root: string;
   readonly #masterKey: Buffer;
@@ -61,11 +79,11 @@ export class LocalVault {
     return new LocalVault(options, database);
   }
 
-  async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
+  async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
     const contentId = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
     const path = this.#blobPath(contentId);
     const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
-    if (existing) return contentId;
+    if (existing) return { contentId, created: false };
 
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const nonce = randomBytes(12);
@@ -76,10 +94,19 @@ export class LocalVault {
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
     await rename(temporary, path);
-    this.#database.prepare(
-      'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
-    ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
-    return contentId;
+    try {
+      this.#database.prepare(
+        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
+      ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
+      return { contentId, created: true };
+    } catch (error) {
+      await rm(path, { force: true });
+      throw error;
+    }
+  }
+
+  async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
+    return (await this.#putBlob(plaintext, kind)).contentId;
   }
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
@@ -163,6 +190,47 @@ export class LocalVault {
     }
   }
 
+  getLatestCapsuleMetadata(trajectoryId: string): {
+    revision: number;
+    capsuleHash: string;
+    blobContentId: string;
+  } | null {
+    const record = this.#database.prepare(`
+      select revision, capsule_hash, blob_content_id
+      from capsules where trajectory_id = ? order by revision desc limit 1
+    `).get(trajectoryId) as { revision: number; capsule_hash: string; blob_content_id: string } | undefined;
+    return record ? {
+      revision: record.revision,
+      capsuleHash: record.capsule_hash,
+      blobContentId: record.blob_content_id,
+    } : null;
+  }
+
+  async commitCapture(input: VaultCaptureInput): Promise<{ rawContentId: string; capsuleContentId: string }> {
+    const created = new Set<string>();
+    this.#database.exec('begin immediate');
+    try {
+      const raw = await this.#putBlob(input.raw.plaintext, input.raw.kind);
+      if (raw.contentId !== input.raw.expectedContentId) throw new Error('Raw evidence content hash changed before vault commit.');
+      if (raw.created) created.add(raw.contentId);
+      const capsule = await this.#putBlob(input.capsule.plaintext, 'trajectory-capsule');
+      if (capsule.created) created.add(capsule.contentId);
+      this.recordSession(input.session);
+      this.recordCapsule(
+        input.capsule.trajectoryId,
+        input.capsule.revision,
+        input.capsule.capsuleHash,
+        capsule.contentId,
+      );
+      this.#database.exec('commit');
+      return { rawContentId: raw.contentId, capsuleContentId: capsule.contentId };
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      await Promise.all([...created].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
+      throw error;
+    }
+  }
+
   async getLatestCapsule<T = Record<string, unknown>>(trajectoryId: string): Promise<T> {
     const record = this.#database.prepare(`
       select blob_content_id from capsules where trajectory_id = ? order by revision desc limit 1
@@ -188,6 +256,14 @@ export class LocalVault {
     return this.#database.prepare(`
       select session_id, provider, workspace_id, status, observed_at from sessions order by observed_at desc
     `).all();
+  }
+
+  stats(): { blobs: number; sessions: number; capsules: number } {
+    const count = (table: 'blobs' | 'sessions' | 'capsules') => {
+      const row = this.#database.prepare(`select count(*) as count from ${table}`).get() as { count: number };
+      return row.count;
+    };
+    return { blobs: count('blobs'), sessions: count('sessions'), capsules: count('capsules') };
   }
 
   close(): void {

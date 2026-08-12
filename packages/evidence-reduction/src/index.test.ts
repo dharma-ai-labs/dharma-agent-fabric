@@ -87,6 +87,43 @@ test('identical source sessions produce an identical capsule revision hash', () 
   assert.equal(second.capsuleHash, first.capsuleHash);
 });
 
+test('a changed session can produce a hash-linked next revision', () => {
+  const session = {
+    provider: 'codex' as const,
+    sessionId: 'session_revision',
+    sourcePath: '/private/revision.jsonl',
+    workspace: '/repo',
+    coverage: 'partial' as const,
+    startedAt: '2026-08-03T00:00:00.000Z',
+    endedAt: '2026-08-03T00:00:01.000Z',
+    records: [{
+      native: { type: 'assistant_message', text: 'first observation' },
+      sourcePath: '/private/revision.jsonl', line: 1, workspace: '/repo',
+      timestamp: '2026-08-03T00:00:01.000Z', kind: 'assistant_message',
+    }],
+  };
+  const first = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
+    policy, rawContentId: `sha256:${'d'.repeat(64)}`, rawBytes: 100,
+  });
+  const second = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    session: { ...session, records: [...session.records, {
+      ...session.records[0]!, native: { type: 'assistant_message', text: 'later observation' }, line: 2,
+    }] },
+    policy, rawContentId: `sha256:${'e'.repeat(64)}`, rawBytes: 200,
+    revision: 2, previousRevisionHash: first.capsuleHash,
+  });
+  assert.equal(second.trajectoryId, first.trajectoryId);
+  assert.equal(second.revision, 2);
+  assert.equal(second.previousRevisionHash, first.capsuleHash);
+  assert.notEqual(second.capsuleHash, first.capsuleHash);
+  assert.throws(() => buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
+    policy, rawContentId: `sha256:${'f'.repeat(64)}`, rawBytes: 100, revision: 2,
+  }), /requires the previous capsule hash/);
+});
+
 test('capsule removes NUL characters rejected by Postgres jsonb', () => {
   const session = {
     provider: 'codex' as const,
