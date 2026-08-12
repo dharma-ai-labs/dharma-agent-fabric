@@ -50,10 +50,11 @@ for (const workspace of workspaceDirectories) {
     if (!manifest[field]) throw new Error(`${manifest.name} is missing ${field}.`);
   }
 
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) throw new Error('npm_execpath is required for package verification.');
   const { stdout } = await execFileAsync(
-    npm,
-    ['pack', '--workspace', workspace, '--dry-run', '--json'],
+    process.execPath,
+    [npmCli, 'pack', '--workspace', workspace, '--dry-run', '--json'],
     { cwd: root, maxBuffer: 4 * 1024 * 1024 },
   );
   const packed = JSON.parse(stdout)[0];
