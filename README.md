@@ -28,7 +28,7 @@ the private remediation repository and selected runtime, then provides one
 organization-scoped command:
 
 ```bash
-npx @dharma-ai-labs/agent-fabric@0.1.0 onboard \
+npx @dharma-ai-labs/agent-fabric@0.1.2 onboard \
   --hq-url https://www.dharma-ai.io \
   --organization-id <organization-id> \
   --policy-revision <dashboard-policy-revision> \
@@ -41,10 +41,13 @@ provider independently, and installs a repository-local Agent Fabric Skill and
 API specification. It never writes a bearer token, local path, provider key,
 or runtime identity into the repository.
 
-After approval, the CLI prints the exact commands to sync reduced evidence and
-start the outbound relay. Full raw trajectories remain encrypted in the local
-vault. A customer can revoke the device from the dashboard without gaining or
-granting inbound shell access.
+After approval, the CLI prints the exact commands to preview and sync a
+metadata-only automatic capsule and start the outbound relay. Prompt text,
+responses, instructions, tool I/O, execution configuration, token metadata,
+encrypted reasoning, and full raw trajectories remain encrypted in the local
+vault unless a separate bounded evidence request is explicitly approved. A
+customer can revoke the device from the dashboard without gaining or granting
+inbound shell access.
 
 The versioned TypeScript client is `@dharma-ai-labs/agent-fabric-sdk`; the Python
 client is `dharma-agent-fabric-sdk`. Both call the organization-scoped Dharma

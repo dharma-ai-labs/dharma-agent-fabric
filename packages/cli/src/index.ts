@@ -17,7 +17,7 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.1';
+const VERSION = '0.1.2';
 const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -484,6 +484,45 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     records += session.records.length;
     for (const record of session.records) eventKinds[record.kind] = (eventKinds[record.kind] || 0) + 1;
   }
+  let automaticDisclosure: Record<string, unknown>;
+  const policyPath = flags.get('policy');
+  if (typeof policyPath === 'string') {
+    const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+    const registered = (await registry()).find((item) => item.path === workspace);
+    if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+    const policy = await loadOrganizationPolicy(policyPath);
+    const capsules = sessions.map((session) => {
+      const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
+      return buildTrajectoryCapsule({
+        organizationId: device.organizationId,
+        deviceId: device.deviceId,
+        workspaceId: registered.workspaceId,
+        session,
+        policy,
+        rawContentId: sha256(rawTurn),
+        rawBytes: rawTurn.byteLength,
+        rawKind: 'raw-provider-turn',
+      });
+    });
+    automaticDisclosure = {
+      ready: true,
+      disclosureClass: 'automatic_capsule',
+      disclosedClasses: [...new Set(capsules.flatMap((capsule) => capsule.redactionReceipt.disclosedClasses))].sort(),
+      excludedClasses: [...new Set(capsules.flatMap((capsule) => capsule.redactionReceipt.excludedClasses))].sort(),
+      capsuleBytes: capsules.reduce((total, capsule) => total + Buffer.byteLength(canonicalize(capsule)), 0),
+      rawProviderBytesLocal: capsules.reduce((total, capsule) => total + (capsule.contentIndex[0]?.bytes || 0), 0),
+      rawProviderBytesUploaded: 0,
+      syncRequiresExplicitFlag: true,
+    };
+  } else {
+    automaticDisclosure = {
+      ready: false,
+      reason: 'Add --policy <path> to calculate exact automatic-capsule bytes and content classes before sync.',
+      disclosureClass: 'automatic_capsule',
+      rawProviderBytesUploaded: 0,
+      syncRequiresExplicitFlag: true,
+    };
+  }
   return {
     ok: true,
     provider,
@@ -498,6 +537,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
       ? { start: sessions[0]!.startedAt, end: sessions.at(-1)!.endedAt }
       : null,
     eventKinds: Object.fromEntries(Object.entries(eventKinds).sort(([left], [right]) => left.localeCompare(right))),
+    automaticDisclosure,
     sessions: sessions.map((session) => ({
       sessionId: session.sessionId,
       startedAt: session.startedAt,
@@ -575,7 +615,7 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
 
 1. Run \`dharma status\` and \`dharma providers list\` before accepting a remote task.
 2. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-3. Preview first, then capture reduced evidence with \`dharma evidence capture-batch --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20 --sync\` or an exact \`--session-ids-file\`.
+3. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20\`, then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
 4. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
 5. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
 6. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.

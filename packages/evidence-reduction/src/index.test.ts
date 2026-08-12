@@ -43,6 +43,73 @@ test('capsule strips secrets and remains deterministic', () => {
   assert.ok(capsule.redactionReceipt.redactedValues >= 2);
   assert.equal(capsule.contentIndex[0]?.kind, 'raw-provider-turn');
   assert.equal(capsule.localEvidenceAvailable[0]?.kind, 'raw-provider-turn');
+  assert.equal(capsule.redactionReceipt.disclosureClass, 'automatic_capsule');
+  assert.equal(capsule.redactionReceipt.disclosedClasses.includes('event_kind'), true);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('prompt_text'), true);
+  assert.deepEqual(capsule.events[0]?.payload, {
+    nativeKind: 'user_message',
+    recordBytes: Buffer.byteLength(JSON.stringify(session.records[0]!.native)),
+    contentOmitted: true,
+  });
+  assert.equal(capsule.events[0]?.source.nativeEventId, null);
+  assert.equal(capsule.events[0]?.providerModel, null);
+});
+
+test('automatic capsules allowlist metadata and omit Codex content-bearing fields', () => {
+  const forbidden = {
+    type: 'event_msg',
+    role: 'user',
+    message: 'Confidential customer prompt',
+    base_instructions: { text: 'Private system instructions' },
+    dynamic_tools: [{ input_schema: { secretShape: true } }],
+    tool_input: { source: 'private source code' },
+    tool_result: 'private tool output',
+    model: 'private-model-name',
+    approval_policy: 'never',
+    sandbox_policy: { type: 'danger-full-access' },
+    total_token_usage: { input_tokens: 900 },
+    rate_limits: { primary: 10 },
+    encrypted_content: 'opaque-private-reasoning',
+    cwd: 'C:\\Users\\customer\\private-repo',
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test',
+    deviceId: 'device_test',
+    workspaceId: 'workspace_test',
+    session: {
+      provider: 'codex',
+      sessionId: 'session_codex_shape',
+      sourcePath: 'C:\\Users\\customer\\.codex\\session.jsonl',
+      workspace: 'C:\\Users\\customer\\private-repo',
+      coverage: 'observed',
+      startedAt: '2026-08-12T00:00:00.000Z',
+      endedAt: '2026-08-12T00:00:01.000Z',
+      records: [{
+        native: forbidden,
+        sourcePath: 'C:\\Users\\customer\\.codex\\session.jsonl',
+        line: 1,
+        workspace: 'C:\\Users\\customer\\private-repo',
+        timestamp: '2026-08-12T00:00:00.000Z',
+        kind: 'user_message',
+      }],
+    },
+    policy,
+    rawContentId: `sha256:${'9'.repeat(64)}`,
+    rawBytes: 50_000,
+  });
+  const encoded = JSON.stringify(capsule);
+  for (const value of [
+    'Confidential customer prompt', 'Private system instructions', 'secretShape',
+    'private source code', 'private tool output', 'private-model-name',
+    'input_tokens', 'rate_limits', 'opaque-private-reasoning', 'Users\\customer',
+  ]) assert.equal(encoded.includes(value), false, `automatic capsule leaked ${value}`);
+  assert.equal(capsule.contentIndex[0]?.uploaded, false);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('instruction_text'), true);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('tool_schema'), true);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('token_metadata'), true);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('rate_limit_metadata'), true);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('encrypted_reasoning'), true);
+  assert.equal(capsule.redactionReceipt.excludedClasses.includes('execution_configuration'), true);
 });
 
 test('bounded expansion redacts Unix, Windows, and WSL-local paths when identity is pseudonymized', async () => {
