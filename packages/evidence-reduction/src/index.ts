@@ -175,6 +175,21 @@ const AUTOMATIC_DISCLOSED_CLASSES = [
   'local_evidence_descriptor',
 ] as const;
 
+const AUTOMATIC_CONTENT_CLASSES = [
+  'encrypted_reasoning',
+  'execution_configuration',
+  'instruction_text',
+  'local_path',
+  'native_provider_payload',
+  'prompt_text',
+  'rate_limit_metadata',
+  'response_text',
+  'token_metadata',
+  'tool_schema',
+  'tool_input',
+  'tool_output',
+] as const;
+
 function disclosureMode(policy: OrganizationPolicy): TrajectoryCapsule['automaticDisclosureMode'] {
   return policy.evidence.automaticDisclosure?.mode ?? 'local_analysis';
 }
@@ -380,7 +395,7 @@ export function buildTrajectoryCapsule(input: {
       ].sort(),
       excludedClasses: mode === 'customer_authorized_content'
         ? ['detected_secret_values', 'configured_excluded_paths']
-        : [...excludedClasses].sort(),
+        : [...new Set([...AUTOMATIC_CONTENT_CLASSES, ...excludedClasses])].sort(),
       classes: [...new Set([
         ...stats.classes,
         ...(mode === 'customer_authorized_content' ? ['customer_authorized_content'] : ['automatic_content_omission']),
