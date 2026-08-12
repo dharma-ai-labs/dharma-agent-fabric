@@ -1,8 +1,11 @@
+import { execFile } from 'node:child_process';
 import { access, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 
 const root = resolve(import.meta.dirname, '..');
+const execFileAsync = promisify(execFile);
 const required = [
   'LICENSE',
   'THIRD_PARTY_NOTICES.md',
@@ -22,4 +25,45 @@ const notices = await readFile(resolve(root, 'THIRD_PARTY_NOTICES.md'), 'utf8');
 if (!/Better Harness/i.test(notices) || !/MIT/i.test(notices)) {
   throw new Error('Better Harness attribution is incomplete.');
 }
-process.stdout.write(`${JSON.stringify({ ok: true, requiredFiles: required.length })}\n`);
+
+const workspaceDirectories = [
+  'packages/contracts',
+  'packages/secure-store',
+  'packages/policy',
+  'packages/provider-adapters',
+  'packages/better-harness-bridge',
+  'packages/evidence-reduction',
+  'packages/relay-client',
+  'packages/local-vault',
+  'packages/task-runner',
+  'packages/skill-manager',
+  'packages/sdk',
+  'packages/cli',
+];
+
+for (const workspace of workspaceDirectories) {
+  const manifestPath = resolve(root, workspace, 'package.json');
+  const readmePath = resolve(root, workspace, 'README.md');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  await access(readmePath, constants.R_OK);
+  for (const field of ['description', 'homepage', 'bugs', 'license']) {
+    if (!manifest[field]) throw new Error(`${manifest.name} is missing ${field}.`);
+  }
+
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const { stdout } = await execFileAsync(
+    npm,
+    ['pack', '--workspace', workspace, '--dry-run', '--json'],
+    { cwd: root, maxBuffer: 4 * 1024 * 1024 },
+  );
+  const packed = JSON.parse(stdout)[0];
+  const packedPaths = new Set(packed.files.map((file) => file.path));
+  if (!packedPaths.has('README.md')) {
+    throw new Error(`${manifest.name} tarball does not contain README.md.`);
+  }
+  if (!packedPaths.has('dist/index.js')) {
+    throw new Error(`${manifest.name} tarball does not contain dist/index.js.`);
+  }
+}
+
+process.stdout.write(`${JSON.stringify({ ok: true, requiredFiles: required.length, publicPackages: workspaceDirectories.length })}\n`);
