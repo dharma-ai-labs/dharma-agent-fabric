@@ -104,6 +104,33 @@ test('failed capture commit rolls back session metadata and removes newly writte
   vault.close();
 });
 
+test('vault enforces 30-day raw retention without deleting capsule evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const rawContentId = await vault.putBlob(Buffer.from('expired raw provider evidence'), 'raw-provider-turn');
+  const capsuleContentId = await vault.putBlob(Buffer.from('{"metadata":"retained"}'), 'trajectory-capsule');
+  vault.recordCapsule('trajectory-retention', 1, `sha256:${'4'.repeat(64)}`, capsuleContentId);
+
+  const result = await vault.enforceRawEvidenceRetention({
+    retentionDays: 30,
+    now: new Date(Date.now() + 31 * 86_400_000),
+  });
+
+  assert.equal(result.deleted, 1);
+  await assert.rejects(() => vault.getBlob(rawContentId), /ENOENT/);
+  assert.deepEqual(await vault.getBlob(capsuleContentId), Buffer.from('{"metadata":"retained"}'));
+  assert.deepEqual(await vault.getLatestCapsule('trajectory-retention'), { metadata: 'retained' });
+  vault.close();
+});
+
+test('raw retention rejects invalid policy bounds', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  await assert.rejects(() => vault.enforceRawEvidenceRetention({ retentionDays: 0 }), /between 1 and 3650 days/);
+  await assert.rejects(() => vault.enforceRawEvidenceRetention({ limit: 10_001 }), /between 1 and 10000/);
+  vault.close();
+});
+
 test('environment keys fail closed unless explicitly enabled', () => {
   const value = randomBytes(32).toString('base64');
   assert.throws(() => loadExplicitTestKey({ DHARMA_VAULT_KEY: value }));

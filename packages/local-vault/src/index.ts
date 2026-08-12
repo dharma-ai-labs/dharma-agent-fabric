@@ -10,6 +10,7 @@ const BLOB_VERSION = 1;
 export interface VaultOptions {
   root: string;
   masterKey: Buffer;
+  rawLocalDays?: number;
 }
 
 export interface VaultCaptureInput {
@@ -76,7 +77,9 @@ export class LocalVault {
         created_at text not null
       );
     `);
-    return new LocalVault(options, database);
+    const vault = new LocalVault(options, database);
+    await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
+    return vault;
   }
 
   async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
@@ -264,6 +267,49 @@ export class LocalVault {
       return row.count;
     };
     return { blobs: count('blobs'), sessions: count('sessions'), capsules: count('capsules') };
+  }
+
+  async enforceRawEvidenceRetention(input: {
+    retentionDays?: number;
+    now?: Date;
+    limit?: number;
+  } = {}): Promise<{ examined: number; deleted: number; cutoff: string }> {
+    const retentionDays = input.retentionDays ?? 30;
+    const limit = input.limit ?? 10_000;
+    if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 3_650) {
+      throw new Error('Raw evidence retention must be between 1 and 3650 days.');
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+      throw new Error('Raw evidence retention limit must be between 1 and 10000.');
+    }
+    const now = input.now ?? new Date();
+    if (!Number.isFinite(now.getTime())) throw new Error('Raw evidence retention time is invalid.');
+    const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
+    const expired = this.#database.prepare(`
+      select content_id
+      from blobs
+      where kind in ('raw-provider-turn', 'raw-provider-session')
+        and created_at < ?
+        and not exists (
+          select 1 from capsules where capsules.blob_content_id = blobs.content_id
+        )
+      order by created_at asc
+      limit ?
+    `).all(cutoff, limit) as Array<{ content_id: string }>;
+    let deleted = 0;
+    for (const row of expired) {
+      await rm(this.#blobPath(row.content_id), { force: true });
+      const result = this.#database.prepare(`
+        delete from blobs
+        where content_id = ?
+          and kind in ('raw-provider-turn', 'raw-provider-session')
+          and not exists (
+            select 1 from capsules where capsules.blob_content_id = blobs.content_id
+          )
+      `).run(row.content_id);
+      deleted += Number(result.changes);
+    }
+    return { examined: expired.length, deleted, cutoff };
   }
 
   close(): void {
