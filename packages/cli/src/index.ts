@@ -110,6 +110,33 @@ function boundedInteger(value: string | boolean | undefined, fallback: number, m
   return parsed;
 }
 
+export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retention'>): number {
+  const value = policy.retention.rawLocalDays ?? 30;
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 3_650) {
+    throw new Error('Organization rawLocalDays retention must be an integer between 1 and 3650.');
+  }
+  return Number(value);
+}
+
+async function syncPendingRetentionCapsules(
+  vault: {
+    listPendingCapsuleSyncs<T>(limit?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
+    markCapsuleSynced(trajectoryId: string, revision: number): void;
+  },
+  fabric: AgentFabricClient,
+): Promise<number> {
+  let synced = 0;
+  for (;;) {
+    const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
+    if (pending.length === 0) return synced;
+    for (const item of pending) {
+      await fabric.syncTrajectory(item.capsule);
+      vault.markCapsuleSynced(item.trajectoryId, item.revision);
+      synced += 1;
+    }
+  }
+}
+
 export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
   let pid: number;
   try {
@@ -385,11 +412,16 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
+  const fabric = flags.has('sync') ? await client() : null;
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(policy),
+  });
   try {
     const capsules = [];
     const syncResults = [];
-    const fabric = flags.has('sync') ? await client() : null;
+    if (fabric) await syncPendingRetentionCapsules(vault, fabric);
     for (const selected of batch ? sessions : [session]) {
       const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       const rawContentId = sha256(rawTurn);
@@ -781,8 +813,13 @@ async function processEvidenceRequest(
   }
   if (Date.parse(request.expiresAt) <= Date.now()) throw new Error('Evidence request has expired.');
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(policy),
+  });
   try {
+    await syncPendingRetentionCapsules(vault, fabric);
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
     const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
     const available = new Set(contentIndex.flatMap((item) => {
