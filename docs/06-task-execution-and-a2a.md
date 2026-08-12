@@ -1,5 +1,7 @@
 # Task Execution and Agent-to-Agent Communication
 
+> **Implementation status:** Signed local task execution and bounded local A2A handoff are implemented for the constraints below. Broad team queues, managed-environment routing, arbitrary continuation, and speculative multi-agent selection remain target behavior unless a current capability receipt says otherwise.
+
 ## Task execution objective
 
 The Dharma orchestrator must be able to assign bounded engineering work to any compatible local or managed agent while preserving repository isolation, provider independence, evidence lineage, cost attribution, and explicit authority.
@@ -208,6 +210,19 @@ An `AgentMessage` contains:
 - budget;
 - signature.
 
+For the current public `dharma.task/v1` contract, a structured `stateEnvelope` is required only when `taskType` is `a2a_handoff`. It contains:
+
+- `intent`;
+- `evidence_used`;
+- `known_state`;
+- `unknown_or_missing_state`;
+- `allowed_next_actions`;
+- `blocked_actions`;
+- `decision_authority`;
+- `tool_results`.
+
+The handoff also requires source task and endpoint identity plus bounded evidence references. The schema contains no `final_action` field. Passing schema and authority checks does not establish that the evidence is true or that the reasoning is valid.
+
 ### Example structured handoff
 
 ```json
@@ -228,6 +243,8 @@ An `AgentMessage` contains:
 The receiving agent must not infer authority from prose when structured authority is present.
 
 ## Routing
+
+The current HQ route supports same-organization, same-workspace dispatch to a different active local endpoint. It requires a structured requested response and defaults to read-only, no-command, no-network authority. The broader selectors below are planned routing targets, not all current production capabilities.
 
 The broker can target:
 

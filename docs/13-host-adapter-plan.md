@@ -1,5 +1,11 @@
 # Host Adapter Plan
 
+## Current implementation boundary
+
+The package currently contains adapters only for Codex, Claude Code, and Agy. Codex and Claude Code expose available evidence and task execution when the native executable is installed, no continuation, partial usage evidence, and next-session Skill activation. Agy exposes partial evidence, read-only partial task execution, partial continuation, unavailable usage evidence, and next-session plugin activation. Agy write tasks and registered shell commands are rejected.
+
+Cursor, Qoder, Qwen Code, GitHub Copilot CLI, Pi, WorkBuddy, and any other Better Harness host remain planned. Better Harness evidence concepts do not make those hosts supported Dharma task or Skill adapters.
+
 ## Source foundation
 
 Better Harness currently distinguishes host support across eight providers:
