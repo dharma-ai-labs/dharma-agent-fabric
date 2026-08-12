@@ -149,7 +149,11 @@ Preview what can leave the device:
 
 ```bash
 dharma providers list
-dharma evidence preview --workspace . --provider codex
+dharma evidence preview \
+  --workspace . \
+  --provider codex \
+  --policy .dharma/approved-policy.json \
+  --maximum-sessions 20
 ```
 
 Synchronize reduced evidence:
@@ -162,6 +166,8 @@ dharma evidence capture-batch \
   --maximum-sessions 20 \
   --sync
 ```
+
+The policy-qualified preview reports the exact automatic-capsule bytes and disclosed/excluded content classes. Automatic capsules contain event kinds, timestamps, coverage, source kinds, record sizes, and pseudonymous identifiers only. Prompt/response text, instructions, tool schemas and I/O, execution configuration, token/rate metadata, encrypted reasoning, and local paths remain on the device unless a separate bounded evidence request is explicitly approved.
 
 Batch capture is deliberately bounded. Use `--maximum-sessions` after reviewing the preview counts, or pass a JSON `--session-ids-file` to select exact sessions.
 
@@ -276,7 +282,7 @@ After a managed remediation is promoted, HQ creates exactly one KMS-signed local
 ## 10. Security, privacy, and offboarding
 
 - complete raw local evidence remains in the encrypted local vault;
-- reduced capsules are the default upload;
+- metadata-only automatic capsules are the default upload;
 - expanded evidence requires an explicit evidence request and audited approval;
 - all server mutations require organization capability checks and idempotency keys;
 - task and A2A messages are structured and bounded, not arbitrary remote shell;

@@ -209,6 +209,9 @@
       "additionalProperties": false,
       "required": [
         "policyRevision",
+        "disclosureClass",
+        "disclosedClasses",
+        "excludedClasses",
         "classes",
         "redactedValues",
         "excludedPaths",
@@ -218,6 +221,25 @@
       "properties": {
         "policyRevision": {
           "type": "string"
+        },
+        "disclosureClass": {
+          "const": "automatic_capsule"
+        },
+        "disclosedClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "excludedClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
         },
         "classes": {
           "type": "array",

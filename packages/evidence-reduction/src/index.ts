@@ -61,7 +61,17 @@ export interface TrajectoryCapsule {
   events: AgentEvent[];
   contentIndex: Array<{ contentId: string; kind: string; bytes: number; uploaded: boolean; availableLocally: boolean; mimeType: string | null; normalizedPath: string | null }>;
   validationResults: unknown[];
-  redactionReceipt: { policyRevision: string; classes: string[]; redactedValues: number; excludedPaths: number; inputBytes: number; outputBytes: number };
+  redactionReceipt: {
+    policyRevision: string;
+    disclosureClass: 'automatic_capsule';
+    disclosedClasses: string[];
+    excludedClasses: string[];
+    classes: string[];
+    redactedValues: number;
+    excludedPaths: number;
+    inputBytes: number;
+    outputBytes: number;
+  };
   localEvidenceAvailable: Array<{ contentId: string; kind: string; bytes: number }>;
   capsuleHash: string;
   createdAt: string;
@@ -136,20 +146,55 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
   return value;
 }
 
-function nativeEventId(record: SourceRecord): string | null {
-  for (const key of ['id', 'event_id', 'eventId', 'call_id', 'callId']) {
-    const value = record.native[key];
-    if (typeof value === 'string') return value;
-  }
-  return null;
+const AUTOMATIC_DISCLOSED_CLASSES = [
+  'tenant_identifier',
+  'device_identifier',
+  'workspace_identifier',
+  'pseudonymous_session_identifier',
+  'provider_name',
+  'event_kind',
+  'event_timestamp',
+  'event_coverage',
+  'source_kind',
+  'record_size',
+  'local_evidence_descriptor',
+] as const;
+
+function safeSourceKind(record: SourceRecord): string {
+  const value = String(record.native.type ?? record.native.kind ?? 'unknown');
+  return /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : 'unknown';
 }
 
-function providerModel(record: SourceRecord): string | null {
-  for (const key of ['model', 'model_name', 'modelName']) {
-    const value = record.native[key];
-    if (typeof value === 'string') return value;
-  }
-  return null;
+function nativeRecordBytes(record: SourceRecord): number {
+  return Buffer.byteLength(JSON.stringify(record.native));
+}
+
+function excludedContentClasses(record: SourceRecord): string[] {
+  const classes = new Set<string>(['native_provider_payload']);
+  if (record.kind === 'user_message') classes.add('prompt_text');
+  if (record.kind === 'agent_message') classes.add('response_text');
+  if (record.kind === 'tool_call') classes.add('tool_input');
+  if (record.kind === 'tool_result') classes.add('tool_output');
+  const visit = (value: unknown, key = ''): void => {
+    const normalized = key.toLowerCase().replaceAll('-', '_');
+    if (/(instruction|system_prompt|developer_message)/.test(normalized)) classes.add('instruction_text');
+    if (/(tool.*schema|input_schema)/.test(normalized)) classes.add('tool_schema');
+    if (/(tool.*input|arguments|params)/.test(normalized)) classes.add('tool_input');
+    if (/(tool.*result|tool.*output)/.test(normalized)) classes.add('tool_output');
+    if (/(token_usage|tokens|usage_metadata)/.test(normalized)) classes.add('token_metadata');
+    if (/(rate_limit|ratelimit)/.test(normalized)) classes.add('rate_limit_metadata');
+    if (/(encrypted_content|reasoning)/.test(normalized)) classes.add('encrypted_reasoning');
+    if (/(cwd|path|workspace_root)/.test(normalized)) classes.add('local_path');
+    if (/(model|approval_policy|sandbox|collaboration|configuration|config)/.test(normalized)) {
+      classes.add('execution_configuration');
+    }
+    if (Array.isArray(value)) value.forEach((item) => visit(item));
+    else if (value && typeof value === 'object') {
+      Object.entries(value as Record<string, unknown>).forEach(([childKey, child]) => visit(child, childKey));
+    }
+  };
+  visit(record.native);
+  return [...classes];
 }
 
 export function buildTrajectoryCapsule(input: {
@@ -171,10 +216,24 @@ export function buildTrajectoryCapsule(input: {
   const trajectoryId = deterministicUuid(`${input.organizationId}:${input.deviceId}:${input.session.provider}:${input.session.sessionId}`);
   const seen = new Set<string>();
   const events: AgentEvent[] = [];
+  const excludedClasses = new Set<string>();
+  let automaticInputBytes = 0;
+  let automaticOutputBytes = 0;
   for (const [index, record] of input.session.records.entries()) {
-    const payload = redactValue(record.native, stats, '', {
+    // Inspect locally for redaction accounting, but never copy native provider
+    // records into the automatic capsule. Content expansion is a separate,
+    // explicitly authorized disclosure flow.
+    redactValue(record.native, stats, '', {
       pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
-    }) as Record<string, unknown>;
+    });
+    const payload = {
+      nativeKind: safeSourceKind(record),
+      recordBytes: nativeRecordBytes(record),
+      contentOmitted: true,
+    };
+    automaticInputBytes += payload.recordBytes;
+    automaticOutputBytes += Buffer.byteLength(canonicalize(payload));
+    excludedContentClasses(record).forEach((value) => excludedClasses.add(value));
     const fingerprint = sha256(canonicalize({ kind: record.kind, payload }));
     if (seen.has(fingerprint)) continue;
     seen.add(fingerprint);
@@ -193,12 +252,12 @@ export function buildTrajectoryCapsule(input: {
       contentRefs: [],
       payload,
       source: {
-        nativeEventId: nativeEventId(record),
-        sourceKind: String(record.native.type ?? record.native.kind ?? 'unknown'),
+        nativeEventId: null,
+        sourceKind: safeSourceKind(record),
         localLocatorId: sha256(`${basename(record.sourcePath)}:${record.line}`),
       },
       skillBundleId: null,
-      providerModel: providerModel(record),
+      providerModel: null,
     });
   }
 
@@ -244,11 +303,14 @@ export function buildTrajectoryCapsule(input: {
     validationResults: [],
     redactionReceipt: {
       policyRevision: input.policy.revision,
-      classes: [...stats.classes].sort(),
+      disclosureClass: 'automatic_capsule' as const,
+      disclosedClasses: [...AUTOMATIC_DISCLOSED_CLASSES].sort(),
+      excludedClasses: [...excludedClasses].sort(),
+      classes: [...new Set([...stats.classes, 'automatic_content_omission'])].sort(),
       redactedValues: stats.redactedValues,
       excludedPaths: stats.excludedPaths,
-      inputBytes: stats.inputBytes,
-      outputBytes: stats.outputBytes,
+      inputBytes: automaticInputBytes,
+      outputBytes: automaticOutputBytes,
     },
     localEvidenceAvailable: [{ contentId: input.rawContentId, kind: input.rawKind || 'raw-provider-session', bytes: input.rawBytes }],
     createdAt,

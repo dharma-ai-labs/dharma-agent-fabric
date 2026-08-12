@@ -25,7 +25,7 @@ import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 const execFileAsync = promisify(execFile);
 
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.1' });
+  assert.deepEqual(await run(['version']), { version: '0.1.2' });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
@@ -65,7 +65,7 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.1', enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: '0.1.2', enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -281,6 +281,13 @@ test('evidence preview counts native turns without disclosing paths or prompt bo
   ]) as Record<string, unknown>;
   const encoded = JSON.stringify(result);
   assert.equal(result.trajectoryCount, 1);
+  assert.deepEqual(result.automaticDisclosure, {
+    ready: false,
+    reason: 'Add --policy <path> to calculate exact automatic-capsule bytes and content classes before sync.',
+    disclosureClass: 'automatic_capsule',
+    rawProviderBytesUploaded: 0,
+    syncRequiresExplicitFlag: true,
+  });
   assert.equal(encoded.includes(root), false);
   assert.equal(encoded.includes('private prompt body'), false);
 });
