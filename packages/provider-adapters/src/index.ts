@@ -29,6 +29,7 @@ export interface ProviderSession {
 export interface DiscoveryRequest {
   workspace: string;
   roots?: string[];
+  sessionIds?: string[];
   since?: Date;
   maximumSessions?: number;
   maximumBytesPerSession?: number;
@@ -519,6 +520,7 @@ function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): Provide
     async discover(request) {
       const sessions: ProviderSession[] = [];
       const maximumSessions = Math.min(Math.max(request.maximumSessions ?? 100, 1), 1_000);
+      const requestedSessionIds = request.sessionIds ? new Set(request.sessionIds) : null;
       const candidates: Array<{ path: string; modified: number }> = [];
       for (const root of request.roots ?? defaultRoots(provider)) {
         for (const path of await jsonlFiles(root)) {
@@ -532,12 +534,18 @@ function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): Provide
           maximumBytes: request.maximumBytesPerSession,
           maximumRecordBytes: request.maximumRecordBytes,
         });
-        if (session) sessions.push(...segmentProviderSession(session));
-        if (sessions.length >= maximumSessions) break;
+        if (session) {
+          const discovered = segmentProviderSession(session);
+          sessions.push(...(requestedSessionIds
+            ? discovered.filter((candidate) => requestedSessionIds.has(candidate.sessionId))
+            : discovered));
+        }
+        if (requestedSessionIds
+          ? sessions.length >= requestedSessionIds.size
+          : sessions.length >= maximumSessions) break;
       }
-      return sessions
-        .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
-        .slice(-maximumSessions);
+      const ordered = sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+      return requestedSessionIds ? ordered : ordered.slice(-maximumSessions);
     },
   };
 }
@@ -560,16 +568,18 @@ export const agyAdapter: ProviderAdapter = {
   },
   async discover(request) {
     const maximumSessions = Math.min(Math.max(request.maximumSessions ?? 100, 1), 1_000);
+    const requestedSessionIds = request.sessionIds ? new Set(request.sessionIds) : null;
     const sessions: ProviderSession[] = [];
     for (const root of request.roots ?? defaultRoots('agy')) {
       for (const path of await jsonlFiles(root)) {
         sessions.push(...await parseAgyHistoryFile(path, request.workspace));
       }
     }
-    return sessions
+    const ordered = sessions
       .filter((session) => !request.since || Date.parse(session.endedAt) >= request.since.getTime())
-      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
-      .slice(-maximumSessions);
+      .filter((session) => !requestedSessionIds || requestedSessionIds.has(session.sessionId))
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    return requestedSessionIds ? ordered : ordered.slice(-maximumSessions);
   },
 };
 

@@ -159,8 +159,11 @@ dharma evidence capture-batch \
   --workspace . \
   --provider codex \
   --policy .dharma/approved-policy.json \
+  --maximum-sessions 20 \
   --sync
 ```
+
+Batch capture is deliberately bounded. Use `--maximum-sessions` after reviewing the preview counts, or pass a JSON `--session-ids-file` to select exact sessions.
 
 Use `claude` or `agy` as the provider only after the capability report says the required lifecycle is available. Provider evidence support alone does not imply remote task or skill activation support.
 

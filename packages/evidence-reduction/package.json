@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,6 +12,6 @@
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.0",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.0",
-    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.0"
+    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.1"
   }
 }

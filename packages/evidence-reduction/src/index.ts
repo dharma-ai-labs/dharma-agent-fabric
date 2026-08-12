@@ -162,6 +162,8 @@ export function buildTrajectoryCapsule(input: {
   rawBytes: number;
   rawKind?: 'raw-provider-session' | 'raw-provider-turn';
   createdAt?: string;
+  revision?: number;
+  previousRevisionHash?: string | null;
 }): TrajectoryCapsule {
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
@@ -201,11 +203,17 @@ export function buildTrajectoryCapsule(input: {
   }
 
   const createdAt = input.createdAt ?? input.session.endedAt;
+  const revision = input.revision ?? 1;
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Trajectory capsule revision must be a positive integer.');
+  if (revision === 1 && input.previousRevisionHash) throw new Error('The first trajectory capsule revision cannot reference a previous revision.');
+  if (revision > 1 && !/^sha256:[a-f0-9]{64}$/.test(input.previousRevisionHash || '')) {
+    throw new Error('A later trajectory capsule revision requires the previous capsule hash.');
+  }
   const base = {
     schema: 'dharma.trajectory-capsule/v1' as const,
     trajectoryId,
-    revision: 1,
-    previousRevisionHash: null,
+    revision,
+    previousRevisionHash: input.previousRevisionHash ?? null,
     organizationId: input.organizationId,
     deviceId: input.deviceId,
     workspaceId: input.workspaceId,

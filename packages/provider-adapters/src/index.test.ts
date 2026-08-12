@@ -190,6 +190,11 @@ test('Codex Desktop discovery emits one session per real turn context', async ()
   const latest = await codexAdapter.discover({ workspace, roots: [sessions], maximumSessions: 1 });
   assert.equal(latest.length, 1);
   assert.match(latest[0]?.sessionId || '', new RegExp(`${secondTurn}$`));
+
+  const exactOlder = await codexAdapter.discover({
+    workspace, roots: [sessions], maximumSessions: 1, sessionIds: [result[0]!.sessionId],
+  });
+  assert.deepEqual(exactOlder.map((session) => session.sessionId), [result[0]!.sessionId]);
 });
 
 test('Codex task execution uses stdin, workspace sandboxing, and disabled network without a shell', async () => {
