@@ -53,6 +53,71 @@ test('capsule strips secrets and remains deterministic', () => {
   });
   assert.equal(capsule.events[0]?.source.nativeEventId, null);
   assert.equal(capsule.events[0]?.providerModel, null);
+  assert.equal(capsule.automaticDisclosureMode, 'local_analysis');
+  assert.equal(capsule.localAnalysis?.recordCount, 1);
+  assert.equal(capsule.localAnalysis?.semanticReviewRecommended, false);
+  assert.equal(capsule.redactionReceipt.consentReceiptId, null);
+});
+
+test('local analysis delivers failure and tool-discipline metadata without content excerpts', () => {
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy,
+    rawContentId: `sha256:${'7'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'session_local_analysis', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'partial', startedAt: '2026-08-12T01:00:00.000Z', endedAt: '2026-08-12T01:00:02.000Z',
+      records: [
+        { native: { type: 'tool_call', arguments: { code: 'private source' } }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T01:00:00.000Z', kind: 'tool_call' },
+        { native: { type: 'runtime_error', message: 'confidential failure detail' }, sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-12T01:00:02.000Z', kind: 'runtime_error' },
+      ],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('private source'), false);
+  assert.equal(encoded.includes('confidential failure detail'), false);
+  assert.deepEqual(capsule.localAnalysis?.toolDiscipline, { calls: 1, results: 0, unmatchedCalls: 1, orphanResults: 0 });
+  assert.equal(capsule.localAnalysis?.outcomeSignals.errorRecords, 1);
+  assert.equal(capsule.localAnalysis?.durationMs, 2_000);
+  assert.deepEqual(capsule.localAnalysis?.reasonCodes, ['runtime_failure_signal', 'tool_call_without_result', 'partial_evidence']);
+  assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
+});
+
+test('customer-authorized content includes redacted native payload under a consent receipt', () => {
+  const authorizedPolicy: OrganizationPolicy = {
+    ...policy,
+    evidence: {
+      ...policy.evidence,
+      automaticDisclosure: {
+        mode: 'customer_authorized_content',
+        consentReceiptId: 'consent_org_test_20260812',
+        allowedContentClasses: ['native_provider_payload'],
+      },
+    },
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy: authorizedPolicy,
+    rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 2_000,
+    session: {
+      provider: 'codex', sessionId: 'session_authorized_content', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'user_message', text: 'Analyze checkout failure', cwd: '/home/alice/private-repo', authorization: 'Bearer secret-secret-secret' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'user_message',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(capsule.automaticDisclosureMode, 'customer_authorized_content');
+  assert.equal(capsule.redactionReceipt.consentReceiptId, 'consent_org_test_20260812');
+  assert.equal(capsule.contentIndex[0]?.uploaded, true);
+  assert.equal(capsule.redactionReceipt.classes.includes('customer_authorized_content'), true);
+  assert.equal(capsule.redactionReceipt.classes.includes('automatic_content_omission'), false);
+  assert.equal(encoded.includes('Analyze checkout failure'), true);
+  assert.equal(encoded.includes('secret-secret-secret'), false);
+  assert.equal(encoded.includes('/home/alice'), false);
+  assert.equal(encoded.includes('[REDACTED:sensitive_field]'), true);
 });
 
 test('automatic capsules allowlist metadata and omit Codex content-bearing fields', () => {

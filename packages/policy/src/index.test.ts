@@ -40,6 +40,27 @@ test('policy rejects capsule sizes above the HQ persistence boundary', () => {
   }), /maximumCapsuleBytes/);
 });
 
+test('content disclosure requires an explicit customer consent receipt and class grant', () => {
+  assert.throws(() => assertPolicy({
+    ...policy,
+    evidence: {
+      ...policy.evidence,
+      automaticDisclosure: { mode: 'customer_authorized_content' },
+    },
+  }), /consentReceiptId/);
+  assert.doesNotThrow(() => assertPolicy({
+    ...policy,
+    evidence: {
+      ...policy.evidence,
+      automaticDisclosure: {
+        mode: 'customer_authorized_content',
+        consentReceiptId: 'consent_org_test_20260812',
+        allowedContentClasses: ['native_provider_payload'],
+      },
+    },
+  }));
+});
+
 test('workspace path checks reject traversal', () => {
   assert.match(assertPathWithinWorkspace('/repo', 'src/index.ts'), /repo/);
   assert.throws(() => assertPathWithinWorkspace('/repo', '../secret'));

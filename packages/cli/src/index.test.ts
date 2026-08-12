@@ -177,6 +177,7 @@ test('repository onboarding skill records scoped API metadata without local path
   const skill = await readFile(join(workspace, result.skillPath), 'utf8');
   const connection = await readFile(join(workspace, result.connectionPath), 'utf8');
   assert.match(skill, /structured, task-bound handoff/);
+  assert.match(skill, /local deterministic self-analysis/);
   assert.match(skill, /dharma skills verify --provider codex --workspace \./);
   assert.match(skill, /dharma skills verify --provider claude --workspace \./);
   assert.match(skill, /dharma skills verify --provider agy --workspace \./);
@@ -222,6 +223,7 @@ test('blank-slate onboarding creates a conservative executable workspace policy'
   assert.deepEqual(generated.policy.tasks.writePaths, ['src/**']);
   assert.equal(generated.policy.tasks.defaultNetwork, 'deny');
   assert.equal(generated.policy.skills.automaticPromotionMaxRisk, 'R2');
+  assert.deepEqual(generated.policy.evidence.automaticDisclosure, { mode: 'local_analysis' });
   const persisted = JSON.parse(await readFile(join(workspace, generated.relativePath), 'utf8'));
   assert.equal(persisted.organizationId, 'org_northstar');
 });

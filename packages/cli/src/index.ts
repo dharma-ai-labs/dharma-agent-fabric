@@ -189,6 +189,7 @@ export async function materializeWorkspacePolicy(input: {
     revision: input.revision,
     evidence: {
       defaultMode: 'deep',
+      automaticDisclosure: { mode: 'local_analysis' },
       registeredWorkspaceOnly: true,
       excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
       maximumCapsuleBytes: 1_000_000,
@@ -560,11 +561,18 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     automaticDisclosure = {
       ready: true,
       disclosureClass: 'automatic_capsule',
+      disclosureMode: capsules[0]?.automaticDisclosureMode ?? policy.evidence.automaticDisclosure?.mode ?? 'local_analysis',
+      consentReceiptId: policy.evidence.automaticDisclosure?.consentReceiptId ?? null,
       disclosedClasses: [...new Set(capsules.flatMap((capsule) => capsule.redactionReceipt.disclosedClasses))].sort(),
       excludedClasses: [...new Set(capsules.flatMap((capsule) => capsule.redactionReceipt.excludedClasses))].sort(),
       capsuleBytes: capsules.reduce((total, capsule) => total + Buffer.byteLength(canonicalize(capsule)), 0),
       rawProviderBytesLocal: capsules.reduce((total, capsule) => total + (capsule.contentIndex[0]?.bytes || 0), 0),
-      rawProviderBytesUploaded: 0,
+      rawProviderBytesUploaded: capsules.reduce((total, capsule) => total + (
+        capsule.automaticDisclosureMode === 'customer_authorized_content'
+          ? Buffer.byteLength(canonicalize(capsule.events.map((event) => event.payload.nativeProviderPayload ?? null)))
+          : 0
+      ), 0),
+      semanticReviewCandidates: capsules.filter((capsule) => capsule.localAnalysis?.semanticReviewRecommended).length,
       syncRequiresExplicitFlag: true,
     };
   } else {
@@ -662,7 +670,7 @@ description: Connect this repository's coding agents to the organization's Dharm
 
 # Dharma Agent Fabric
 
-Use the installed \`dharma\` CLI for organization-scoped agent work. Never print, commit, or transmit provider credentials, developer tokens, local paths, or raw private trajectories.
+Use the installed \`dharma\` CLI for organization-scoped agent work. Never print or commit provider credentials, developer tokens, local paths, or raw private trajectories. Transmit content only when the organization policy contains an auditable customer-authorized content grant.
 
 ## Required flow
 
@@ -673,10 +681,11 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
    Do not substitute a placeholder or shell variable. Stop unless the result reports \`ready: true\`. Restart the provider after the first installation so it discovers the native skill.
 2. Run \`dharma providers list\` to confirm the provider's independently tested evidence, task, continuation, skill, activation, and rollback capabilities.
 3. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\` or \`agy\` when that is the current agent. Then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
-5. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
-6. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
-7. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
+4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\` or \`agy\` when that is the current agent. Confirm the policy mode and consent receipt before syncing.
+5. Run local deterministic self-analysis during capture. Deliver event counts, timing, coverage, failure signals, tool-discipline results, reason codes, and content availability metadata. Do not invent a semantic judgment from metadata. Sessions flagged \`semanticReviewRecommended\` require a policy-authorized evidence request or customer-authorized content mode before server judging.
+6. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
+7. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
+8. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
 
 The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
 `;
@@ -1026,7 +1035,7 @@ Use this skill only inside a repository containing \`.dharma/agent-fabric.json\`
 
 1. Run \`dharma status\` and \`dharma skills verify --provider ${input.provider} --workspace .\` before accepting work.
 2. Start \`dharma relay start --policy .dharma/approved-policy.json\` for signed task, evidence, and skill delivery.
-3. Preview evidence before sync. Never expose provider credentials, developer tokens, raw private trajectories, hidden evaluation truth, or unrelated local files.
+3. Preview evidence before sync. Run local deterministic self-analysis and disclose only the policy-selected metadata or customer-authorized content classes. Never expose provider credentials, hidden evaluation truth, or unrelated local files.
 4. Accept only organization-scoped tasks whose workspace, path, command, network, Git, budget, expiry, replay, and skill-pin checks pass locally.
 5. Treat cross-agent requests as structured, task-bound handoffs. Never infer shell, merge, deploy, secret, or unrelated-file authority.
 

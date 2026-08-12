@@ -14,6 +14,11 @@ export interface OrganizationPolicy {
   revision: string;
   evidence: {
     defaultMode: 'structured' | 'deep' | 'reduced_full_session' | 'incident_capture';
+    automaticDisclosure?: {
+      mode: 'metadata_only' | 'local_analysis' | 'customer_authorized_content';
+      consentReceiptId?: string;
+      allowedContentClasses?: Array<'native_provider_payload'>;
+    };
     registeredWorkspaceOnly: true;
     excludePaths: string[];
     maximumCapsuleBytes: number;
@@ -55,6 +60,17 @@ export function assertPolicy(policy: OrganizationPolicy): void {
     || policy.evidence.maximumCapsuleBytes < 1
     || policy.evidence.maximumCapsuleBytes > MAXIMUM_TRAJECTORY_CAPSULE_BYTES) {
     throw new Error(`maximumCapsuleBytes must be between 1 and ${MAXIMUM_TRAJECTORY_CAPSULE_BYTES}.`);
+  }
+  const disclosure = policy.evidence.automaticDisclosure;
+  if (disclosure?.mode === 'customer_authorized_content') {
+    if (!disclosure.consentReceiptId?.trim()) {
+      throw new Error('customer_authorized_content requires a consentReceiptId.');
+    }
+    if (!disclosure.allowedContentClasses?.includes('native_provider_payload')) {
+      throw new Error('customer_authorized_content requires an explicit native_provider_payload content grant.');
+    }
+  } else if (disclosure?.consentReceiptId || disclosure?.allowedContentClasses?.length) {
+    throw new Error('Content grants are only valid for customer_authorized_content.');
   }
   if (policy.skills.automaticPromotionMaxRisk === 'R3' || policy.skills.automaticPromotionMaxRisk === 'R4') {
     throw new Error('Automatic promotion cannot grant R3 or R4 authority.');

@@ -55,15 +55,30 @@ export interface TrajectoryCapsule {
   timeRange: { start: string; end: string };
   status: 'completed' | 'partial';
   evidenceMode: OrganizationPolicy['evidence']['defaultMode'];
+  automaticDisclosureMode: 'metadata_only' | 'local_analysis' | 'customer_authorized_content';
   coverage: { state: 'observed' | 'partial'; admittedSessions: number; excludedSessions: number; missingFields: string[] };
   repoState: Record<string, unknown>;
   skillState: Record<string, unknown>;
   events: AgentEvent[];
   contentIndex: Array<{ contentId: string; kind: string; bytes: number; uploaded: boolean; availableLocally: boolean; mimeType: string | null; normalizedPath: string | null }>;
   validationResults: unknown[];
+  localAnalysis: {
+    schema: 'dharma.local-trajectory-analysis/v1';
+    analyzer: 'deterministic';
+    recordCount: number;
+    recordBytes: { total: number; maximum: number };
+    eventKinds: Record<string, number>;
+    toolDiscipline: { calls: number; results: number; unmatchedCalls: number; orphanResults: number };
+    outcomeSignals: { errorRecords: number; incomplete: boolean; coverage: EvidenceState };
+    durationMs: number;
+    semanticReviewRecommended: boolean;
+    reasonCodes: string[];
+  } | null;
   redactionReceipt: {
     policyRevision: string;
     disclosureClass: 'automatic_capsule';
+    disclosureMode: 'metadata_only' | 'local_analysis' | 'customer_authorized_content';
+    consentReceiptId: string | null;
     disclosedClasses: string[];
     excludedClasses: string[];
     classes: string[];
@@ -160,6 +175,57 @@ const AUTOMATIC_DISCLOSED_CLASSES = [
   'local_evidence_descriptor',
 ] as const;
 
+function disclosureMode(policy: OrganizationPolicy): TrajectoryCapsule['automaticDisclosureMode'] {
+  return policy.evidence.automaticDisclosure?.mode ?? 'local_analysis';
+}
+
+function isErrorRecord(record: SourceRecord): boolean {
+  if (/(error|failed|failure|exception|timeout|cancelled)/i.test(record.kind)) return true;
+  const nativeType = String(record.native.type ?? record.native.kind ?? '');
+  const status = String(record.native.status ?? record.native.outcome ?? '');
+  return /(error|failed|failure|exception|timeout|cancelled)/i.test(`${nativeType} ${status}`);
+}
+
+function buildLocalAnalysis(session: ProviderSession): NonNullable<TrajectoryCapsule['localAnalysis']> {
+  const eventKinds: Record<string, number> = {};
+  let totalBytes = 0;
+  let maximumBytes = 0;
+  let calls = 0;
+  let results = 0;
+  let errorRecords = 0;
+  for (const record of session.records) {
+    const kind = safeSourceKind(record);
+    eventKinds[kind] = (eventKinds[kind] ?? 0) + 1;
+    const bytes = nativeRecordBytes(record);
+    totalBytes += bytes;
+    maximumBytes = Math.max(maximumBytes, bytes);
+    if (record.kind === 'tool_call' || /tool.*call/i.test(kind)) calls += 1;
+    if (record.kind === 'tool_result' || /tool.*(result|output)/i.test(kind)) results += 1;
+    if (isErrorRecord(record)) errorRecords += 1;
+  }
+  const unmatchedCalls = Math.max(0, calls - results);
+  const orphanResults = Math.max(0, results - calls);
+  const incomplete = session.coverage !== 'observed';
+  const reasonCodes = [
+    ...(errorRecords > 0 ? ['runtime_failure_signal'] : []),
+    ...(unmatchedCalls > 0 ? ['tool_call_without_result'] : []),
+    ...(orphanResults > 0 ? ['tool_result_without_call'] : []),
+    ...(incomplete ? ['partial_evidence'] : []),
+  ];
+  return {
+    schema: 'dharma.local-trajectory-analysis/v1',
+    analyzer: 'deterministic',
+    recordCount: session.records.length,
+    recordBytes: { total: totalBytes, maximum: maximumBytes },
+    eventKinds,
+    toolDiscipline: { calls, results, unmatchedCalls, orphanResults },
+    outcomeSignals: { errorRecords, incomplete, coverage: session.coverage },
+    durationMs: Math.max(0, Date.parse(session.endedAt) - Date.parse(session.startedAt)),
+    semanticReviewRecommended: reasonCodes.length > 0,
+    reasonCodes,
+  };
+}
+
 function safeSourceKind(record: SourceRecord): string {
   const value = String(record.native.type ?? record.native.kind ?? 'unknown');
   return /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : 'unknown';
@@ -217,20 +283,19 @@ export function buildTrajectoryCapsule(input: {
   const seen = new Set<string>();
   const events: AgentEvent[] = [];
   const excludedClasses = new Set<string>();
+  const mode = disclosureMode(input.policy);
   let automaticInputBytes = 0;
   let automaticOutputBytes = 0;
   for (const [index, record] of input.session.records.entries()) {
-    // Inspect locally for redaction accounting, but never copy native provider
-    // records into the automatic capsule. Content expansion is a separate,
-    // explicitly authorized disclosure flow.
-    redactValue(record.native, stats, '', {
+    const redactedNative = redactValue(record.native, stats, '', {
       pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
     });
-    const payload = {
+    const payload: Record<string, unknown> & { recordBytes: number } = {
       nativeKind: safeSourceKind(record),
       recordBytes: nativeRecordBytes(record),
-      contentOmitted: true,
+      contentOmitted: mode !== 'customer_authorized_content',
     };
+    if (mode === 'customer_authorized_content') payload.nativeProviderPayload = redactedNative;
     automaticInputBytes += payload.recordBytes;
     automaticOutputBytes += Buffer.byteLength(canonicalize(payload));
     excludedContentClasses(record).forEach((value) => excludedClasses.add(value));
@@ -282,6 +347,7 @@ export function buildTrajectoryCapsule(input: {
     timeRange: { start: input.session.startedAt, end: input.session.endedAt },
     status: input.session.coverage === 'observed' ? 'completed' as const : 'partial' as const,
     evidenceMode: input.policy.evidence.defaultMode,
+    automaticDisclosureMode: mode,
     coverage: {
       state: input.session.coverage === 'observed' ? 'observed' as const : 'partial' as const,
       admittedSessions: 1,
@@ -295,18 +361,30 @@ export function buildTrajectoryCapsule(input: {
       contentId: input.rawContentId,
       kind: input.rawKind || 'raw-provider-session',
       bytes: input.rawBytes,
-      uploaded: false,
+      uploaded: mode === 'customer_authorized_content',
       availableLocally: true,
       mimeType: 'application/x-ndjson',
       normalizedPath: null,
     }],
     validationResults: [],
+    localAnalysis: mode === 'metadata_only' ? null : buildLocalAnalysis(input.session),
     redactionReceipt: {
       policyRevision: input.policy.revision,
       disclosureClass: 'automatic_capsule' as const,
-      disclosedClasses: [...AUTOMATIC_DISCLOSED_CLASSES].sort(),
-      excludedClasses: [...excludedClasses].sort(),
-      classes: [...new Set([...stats.classes, 'automatic_content_omission'])].sort(),
+      disclosureMode: mode,
+      consentReceiptId: input.policy.evidence.automaticDisclosure?.consentReceiptId ?? null,
+      disclosedClasses: [
+        ...AUTOMATIC_DISCLOSED_CLASSES,
+        ...(mode === 'metadata_only' ? [] : ['local_deterministic_analysis'] as const),
+        ...(mode === 'customer_authorized_content' ? ['native_provider_payload'] as const : []),
+      ].sort(),
+      excludedClasses: mode === 'customer_authorized_content'
+        ? ['detected_secret_values', 'configured_excluded_paths']
+        : [...excludedClasses].sort(),
+      classes: [...new Set([
+        ...stats.classes,
+        ...(mode === 'customer_authorized_content' ? ['customer_authorized_content'] : ['automatic_content_omission']),
+      ])].sort(),
       redactedValues: stats.redactedValues,
       excludedPaths: stats.excludedPaths,
       inputBytes: automaticInputBytes,

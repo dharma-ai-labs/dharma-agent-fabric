@@ -46,6 +46,26 @@
             "incident_capture"
           ]
         },
+        "automaticDisclosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["metadata_only", "local_analysis", "customer_authorized_content"]
+            },
+            "consentReceiptId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "allowedContentClasses": {
+              "type": "array",
+              "items": { "const": "native_provider_payload" },
+              "uniqueItems": true
+            }
+          }
+        },
         "registeredWorkspaceOnly": {
           "const": true
         },

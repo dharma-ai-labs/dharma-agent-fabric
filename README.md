@@ -14,7 +14,8 @@ localhost shell or unrestricted file interface.
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI/Desktop | available | available when installed | unavailable | available when installed | next session |
 | Claude Code | available | available when installed | unavailable | available when installed | next session |
-| Agy 1.0.1 | partial | read-only partial | partial | available when installed | next session |
+| Agy 1.0.1 | partial | read-only partial | partial | available when installed | plugin enable + next session |
+| Pi | unavailable | unavailable | unavailable | unavailable | unavailable |
 | Other Better Harness hosts | evidence adapter work | unavailable | unavailable | unavailable | unavailable |
 
 Each capability is verified independently. Evidence discovery does not imply
@@ -52,13 +53,18 @@ dharma skills verify --provider codex --workspace .
 Start a new Codex session from the connected repository after verification so
 Codex reloads its Skill inventory. The Skill is named `dharma-agent-fabric`.
 
-After approval, the CLI prints the exact commands to preview and sync a
-metadata-only automatic capsule and start the outbound relay. Prompt text,
-responses, instructions, tool I/O, execution configuration, token metadata,
-encrypted reasoning, and full raw trajectories remain encrypted in the local
-vault unless a separate bounded evidence request is explicitly approved. A
-customer can revoke the device from the dashboard without gaining or granting
-inbound shell access.
+After approval, the CLI prints the exact commands to preview and sync an
+automatic capsule and start the outbound relay. The initial organization policy
+uses `local_analysis`: prompts, responses, instructions, tool I/O, execution
+configuration, token metadata, encrypted reasoning, and full raw trajectories
+remain encrypted locally, while deterministic counts, timing, coverage,
+failure signals, and tool-discipline metadata are delivered to HQ.
+
+An organization can choose `metadata_only`, `local_analysis`, or
+`customer_authorized_content`. The third mode may be the organization's default
+after an administrator records a durable consent receipt and content-class
+grant. It remains secret-redacted and size-bounded. This is an organization
+policy, never an undisclosed global default.
 
 The versioned TypeScript client is `@dharma-ai-labs/agent-fabric-sdk`; the Python
 client is `dharma-agent-fabric-sdk`. Both call the organization-scoped Dharma
@@ -105,7 +111,8 @@ concurrent device connections, 10,000 relayed request envelopes, and a
 
 ## Security boundary
 
-- raw provider evidence stays encrypted locally;
+- raw provider evidence stays encrypted locally unless the organization has an
+  auditable customer-authorized content policy;
 - only registered workspaces are eligible;
 - secrets, credentials, private keys, excluded paths, and unrelated sessions
   are removed before capsule creation;
