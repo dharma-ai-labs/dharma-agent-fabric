@@ -159,7 +159,8 @@ dharma workspace add <path>
 dharma workspace pause <id>
 dharma workspace remove <id> --preserve-vault
 dharma evidence preview --workspace <id> --session <id>
-dharma evidence sync --workspace <id>
+dharma workspace sync --workspace <id> --api-url <url> --apply
+dharma evidence sync --workspace <id> --provider <id> --policy <path>
 dharma evidence run-request --policy <policy.json> --workspace-id <id>
 dharma evidence disclosures --workspace <id>
 dharma tasks list

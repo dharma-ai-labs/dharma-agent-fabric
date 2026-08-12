@@ -94,6 +94,11 @@ test('customer-authorized content includes redacted native payload under a conse
         allowedContentClasses: ['native_provider_payload'],
       },
     },
+    serverAuthorization: {
+      schema: 'dharma.workspace-policy-authorization/v1', organizationId: 'org_test', workspaceId: 'workspace_test',
+      policy: { revision: 'rev_1', evidence: { automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent_org_test_20260812', allowedContentClasses: ['native_provider_payload'] }, maximumCapsuleBytes: 100_000, maximumDailyUploadBytes: 1_000_000 } },
+      issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', signature: 'test', keyVersion: 'test',
+    },
   };
   const capsule = buildTrajectoryCapsule({
     organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
@@ -111,13 +116,50 @@ test('customer-authorized content includes redacted native payload under a conse
   const encoded = JSON.stringify(capsule);
   assert.equal(capsule.automaticDisclosureMode, 'customer_authorized_content');
   assert.equal(capsule.redactionReceipt.consentReceiptId, 'consent_org_test_20260812');
-  assert.equal(capsule.contentIndex[0]?.uploaded, true);
+  assert.equal(capsule.contentIndex[0]?.uploaded, false);
   assert.equal(capsule.redactionReceipt.classes.includes('customer_authorized_content'), true);
   assert.equal(capsule.redactionReceipt.classes.includes('automatic_content_omission'), false);
   assert.equal(encoded.includes('Analyze checkout failure'), true);
   assert.equal(encoded.includes('secret-secret-secret'), false);
   assert.equal(encoded.includes('/home/alice'), false);
   assert.equal(encoded.includes('[REDACTED:sensitive_field]'), true);
+});
+
+test('customer-authorized content omits records that reference configured excluded paths', () => {
+  const authorizedPolicy: OrganizationPolicy = {
+    ...policy,
+    evidence: {
+      ...policy.evidence,
+      excludePaths: ['private/**'],
+      automaticDisclosure: {
+        mode: 'customer_authorized_content',
+        consentReceiptId: 'consent_org_test_20260812',
+        allowedContentClasses: ['native_provider_payload'],
+      },
+    },
+    serverAuthorization: {
+      schema: 'dharma.workspace-policy-authorization/v1', organizationId: 'org_test', workspaceId: 'workspace_test',
+      policy: { revision: 'rev_1', evidence: { automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent_org_test_20260812', allowedContentClasses: ['native_provider_payload'] }, maximumCapsuleBytes: 100_000, maximumDailyUploadBytes: 1_000_000 } },
+      issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', signature: 'test', keyVersion: 'test',
+    },
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'7'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'excluded_path', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_result', source_path: 'private/customer-record.json', text: 'must not synchronize' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('must not synchronize'), false);
+  assert.equal(encoded.includes('customer-record.json'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(encoded.includes('configured_excluded_path'), true);
 });
 
 test('automatic capsules allowlist metadata and omit Codex content-bearing fields', () => {

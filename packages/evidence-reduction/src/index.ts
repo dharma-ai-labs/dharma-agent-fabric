@@ -102,6 +102,27 @@ function deterministicUuid(value: string): string {
 
 type RedactionOptions = { pseudonymizeIdentity?: boolean };
 
+function globPattern(pattern: string): RegExp {
+  const normalized = pattern.replaceAll('\\', '/').replace(/^\.\//, '');
+  const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replaceAll('**', '\u0000').replaceAll('*', '[^/]*').replaceAll('\u0000', '.*');
+  return new RegExp(`(?:^|/)${escaped}$`, 'i');
+}
+
+function referencesExcludedPath(value: unknown, excludePaths: string[], key = '', depth = 0): boolean {
+  if (depth > 10) return false;
+  if (typeof value === 'string' && /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(key)) {
+    const normalized = value.replaceAll('\\', '/').replace(/^\.\//, '');
+    return excludePaths.some((pattern) => globPattern(pattern).test(normalized));
+  }
+  if (Array.isArray(value)) return value.some((item) => referencesExcludedPath(item, excludePaths, key, depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .some(([childKey, child]) => referencesExcludedPath(child, excludePaths, childKey, depth + 1));
+  }
+  return false;
+}
+
 const LOCAL_PATH_PATTERNS = [
   /\/(?:home|Users)\/[A-Za-z0-9._-]+(?:\/[^\s"'<>|,}\]]+)*/g,
   /\b[A-Za-z]:\\{1,}[^\s"'<>|,}\]]+/g,
@@ -302,9 +323,16 @@ export function buildTrajectoryCapsule(input: {
   let automaticInputBytes = 0;
   let automaticOutputBytes = 0;
   for (const [index, record] of input.session.records.entries()) {
-    const redactedNative = redactValue(record.native, stats, '', {
-      pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
-    });
+    const excludedPath = referencesExcludedPath(record.native, input.policy.evidence.excludePaths);
+    if (excludedPath) {
+      stats.classes.add('configured_excluded_path');
+      stats.excludedPaths += 1;
+    }
+    const redactedNative = excludedPath
+      ? { contentOmitted: true, omissionReason: 'configured_excluded_path' }
+      : redactValue(record.native, stats, '', {
+        pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
+      });
     const payload: Record<string, unknown> & { recordBytes: number } = {
       nativeKind: safeSourceKind(record),
       recordBytes: nativeRecordBytes(record),
@@ -376,7 +404,7 @@ export function buildTrajectoryCapsule(input: {
       contentId: input.rawContentId,
       kind: input.rawKind || 'raw-provider-session',
       bytes: input.rawBytes,
-      uploaded: mode === 'customer_authorized_content',
+      uploaded: false,
       availableLocally: true,
       mimeType: 'application/x-ndjson',
       normalizedPath: null,

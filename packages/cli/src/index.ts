@@ -17,7 +17,7 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.8';
+const VERSION = '0.1.9';
 const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -86,6 +86,7 @@ function configPath() { return resolve(dharmaHome(), 'device.json'); }
 function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollment.json'); }
 function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-state.json'); }
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
+function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evidence-upload-ledger.json'); }
 
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
@@ -124,17 +125,40 @@ async function syncPendingRetentionCapsules(
     markCapsuleSynced(trajectoryId: string, revision: number): void;
   },
   fabric: AgentFabricClient,
+  policy: OrganizationPolicy,
 ): Promise<number> {
   let synced = 0;
   for (;;) {
     const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
     if (pending.length === 0) return synced;
     for (const item of pending) {
+      await reserveDailyContentUpload(item.capsule, policy);
       await fabric.syncTrajectory(item.capsule);
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
   }
+}
+
+export async function reserveDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
+  const capsuleHash = String(capsule.capsuleHash || '');
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) throw new Error('Content capsule hash is invalid.');
+  const bytes = Buffer.byteLength(canonicalize(capsule));
+  const day = new Date().toISOString().slice(0, 10);
+  let ledger: { day: string; totalBytes: number; capsuleHashes: string[] } = { day, totalBytes: 0, capsuleHashes: [] };
+  try {
+    const stored = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as typeof ledger;
+    if (stored.day === day && Number.isSafeInteger(stored.totalBytes) && Array.isArray(stored.capsuleHashes)) ledger = stored;
+  } catch {}
+  if (ledger.capsuleHashes.includes(capsuleHash)) return;
+  if (ledger.totalBytes + bytes > policy.evidence.maximumDailyUploadBytes) {
+    throw new Error('Organization daily content upload limit would be exceeded.');
+  }
+  ledger.totalBytes += bytes;
+  ledger.capsuleHashes.push(capsuleHash);
+  await mkdir(dirname(evidenceUploadLedgerPath()), { recursive: true, mode: 0o700 });
+  await writeFile(evidenceUploadLedgerPath(), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
 }
 
 export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
@@ -159,7 +183,10 @@ export async function materializeWorkspacePolicy(input: {
   workspace: string;
   organizationId: string;
   revision: string;
-  serverPolicy?: unknown;
+  serverPolicyAuthorization?: unknown;
+  serverPublicKeyEd25519?: string;
+  workspaceId?: string;
+  dryRun?: boolean;
 }) {
   const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
   try {
@@ -209,22 +236,63 @@ export async function materializeWorkspacePolicy(input: {
     retention: { rawLocalDays: 30, capsuleServerDays: 90 },
     budgets: { dailyAnalysisCents: 1_000 },
   };
-  if (input.serverPolicy !== undefined && input.serverPolicy !== null) {
-    policy = applyServerEvidencePolicy(policy, input.serverPolicy);
+  const existingPath = resolve(input.workspace, '.dharma', 'approved-policy.json');
+  if (await pathExists(existingPath)) {
+    const existing = await loadOrganizationPolicy(existingPath);
+    if (existing.organizationId === input.organizationId) policy = existing;
+  }
+  if (input.serverPolicyAuthorization !== undefined && input.serverPolicyAuthorization !== null) {
+    if (!input.serverPublicKeyEd25519 || !input.workspaceId) {
+      throw new Error('Server policy authorization requires the enrolled server key and workspace ID.');
+    }
+    policy = applyServerEvidencePolicy(
+      policy,
+      input.serverPolicyAuthorization,
+      input.serverPublicKeyEd25519,
+      input.organizationId,
+      input.workspaceId,
+    );
   }
   assertPolicy(policy);
   const relativePath = '.dharma/approved-policy.json';
-  await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
-  await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
-  return { relativePath, policy };
+  if (!input.dryRun) {
+    await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
+    await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+  }
+  return { relativePath, policy, applied: !input.dryRun };
 }
 
-export function applyServerEvidencePolicy(base: OrganizationPolicy, value: unknown): OrganizationPolicy {
+export function applyServerEvidencePolicy(
+  base: OrganizationPolicy,
+  value: unknown,
+  serverPublicKeyEd25519: string,
+  organizationId: string,
+  workspaceId: string,
+  now = new Date(),
+): OrganizationPolicy {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Server workspace policy must be an object.');
+    throw new Error('Server workspace policy authorization must be an object.');
   }
-  const fragment = value as Record<string, unknown>;
-  const evidence = fragment.evidence;
+  const envelope = value as Record<string, unknown>;
+  const { signature, keyVersion: _keyVersion, ...unsigned } = envelope;
+  if (envelope.schema !== 'dharma.workspace-policy-authorization/v1'
+    || envelope.organizationId !== organizationId
+    || envelope.workspaceId !== workspaceId
+    || typeof signature !== 'string'
+    || !Number.isFinite(Date.parse(String(envelope.issuedAt || '')))
+    || Date.parse(String(envelope.expiresAt || '')) <= now.getTime()) {
+    throw new Error('Server workspace policy authorization is invalid or expired.');
+  }
+  const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: serverPublicKeyEd25519 }, format: 'jwk' });
+  if (!verifyCanonicalObject(unsigned, signature, serverPublicKey)) {
+    throw new Error('Server workspace policy authorization signature is invalid.');
+  }
+  const fragment = envelope.policy;
+  if (!fragment || typeof fragment !== 'object' || Array.isArray(fragment)) {
+    throw new Error('Server workspace policy authorization has no policy.');
+  }
+  const policyFragment = fragment as Record<string, unknown>;
+  const evidence = policyFragment.evidence;
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
     throw new Error('Server workspace policy evidence must be an object.');
   }
@@ -234,7 +302,7 @@ export function applyServerEvidencePolicy(base: OrganizationPolicy, value: unkno
     throw new Error('Server workspace policy disclosure grant is required.');
   }
   const automaticDisclosure = disclosure as Record<string, unknown>;
-  const localAnalysis = automaticDisclosure.mode === 'local_analysis'
+  const noContent = ['metadata_only', 'local_analysis'].includes(String(automaticDisclosure.mode))
     && automaticDisclosure.consentReceiptId === undefined
     && automaticDisclosure.allowedContentClasses === undefined;
   const authorizedContent = automaticDisclosure.mode === 'customer_authorized_content'
@@ -242,10 +310,10 @@ export function applyServerEvidencePolicy(base: OrganizationPolicy, value: unkno
     && Array.isArray(automaticDisclosure.allowedContentClasses)
     && automaticDisclosure.allowedContentClasses.length === 1
     && automaticDisclosure.allowedContentClasses[0] === 'native_provider_payload';
-  if (!localAnalysis && !authorizedContent) {
+  if (!noContent && !authorizedContent) {
     throw new Error('Server workspace policy contains an invalid content disclosure grant.');
   }
-  const revision = fragment.revision;
+  const revision = policyFragment.revision;
   const maximumCapsuleBytes = Number(grant.maximumCapsuleBytes);
   const maximumDailyUploadBytes = Number(grant.maximumDailyUploadBytes);
   if (typeof revision !== 'string' || !revision.trim()
@@ -262,10 +330,11 @@ export function applyServerEvidencePolicy(base: OrganizationPolicy, value: unkno
         mode: 'customer_authorized_content',
         consentReceiptId: String(automaticDisclosure.consentReceiptId),
         allowedContentClasses: ['native_provider_payload'],
-      } : { mode: 'local_analysis' },
+      } : { mode: automaticDisclosure.mode as 'metadata_only' | 'local_analysis' },
       maximumCapsuleBytes,
       maximumDailyUploadBytes,
     },
+    serverAuthorization: envelope as OrganizationPolicy['serverAuthorization'],
   };
   assertPolicy(policy);
   return policy;
@@ -466,7 +535,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   }
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policyPath = required(flags, 'policy');
   const adapter = providerAdapter(provider);
   if (!adapter) throw new Error(`Unsupported capture provider: ${provider}`);
   const root = flags.get('source-root');
@@ -490,6 +559,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+  const policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
   const vault = await LocalVault.open({
@@ -500,7 +570,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   try {
     const capsules = [];
     const syncResults = [];
-    if (fabric) await syncPendingRetentionCapsules(vault, fabric);
+    if (fabric) await syncPendingRetentionCapsules(vault, fabric, policy);
     for (const selected of batch ? sessions : [session]) {
       const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       const rawContentId = sha256(rawTurn);
@@ -541,7 +611,10 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
         });
       }
       capsules.push(capsule);
-      if (fabric) syncResults.push(await fabric.syncTrajectory(capsule));
+      if (fabric) {
+        await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
+        syncResults.push(await fabric.syncTrajectory(capsule));
+      }
     }
     const output = flags.get('output');
     if (!batch) {
@@ -601,7 +674,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     const registered = (await registry()).find((item) => item.path === workspace);
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
-    const policy = await loadOrganizationPolicy(policyPath);
+    const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
     const capsules = sessions.map((session) => {
       const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       return buildTrajectoryCapsule({
@@ -690,10 +763,10 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
   const workspaceId = positional[0] || required(flags, 'workspace-id');
   const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
   if (!item) throw new Error('Workspace is not registered locally.');
-  return syncWorkspacePolicy(await client(), item, required(flags, 'policy-revision'));
+  return syncWorkspacePolicy(await client(), item, required(flags, 'policy-revision'), flags.has('apply'));
 }
 
-async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string) {
+async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string, apply = true) {
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
@@ -704,7 +777,10 @@ async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRec
     workspace: item.path,
     organizationId: item.organizationId,
     revision: String((response.workspace as Record<string, unknown> | undefined)?.policyRevision || policyRevision),
-    serverPolicy: response.organizationPolicy,
+    serverPolicyAuthorization: response.organizationPolicyAuthorization,
+    serverPublicKeyEd25519: (await readDeviceConfig())?.serverPublicKeyEd25519,
+    workspaceId: item.workspaceId,
+    dryRun: !apply,
   });
   return {
     ...response,
@@ -712,6 +788,7 @@ async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRec
       path: generated.relativePath,
       revision: generated.policy.revision,
       disclosureMode: generated.policy.evidence.automaticDisclosure?.mode || 'local_analysis',
+      applied: generated.applied,
     },
   };
 }
@@ -719,6 +796,26 @@ async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRec
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
   try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
   catch { return null; }
+}
+
+async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
+  const policy = await loadOrganizationPolicy(path);
+  if (policy.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') return policy;
+  const config = await readDeviceConfig();
+  const authorizedWorkspaceId = workspaceId || policy.serverAuthorization?.workspaceId;
+  const registered = authorizedWorkspaceId
+    ? (await registry()).some((item) => item.workspaceId === authorizedWorkspaceId && item.organizationId === policy.organizationId)
+    : false;
+  if (!config || policy.organizationId !== config.organizationId || !authorizedWorkspaceId || !registered) {
+    throw new Error('Content policy does not match an enrolled organization and workspace.');
+  }
+  return applyServerEvidencePolicy(
+    { ...structuredClone(policy), evidence: { ...structuredClone(policy.evidence), automaticDisclosure: { mode: 'local_analysis' } }, serverAuthorization: undefined },
+    policy.serverAuthorization,
+    config.serverPublicKeyEd25519,
+    config.organizationId,
+    authorizedWorkspaceId,
+  );
 }
 
 export async function installRepositoryAgentFabricSkill(input: {
@@ -831,10 +928,12 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     registered = (await registry()).find((item) => item.path === workspace);
   }
   if (!registered) throw new Error('Workspace registration failed.');
-  const synced = await workspaceSync(new Map([['policy-revision', policyRevision]]), [registered.workspaceId]) as Record<string, unknown>;
+  const synced = await workspaceSync(new Map<string, string | boolean>([
+    ['policy-revision', policyRevision], ['apply', true],
+  ]), [registered.workspaceId]) as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
-  const generatedPolicy = await loadOrganizationPolicy(resolve(workspace, '.dharma', 'approved-policy.json'));
+  const generatedPolicy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);
   const installed = await installRepositoryAgentFabricSkill({
     workspace,
     hqUrl,
@@ -882,6 +981,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
   const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8'));
+  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+  await reserveDailyContentUpload(capsule, policy);
   return (await client()).syncTrajectory(capsule);
 }
 
@@ -940,7 +1041,7 @@ async function processEvidenceRequest(
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
-    await syncPendingRetentionCapsules(vault, fabric);
+    await syncPendingRetentionCapsules(vault, fabric, policy);
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
     const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
     const available = new Set(contentIndex.flatMap((item) => {
@@ -1010,7 +1111,7 @@ async function processEvidenceRequest(
 }
 
 async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
   return processEvidenceRequest(await client(), policy, typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
 }
 
@@ -1069,7 +1170,7 @@ async function executeOneTask(
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
   return executeOneTask(await client(), policy, Number(flags.get('lease-seconds') || 120));
 }
 
@@ -1295,7 +1396,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
   const policyPath = resolve(required(flags, 'policy'));
-  let policy = await loadOrganizationPolicy(policyPath);
+  let policy = await loadVerifiedWorkspacePolicy(policyPath);
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
@@ -1314,9 +1415,9 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       if (Date.now() >= nextPolicyRefreshAt) {
         for (const workspace of (await registry()).filter((item) => item.organizationId === policy.organizationId)) {
           try {
-            await syncWorkspacePolicy(fabric, workspace, policy.revision);
+            await syncWorkspacePolicy(fabric, workspace, policy.revision, true);
             if (policyPath === resolve(workspace.path, '.dharma', 'approved-policy.json')) {
-              policy = await loadOrganizationPolicy(policyPath);
+              policy = await loadVerifiedWorkspacePolicy(policyPath, workspace.workspaceId);
             }
           } catch {}
         }

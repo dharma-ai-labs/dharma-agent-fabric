@@ -16,13 +16,11 @@
     "timeRange",
     "status",
     "evidenceMode",
-    "automaticDisclosureMode",
     "coverage",
     "events",
     "contentIndex",
     "redactionReceipt",
     "localEvidenceAvailable",
-    "localAnalysis",
     "capsuleHash",
     "createdAt"
   ],

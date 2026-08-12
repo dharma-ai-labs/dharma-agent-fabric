@@ -40,6 +40,27 @@ export interface OrganizationPolicy {
   };
   retention: Record<string, unknown>;
   budgets: Record<string, unknown>;
+  serverAuthorization?: {
+    schema: 'dharma.workspace-policy-authorization/v1';
+    organizationId: string;
+    workspaceId: string;
+    policy: {
+      revision: string;
+      evidence: {
+        automaticDisclosure: {
+          mode: 'metadata_only' | 'local_analysis' | 'customer_authorized_content';
+          consentReceiptId?: string;
+          allowedContentClasses?: Array<'native_provider_payload'>;
+        };
+        maximumCapsuleBytes: number;
+        maximumDailyUploadBytes: number;
+      };
+    };
+    issuedAt: string;
+    expiresAt: string;
+    signature: string;
+    keyVersion: string;
+  };
 }
 
 export const MAXIMUM_TRAJECTORY_CAPSULE_BYTES = 1_048_576;
@@ -68,6 +89,9 @@ export function assertPolicy(policy: OrganizationPolicy): void {
     }
     if (!disclosure.allowedContentClasses?.includes('native_provider_payload')) {
       throw new Error('customer_authorized_content requires an explicit native_provider_payload content grant.');
+    }
+    if (policy.serverAuthorization?.schema !== 'dharma.workspace-policy-authorization/v1') {
+      throw new Error('customer_authorized_content requires a server-signed workspace authorization.');
     }
   } else if (disclosure?.consentReceiptId || disclosure?.allowedContentClasses?.length) {
     throw new Error('Content grants are only valid for customer_authorized_content.');

@@ -25,6 +25,21 @@
     "revision": {
       "type": "string"
     },
+    "serverAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "organizationId", "workspaceId", "policy", "issuedAt", "expiresAt", "signature", "keyVersion"],
+      "properties": {
+        "schema": { "const": "dharma.workspace-policy-authorization/v1" },
+        "organizationId": { "type": "string", "minLength": 1 },
+        "workspaceId": { "type": "string", "format": "uuid" },
+        "policy": { "type": "object" },
+        "issuedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "signature": { "type": "string", "minLength": 1 },
+        "keyVersion": { "type": "string", "minLength": 1 }
+      }
+    },
     "evidence": {
       "type": "object",
       "additionalProperties": false,

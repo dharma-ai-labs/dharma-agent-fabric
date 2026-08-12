@@ -58,6 +58,11 @@ test('content disclosure requires an explicit customer consent receipt and class
         allowedContentClasses: ['native_provider_payload'],
       },
     },
+    serverAuthorization: {
+      schema: 'dharma.workspace-policy-authorization/v1', organizationId: 'org_test', workspaceId: 'workspace_test',
+      policy: { revision: 'rev_1', evidence: { automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent_org_test_20260812', allowedContentClasses: ['native_provider_payload'] }, maximumCapsuleBytes: 1_000_000, maximumDailyUploadBytes: 5_000_000 } },
+      issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', signature: 'test', keyVersion: 'test',
+    },
   }));
 });
 
