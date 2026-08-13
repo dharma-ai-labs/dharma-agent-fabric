@@ -28,7 +28,7 @@ import {
   verifyAgentFabricSkillInstallation,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
-import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 
 const execFileAsync = promisify(execFile);
 
@@ -105,7 +105,7 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.9', enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: '0.1.10', enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -312,8 +312,12 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
   try {
     const base = await materializeWorkspacePolicy({ workspace: home, organizationId: 'org_northstar', revision: 'content' });
     const policy = { ...base.policy, evidence: { ...base.policy.evidence, maximumDailyUploadBytes: 700 } };
-    const first = { automaticDisclosureMode: 'customer_authorized_content', capsuleHash: `sha256:${'1'.repeat(64)}`, text: 'x'.repeat(300) };
-    const second = { automaticDisclosureMode: 'customer_authorized_content', capsuleHash: `sha256:${'2'.repeat(64)}`, text: 'y'.repeat(300) };
+    const signCapsule = (unsigned: Record<string, unknown>) => ({
+      ...unsigned,
+      capsuleHash: `sha256:${createHash('sha256').update(canonicalize(unsigned)).digest('hex')}`,
+    });
+    const first = signCapsule({ automaticDisclosureMode: 'customer_authorized_content', text: 'x'.repeat(300) });
+    const second = signCapsule({ automaticDisclosureMode: 'customer_authorized_content', text: 'y'.repeat(300) });
     await reserveDailyContentUpload(first, policy);
     await reserveDailyContentUpload(first, policy);
     await assert.rejects(() => reserveDailyContentUpload(second, policy), /daily content upload limit/i);

@@ -27,9 +27,10 @@ function customerAuthorizedPolicy(excludePaths: string[] = []): OrganizationPoli
       maximumExpansionBytes: 100_000, excludePaths, pseudonymizeIdentity: true as const,
     },
   };
+  const now = Date.now();
   const unsigned = {
     schema: 'dharma.workspace-policy-authorization/v1' as const, organizationId: 'org_test', workspaceId: 'workspace_test',
-    policy: signedPolicy, issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', keyVersion: 'test',
+    policy: signedPolicy, issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), keyVersion: 'test',
   };
   const authorizedPolicy: OrganizationPolicy = {
     ...policy,
@@ -50,7 +51,7 @@ function customerAuthorizedPolicy(excludePaths: string[] = []): OrganizationPoli
   const publicJwk = keys.publicKey.export({ format: 'jwk' });
   return verifyServerAuthorizedPolicy({
     policy: authorizedPolicy, publicKeyEd25519: publicJwk.x!, organizationId: 'org_test', workspaceId: 'workspace_test',
-    now: new Date('2026-08-12T12:00:00.000Z'),
+    now: new Date(now),
   });
 }
 

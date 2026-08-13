@@ -58,10 +58,11 @@ test('content disclosure requires an explicit customer consent receipt, class gr
   const { generateKeyPairSync } = await import('node:crypto');
   const { signCanonicalObject } = await import('@dharma-ai-labs/agent-fabric-contracts');
   const keys = generateKeyPairSync('ed25519');
+  const now = Date.now();
   const unsigned = {
     schema: 'dharma.workspace-policy-authorization/v1' as const, organizationId: 'org_test', workspaceId: 'workspace_test',
     policy: { revision: 'rev_1', evidence: { automaticDisclosure: { mode: 'customer_authorized_content' as const, consentReceiptId: 'consent_org_test_20260812', allowedContentClasses: ['native_provider_payload' as const] }, maximumCapsuleBytes: 1_000_000, maximumDailyUploadBytes: 5_000_000, maximumExpansionBytes: 100_000, excludePaths: ['**/.env'], pseudonymizeIdentity: true as const } },
-    issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', keyVersion: 'test',
+    issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), keyVersion: 'test',
   };
   const authorizedPolicy: OrganizationPolicy = {
     ...policy,
@@ -88,7 +89,7 @@ test('content disclosure requires an explicit customer consent receipt, class gr
     publicKeyEd25519: publicJwk.x!,
     organizationId: 'org_test',
     workspaceId: 'workspace_test',
-    now: new Date('2026-08-12T12:00:00.000Z'),
+    now: new Date(now),
   }));
   assert.doesNotThrow(() => assertPolicy(authorizedPolicy));
   authorizedPolicy.evidence.excludePaths.push('private/**');
