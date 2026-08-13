@@ -19,7 +19,8 @@
     "authorityDecisionId",
     "createdAt",
     "expiresAt",
-    "nonce"
+    "nonce",
+    "signature"
   ],
   "properties": {
     "schema": {
