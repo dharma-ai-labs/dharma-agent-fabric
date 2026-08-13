@@ -122,7 +122,7 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
   if (typeof value === 'string') {
     const normalizedKey = normalizedFieldName(key);
     const pathBearingKey = /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedKey);
-    const serializedPayloadKey = /(?:^|_)(?:arguments?|args|command|cmd|input|payload|body|data)(?:$|_)/i.test(normalizedKey);
+    const serializedPayloadKey = /(?:^|_)(?:arguments?|args|command|cmd|input|payload|body|data|message|content)(?:$|_)/i.test(normalizedKey);
     if (pathBearingKey || serializedPayloadKey) {
       const normalized = value.replaceAll('\\', '/');
       const candidates = [

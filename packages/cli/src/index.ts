@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,6 +129,9 @@ async function syncPendingRetentionCapsules(
   fabric: AgentFabricClient,
   policy: OrganizationPolicy,
 ): Promise<number> {
+  // The caller must obtain this policy from an authoritative control-plane
+  // refresh. An expired policy pauses the queue instead of mutating it.
+  assertPolicy(policy);
   let synced = 0;
   for (;;) {
     const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
@@ -143,10 +146,10 @@ async function syncPendingRetentionCapsules(
       try {
         assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
       } catch {
-        // Authorization failures can be temporary (for example, a control-plane
-        // refresh outage). Retain the encrypted local queue until a fresh signed
-        // policy explicitly authorizes or supersedes it.
-        return synced;
+        // A successfully refreshed policy is authoritative. Retire only the
+        // superseded capsule so it cannot permanently block later valid work.
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
+        continue;
       }
       await reserveDailyContentUpload(item.capsule, policy);
       await fabric.syncTrajectory(item.capsule);
@@ -233,17 +236,18 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
   }
 }
 
-async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
-  const lockPath = `${evidenceUploadLedgerPath()}.lock`;
+async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessage: string): Promise<() => Promise<void>> {
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + 5_000;
-  let handle;
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
+    const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
     try {
-      handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(`${process.pid}\n`);
-      break;
+      await writeFile(candidate, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
+      await link(candidate, lockPath);
+      await unlink(candidate);
+      return async () => { await unlink(lockPath).catch(() => undefined); };
     } catch (error) {
+      await unlink(candidate).catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
         const owner = Number((await readFile(lockPath, 'utf8')).trim());
@@ -255,17 +259,28 @@ async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T
               continue;
             }
           }
+        } else {
+          const metadata = await stat(lockPath);
+          if (Date.now() - metadata.mtimeMs >= timeoutMs) {
+            await unlink(lockPath);
+            continue;
+          }
         }
       } catch {}
-      if (Date.now() >= deadline) throw new Error('Timed out waiting for the evidence upload ledger lock.');
+      if (Date.now() >= deadline) throw new Error(timeoutMessage);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
   }
+}
+
+async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
+  const release = await acquirePidLock(
+    `${evidenceUploadLedgerPath()}.lock`,
+    5_000,
+    'Timed out waiting for the evidence upload ledger lock.',
+  );
   try { return await operation(); }
-  finally {
-    await handle.close().catch(() => undefined);
-    await unlink(lockPath).catch(() => undefined);
-  }
+  finally { await release(); }
 }
 
 async function writeJsonAtomic(path: string, value: unknown) {
@@ -456,38 +471,9 @@ function workspaceAuthorizationStatePath(workspaceId: string) {
 }
 
 async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + 10_000;
-  let handle;
-  for (;;) {
-    try {
-      handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(`${process.pid}\n`);
-      break;
-    }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        const owner = Number((await readFile(lockPath, 'utf8')).trim());
-        if (Number.isSafeInteger(owner) && owner > 0) {
-          try { process.kill(owner, 0); }
-          catch (ownerError) {
-            if ((ownerError as NodeJS.ErrnoException).code === 'ESRCH') {
-              await unlink(lockPath);
-              continue;
-            }
-          }
-        }
-      } catch {}
-      if (Date.now() >= deadline) throw new Error('Timed out waiting for the workspace authorization lock.');
-      await new Promise((accept) => setTimeout(accept, 25));
-    }
-  }
+  const release = await acquirePidLock(lockPath, 10_000, 'Timed out waiting for the workspace authorization lock.');
   try { return await operation(); }
-  finally {
-    await handle.close().catch(() => undefined);
-    await unlink(lockPath).catch(() => undefined);
-  }
+  finally { await release(); }
 }
 
 async function assertWorkspaceAuthorizationCurrent(
@@ -523,17 +509,29 @@ async function applyWorkspaceAuthorizationAtomically(input: {
   const statePath = workspaceAuthorizationStatePath(input.workspaceId);
   await withFileLock(`${statePath}.lock`, async () => {
     await assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false);
-    await writeJsonAtomic(statePath, {
-      issuedAt: input.authorization.issuedAt,
-      signature: input.authorization.signature,
-    });
-    await writeJsonAtomic(input.policyPath, input.policy);
-    if (input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content'
-      && !(await pathExists(evidenceUploadLedgerPath()))) {
+    let previous: { contentLedgerInitialized?: boolean } | null = null;
+    try { previous = JSON.parse(await readFile(statePath, 'utf8')) as { contentLedgerInitialized?: boolean }; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+      }
+    }
+    const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
+    const ledgerExists = await pathExists(evidenceUploadLedgerPath());
+    if (contentAuthorized && previous?.contentLedgerInitialized === true && !ledgerExists) {
+      throw new Error('Evidence upload quota ledger is missing; content transmission is disabled until the device is re-enrolled.');
+    }
+    if (contentAuthorized && !ledgerExists) {
       await writeJsonAtomic(evidenceUploadLedgerPath(), {
         day: new Date().toISOString().slice(0, 10), totalBytes: 0, capsuleHashes: [], capsuleBytes: {},
       });
     }
+    await writeJsonAtomic(statePath, {
+      issuedAt: input.authorization.issuedAt,
+      signature: input.authorization.signature,
+      contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
+    });
+    await writeJsonAtomic(input.policyPath, input.policy);
   });
 }
 
@@ -1787,29 +1785,38 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let tasksCompleted = 0;
   let evidenceResponsesCompleted = 0;
   let nextPolicyRefreshAt = 0;
+  let evidencePolicyFresh = false;
   try {
     do {
       if (Date.now() >= nextPolicyRefreshAt) {
+        let canonicalWorkspaceSeen = false;
+        let canonicalWorkspaceRefreshed = false;
         for (const workspace of (await registry()).filter((item) => item.organizationId === policy.organizationId)) {
+          const isCanonicalWorkspace = policyPath === resolve(workspace.path, '.dharma', 'approved-policy.json');
+          if (isCanonicalWorkspace) canonicalWorkspaceSeen = true;
           try {
             await syncWorkspacePolicy(fabric, workspace, policy.revision, true);
-            if (policyPath === resolve(workspace.path, '.dharma', 'approved-policy.json')) {
+            if (isCanonicalWorkspace) {
               policy = await loadVerifiedWorkspacePolicy(policyPath, workspace.workspaceId);
+              canonicalWorkspaceRefreshed = true;
             }
           } catch {
-            // Preserve the last verified policy in memory. Expiry is rechecked at
-            // every disclosure boundary, so content pauses fail-closed while a
-            // transient refresh outage cannot destroy queued evidence.
+            if (isCanonicalWorkspace) canonicalWorkspaceRefreshed = false;
           }
         }
+        evidencePolicyFresh = canonicalWorkspaceSeen && canonicalWorkspaceRefreshed;
         nextPolicyRefreshAt = Date.now() + 60_000;
       }
-      const evidence = await processEvidenceRequest(fabric, policy);
-      if (evidence.requestId) evidenceResponsesCompleted += 1;
+      let evidenceRequestId: string | undefined;
+      if (evidencePolicyFresh) {
+        const evidence = await processEvidenceRequest(fabric, policy);
+        evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
+        if (evidenceRequestId) evidenceResponsesCompleted += 1;
+      }
       const result = await executeOneTask(fabric, policy, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
       if (flags.has('once')) break;
-      if (!result.taskId && !evidence.requestId) await new Promise((accept) => setTimeout(accept, pollMs));
+      if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
     process.removeListener('SIGINT', stop);

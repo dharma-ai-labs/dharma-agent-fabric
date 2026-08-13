@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -333,6 +333,30 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
     await assert.rejects(() => reserveDailyContentUpload(second, policy), /daily content upload limit/i);
     await releaseDailyContentUpload(first, policy);
     await reserveDailyContentUpload(second, policy);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('deleting an initialized content quota ledger fails closed on policy refresh', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-delete-'));
+  process.env.DHARMA_HOME = home;
+  try {
+    const signed = signedPolicyAuthorization({
+      revision: 'content-delete-v1',
+      evidence: {
+        automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-ledger-delete', allowedContentClasses: ['native_provider_payload'] },
+        maximumCapsuleBytes: 1_000, maximumDailyUploadBytes: 700, maximumExpansionBytes: 100,
+      },
+    });
+    const input = {
+      workspace: home, organizationId: 'org_northstar', revision: 'content-delete', workspaceId: 'workspace-northstar',
+      serverPolicyAuthorization: signed.envelope, serverPublicKeyEd25519: signed.publicKeyEd25519,
+    };
+    await materializeWorkspacePolicy(input);
+    await unlink(join(home, 'relay', 'evidence-upload-ledger.json'));
+    await assert.rejects(() => materializeWorkspacePolicy(input), /quota ledger is missing/i);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
   }
