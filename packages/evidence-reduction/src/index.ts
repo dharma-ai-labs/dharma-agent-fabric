@@ -144,7 +144,11 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
   if (Array.isArray(value)) return value.some((item) => referencesExcludedPath(item, excludePaths, key, depth + 1));
   if (value && typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>)
-      .some(([childKey, child]) => referencesExcludedPath(child, excludePaths, childKey, depth + 1));
+      .some(([childKey, child]) => {
+        const normalizedChildKey = childKey.replaceAll('\\', '/').replace(/^\.?\/+/, '');
+        return excludePaths.some((pattern) => globPattern(pattern).test(normalizedChildKey))
+          || referencesExcludedPath(child, excludePaths, childKey, depth + 1);
+      });
   }
   return false;
 }
@@ -209,10 +213,15 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, stats, '', options));
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([childKey, child]) => [
-      childKey,
-      redactValue(child, stats, childKey, options),
-    ]));
+    const output: Record<string, unknown> = {};
+    for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
+      const redactedKey = redactString(childKey, stats, options);
+      const safeKey = redactedKey === childKey
+        ? childKey
+        : `redacted_key_${sha256(childKey).slice(7, 23)}`;
+      output[safeKey] = redactValue(child, stats, childKey, options);
+    }
+    return output;
   }
   return value;
 }
@@ -299,9 +308,17 @@ function buildLocalAnalysis(session: ProviderSession): NonNullable<TrajectoryCap
   };
 }
 
+function safeKind(value: unknown): string {
+  const candidate = String(value ?? 'unknown');
+  if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(candidate)) return 'unknown';
+  const stats: RedactionStats = {
+    classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
+  };
+  return redactString(candidate, stats, { pseudonymizeIdentity: true }) === candidate ? candidate : 'unknown';
+}
+
 function safeSourceKind(record: SourceRecord): string {
-  const value = String(record.native.type ?? record.native.kind ?? 'unknown');
-  return /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : 'unknown';
+  return safeKind(record.native.type ?? record.native.kind);
 }
 
 function nativeRecordBytes(record: SourceRecord): number {
@@ -362,6 +379,7 @@ export function buildTrajectoryCapsule(input: {
   let automaticInputBytes = 0;
   let automaticOutputBytes = 0;
   for (const [index, record] of input.session.records.entries()) {
+    const recordKind = safeKind(record.kind);
     const excludedPath = referencesExcludedPath(record.native, input.policy.evidence.excludePaths);
     if (excludedPath) {
       stats.classes.add('configured_excluded_path');
@@ -373,7 +391,7 @@ export function buildTrajectoryCapsule(input: {
         pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
       });
     const payload: Record<string, unknown> & { recordBytes: number } = {
-      nativeKind: mode === 'customer_authorized_content' ? safeSourceKind(record) : record.kind,
+      nativeKind: mode === 'customer_authorized_content' ? safeSourceKind(record) : recordKind,
       recordBytes: nativeRecordBytes(record),
       contentOmitted: mode !== 'customer_authorized_content',
     };
@@ -403,13 +421,13 @@ export function buildTrajectoryCapsule(input: {
       sessionId: pseudonymousSessionId,
       sequence: events.length,
       occurredAt: record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt,
-      kind: record.kind,
+      kind: recordKind,
       coverage: input.session.coverage,
       contentRefs: [],
       payload,
       source: {
         nativeEventId: null,
-        sourceKind: mode === 'customer_authorized_content' ? safeSourceKind(record) : record.kind,
+        sourceKind: mode === 'customer_authorized_content' ? safeSourceKind(record) : recordKind,
         localLocatorId: mode === 'customer_authorized_content'
           ? sha256(`${basename(record.sourcePath)}:${record.line}`)
           : null,

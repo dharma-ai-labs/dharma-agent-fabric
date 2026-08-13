@@ -188,6 +188,51 @@ test('customer-authorized content omits records that reference configured exclud
   assert.equal(encoded.includes('configured_excluded_path'), true);
 });
 
+test('customer-authorized content omits records with excluded paths in object property names', () => {
+  const authorizedPolicy = customerAuthorizedPolicy(['**/.env']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'2'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'excluded_property_name', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_result', files: { '/repo/.env': 'must not synchronize' } },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('/repo/.env'), false);
+  assert.equal(encoded.includes('must not synchronize'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(encoded.includes('configured_excluded_path'), true);
+});
+
+test('secret-shaped property names and provider kinds never enter a capsule', () => {
+  const authorizedPolicy = customerAuthorizedPolicy();
+  const secret = `sk-${'A'.repeat(32)}`;
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'3'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'secret_property_name', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: secret, [secret]: 'non-secret value' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: secret,
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes(secret), false);
+  assert.equal(capsule.events[0]?.kind, 'unknown');
+  assert.equal(capsule.events[0]?.payload.nativeKind, 'unknown');
+  assert.equal(capsule.events[0]?.source.sourceKind, 'unknown');
+  assert.deepEqual(capsule.localAnalysis?.eventKinds, { unknown: 1 });
+  assert.equal(capsule.redactionReceipt.classes.includes('openai_key'), true);
+});
+
 test('customer-authorized content detects excluded paths inside serialized tool arguments', () => {
   const authorizedPolicy = customerAuthorizedPolicy(['.env', '**/*.key']);
   const capsule = buildTrajectoryCapsule({
