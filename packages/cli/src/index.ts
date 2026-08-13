@@ -136,10 +136,17 @@ async function syncPendingRetentionCapsules(
     for (const item of pending) {
       try {
         assertCapsuleIntegrity(item.capsule);
+      } catch {
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
+        continue;
+      }
+      try {
         assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
       } catch {
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_revoked_or_integrity_failed');
-        continue;
+        // Authorization failures can be temporary (for example, a control-plane
+        // refresh outage). Retain the encrypted local queue until a fresh signed
+        // policy explicitly authorizes or supersedes it.
+        return synced;
       }
       await reserveDailyContentUpload(item.capsule, policy);
       await fabric.syncTrajectory(item.capsule);
@@ -147,6 +154,26 @@ async function syncPendingRetentionCapsules(
       synced += 1;
     }
   }
+}
+
+async function refreshVerifiedWorkspacePolicyForTransmission(
+  policyPath: string,
+  workspaceId: string,
+  fabric: AgentFabricClient,
+) {
+  if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
+  const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
+  if (!item) throw new Error('Content transmission workspace is not registered locally.');
+  const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
+  if (resolve(policyPath) !== canonicalPolicyPath) {
+    throw new Error('Content transmission requires the canonical registered workspace policy path.');
+  }
+  const current = await loadOrganizationPolicy(policyPath);
+  if (current.organizationId !== item.organizationId) {
+    throw new Error('Workspace policy organization does not match registration.');
+  }
+  await syncWorkspacePolicy(fabric, item, current.revision, true);
+  return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
 }
 
 export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
@@ -158,10 +185,46 @@ export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
 }
 
 export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
-  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
-  const disclosure = policy.evidence.automaticDisclosure;
+  assertPolicy(policy);
+  const mode = capsule.automaticDisclosureMode;
   const receipt = capsule.redactionReceipt && typeof capsule.redactionReceipt === 'object' && !Array.isArray(capsule.redactionReceipt)
     ? capsule.redactionReceipt as Record<string, unknown> : {};
+  if (!['metadata_only', 'local_analysis', 'customer_authorized_content'].includes(String(mode))
+    || receipt.disclosureMode !== mode) {
+    throw new Error('Trajectory capsule disclosure mode is invalid or inconsistent.');
+  }
+  const events = Array.isArray(capsule.events) ? capsule.events : [];
+  if (mode !== 'customer_authorized_content') {
+    const emptyRecord = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value as Record<string, unknown>).length === 0;
+    if (!emptyRecord(capsule.repoState) || !emptyRecord(capsule.skillState)
+      || !Array.isArray(capsule.validationResults) || capsule.validationResults.length !== 0) {
+      throw new Error('Reduced trajectory capsule contains unauthorized auxiliary content.');
+    }
+    const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
+    if (contentIndex.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || (entry as Record<string, unknown>).uploaded !== false
+      || (entry as Record<string, unknown>).normalizedPath !== null)) {
+      throw new Error('Reduced trajectory capsule contains an unauthorized content descriptor.');
+    }
+    for (const event of events) {
+      const payload = event && typeof event === 'object' && !Array.isArray(event)
+        ? (event as Record<string, unknown>).payload : null;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Reduced trajectory event payload is invalid.');
+      }
+      const record = payload as Record<string, unknown>;
+      const allowedKeys = new Set(['nativeKind', 'recordBytes', 'contentOmitted']);
+      if (Object.keys(record).some((key) => !allowedKeys.has(key)) || record.contentOmitted !== true) {
+        throw new Error('Reduced trajectory capsule contains unauthorized provider content.');
+      }
+    }
+    if (receipt.consentReceiptId !== null && receipt.consentReceiptId !== undefined) {
+      throw new Error('Reduced trajectory capsule cannot claim a content consent receipt.');
+    }
+    return;
+  }
+  const disclosure = policy.evidence.automaticDisclosure;
   if (disclosure?.mode !== 'customer_authorized_content'
     || receipt.policyRevision !== policy.revision
     || receipt.consentReceiptId !== disclosure.consentReceiptId
@@ -178,9 +241,22 @@ async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T
   for (;;) {
     try {
       handle = await open(lockPath, 'wx', 0o600);
+      await handle.writeFile(`${process.pid}\n`);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        const owner = Number((await readFile(lockPath, 'utf8')).trim());
+        if (Number.isSafeInteger(owner) && owner > 0) {
+          try { process.kill(owner, 0); }
+          catch (ownerError) {
+            if ((ownerError as NodeJS.ErrnoException).code === 'ESRCH') {
+              await unlink(lockPath);
+              continue;
+            }
+          }
+        }
+      } catch {}
       if (Date.now() >= deadline) throw new Error('Timed out waiting for the evidence upload ledger lock.');
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
@@ -219,7 +295,10 @@ async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: Org
         throw new Error('Evidence upload ledger is invalid.');
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error('Evidence upload ledger is missing; refresh and reapply the signed workspace policy.');
+      }
+      throw error;
     }
     if (ledger.capsuleHashes.includes(key)) return;
     if (ledger.totalBytes + bytes > policy.evidence.maximumDailyUploadBytes) {
@@ -381,9 +460,25 @@ async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): P
   const deadline = Date.now() + 10_000;
   let handle;
   for (;;) {
-    try { handle = await open(lockPath, 'wx', 0o600); break; }
+    try {
+      handle = await open(lockPath, 'wx', 0o600);
+      await handle.writeFile(`${process.pid}\n`);
+      break;
+    }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        const owner = Number((await readFile(lockPath, 'utf8')).trim());
+        if (Number.isSafeInteger(owner) && owner > 0) {
+          try { process.kill(owner, 0); }
+          catch (ownerError) {
+            if ((ownerError as NodeJS.ErrnoException).code === 'ESRCH') {
+              await unlink(lockPath);
+              continue;
+            }
+          }
+        }
+      } catch {}
       if (Date.now() >= deadline) throw new Error('Timed out waiting for the workspace authorization lock.');
       await new Promise((accept) => setTimeout(accept, 25));
     }
@@ -433,6 +528,12 @@ async function applyWorkspaceAuthorizationAtomically(input: {
       signature: input.authorization.signature,
     });
     await writeJsonAtomic(input.policyPath, input.policy);
+    if (input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content'
+      && !(await pathExists(evidenceUploadLedgerPath()))) {
+      await writeJsonAtomic(evidenceUploadLedgerPath(), {
+        day: new Date().toISOString().slice(0, 10), totalBytes: 0, capsuleHashes: [], capsuleBytes: {},
+      });
+    }
   });
 }
 
@@ -750,9 +851,10 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
-  const policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
+  let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
+  if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
     masterKey: await loadOrCreateVaultMasterKey(),
@@ -1186,11 +1288,15 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
   const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8'));
-  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+  const workspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : String(capsule.workspaceId || '');
+  const fabric = await client();
+  const policy = await refreshVerifiedWorkspacePolicyForTransmission(required(flags, 'policy'), workspaceId, fabric);
+  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+  if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
   assertCapsuleIntegrity(capsule);
   assertCapsuleAuthorizedByCurrentPolicy(capsule, policy);
   await reserveDailyContentUpload(capsule, policy);
-  return (await client()).syncTrajectory(capsule);
+  return fabric.syncTrajectory(capsule);
 }
 
 type EvidenceRequest = {
@@ -1220,6 +1326,7 @@ async function processEvidenceRequest(
   policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
   workspaceId?: string,
 ): Promise<Record<string, unknown>> {
+  assertPolicy(policy);
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const workspaces = (await registry()).filter((item) => !workspaceId || item.workspaceId === workspaceId);
   if (workspaces.length === 0) throw new Error('Evidence workspace is not registered locally.');
@@ -1311,19 +1418,25 @@ async function processEvidenceRequest(
           continue;
         }
         const selected = source.subarray(start, end).toString('utf8');
-        const sourceRecords = selected.split(/\r?\n/).filter(Boolean).map((line) => {
-          try { return JSON.parse(line) as unknown; } catch { return line; }
-        });
+        const sourceLines = selected.split(/\r?\n/).filter(Boolean);
+        const sourceRecords: unknown[] = [];
+        let structured = sourceLines.length > 0;
+        for (const line of sourceLines) {
+          try { sourceRecords.push(JSON.parse(line) as unknown); }
+          catch { structured = false; break; }
+        }
+        if (!structured) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'malformed_structured_content' });
+          continue;
+        }
         if (referencesExcludedPath(sourceRecords, policy.evidence.excludePaths)) {
           excluded.push({ contentId: selector.contentId, reasonCode: 'configured_excluded_path' });
           continue;
         }
-        const redacted = Buffer.from(String(redactValue(
-          selected,
-          stats,
-          '',
-          { pseudonymizeIdentity: policy.evidence.pseudonymizeIdentity },
-        )), 'utf8');
+        const redactedValue = sourceRecords.map((record) => redactValue(record, stats, '', {
+          pseudonymizeIdentity: policy.evidence.pseudonymizeIdentity,
+        })).map((record) => JSON.stringify(record)).join('\n');
+        const redacted = Buffer.from(redactedValue, 'utf8');
         if (redacted.byteLength === 0) {
           excluded.push({ contentId: selector.contentId, reasonCode: 'redacted_empty' });
           continue;
@@ -1684,14 +1797,9 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
               policy = await loadVerifiedWorkspacePolicy(policyPath, workspace.workspaceId);
             }
           } catch {
-            if (policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content') {
-              policy = {
-                ...structuredClone(policy),
-                evidence: { ...structuredClone(policy.evidence), automaticDisclosure: { mode: 'local_analysis' } },
-                serverAuthorization: undefined,
-              };
-              assertPolicy(policy);
-            }
+            // Preserve the last verified policy in memory. Expiry is rechecked at
+            // every disclosure boundary, so content pauses fail-closed while a
+            // transient refresh outage cannot destroy queued evidence.
           }
         }
         nextPolicyRefreshAt = Date.now() + 60_000;

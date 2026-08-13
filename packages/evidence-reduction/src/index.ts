@@ -122,8 +122,8 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
   if (typeof value === 'string') {
     const normalizedKey = normalizedFieldName(key);
     const pathBearingKey = /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedKey);
-    const argumentBearingKey = /(?:^|_)(?:arguments?|args|command|cmd|input)(?:$|_)/i.test(normalizedKey);
-    if (pathBearingKey || argumentBearingKey) {
+    const serializedPayloadKey = /(?:^|_)(?:arguments?|args|command|cmd|input|payload|body|data)(?:$|_)/i.test(normalizedKey);
+    if (pathBearingKey || serializedPayloadKey) {
       const normalized = value.replaceAll('\\', '/');
       const candidates = [
         ...(pathBearingKey ? [normalized.trim()] : []),
@@ -134,7 +134,7 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
       if (candidates.some((candidate) => excludePaths.some((pattern) => globPattern(pattern).test(candidate.replace(/^\.\//, ''))))) {
         return true;
       }
-      if (argumentBearingKey && /^[\[{]/.test(value.trim())) {
+      if (serializedPayloadKey && /^[\[{]/.test(value.trim())) {
         try {
           if (referencesExcludedPath(JSON.parse(value), excludePaths, 'arguments', depth + 1)) return true;
         } catch {}

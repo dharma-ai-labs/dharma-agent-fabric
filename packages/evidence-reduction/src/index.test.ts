@@ -292,6 +292,26 @@ test('automatic capsules allowlist metadata and omit Codex content-bearing field
   assert.equal(capsule.redactionReceipt.excludedClasses.includes('execution_configuration'), true);
 });
 
+test('serialized payload and body fields cannot hide excluded paths or secret fields', () => {
+  const contentPolicy = customerAuthorizedPolicy(['**/.env', '**/*.key']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: contentPolicy,
+    rawContentId: `sha256:${'9'.repeat(64)}`, rawBytes: 300,
+    session: {
+      provider: 'codex', sessionId: 'serialized_secret', sourcePath: '/private/source.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-03T00:00:00.000Z', endedAt: '2026-08-03T00:00:01.000Z',
+      records: [{
+        native: { type: 'tool_call', payload: JSON.stringify({ path: '/repo/.env', credential: 'private-secret-value' }) },
+        sourcePath: '/private/source.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-03T00:00:00.000Z', kind: 'tool_call',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('private-secret-value'), false);
+  assert.equal(encoded.includes('/repo/.env'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+});
+
 test('bounded expansion redacts Unix, Windows, and WSL-local paths when identity is pseudonymized', async () => {
   const { redactValue } = await import('./index.js');
   const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
