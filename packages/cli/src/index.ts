@@ -12,7 +12,8 @@ import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, type Redac
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
-  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment, saveDeviceConfig, type DeviceConfig,
+  AgentFabricClient, beginEnrollment, loadEvidenceQuotaAnchor, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
+  saveDeviceConfig, saveEvidenceQuotaAnchor, type DeviceConfig, type EvidenceQuotaAnchor, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
@@ -88,6 +89,59 @@ function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-s
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
 function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evidence-upload-ledger.json'); }
 function evidenceRequestReceiptPath(requestId: string) { return resolve(dharmaHome(), 'relay', 'evidence-requests', `${requestId}.json`); }
+
+type EvidenceUploadLedger = {
+  schema: 'dharma.evidence-upload-ledger/v2';
+  day: string;
+  totalBytes: number;
+  capsuleHashes: string[];
+  capsuleBytes: Record<string, number>;
+};
+
+function newEvidenceUploadLedger(day: string): EvidenceUploadLedger {
+  return { schema: 'dharma.evidence-upload-ledger/v2', day, totalBytes: 0, capsuleHashes: [], capsuleBytes: {} };
+}
+
+function evidenceLedgerHash(ledger: EvidenceUploadLedger): string {
+  return createHash('sha256').update(canonicalize(ledger)).digest('hex');
+}
+
+async function loadEnrolledDeviceForQuota(): Promise<DeviceConfig> {
+  const value = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  if (value.schema !== 'dharma.device-config/v1' || !value.hqUrl || !value.organizationId || !value.deviceId) {
+    throw new Error('Enrolled device state is required for content quota enforcement.');
+  }
+  return value;
+}
+
+function assertEvidenceLedger(ledger: EvidenceUploadLedger, day: string) {
+  if (ledger.schema !== 'dharma.evidence-upload-ledger/v2' || ledger.day !== day
+    || !Number.isSafeInteger(ledger.totalBytes) || ledger.totalBytes < 0
+    || !Array.isArray(ledger.capsuleHashes) || new Set(ledger.capsuleHashes).size !== ledger.capsuleHashes.length
+    || ledger.capsuleHashes.some((hash) => !/^sha256:[a-f0-9]{64}$/.test(hash))
+    || !ledger.capsuleBytes || typeof ledger.capsuleBytes !== 'object'
+    || ledger.capsuleHashes.some((hash) => !Number.isSafeInteger(ledger.capsuleBytes[hash]) || ledger.capsuleBytes[hash]! < 0)
+    || Object.keys(ledger.capsuleBytes).some((hash) => !ledger.capsuleHashes.includes(hash))
+    || ledger.capsuleHashes.reduce((sum, hash) => sum + ledger.capsuleBytes[hash]!, 0) !== ledger.totalBytes) {
+    throw new Error('Evidence upload ledger is invalid.');
+  }
+}
+
+async function protectEvidenceLedger(device: DeviceConfig, ledger: EvidenceUploadLedger, store?: SecureSecretStore) {
+  const anchor: EvidenceQuotaAnchor = {
+    schema: 'dharma.evidence-quota-anchor/v1', day: ledger.day,
+    totalBytes: ledger.totalBytes, ledgerHash: evidenceLedgerHash(ledger), updatedAt: new Date().toISOString(),
+  };
+  await saveEvidenceQuotaAnchor({ config: device, anchor, store });
+}
+
+async function assertEvidenceLedgerAnchor(device: DeviceConfig, ledger: EvidenceUploadLedger, store?: SecureSecretStore) {
+  const anchor = await loadEvidenceQuotaAnchor({ config: device, store });
+  if (!anchor || anchor.day !== ledger.day || anchor.totalBytes !== ledger.totalBytes
+    || anchor.ledgerHash !== evidenceLedgerHash(ledger)) {
+    throw new Error('Evidence upload quota ledger does not match its protected device anchor.');
+  }
+}
 
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
@@ -225,8 +279,17 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
     if (contentIndex.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
       || (entry as Record<string, unknown>).uploaded !== false
-      || (entry as Record<string, unknown>).normalizedPath !== null)) {
+      || (entry as Record<string, unknown>).normalizedPath !== null
+      || !['raw-provider-session', 'raw-provider-turn'].includes(String((entry as Record<string, unknown>).kind || ''))
+      || (entry as Record<string, unknown>).mimeType !== 'application/x-ndjson')) {
       throw new Error('Reduced trajectory capsule contains an unauthorized content descriptor.');
+    }
+    const localEvidenceAvailable = Array.isArray(capsule.localEvidenceAvailable) ? capsule.localEvidenceAvailable : [];
+    if (localEvidenceAvailable.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || !['raw-provider-session', 'raw-provider-turn'].includes(String((entry as Record<string, unknown>).kind || ''))
+      || !Number.isSafeInteger((entry as Record<string, unknown>).bytes)
+      || Number((entry as Record<string, unknown>).bytes) < 0)) {
+      throw new Error('Reduced trajectory capsule contains an unauthorized local evidence descriptor.');
     }
     for (const event of events) {
       const payload = event && typeof event === 'object' && !Array.isArray(event)
@@ -236,8 +299,18 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
       }
       const record = payload as Record<string, unknown>;
       const allowedKeys = new Set(['nativeKind', 'recordBytes', 'contentOmitted']);
-      if (Object.keys(record).some((key) => !allowedKeys.has(key)) || record.contentOmitted !== true) {
+      if (Object.keys(record).some((key) => !allowedKeys.has(key)) || record.contentOmitted !== true
+        || !/^[A-Za-z0-9_.:-]{1,80}$/.test(String(record.nativeKind || ''))
+        || !Number.isSafeInteger(record.recordBytes) || Number(record.recordBytes) < 0) {
         throw new Error('Reduced trajectory capsule contains unauthorized provider content.');
+      }
+      const eventRecord = event as Record<string, unknown>;
+      const source = eventRecord.source && typeof eventRecord.source === 'object' && !Array.isArray(eventRecord.source)
+        ? eventRecord.source as Record<string, unknown> : {};
+      if (!/^(user_message|agent_message|tool_call|tool_result|command|error|retry|metadata)$/.test(String(eventRecord.kind || ''))
+        || !/^[A-Za-z0-9_.:-]{1,80}$/.test(String(source.sourceKind || ''))
+        || source.nativeEventId !== null) {
+        throw new Error('Reduced trajectory capsule contains unauthorized event descriptors.');
       }
     }
     if (receipt.consentReceiptId !== null && receipt.consentReceiptId !== undefined) {
@@ -292,8 +365,36 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
     } catch (error) {
       await unlink(candidate).catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      // Never unlink a lock another process may have replaced between stat and
-      // cleanup. A crashed lock fails closed and requires explicit recovery.
+      const recoveryPath = `${lockPath}.recovery`;
+      try {
+        await mkdir(recoveryPath);
+        try {
+          let ownerPid = 0;
+          try { ownerPid = Number((await readFile(lockPath, 'utf8')).trim()); }
+          catch (readError) {
+            if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          }
+          let ownerAlive = Number.isSafeInteger(ownerPid) && ownerPid > 0;
+          if (ownerAlive) {
+            try { process.kill(ownerPid, 0); }
+            catch (killError) { ownerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+          }
+          if (!ownerAlive) {
+            const quarantine = `${lockPath}.dead.${randomUUID()}`;
+            try {
+              await rename(lockPath, quarantine);
+              await unlink(quarantine);
+              continue;
+            } catch (renameError) {
+              if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+            }
+          }
+        } finally {
+          await rm(recoveryPath, { recursive: true, force: true });
+        }
+      } catch (recoveryError) {
+        if ((recoveryError as NodeJS.ErrnoException).code !== 'EEXIST') throw recoveryError;
+      }
       if (Date.now() >= deadline) throw new Error(timeoutMessage);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
@@ -317,24 +418,27 @@ async function writeJsonAtomic(path: string, value: unknown) {
   await rename(temporary, path);
 }
 
-async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: OrganizationPolicy) {
+async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: OrganizationPolicy, store?: SecureSecretStore) {
   if (!/^sha256:[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(bytes) || bytes < 0) {
     throw new Error('Evidence upload reservation is invalid.');
   }
   const day = new Date().toISOString().slice(0, 10);
   await withEvidenceLedgerLock(async () => {
-    let ledger: { day: string; totalBytes: number; capsuleHashes: string[]; capsuleBytes: Record<string, number> } = {
-      day, totalBytes: 0, capsuleHashes: [], capsuleBytes: {},
-    };
+    const device = await loadEnrolledDeviceForQuota();
+    let ledger: EvidenceUploadLedger;
     try {
-      const stored = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as typeof ledger;
-      if (stored.day !== day) {
-        ledger = { day, totalBytes: 0, capsuleHashes: [], capsuleBytes: {} };
-      } else if (Number.isSafeInteger(stored.totalBytes) && stored.totalBytes >= 0
-        && Array.isArray(stored.capsuleHashes) && stored.capsuleBytes && typeof stored.capsuleBytes === 'object') {
-        ledger = stored;
+      ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
+      if (ledger.day !== day) {
+        const previous = await loadEvidenceQuotaAnchor({ config: device, store });
+        if (!previous || previous.day !== ledger.day || previous.ledgerHash !== evidenceLedgerHash(ledger)) {
+          throw new Error('Evidence upload quota ledger does not match its protected device anchor.');
+        }
+        ledger = newEvidenceUploadLedger(day);
+        await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+        await protectEvidenceLedger(device, ledger, store);
       } else {
-        throw new Error('Evidence upload ledger is invalid.');
+        assertEvidenceLedger(ledger, day);
+        await assertEvidenceLedgerAnchor(device, ledger, store);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -350,32 +454,39 @@ async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: Org
     ledger.capsuleHashes.push(key);
     ledger.capsuleBytes[key] = bytes;
     await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+    await protectEvidenceLedger(device, ledger, store);
   });
 }
 
-export async function reserveDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+export async function reserveDailyContentUpload(
+  capsule: Record<string, unknown>, policy: OrganizationPolicy, store?: SecureSecretStore,
+) {
   if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
   const capsuleHash = String(capsule.capsuleHash || '');
   assertCapsuleIntegrity(capsule);
   const bytes = Buffer.byteLength(canonicalize(capsule));
-  await reserveDailyEvidenceBytes(capsuleHash, bytes, policy);
+  await reserveDailyEvidenceBytes(capsuleHash, bytes, policy, store);
 }
 
-export async function releaseDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+export async function releaseDailyContentUpload(
+  capsule: Record<string, unknown>, policy: OrganizationPolicy, store?: SecureSecretStore,
+) {
   if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
   const capsuleHash = String(capsule.capsuleHash || '');
   if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) return;
   await withEvidenceLedgerLock(async () => {
     try {
-      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as {
-        day: string; totalBytes: number; capsuleHashes: string[]; capsuleBytes?: Record<string, number>;
-      };
+      const device = await loadEnrolledDeviceForQuota();
+      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
+      assertEvidenceLedger(ledger, new Date().toISOString().slice(0, 10));
+      await assertEvidenceLedgerAnchor(device, ledger, store);
       if (!ledger.capsuleHashes.includes(capsuleHash)) return;
-      const reservedBytes = Number(ledger.capsuleBytes?.[capsuleHash] ?? Buffer.byteLength(canonicalize(capsule)));
+      const reservedBytes = Number(ledger.capsuleBytes[capsuleHash] ?? Buffer.byteLength(canonicalize(capsule)));
       ledger.capsuleHashes = ledger.capsuleHashes.filter((hash) => hash !== capsuleHash);
       ledger.totalBytes = Math.max(0, ledger.totalBytes - (Number.isSafeInteger(reservedBytes) ? reservedBytes : 0));
-      if (ledger.capsuleBytes) delete ledger.capsuleBytes[capsuleHash];
+      delete ledger.capsuleBytes[capsuleHash];
       await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+      await protectEvidenceLedger(device, ledger, store);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -408,6 +519,7 @@ export async function materializeWorkspacePolicy(input: {
   serverPublicKeyEd25519?: string;
   workspaceId?: string;
   dryRun?: boolean;
+  secureStore?: SecureSecretStore;
 }) {
   const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
   try {
@@ -479,6 +591,7 @@ export async function materializeWorkspacePolicy(input: {
         authorization: policy.serverAuthorization!,
         policyPath: existingPath,
         policy,
+        secureStore: input.secureStore,
       });
     } else {
       await assertWorkspaceAuthorizationCurrent(input.workspaceId, policy.serverAuthorization!, false);
@@ -532,6 +645,7 @@ async function applyWorkspaceAuthorizationAtomically(input: {
   authorization: NonNullable<OrganizationPolicy['serverAuthorization']>;
   policyPath: string;
   policy: OrganizationPolicy;
+  secureStore?: SecureSecretStore;
 }) {
   const statePath = workspaceAuthorizationStatePath(input.workspaceId);
   await withFileLock(`${statePath}.lock`, async () => {
@@ -545,18 +659,27 @@ async function applyWorkspaceAuthorizationAtomically(input: {
     }
     const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
     const ledgerExists = await pathExists(evidenceUploadLedgerPath());
-    let device: DeviceConfig;
-    try { device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
-    catch { throw new Error('Enrolled device state is required before applying a server evidence policy.'); }
-    if (contentAuthorized && device.evidenceQuotaLedgerInitializedAt && !ledgerExists) {
+    let device: DeviceConfig | null = null;
+    let protectedAnchor: EvidenceQuotaAnchor | null = null;
+    if (contentAuthorized) {
+      try { device = await loadEnrolledDeviceForQuota(); }
+      catch { throw new Error('Enrolled device state is required before applying a server evidence policy.'); }
+      protectedAnchor = await loadEvidenceQuotaAnchor({ config: device, store: input.secureStore });
+    }
+    if (contentAuthorized && (device!.evidenceQuotaLedgerInitializedAt || protectedAnchor) && !ledgerExists) {
       throw new Error('Evidence upload quota ledger is missing; content transmission is disabled until the device is re-enrolled.');
     }
+    if (contentAuthorized && ledgerExists) {
+      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
+      assertEvidenceLedger(ledger, ledger.day);
+      await assertEvidenceLedgerAnchor(device!, ledger, input.secureStore);
+    }
     if (contentAuthorized && !ledgerExists) {
-      await writeJsonAtomic(evidenceUploadLedgerPath(), {
-        day: new Date().toISOString().slice(0, 10), totalBytes: 0, capsuleHashes: [], capsuleBytes: {},
-      });
-      device.evidenceQuotaLedgerInitializedAt = new Date().toISOString();
-      await writeJsonAtomic(configPath(), device);
+      const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
+      await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+      await protectEvidenceLedger(device!, ledger, input.secureStore);
+      device!.evidenceQuotaLedgerInitializedAt = new Date().toISOString();
+      await writeJsonAtomic(configPath(), device!);
     }
     await writeJsonAtomic(statePath, {
       issuedAt: input.authorization.issuedAt,

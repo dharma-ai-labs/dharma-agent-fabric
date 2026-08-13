@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { canonicalize, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
@@ -70,6 +71,54 @@ export function normalizeRelayUrl(value: string) {
 
 function accountFor(hqUrl: string, organizationId: string) {
   return `device-key-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId: string) {
+  return `evidence-quota-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
+}
+
+export interface EvidenceQuotaAnchor {
+  schema: 'dharma.evidence-quota-anchor/v1';
+  day: string;
+  totalBytes: number;
+  ledgerHash: string;
+  updatedAt: string;
+}
+
+export async function loadEvidenceQuotaAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  store?: SecureSecretStore;
+}): Promise<EvidenceQuotaAnchor | null> {
+  const store = input.store ?? await createSystemSecureStore();
+  const value = await store.get(evidenceQuotaAccountFor(
+    input.config.hqUrl, input.config.organizationId, input.config.deviceId,
+  ));
+  if (!value) return null;
+  const anchor = JSON.parse(value) as EvidenceQuotaAnchor;
+  if (anchor.schema !== 'dharma.evidence-quota-anchor/v1'
+    || !/^\d{4}-\d{2}-\d{2}$/.test(anchor.day)
+    || !Number.isSafeInteger(anchor.totalBytes) || anchor.totalBytes < 0
+    || !/^[a-f0-9]{64}$/.test(anchor.ledgerHash)
+    || !Number.isFinite(Date.parse(anchor.updatedAt))) {
+    throw new Error('Protected evidence quota anchor is corrupt.');
+  }
+  return anchor;
+}
+
+export async function saveEvidenceQuotaAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  anchor: EvidenceQuotaAnchor;
+  store?: SecureSecretStore;
+}): Promise<void> {
+  const store = input.store ?? await createSystemSecureStore();
+  const account = evidenceQuotaAccountFor(
+    input.config.hqUrl, input.config.organizationId, input.config.deviceId,
+  );
+  await store.put(account, JSON.stringify(input.anchor));
+  const confirmed = await store.get(account);
+  if (confirmed !== JSON.stringify(input.anchor)) {
+    throw new Error('Secure store did not confirm the evidence quota anchor write.');
+  }
 }
 
 async function atomicJson(path: string, value: unknown) {
