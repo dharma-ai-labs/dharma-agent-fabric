@@ -327,7 +327,59 @@ function safeSourceKind(record: SourceRecord): string {
 }
 
 function nativeRecordBytes(record: SourceRecord): number {
-  return Buffer.byteLength(JSON.stringify(record.native));
+  type PendingValue = { kind: 'value'; value: unknown; arrayMember: boolean } | { kind: 'exit'; value: object };
+  const ancestors = new WeakSet<object>();
+  const pending: PendingValue[] = [{ kind: 'value', value: record.native, arrayMember: false }];
+  let bytes = 0;
+  while (pending.length > 0) {
+    const item = pending.pop()!;
+    if (item.kind === 'exit') {
+      ancestors.delete(item.value);
+      continue;
+    }
+    const { value, arrayMember } = item;
+    if (value === null) {
+      bytes += 4;
+      continue;
+    }
+    if (typeof value === 'string') {
+      bytes += Buffer.byteLength(JSON.stringify(value));
+      continue;
+    }
+    if (typeof value === 'boolean') {
+      bytes += value ? 4 : 5;
+      continue;
+    }
+    if (typeof value === 'number') {
+      bytes += Buffer.byteLength(Number.isFinite(value) ? String(value) : 'null');
+      continue;
+    }
+    if (typeof value === 'undefined' || typeof value === 'function' || typeof value === 'symbol') {
+      if (arrayMember) bytes += 4;
+      continue;
+    }
+    if (typeof value === 'bigint') throw new TypeError('Provider records must be JSON-compatible');
+    if (ancestors.has(value)) throw new TypeError('Provider records must not contain circular references');
+    ancestors.add(value);
+    pending.push({ kind: 'exit', value });
+    if (Array.isArray(value)) {
+      bytes += 2 + Math.max(0, value.length - 1);
+      for (let index = value.length - 1; index >= 0; index -= 1) {
+        pending.push({ kind: 'value', value: value[index], arrayMember: true });
+      }
+      continue;
+    }
+    const entries = Object.entries(value).filter(([, child]) => (
+      typeof child !== 'undefined' && typeof child !== 'function' && typeof child !== 'symbol'
+    ));
+    bytes += 2 + Math.max(0, entries.length - 1);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const [key, child] = entries[index]!;
+      bytes += Buffer.byteLength(JSON.stringify(key)) + 1;
+      pending.push({ kind: 'value', value: child, arrayMember: false });
+    }
+  }
+  return bytes;
 }
 
 function excludedContentClasses(record: SourceRecord): string[] {

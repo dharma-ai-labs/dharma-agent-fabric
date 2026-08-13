@@ -255,6 +255,29 @@ test('deep provider records are conservatively omitted without overflowing trave
   assert.equal(encoded.includes('configured_excluded_path'), true);
 });
 
+test('provider record byte accounting matches JSON encoding without recursive serialization', () => {
+  const native = {
+    type: 'tool_result', ok: true, count: 12, nullable: null,
+    nested: { label: 'customer content', values: [1, false, 'three'] },
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: customerAuthorizedPolicy(),
+    rawContentId: `sha256:${'2'.repeat(64)}`, rawBytes: 500,
+    session: {
+      provider: 'codex', sessionId: 'byte_accounting', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo',
+        timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const expectedBytes = Buffer.byteLength(JSON.stringify(native));
+  assert.equal(capsule.localAnalysis?.recordBytes.total, expectedBytes);
+  assert.equal(capsule.localAnalysis?.recordBytes.maximum, expectedBytes);
+  assert.equal(capsule.events[0]?.payload.recordBytes, expectedBytes);
+});
+
 test('customer-authorized content detects excluded paths inside serialized tool arguments', () => {
   const authorizedPolicy = customerAuthorizedPolicy(['.env', '**/*.key']);
   const capsule = buildTrajectoryCapsule({
