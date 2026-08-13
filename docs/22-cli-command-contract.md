@@ -55,8 +55,8 @@ dharma providers smoke <provider> --workspace <path-or-id> --no-write --json
 dharma evidence sources --workspace <id> --provider <id> --json
 dharma evidence preview --workspace <id> --latest --json
 dharma evidence capture --workspace <id> --provider <id> --json
-dharma workspace sync --workspace <id> --api-url <url> --apply
-dharma evidence sync --workspace <id> --provider <id> --policy <path> --json
+dharma workspace sync <id> --policy-revision <revision> --apply
+dharma evidence sync --file <capsule.json> --workspace-id <id> --policy <path> --json
 dharma evidence run-request --policy <policy.json> --workspace-id <id> --json
 dharma evidence disclosures --workspace <id> --json
 dharma evidence export-local <trajectory-id> --output <path> --json

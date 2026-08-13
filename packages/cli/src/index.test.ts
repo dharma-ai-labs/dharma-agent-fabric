@@ -104,6 +104,17 @@ test('unknown commands fail as usage errors', async () => {
   await assert.rejects(() => run(['unknown']), /Usage:/);
 });
 
+test('documented direct-sync commands enforce their required arguments', async () => {
+  await assert.rejects(
+    () => run(['workspace', 'sync', 'workspace-test', '--apply']),
+    /Missing required option --policy-revision/,
+  );
+  await assert.rejects(
+    () => run(['evidence', 'sync', '--workspace-id', 'workspace-test', '--policy', '.dharma/approved-policy.json']),
+    /Missing required option --file/,
+  );
+});
+
 test('status reports verified relay state and hides local identifiers by default', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-cli-status-'));
   const previous = process.env.DHARMA_HOME;

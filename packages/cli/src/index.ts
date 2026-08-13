@@ -1238,9 +1238,9 @@ async function workspaceAdd(flags: Map<string, string | boolean>, positional: st
 
 async function workspaceSync(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
   const workspaceId = positional[0] || required(flags, 'workspace-id');
+  const policyRevision = required(flags, 'policy-revision');
   const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
   if (!item) throw new Error('Workspace is not registered locally.');
-  const policyRevision = required(flags, 'policy-revision');
   if (!flags.has('apply')) {
     return {
       ok: true, workspaceId, planned: true, serverMutation: false, localMutation: false,
