@@ -174,6 +174,43 @@ test('a later operation cannot implicitly replay an ambiguous content request', 
   assert.deepEqual(calls.map((call) => call.sequence), [1, 2, 3]);
 });
 
+test('an ambiguous evidence response is neither persisted nor implicitly replayed', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-evidence-response-outbox-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const paths: string[] = [];
+  let failResponse = true;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    paths.push(pathname);
+    if (failResponse && pathname.endsWith('/responses')) {
+      failResponse = false;
+      throw new Error('unknown evidence-response delivery outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(
+    client.postEvidenceResponse('request-1', { contentBase64: 'customer-content' }),
+    /unknown evidence-response delivery/,
+  );
+  const persisted = await readFile(statePath, 'utf8');
+  assert.doesNotMatch(persisted, /customer-content/);
+  assert.equal(JSON.parse(persisted).nextSequence, 3);
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.registerWorkspace({ workspaceId: 'control-operation' });
+  assert.equal(paths.filter((path) => path.endsWith('/responses')).length, 1);
+});
+
 test('deterministic client rejection advances the outbox instead of blocking the device', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-rejection-'));

@@ -435,7 +435,7 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
         }
       } catch (recoveryError) {
         await rm(recoveryCandidate, { recursive: true, force: true });
-        if ((recoveryError as NodeJS.ErrnoException).code !== 'EEXIST') throw recoveryError;
+        if (!['EEXIST', 'ENOTEMPTY'].includes((recoveryError as NodeJS.ErrnoException).code || '')) throw recoveryError;
         let recoveryOwner = 0;
         try { recoveryOwner = Number((await readFile(resolve(recoveryPath, 'owner'), 'utf8')).trim()); } catch {}
         let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
@@ -1466,16 +1466,31 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 }
 
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
-  const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8'));
+  const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8')) as Record<string, unknown>;
   const workspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : String(capsule.workspaceId || '');
-  const fabric = await client();
-  const policy = await refreshVerifiedWorkspacePolicyForTransmission(required(flags, 'policy'), workspaceId, fabric);
   const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
   if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
   assertCapsuleIntegrity(capsule);
-  assertCapsuleAuthorizedByCurrentPolicy(capsule, policy);
-  await reserveDailyContentUpload(capsule, policy);
-  return fabric.syncTrajectory(capsule);
+  const trajectoryId = String(capsule.trajectoryId || '');
+  const revision = Number(capsule.revision);
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+  });
+  try {
+    const storedCapsule = await vault.getCapsule<Record<string, unknown>>(trajectoryId, revision);
+    if (canonicalize(storedCapsule) !== canonicalize(capsule)) {
+      throw new Error('Trajectory capsule file does not exactly match the encrypted local-vault revision.');
+    }
+    const fabric = await client();
+    const policy = await refreshVerifiedWorkspacePolicyForTransmission(required(flags, 'policy'), workspaceId, fabric);
+    assertCapsuleAuthorizedByCurrentPolicy(storedCapsule, policy);
+    await reserveDailyContentUpload(storedCapsule, policy);
+    return fabric.syncTrajectory(storedCapsule);
+  } finally {
+    vault.close();
+  }
 }
 
 type EvidenceRequest = {

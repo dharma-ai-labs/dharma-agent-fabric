@@ -151,6 +151,22 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   vault.close();
 });
 
+test('vault returns only the requested immutable capsule revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-revision-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  for (const revision of [1, 2]) {
+    const value = { trajectoryId: 'trajectory-versioned', revision };
+    const blobContentId = await vault.putBlob(Buffer.from(JSON.stringify(value)), 'trajectory-capsule');
+    vault.recordCapsule('trajectory-versioned', revision, `sha256:${String(revision).repeat(64)}`, blobContentId);
+  }
+  assert.deepEqual(await vault.getCapsule('trajectory-versioned', 1), {
+    trajectoryId: 'trajectory-versioned', revision: 1,
+  });
+  await assert.rejects(() => vault.getCapsule('trajectory-versioned', 3), /not available in the local vault/);
+  await assert.rejects(() => vault.getCapsule('trajectory-versioned', 0), /positive integer/);
+  vault.close();
+});
+
 test('raw retention drains every expired batch and creates lookup indexes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });

@@ -228,7 +228,7 @@ export class AgentFabricClient {
   }
 
   async openSession(relayVersion = '0.1.0') {
-    if (this.#state.pending?.pathname.endsWith('/agent-fabric/trajectories')) {
+    if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // Content-bearing requests are never replayed from durable state before
       // the CLI has refreshed consent. A later explicit sync rebuilds and
       // reauthorizes the request; server ingestion is capsule-hash idempotent.
@@ -269,7 +269,7 @@ export class AgentFabricClient {
 
   async #signedPostNow(route: string, body: unknown): Promise<Record<string, unknown>> {
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
-    if (this.#state.pending?.pathname.endsWith('/agent-fabric/trajectories')) {
+    if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
       // explicit caller must rebuild the capsule after rechecking disclosure
       // policy; a skipped sequence is safe because the server enforces
@@ -397,9 +397,14 @@ export class AgentFabricClient {
     // in-flight request in memory, but never copy that body into the plaintext
     // protocol-state outbox. The encrypted local vault remains the durable
     // source from which an explicitly authorized retry is rebuilt.
-    const durableState = this.#state.pending?.pathname.endsWith('/agent-fabric/trajectories')
-      ? { ...this.#state, pending: null }
+    const durableState = this.#state.pending && isContentBearingPath(this.#state.pending.pathname)
+      ? { ...this.#state, nextSequence: this.#state.nextSequence + 1, pending: null }
       : this.#state;
     return atomicJson(this.#statePath, durableState);
   }
+}
+
+export function isContentBearingPath(pathname: string): boolean {
+  return pathname.endsWith('/agent-fabric/trajectories')
+    || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname);
 }

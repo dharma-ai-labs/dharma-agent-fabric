@@ -276,6 +276,17 @@ export class LocalVault {
     return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
   }
 
+  async getCapsule<T = Record<string, unknown>>(trajectoryId: string, revision: number): Promise<T> {
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('Trajectory capsule revision must be a positive integer.');
+    }
+    const record = this.#database.prepare(`
+      select blob_content_id from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { blob_content_id: string } | undefined;
+    if (!record) throw new Error('Trajectory capsule revision is not available in the local vault.');
+    return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
+  }
+
   async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100, offset = 0): Promise<Array<{
     trajectoryId: string;
     revision: number;
