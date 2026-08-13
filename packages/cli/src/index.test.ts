@@ -89,6 +89,10 @@ test('help is successful and direct basic commands keep stdout and stderr clean'
     assert.equal(result.stderr, '');
     assert.equal(result.stdout.includes('ExperimentalWarning'), false);
   }
+  const bin = new URL('./bin.js', import.meta.url);
+  const help = await execFileAsync(process.execPath, [fileURLToPath(bin), '--help'], { encoding: 'utf8' });
+  assert.match(help.stdout, /^Usage: dharma/);
+  assert.equal(help.stderr, '');
 });
 
 test('global npm symlinks still execute the CLI entrypoint', async () => {
@@ -129,7 +133,8 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.12', enrolled: true, relay: 'running' });
+    const version = await run(['version']) as Record<string, unknown>;
+    assert.deepEqual(status, { version: version.version, enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
