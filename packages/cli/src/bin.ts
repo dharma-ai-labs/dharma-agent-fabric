@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 
+const args = process.argv.slice(2);
+const HELP = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const [major, minor] = process.versions.node.split('.').map(Number);
-if ((major ?? 0) < 22 || ((major ?? 0) === 22 && (minor ?? 0) < 20)) {
+if (args.includes('--help') || args.includes('-h')) {
+  process.stdout.write(`${HELP}\n`);
+} else if ((major ?? 0) < 22 || ((major ?? 0) === 22 && (minor ?? 0) < 20)) {
   process.stderr.write(
     `Dharma Agent Fabric requires Node.js 22.20 or newer. Current runtime: ${process.versions.node}. `
     + 'Install the current Node.js 22 LTS release, reopen the terminal, and rerun the command.\n',
@@ -9,7 +13,7 @@ if ((major ?? 0) < 22 || ((major ?? 0) === 22 && (minor ?? 0) < 20)) {
   process.exitCode = 1;
 } else {
   const { run } = await import('./index.js');
-  run(process.argv.slice(2)).then((value: unknown) => {
+  run(args).then((value: unknown) => {
     process.stdout.write(typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
   }).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

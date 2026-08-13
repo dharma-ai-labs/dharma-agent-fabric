@@ -18,7 +18,7 @@ import {
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.12';
+const VERSION = '0.1.13';
 const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;

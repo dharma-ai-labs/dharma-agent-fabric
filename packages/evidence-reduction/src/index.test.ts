@@ -404,20 +404,26 @@ test('serialized payload, body, message, and content fields cannot hide excluded
   }
 });
 
-test('bounded expansion redacts Unix, Windows, and WSL-local paths when identity is pseudonymized', async () => {
+test('bounded expansion redacts file URIs and local paths while preserving web URLs and semantic text', async () => {
   const { redactValue } = await import('./index.js');
   const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
   const raw = [
-    '{"cwd":"/home/alice/company/private-repo"}',
-    '{"cwd":"C:\\\\Users\\\\alice\\\\company\\\\private-repo"}',
-    '{"cwd":"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\alice\\\\private-repo"}',
+    'Review /home/alice/company/private-repo before release.',
+    'Review C:\\\\Users\\\\alice\\\\company\\\\private-repo before release.',
+    'Review \\\\wsl.localhost\\Ubuntu\\home\\alice\\private-repo before release.',
+    'Do not publish file:///home/alice/company/private-repo or file:// by mistake.',
+    'Keep https://dharma-ai.io/docs and vscode://settings intact.',
   ].join('\n');
   const redacted = String(redactValue(raw, stats, '', { pseudonymizeIdentity: true }));
   assert.equal(redacted.includes('/home/alice'), false);
   assert.equal(redacted.includes('C:\\\\Users'), false);
   assert.equal(redacted.includes('wsl.localhost'), false);
+  assert.equal(redacted.includes('file://'), false);
+  assert.equal(redacted.includes('Review [REDACTED:local_path] before release.'), true);
+  assert.equal(redacted.includes('https://dharma-ai.io/docs'), true);
+  assert.equal(redacted.includes('vscode://settings'), true);
   assert.equal(stats.classes.has('local_path'), true);
-  assert.equal(stats.redactedValues, 3);
+  assert.equal(stats.redactedValues, 5);
 });
 
 test('identical source sessions produce an identical capsule revision hash', () => {
