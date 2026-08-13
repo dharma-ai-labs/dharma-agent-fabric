@@ -129,10 +129,49 @@ test('content-bearing trajectory outbox is discarded before a new session can re
   const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await client.openSession();
   await assert.rejects(client.syncTrajectory({ secret: 'authorized-at-the-time' }), /unknown trajectory delivery/);
+  const durableState = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(durableState.pending, null);
+  assert.doesNotMatch(await readFile(statePath, 'utf8'), /authorized-at-the-time/);
   const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await resumed.openSession();
   assert.equal(paths.filter((path) => path.endsWith('/agent-fabric/trajectories')).length, 1);
   assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+});
+
+test('a later operation cannot implicitly replay an ambiguous content request', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-retry-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const calls: Array<{ path: string; body: string; sequence: number }> = [];
+  let failTrajectory = true;
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname;
+    calls.push({
+      path,
+      body: String(init?.body || ''),
+      sequence: Number(new Headers(init?.headers).get('x-dharma-sequence')),
+    });
+    if (failTrajectory && path.endsWith('/agent-fabric/trajectories')) {
+      failTrajectory = false;
+      throw new Error('unknown trajectory delivery outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(client.syncTrajectory({ secret: 'old-authorized-content' }), /unknown trajectory delivery/);
+  await client.registerWorkspace({ workspaceId: 'new-control-operation' });
+  assert.equal(calls.filter((call) => call.path.endsWith('/agent-fabric/trajectories')).length, 1);
+  assert.match(calls.at(-1)?.body || '', /new-control-operation/);
+  assert.deepEqual(calls.map((call) => call.sequence), [1, 2, 3]);
 });
 
 test('deterministic client rejection advances the outbox instead of blocking the device', async () => {

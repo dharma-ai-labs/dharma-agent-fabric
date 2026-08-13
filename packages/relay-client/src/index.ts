@@ -269,7 +269,17 @@ export class AgentFabricClient {
 
   async #signedPostNow(route: string, body: unknown): Promise<Record<string, unknown>> {
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
-    if (this.#state.pending) return this.#sendPending();
+    if (this.#state.pending?.pathname.endsWith('/agent-fabric/trajectories')) {
+      // An ambiguous content delivery is never replayed implicitly. The next
+      // explicit caller must rebuild the capsule after rechecking disclosure
+      // policy; a skipped sequence is safe because the server enforces
+      // monotonic rather than contiguous device sequences.
+      this.#state.nextSequence += 1;
+      this.#state.pending = null;
+      await this.#persist();
+    } else if (this.#state.pending) {
+      return this.#sendPending();
+    }
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
     const serialized = canonicalize(body);
     const timestamp = new Date().toISOString();
@@ -382,5 +392,14 @@ export class AgentFabricClient {
     });
   }
 
-  #persist() { return atomicJson(this.#statePath, this.#state); }
+  #persist() {
+    // Authorized trajectory bodies may contain customer content. Keep an
+    // in-flight request in memory, but never copy that body into the plaintext
+    // protocol-state outbox. The encrypted local vault remains the durable
+    // source from which an explicitly authorized retry is rebuilt.
+    const durableState = this.#state.pending?.pathname.endsWith('/agent-fabric/trajectories')
+      ? { ...this.#state, pending: null }
+      : this.#state;
+    return atomicJson(this.#statePath, durableState);
+  }
 }
