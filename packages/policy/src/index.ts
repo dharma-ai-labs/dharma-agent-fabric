@@ -10,7 +10,7 @@ export interface CommandPolicy {
 }
 
 export interface OrganizationPolicy {
-  schema: 'dharma.organization-policy/v1';
+  schema: 'dharma.organization-policy/v1' | 'dharma.organization-policy/v2';
   organizationId: string;
   revision: string;
   evidence: {
@@ -132,7 +132,9 @@ export async function loadOrganizationPolicy(path: string): Promise<Organization
 }
 
 export function assertPolicy(policy: OrganizationPolicy, options: { allowUnverifiedAuthorization?: boolean } = {}): void {
-  if (policy.schema !== 'dharma.organization-policy/v1') throw new Error('Unsupported policy schema.');
+  if (policy.schema !== 'dharma.organization-policy/v1' && policy.schema !== 'dharma.organization-policy/v2') {
+    throw new Error('Unsupported policy schema.');
+  }
   if (!policy.organizationId || !policy.revision) throw new Error('Policy identity is required.');
   if (policy.evidence.registeredWorkspaceOnly !== true) {
     throw new Error('registeredWorkspaceOnly must remain true.');
@@ -143,7 +145,13 @@ export function assertPolicy(policy: OrganizationPolicy, options: { allowUnverif
     throw new Error(`maximumCapsuleBytes must be between 1 and ${MAXIMUM_TRAJECTORY_CAPSULE_BYTES}.`);
   }
   const disclosure = policy.evidence.automaticDisclosure;
+  if (policy.schema === 'dharma.organization-policy/v1' && disclosure !== undefined) {
+    throw new Error('automaticDisclosure requires organization policy v2.');
+  }
   if (disclosure?.mode === 'customer_authorized_content') {
+    if (policy.schema !== 'dharma.organization-policy/v2') {
+      throw new Error('customer_authorized_content requires organization policy v2.');
+    }
     if (!disclosure.consentReceiptId?.trim()) {
       throw new Error('customer_authorized_content requires a consentReceiptId.');
     }

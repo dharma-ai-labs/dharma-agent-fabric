@@ -119,9 +119,21 @@ function normalizedFieldName(key: string) {
 
 function referencesExcludedPath(value: unknown, excludePaths: string[], key = '', depth = 0): boolean {
   if (depth > 10) return false;
-  if (typeof value === 'string' && /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedFieldName(key))) {
-    const normalized = value.replaceAll('\\', '/').replace(/^\.\//, '');
-    return excludePaths.some((pattern) => globPattern(pattern).test(normalized));
+  if (typeof value === 'string') {
+    const normalizedKey = normalizedFieldName(key);
+    const pathBearingKey = /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedKey);
+    const argumentBearingKey = /(?:^|_)(?:arguments?|args|command|cmd|input)(?:$|_)/i.test(normalizedKey);
+    if (pathBearingKey || argumentBearingKey) {
+      const candidates = value.replaceAll('\\', '/').split(/[\s"'`=,:;()[\]{}]+/).filter(Boolean);
+      if (candidates.some((candidate) => excludePaths.some((pattern) => globPattern(pattern).test(candidate.replace(/^\.\//, ''))))) {
+        return true;
+      }
+      if (argumentBearingKey && /^[\[{]/.test(value.trim())) {
+        try {
+          if (referencesExcludedPath(JSON.parse(value), excludePaths, 'arguments', depth + 1)) return true;
+        } catch {}
+      }
+    }
   }
   if (Array.isArray(value)) return value.some((item) => referencesExcludedPath(item, excludePaths, key, depth + 1));
   if (value && typeof value === 'object') {
@@ -228,7 +240,9 @@ function isErrorRecord(record: SourceRecord): boolean {
   if (/(error|failed|failure|exception|timeout|cancelled)/i.test(record.kind)) return true;
   const nativeType = String(record.native.type ?? record.native.kind ?? '');
   const status = String(record.native.status ?? record.native.outcome ?? '');
-  return /(error|failed|failure|exception|timeout|cancelled)/i.test(`${nativeType} ${status}`);
+  const subtype = String(record.native.subtype ?? record.native.stop_reason ?? '');
+  return record.native.is_error === true
+    || /(error|failed|failure|exception|timeout|cancelled|max_turns)/i.test(`${nativeType} ${status} ${subtype}`);
 }
 
 function buildLocalAnalysis(session: ProviderSession): NonNullable<TrajectoryCapsule['localAnalysis']> {

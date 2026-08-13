@@ -185,7 +185,7 @@ The default `local_analysis` mode performs deterministic self-analysis on the de
 - start/end timestamps, duration, completion, and coverage;
 - tool-call/result counts and unmatched-call/orphan-result signals;
 - runtime failure, timeout, cancellation, and partial-evidence reason codes;
-- active skill/bundle state and local evidence availability descriptors;
+- local evidence availability descriptors; skill activation is proven separately by signed installation receipts;
 - redaction, omission, policy revision, and capsule lineage receipts.
 
 It does not deliver prompt/response excerpts, instructions, tool arguments/results, source code, local paths, encrypted reasoning, or credentials. This metadata is enough for fleet coverage, operational triage, deterministic failure detection, clustering candidates, cost/latency aggregation where available, and selecting sessions for semantic review. It is the first pass, not the product endpoint. It is not enough to judge nuanced rationale or generate a trustworthy remediation by itself. A semantic evaluation must obtain the exact approved, redacted evidence spans it needs or return `insufficient_evidence`.

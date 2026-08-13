@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  assertCapsuleAuthorizedByCurrentPolicy,
   assertTaskSkillPin,
   installNativeAgentFabricBootstrap,
   installRepositoryAgentFabricSkill,
@@ -46,7 +47,7 @@ function signedPolicyAuthorization(policy: Record<string, unknown>, organization
   };
   const unsigned = {
     schema: 'dharma.workspace-policy-authorization/v1', organizationId, workspaceId, policy: signedPolicy,
-    issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-14T00:00:00.000Z',
+    issuedAt: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
   };
   const publicJwk = keys.publicKey.export({ format: 'jwk' });
   return {
@@ -320,6 +321,23 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
   }
+});
+
+test('queued content must match the current signed consent and policy revision', async () => {
+  const base = await materializeWorkspacePolicy({ workspace: await mkdtemp(join(tmpdir(), 'dharma-current-grant-')), organizationId: 'org_northstar', revision: 'local' });
+  const policy = {
+    ...base.policy,
+    revision: 'content-v2',
+    evidence: {
+      ...base.policy.evidence,
+      automaticDisclosure: { mode: 'customer_authorized_content' as const, consentReceiptId: 'consent-current', allowedContentClasses: ['native_provider_payload' as const] },
+    },
+    serverAuthorization: { schema: 'dharma.workspace-policy-authorization/v1' as const } as NonNullable<typeof base.policy.serverAuthorization>,
+  };
+  const current = { automaticDisclosureMode: 'customer_authorized_content', redactionReceipt: { policyRevision: 'content-v2', consentReceiptId: 'consent-current' } };
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(current, policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({ ...current, redactionReceipt: { policyRevision: 'content-v1', consentReceiptId: 'consent-old' } }, policy), /no longer authorized/);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy(current, { ...policy, evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } } }), /no longer authorized/);
 });
 
 test('server withdrawal resets a workspace to local analysis without retaining a consent receipt', async () => {

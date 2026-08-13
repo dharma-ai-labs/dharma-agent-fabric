@@ -33,6 +33,7 @@ function customerAuthorizedPolicy(excludePaths: string[] = []): OrganizationPoli
   };
   const authorizedPolicy: OrganizationPolicy = {
     ...policy,
+    schema: 'dharma.organization-policy/v2',
     evidence: {
       ...policy.evidence,
       excludePaths,
@@ -121,6 +122,23 @@ test('local analysis delivers failure and tool-discipline metadata without conte
   assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
 });
 
+test('local analysis recognizes Claude-native terminal failure signals', () => {
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
+    rawContentId: `sha256:${'5'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'claude', sessionId: 'claude_failure', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T01:00:00.000Z', endedAt: '2026-08-12T01:00:01.000Z',
+      records: [{
+        native: { type: 'result', is_error: true, subtype: 'error_max_turns' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T01:00:01.000Z', kind: 'result',
+      }],
+    },
+  });
+  assert.equal(capsule.localAnalysis?.outcomeSignals.errorRecords, 1);
+  assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
+});
+
 test('customer-authorized content includes redacted native payload under a consent receipt', () => {
   const authorizedPolicy = customerAuthorizedPolicy();
   const capsule = buildTrajectoryCapsule({
@@ -167,6 +185,25 @@ test('customer-authorized content omits records that reference configured exclud
   assert.equal(encoded.includes('customer-record.json'), false);
   assert.equal(capsule.redactionReceipt.excludedPaths, 1);
   assert.equal(encoded.includes('configured_excluded_path'), true);
+});
+
+test('customer-authorized content detects excluded paths inside serialized tool arguments', () => {
+  const authorizedPolicy = customerAuthorizedPolicy(['.env', '**/*.key']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'4'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'serialized_excluded_path', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_call', arguments: '{"cmd":"cat .env"}', result: 'non-secret customer content' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_call',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('non-secret customer content'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
 });
 
 test('customer-authorized content handles root globs, camelCase paths, and common credential fields', () => {

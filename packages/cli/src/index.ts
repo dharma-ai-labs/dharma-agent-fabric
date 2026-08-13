@@ -132,6 +132,7 @@ async function syncPendingRetentionCapsules(
     const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
     if (pending.length === 0) return synced;
     for (const item of pending) {
+      assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
       await reserveDailyContentUpload(item.capsule, policy);
       try {
         await fabric.syncTrajectory(item.capsule);
@@ -142,6 +143,19 @@ async function syncPendingRetentionCapsules(
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
+  }
+}
+
+export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
+  const disclosure = policy.evidence.automaticDisclosure;
+  const receipt = capsule.redactionReceipt && typeof capsule.redactionReceipt === 'object' && !Array.isArray(capsule.redactionReceipt)
+    ? capsule.redactionReceipt as Record<string, unknown> : {};
+  if (disclosure?.mode !== 'customer_authorized_content'
+    || receipt.policyRevision !== policy.revision
+    || receipt.consentReceiptId !== disclosure.consentReceiptId
+    || !policy.serverAuthorization) {
+    throw new Error('Queued content capsule is no longer authorized by the current signed policy.');
   }
 }
 
@@ -268,7 +282,7 @@ export async function materializeWorkspacePolicy(input: {
     if (await pathExists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
   }
   let policy: OrganizationPolicy = {
-    schema: 'dharma.organization-policy/v1',
+    schema: 'dharma.organization-policy/v2',
     organizationId: input.organizationId,
     revision: input.revision,
     evidence: {
@@ -308,6 +322,11 @@ export async function materializeWorkspacePolicy(input: {
       input.organizationId,
       input.workspaceId,
     );
+    await assertAndRecordWorkspaceAuthorization({
+      workspaceId: input.workspaceId,
+      authorization: policy.serverAuthorization!,
+      apply: !input.dryRun,
+    });
   }
   assertPolicy(policy);
   const relativePath = '.dharma/approved-policy.json';
@@ -316,6 +335,34 @@ export async function materializeWorkspacePolicy(input: {
     await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
   }
   return { relativePath, policy, applied: !input.dryRun };
+}
+
+function workspaceAuthorizationStatePath(workspaceId: string) {
+  return resolve(dharmaHome(), 'registry', 'workspace-authorizations', `${workspaceId}.json`);
+}
+
+async function assertAndRecordWorkspaceAuthorization(input: {
+  workspaceId: string;
+  authorization: NonNullable<OrganizationPolicy['serverAuthorization']>;
+  apply: boolean;
+}) {
+  const statePath = workspaceAuthorizationStatePath(input.workspaceId);
+  type AuthorizationState = { issuedAt: string; signature: string };
+  let previous: AuthorizationState | null = null;
+  try { previous = JSON.parse(await readFile(statePath, 'utf8')) as AuthorizationState; } catch {}
+  if (previous) {
+    const incomingTime = Date.parse(input.authorization.issuedAt);
+    const previousTime = Date.parse(previous.issuedAt);
+    if (incomingTime < previousTime || (incomingTime === previousTime && input.authorization.signature !== previous.signature)) {
+      throw new Error('Server workspace policy authorization is older than the last accepted authorization.');
+    }
+  }
+  if (!input.apply) return;
+  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
+  await writeFile(statePath, `${JSON.stringify({
+    issuedAt: input.authorization.issuedAt,
+    signature: input.authorization.signature,
+  }, null, 2)}\n`, { mode: 0o600 });
 }
 
 export function applyServerEvidencePolicy(
@@ -385,6 +432,7 @@ export function applyServerEvidencePolicy(
   }
   const policy: OrganizationPolicy = {
     ...structuredClone(base),
+    schema: 'dharma.organization-policy/v2',
     revision,
     evidence: {
       ...structuredClone(base.evidence),
@@ -840,7 +888,14 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
   const workspaceId = positional[0] || required(flags, 'workspace-id');
   const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
   if (!item) throw new Error('Workspace is not registered locally.');
-  return syncWorkspacePolicy(await client(), item, required(flags, 'policy-revision'), flags.has('apply'));
+  const policyRevision = required(flags, 'policy-revision');
+  if (!flags.has('apply')) {
+    return {
+      ok: true, workspaceId, planned: true, serverMutation: false, localMutation: false,
+      next: `dharma workspace sync ${workspaceId} --policy-revision ${policyRevision} --apply`,
+    };
+  }
+  return syncWorkspacePolicy(await client(), item, policyRevision, true);
 }
 
 async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string, apply = true) {
@@ -886,13 +941,19 @@ async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
   if (!config || policy.organizationId !== config.organizationId || !authorizedWorkspaceId || !registered) {
     throw new Error('Content policy does not match an enrolled organization and workspace.');
   }
-  return applyServerEvidencePolicy(
+  const verified = applyServerEvidencePolicy(
     { ...structuredClone(policy), evidence: { ...structuredClone(policy.evidence), automaticDisclosure: { mode: 'local_analysis' } }, serverAuthorization: undefined },
     policy.serverAuthorization,
     config.serverPublicKeyEd25519,
     config.organizationId,
     authorizedWorkspaceId,
   );
+  await assertAndRecordWorkspaceAuthorization({
+    workspaceId: authorizedWorkspaceId,
+    authorization: verified.serverAuthorization!,
+    apply: false,
+  });
+  return verified;
 }
 
 export async function installRepositoryAgentFabricSkill(input: {

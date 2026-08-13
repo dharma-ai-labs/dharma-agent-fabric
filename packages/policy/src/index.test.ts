@@ -49,6 +49,7 @@ test('policy rejects capsule sizes above the HQ persistence boundary', () => {
 test('content disclosure requires an explicit customer consent receipt, class grant, and verified signature', async () => {
   assert.throws(() => assertPolicy({
     ...policy,
+    schema: 'dharma.organization-policy/v2',
     evidence: {
       ...policy.evidence,
       automaticDisclosure: { mode: 'customer_authorized_content' },
@@ -64,6 +65,7 @@ test('content disclosure requires an explicit customer consent receipt, class gr
   };
   const authorizedPolicy: OrganizationPolicy = {
     ...policy,
+    schema: 'dharma.organization-policy/v2',
     evidence: {
       ...policy.evidence,
       excludePaths: ['**/.env'],
@@ -89,6 +91,26 @@ test('content disclosure requires an explicit customer consent receipt, class gr
     now: new Date('2026-08-12T12:00:00.000Z'),
   }));
   assert.doesNotThrow(() => assertPolicy(authorizedPolicy));
+});
+
+test('v1 remains valid for local analysis but cannot carry content authorization', () => {
+  assert.doesNotThrow(() => assertPolicy(policy));
+  assert.throws(() => assertPolicy({
+    ...policy,
+    evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } },
+  }), /organization policy v2/);
+  assert.throws(() => assertPolicy({
+    ...policy,
+    evidence: {
+      ...policy.evidence,
+      automaticDisclosure: {
+        mode: 'customer_authorized_content',
+        consentReceiptId: 'consent_test',
+        allowedContentClasses: ['native_provider_payload'],
+      },
+    },
+    serverAuthorization: { schema: 'dharma.workspace-policy-authorization/v1' } as NonNullable<OrganizationPolicy['serverAuthorization']>,
+  }, { allowUnverifiedAuthorization: true }), /organization policy v2/);
 });
 
 test('workspace path checks reject traversal', () => {

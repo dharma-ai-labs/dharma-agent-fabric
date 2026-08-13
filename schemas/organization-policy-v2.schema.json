@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.dharma-ai.io/organization-policy/v1",
+  "$id": "https://schemas.dharma-ai.io/organization-policy/v2",
   "title": "Agent Fabric Organization Policy",
   "type": "object",
   "additionalProperties": false,
@@ -16,7 +16,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "dharma.organization-policy/v1"
+      "const": "dharma.organization-policy/v2"
     },
     "organizationId": {
       "type": "string",
@@ -24,6 +24,41 @@
     },
     "revision": {
       "type": "string"
+    },
+    "serverAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "organizationId", "workspaceId", "policy", "issuedAt", "expiresAt", "signature", "keyVersion"],
+      "properties": {
+        "schema": { "const": "dharma.workspace-policy-authorization/v1" },
+        "organizationId": { "type": "string", "minLength": 1 },
+        "workspaceId": { "type": "string", "format": "uuid" },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revision", "evidence"],
+          "properties": {
+            "revision": { "type": "string", "minLength": 1 },
+            "evidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["automaticDisclosure", "maximumCapsuleBytes", "maximumDailyUploadBytes", "maximumExpansionBytes", "excludePaths", "pseudonymizeIdentity"],
+              "properties": {
+                "automaticDisclosure": { "type": "object" },
+                "maximumCapsuleBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+                "maximumDailyUploadBytes": { "type": "integer", "minimum": 1 },
+                "maximumExpansionBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+                "excludePaths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+                "pseudonymizeIdentity": { "const": true }
+              }
+            }
+          }
+        },
+        "issuedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "signature": { "type": "string", "minLength": 1 },
+        "keyVersion": { "type": "string", "minLength": 1 }
+      }
     },
     "evidence": {
       "type": "object",
@@ -45,6 +80,26 @@
             "reduced_full_session",
             "incident_capture"
           ]
+        },
+        "automaticDisclosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["metadata_only", "local_analysis", "customer_authorized_content"]
+            },
+            "consentReceiptId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "allowedContentClasses": {
+              "type": "array",
+              "items": { "const": "native_provider_payload" },
+              "uniqueItems": true
+            }
+          }
         },
         "registeredWorkspaceOnly": {
           "const": true
