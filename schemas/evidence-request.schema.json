@@ -11,6 +11,8 @@
     "deviceId",
     "workspaceId",
     "trajectoryId",
+    "capsuleRevision",
+    "capsuleHash",
     "purpose",
     "selectors",
     "maximumBytes",
@@ -44,6 +46,14 @@
     "trajectoryId": {
       "type": "string",
       "format": "uuid"
+    },
+    "capsuleRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "capsuleHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
     },
     "purpose": {
       "type": "string",

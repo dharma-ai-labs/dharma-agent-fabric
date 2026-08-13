@@ -993,6 +993,8 @@ type EvidenceRequest = {
   deviceId: string;
   workspaceId: string;
   trajectoryId: string;
+  capsuleRevision: number;
+  capsuleHash: string;
   purpose: string;
   selectors: Array<{ contentId: string; range?: { start: number; end: number } | null; reason?: string | null }>;
   maximumBytes: number;
