@@ -2,14 +2,14 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, open, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import { assertPolicy, loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment, saveDeviceConfig, type DeviceConfig,
@@ -133,10 +133,41 @@ async function syncPendingRetentionCapsules(
     if (pending.length === 0) return synced;
     for (const item of pending) {
       await reserveDailyContentUpload(item.capsule, policy);
-      await fabric.syncTrajectory(item.capsule);
+      try {
+        await fabric.syncTrajectory(item.capsule);
+      } catch (error) {
+        await releaseDailyContentUpload(item.capsule, policy).catch(() => undefined);
+        throw error;
+      }
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
+  }
+}
+
+async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
+  const lockPath = `${evidenceUploadLedgerPath()}.lock`;
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + 5_000;
+  let handle;
+  for (;;) {
+    try {
+      handle = await open(lockPath, 'wx', 0o600);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        const lockStat = await stat(lockPath);
+        if (Date.now() - lockStat.mtimeMs > 60_000) await unlink(lockPath);
+      } catch {}
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for the evidence upload ledger lock.');
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+  }
+  try { return await operation(); }
+  finally {
+    await handle.close().catch(() => undefined);
+    await unlink(lockPath).catch(() => undefined);
   }
 }
 
@@ -146,19 +177,44 @@ export async function reserveDailyContentUpload(capsule: Record<string, unknown>
   if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) throw new Error('Content capsule hash is invalid.');
   const bytes = Buffer.byteLength(canonicalize(capsule));
   const day = new Date().toISOString().slice(0, 10);
-  let ledger: { day: string; totalBytes: number; capsuleHashes: string[] } = { day, totalBytes: 0, capsuleHashes: [] };
-  try {
-    const stored = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as typeof ledger;
-    if (stored.day === day && Number.isSafeInteger(stored.totalBytes) && Array.isArray(stored.capsuleHashes)) ledger = stored;
-  } catch {}
-  if (ledger.capsuleHashes.includes(capsuleHash)) return;
-  if (ledger.totalBytes + bytes > policy.evidence.maximumDailyUploadBytes) {
-    throw new Error('Organization daily content upload limit would be exceeded.');
-  }
-  ledger.totalBytes += bytes;
-  ledger.capsuleHashes.push(capsuleHash);
-  await mkdir(dirname(evidenceUploadLedgerPath()), { recursive: true, mode: 0o700 });
-  await writeFile(evidenceUploadLedgerPath(), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+  await withEvidenceLedgerLock(async () => {
+    let ledger: { day: string; totalBytes: number; capsuleHashes: string[]; capsuleBytes: Record<string, number> } = {
+      day, totalBytes: 0, capsuleHashes: [], capsuleBytes: {},
+    };
+    try {
+      const stored = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as typeof ledger;
+      if (stored.day === day && Number.isSafeInteger(stored.totalBytes) && Array.isArray(stored.capsuleHashes)) {
+        ledger = { ...stored, capsuleBytes: stored.capsuleBytes && typeof stored.capsuleBytes === 'object' ? stored.capsuleBytes : {} };
+      }
+    } catch {}
+    if (ledger.capsuleHashes.includes(capsuleHash)) return;
+    if (ledger.totalBytes + bytes > policy.evidence.maximumDailyUploadBytes) {
+      throw new Error('Organization daily content upload limit would be exceeded.');
+    }
+    ledger.totalBytes += bytes;
+    ledger.capsuleHashes.push(capsuleHash);
+    ledger.capsuleBytes[capsuleHash] = bytes;
+    await writeFile(evidenceUploadLedgerPath(), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+  });
+}
+
+export async function releaseDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
+  const capsuleHash = String(capsule.capsuleHash || '');
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) return;
+  await withEvidenceLedgerLock(async () => {
+    try {
+      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as {
+        day: string; totalBytes: number; capsuleHashes: string[]; capsuleBytes?: Record<string, number>;
+      };
+      if (!ledger.capsuleHashes.includes(capsuleHash)) return;
+      const reservedBytes = Number(ledger.capsuleBytes?.[capsuleHash] ?? Buffer.byteLength(canonicalize(capsule)));
+      ledger.capsuleHashes = ledger.capsuleHashes.filter((hash) => hash !== capsuleHash);
+      ledger.totalBytes = Math.max(0, ledger.totalBytes - (Number.isSafeInteger(reservedBytes) ? reservedBytes : 0));
+      if (ledger.capsuleBytes) delete ledger.capsuleBytes[capsuleHash];
+      await writeFile(evidenceUploadLedgerPath(), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+    } catch {}
+  });
 }
 
 export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
@@ -316,9 +372,15 @@ export function applyServerEvidencePolicy(
   const revision = policyFragment.revision;
   const maximumCapsuleBytes = Number(grant.maximumCapsuleBytes);
   const maximumDailyUploadBytes = Number(grant.maximumDailyUploadBytes);
+  const maximumExpansionBytes = Number(grant.maximumExpansionBytes);
+  const excludePaths = Array.isArray(grant.excludePaths) ? grant.excludePaths.map(String) : [];
   if (typeof revision !== 'string' || !revision.trim()
     || !Number.isSafeInteger(maximumCapsuleBytes)
-    || !Number.isSafeInteger(maximumDailyUploadBytes)) {
+    || !Number.isSafeInteger(maximumDailyUploadBytes)
+    || !Number.isSafeInteger(maximumExpansionBytes)
+    || maximumExpansionBytes < 1 || maximumExpansionBytes > 262_144
+    || grant.pseudonymizeIdentity !== true
+    || excludePaths.length < 1 || excludePaths.some((item) => !item || item.length > 200)) {
     throw new Error('Server workspace policy limits or revision are invalid.');
   }
   const policy: OrganizationPolicy = {
@@ -333,9 +395,19 @@ export function applyServerEvidencePolicy(
       } : { mode: automaticDisclosure.mode as 'metadata_only' | 'local_analysis' },
       maximumCapsuleBytes,
       maximumDailyUploadBytes,
+      maximumExpansionBytes,
+      excludePaths,
+      pseudonymizeIdentity: true,
     },
     serverAuthorization: envelope as OrganizationPolicy['serverAuthorization'],
   };
+  verifyServerAuthorizedPolicy({
+    policy,
+    publicKeyEd25519: serverPublicKeyEd25519,
+    organizationId,
+    workspaceId,
+    now,
+  });
   assertPolicy(policy);
   return policy;
 }
@@ -613,7 +685,12 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       capsules.push(capsule);
       if (fabric) {
         await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
-        syncResults.push(await fabric.syncTrajectory(capsule));
+        try {
+          syncResults.push(await fabric.syncTrajectory(capsule));
+        } catch (error) {
+          await releaseDailyContentUpload(capsule as unknown as Record<string, unknown>, policy).catch(() => undefined);
+          throw error;
+        }
       }
     }
     const output = flags.get('output');
@@ -1045,6 +1122,12 @@ async function processEvidenceRequest(
   try {
     await syncPendingRetentionCapsules(vault, fabric, policy);
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
+    if (Number(capsule.revision) !== request.capsuleRevision || capsule.capsuleHash !== request.capsuleHash) {
+      throw new Error('Evidence request is not bound to the current local capsule revision.');
+    }
+    const capsuleReceipt = capsule.redactionReceipt && typeof capsule.redactionReceipt === 'object' && !Array.isArray(capsule.redactionReceipt)
+      ? capsule.redactionReceipt as Record<string, unknown> : {};
+    const expansionBlockedByExcludedPath = Number(capsuleReceipt.excludedPaths || 0) > 0;
     const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
     const available = new Set(contentIndex.flatMap((item) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
@@ -1058,6 +1141,10 @@ async function processEvidenceRequest(
     const authorizedBytes = Math.min(request.maximumBytes, policy.evidence.maximumExpansionBytes);
     let bytesPrepared = 0;
     for (const selector of request.selectors) {
+      if (expansionBlockedByExcludedPath) {
+        excluded.push({ contentId: selector.contentId, reasonCode: 'configured_excluded_path' });
+        continue;
+      }
       if (!available.has(selector.contentId)) { excluded.push({ contentId: selector.contentId, reasonCode: 'not_available_in_capsule' }); continue; }
       try {
         const source = await vault.getBlob(selector.contentId);
@@ -1421,7 +1508,16 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
             if (policyPath === resolve(workspace.path, '.dharma', 'approved-policy.json')) {
               policy = await loadVerifiedWorkspacePolicy(policyPath, workspace.workspaceId);
             }
-          } catch {}
+          } catch {
+            if (policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content') {
+              policy = {
+                ...structuredClone(policy),
+                evidence: { ...structuredClone(policy.evidence), automaticDisclosure: { mode: 'local_analysis' } },
+                serverAuthorization: undefined,
+              };
+              assertPolicy(policy);
+            }
+          }
         }
         nextPolicyRefreshAt = Date.now() + 60_000;
       }

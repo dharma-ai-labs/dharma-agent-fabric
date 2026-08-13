@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { canonicalize, sha256, type EvidenceState } from '@dharma-ai-labs/agent-fabric-contracts';
-import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { assertPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import type { ProviderSession, SourceRecord } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 
 const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
@@ -12,6 +12,9 @@ const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   { name: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   { name: 'connection_string', pattern: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s"']+/gi },
   { name: 'authorization', pattern: /\b(?:authorization|api[_-]?key|access[_-]?token|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{12,}["']?/gi },
+  { name: 'google_api_key', pattern: /\bAIza[0-9A-Za-z_-]{30,}\b/g },
+  { name: 'slack_token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
+  { name: 'generic_secret', pattern: /\b(?:client[_-]?secret|refresh[_-]?token|aws[_-]?secret[_-]?access[_-]?key|auth[_-]?token|x[_-]?api[_-]?key)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}["']?/gi },
 ];
 
 export interface RedactionStats {
@@ -105,13 +108,18 @@ type RedactionOptions = { pseudonymizeIdentity?: boolean };
 function globPattern(pattern: string): RegExp {
   const normalized = pattern.replaceAll('\\', '/').replace(/^\.\//, '');
   const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replaceAll('**', '\u0000').replaceAll('*', '[^/]*').replaceAll('\u0000', '.*');
+    .replaceAll('**/', '\u0001').replaceAll('**', '\u0000').replaceAll('*', '[^/]*')
+    .replaceAll('\u0001', '(?:.*/)?').replaceAll('\u0000', '.*');
   return new RegExp(`(?:^|/)${escaped}$`, 'i');
+}
+
+function normalizedFieldName(key: string) {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[-\s]+/g, '_').toLowerCase();
 }
 
 function referencesExcludedPath(value: unknown, excludePaths: string[], key = '', depth = 0): boolean {
   if (depth > 10) return false;
-  if (typeof value === 'string' && /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(key)) {
+  if (typeof value === 'string' && /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedFieldName(key))) {
     const normalized = value.replaceAll('\\', '/').replace(/^\.\//, '');
     return excludePaths.some((pattern) => globPattern(pattern).test(normalized));
   }
@@ -157,14 +165,15 @@ function redactString(value: string, stats: RedactionStats, options: RedactionOp
 }
 
 function redactValue(value: unknown, stats: RedactionStats, key = '', options: RedactionOptions = {}): unknown {
-  if (/^(authorization|cookie|set-cookie|password|secret|token|api[_-]?key)$/i.test(key)) {
+  const normalizedKey = normalizedFieldName(key);
+  if (/^(authorization|cookie|set_cookie|password|secret|token|api_key|x_api_key|client_secret|refresh_token|auth_token|access_token|aws_secret_access_key)$/i.test(normalizedKey)) {
     if (value !== null && value !== undefined) {
       stats.classes.add('sensitive_field');
       stats.redactedValues += 1;
     }
     return '[REDACTED:sensitive_field]';
   }
-  if (options.pseudonymizeIdentity && /^(cwd|source[_-]?path|workspace[_-]?path|local[_-]?path)$/i.test(key) && typeof value === 'string') {
+  if (options.pseudonymizeIdentity && /^(cwd|source_path|workspace_path|local_path)$/i.test(normalizedKey) && typeof value === 'string') {
     stats.inputBytes += Buffer.byteLength(value);
     stats.outputBytes += Buffer.byteLength('[REDACTED:local_path]');
     stats.classes.add('local_path');
@@ -312,6 +321,7 @@ export function buildTrajectoryCapsule(input: {
   revision?: number;
   previousRevisionHash?: string | null;
 }): TrajectoryCapsule {
+  assertPolicy(input.policy);
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
   };

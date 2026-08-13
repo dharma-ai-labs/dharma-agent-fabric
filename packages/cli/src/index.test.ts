@@ -19,6 +19,7 @@ import {
   nativeSkillDirectory,
   rawLocalRetentionDays,
   relayProcessState,
+  releaseDailyContentUpload,
   reserveDailyContentUpload,
   run,
   taskResponsePreview,
@@ -32,8 +33,19 @@ const execFileAsync = promisify(execFile);
 
 function signedPolicyAuthorization(policy: Record<string, unknown>, organizationId = 'org_northstar', workspaceId = 'workspace-northstar') {
   const keys = generateKeyPairSync('ed25519');
+  const sourceEvidence = policy.evidence && typeof policy.evidence === 'object' && !Array.isArray(policy.evidence)
+    ? policy.evidence as Record<string, unknown> : {};
+  const signedPolicy = {
+    ...policy,
+    evidence: {
+      ...sourceEvidence,
+      maximumExpansionBytes: sourceEvidence.maximumExpansionBytes ?? 100_000,
+      excludePaths: sourceEvidence.excludePaths ?? ['**/.env', '**/*.key'],
+      pseudonymizeIdentity: true,
+    },
+  };
   const unsigned = {
-    schema: 'dharma.workspace-policy-authorization/v1', organizationId, workspaceId, policy,
+    schema: 'dharma.workspace-policy-authorization/v1', organizationId, workspaceId, policy: signedPolicy,
     issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-14T00:00:00.000Z',
   };
   const publicJwk = keys.publicKey.export({ format: 'jwk' });
@@ -303,6 +315,8 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
     await reserveDailyContentUpload(first, policy);
     await reserveDailyContentUpload(first, policy);
     await assert.rejects(() => reserveDailyContentUpload(second, policy), /daily content upload limit/i);
+    await releaseDailyContentUpload(first, policy);
+    await reserveDailyContentUpload(second, policy);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
   }
