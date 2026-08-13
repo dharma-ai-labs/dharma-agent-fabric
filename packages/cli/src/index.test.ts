@@ -179,7 +179,7 @@ test('single capture selects an older session exactly and advances a changing se
       'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
       '--policy', policyPath, '--session-ids-file', allowlist,
     ]) as Record<string, unknown>;
-    assert.equal(first.sessionId, selectedSessionId);
+    assert.match(String(first.sessionId), /^sha256:[a-f0-9]{64}$/);
     assert.equal(first.revision, 1);
     events.push(
       { type: 'turn_context', payload: { turn_id: firstTurn, cwd: canonicalWorkspace }, timestamp: '2026-08-12T03:00:00Z' },
@@ -190,7 +190,7 @@ test('single capture selects an older session exactly and advances a changing se
       'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
       '--policy', policyPath, '--session-ids-file', allowlist,
     ]) as Record<string, unknown>;
-    assert.equal(second.sessionId, selectedSessionId);
+    assert.equal(second.sessionId, first.sessionId);
     assert.equal(second.revision, 2);
     assert.equal(second.previousRevisionHash, first.capsuleHash);
     const retry = await run([
@@ -370,7 +370,7 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
   }
 });
 
-test('deleting an initialized content quota ledger fails closed on policy refresh', async () => {
+test('deleting the advisory local quota ledger does not bypass the authoritative server quota', async () => {
   const previous = process.env.DHARMA_HOME;
   const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-delete-'));
   process.env.DHARMA_HOME = home;
@@ -392,7 +392,8 @@ test('deleting an initialized content quota ledger fails closed on policy refres
     };
     await materializeWorkspacePolicy(input);
     await unlink(join(home, 'relay', 'evidence-upload-ledger.json'));
-    await assert.rejects(() => materializeWorkspacePolicy(input), /quota ledger is missing/i);
+    await materializeWorkspacePolicy(input);
+    assert.equal(JSON.parse(await readFile(join(home, 'relay', 'evidence-upload-ledger.json'), 'utf8')).totalBytes, 0);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
   }
@@ -417,12 +418,15 @@ test('queued content must match the current signed consent and policy revision',
 test('reduced capsules cannot disguise provider content as local analysis', async () => {
   const base = await materializeWorkspacePolicy({ workspace: await mkdtemp(join(tmpdir(), 'dharma-reduced-boundary-')), organizationId: 'org_northstar', revision: 'local' });
   const reduced = {
-    organizationId: 'org_northstar', workspaceId: 'workspace-northstar',
+    organizationId: 'org_northstar', workspaceId: 'workspace-northstar', deviceId: '22222222-2222-4222-8222-222222222222',
+    provider: 'codex', sessionId: `sha256:${'a'.repeat(64)}`, taskId: null,
     automaticDisclosureMode: 'local_analysis', repoState: {}, skillState: {}, validationResults: [], contentIndex: [],
     events: [{
-      kind: 'user_message',
+      schema: 'dharma.agent-event/v1', eventId: '33333333-3333-4333-8333-333333333333',
+      organizationId: 'org_northstar', deviceId: '22222222-2222-4222-8222-222222222222', workspaceId: 'workspace-northstar',
+      provider: 'codex', sessionId: `sha256:${'a'.repeat(64)}`, sequence: 0, occurredAt: '2026-08-12T00:00:00.000Z', kind: 'user_message', coverage: 'observed', contentRefs: [],
       payload: { nativeKind: 'user_message', recordBytes: 10, contentOmitted: true },
-      source: { nativeEventId: null, sourceKind: 'user_message' },
+      source: { nativeEventId: null, sourceKind: 'user_message', localLocatorId: null }, skillBundleId: null, providerModel: null,
     }],
     localAnalysis: {
       schema: 'dharma.local-trajectory-analysis/v1', analyzer: 'deterministic', recordCount: 1,
@@ -431,7 +435,7 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
       outcomeSignals: { errorRecords: 0, incomplete: false, coverage: 'observed' }, durationMs: 1,
       semanticReviewRecommended: false, reasonCodes: [],
     },
-    redactionReceipt: { disclosureMode: 'local_analysis', consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['provider_prompt'], classes: [] },
+    redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['provider_prompt'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
@@ -460,6 +464,14 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced, localAnalysis: { ...reduced.localAnalysis, reasonCodes: ['secret=customer-token'] },
   }, base.policy), /invalid free-form analysis/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: [{ ...reduced.events[0], providerModel: 'customer-secret-in-metadata' }],
+  }, base.policy), /unauthorized event descriptors/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: [{ ...reduced.events[0]!, source: { ...reduced.events[0]!.source, localLocatorId: 'customer-secret-in-metadata' } }],
+  }, base.policy), /unauthorized event descriptors/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced, redactionReceipt: { ...reduced.redactionReceipt, classes: ['secret=customer-token'] },
   }, base.policy), /invalid redaction receipt classes/i);

@@ -103,6 +103,38 @@ test('signed outbox retries the exact message after an unknown network outcome',
   assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });
 
+test('content-bearing trajectory outbox is discarded before a new session can replay it', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-outbox-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const paths: string[] = [];
+  let failTrajectory = true;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    paths.push(pathname);
+    if (failTrajectory && pathname.endsWith('/agent-fabric/trajectories')) {
+      failTrajectory = false;
+      throw new Error('unknown trajectory delivery outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(client.syncTrajectory({ secret: 'authorized-at-the-time' }), /unknown trajectory delivery/);
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.openSession();
+  assert.equal(paths.filter((path) => path.endsWith('/agent-fabric/trajectories')).length, 1);
+  assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+});
+
 test('deterministic client rejection advances the outbox instead of blocking the device', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-rejection-'));

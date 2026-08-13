@@ -354,6 +354,7 @@ export function buildTrajectoryCapsule(input: {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
   };
   const trajectoryId = deterministicUuid(`${input.organizationId}:${input.deviceId}:${input.session.provider}:${input.session.sessionId}`);
+  const pseudonymousSessionId = sha256(`${input.organizationId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`);
   const seen = new Set<string>();
   const events: AgentEvent[] = [];
   const excludedClasses = new Set<string>();
@@ -372,7 +373,7 @@ export function buildTrajectoryCapsule(input: {
         pseudonymizeIdentity: input.policy.evidence.pseudonymizeIdentity,
       });
     const payload: Record<string, unknown> & { recordBytes: number } = {
-      nativeKind: safeSourceKind(record),
+      nativeKind: mode === 'customer_authorized_content' ? safeSourceKind(record) : record.kind,
       recordBytes: nativeRecordBytes(record),
       contentOmitted: mode !== 'customer_authorized_content',
     };
@@ -399,7 +400,7 @@ export function buildTrajectoryCapsule(input: {
       deviceId: input.deviceId,
       workspaceId: input.workspaceId,
       provider: input.session.provider,
-      sessionId: input.session.sessionId,
+      sessionId: pseudonymousSessionId,
       sequence: events.length,
       occurredAt: record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt,
       kind: record.kind,
@@ -408,8 +409,10 @@ export function buildTrajectoryCapsule(input: {
       payload,
       source: {
         nativeEventId: null,
-        sourceKind: safeSourceKind(record),
-        localLocatorId: sha256(`${basename(record.sourcePath)}:${record.line}`),
+        sourceKind: mode === 'customer_authorized_content' ? safeSourceKind(record) : record.kind,
+        localLocatorId: mode === 'customer_authorized_content'
+          ? sha256(`${basename(record.sourcePath)}:${record.line}`)
+          : null,
       },
       skillBundleId: null,
       providerModel: null,
@@ -432,7 +435,7 @@ export function buildTrajectoryCapsule(input: {
     deviceId: input.deviceId,
     workspaceId: input.workspaceId,
     provider: input.session.provider,
-    sessionId: input.session.sessionId,
+    sessionId: pseudonymousSessionId,
     taskId: null,
     timeRange: { start: input.session.startedAt, end: input.session.endedAt },
     status: input.session.coverage === 'observed' ? 'completed' as const : 'partial' as const,

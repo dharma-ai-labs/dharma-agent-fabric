@@ -228,7 +228,15 @@ export class AgentFabricClient {
   }
 
   async openSession(relayVersion = '0.1.0') {
-    if (this.#state.pending) await this.#sendPending();
+    if (this.#state.pending?.pathname.endsWith('/agent-fabric/trajectories')) {
+      // Content-bearing requests are never replayed from durable state before
+      // the CLI has refreshed consent. A later explicit sync rebuilds and
+      // reauthorizes the request; server ingestion is capsule-hash idempotent.
+      this.#state.pending = null;
+      await this.#persist();
+    } else if (this.#state.pending) {
+      await this.#sendPending();
+    }
     this.#state = { schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null };
     await this.#persist();
     return this.signedPost('/agent-fabric/sessions', {
