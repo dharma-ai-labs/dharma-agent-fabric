@@ -1428,20 +1428,16 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     policyRevision: authoritativeRevision,
   });
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
-  const nativeSkills = [];
-  for (const capability of providers) {
-    if (capability.skillInstall !== 'available') continue;
-    nativeSkills.push(await installNativeAgentFabricBootstrap({
-      provider: capability.provider as ProviderId,
-      workspace,
-      workspaceId: registered.workspaceId,
-      organizationId,
-      hqUrl,
-    }));
-  }
+  const nativeSkillResult = await installAvailableNativeAgentFabricBootstraps({
+    providers,
+    workspace,
+    workspaceId: registered.workspaceId,
+    organizationId,
+    hqUrl,
+  });
   return {
     ok: true,
-    stage: 'ready',
+    stage: nativeSkillResult.failures.length ? 'ready_with_provider_actions' : 'ready',
     organizationId,
     workspaceId: registered.workspaceId,
     deviceId: config.deviceId,
@@ -1454,7 +1450,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       writePaths: generatedPolicy.tasks.writePaths,
     },
     repositorySkill: installed,
-    nativeSkills,
+    nativeSkills: nativeSkillResult.installed,
+    nativeSkillFailures: nativeSkillResult.failures,
     workspaceSync: synced,
     next: {
       preview: 'dharma evidence preview --workspace . --provider codex',
@@ -1811,6 +1808,41 @@ The repository-local skill and connection manifest are authoritative for the act
   };
 }
 
+type NativeBootstrapCapability = { provider: string; skillInstall: string };
+type NativeBootstrapInstaller = typeof installNativeAgentFabricBootstrap;
+
+export async function installAvailableNativeAgentFabricBootstraps(input: {
+  providers: NativeBootstrapCapability[];
+  workspace: string;
+  workspaceId: string;
+  organizationId: string;
+  hqUrl: string;
+  install?: NativeBootstrapInstaller;
+}) {
+  const install = input.install || installNativeAgentFabricBootstrap;
+  const installed: Awaited<ReturnType<NativeBootstrapInstaller>>[] = [];
+  const failures: Array<{ provider: string; code: 'native_skill_install_failed'; message: string }> = [];
+  for (const capability of input.providers) {
+    if (capability.skillInstall !== 'available') continue;
+    try {
+      installed.push(await install({
+        provider: capability.provider as ProviderId,
+        workspace: input.workspace,
+        workspaceId: input.workspaceId,
+        organizationId: input.organizationId,
+        hqUrl: input.hqUrl,
+      }));
+    } catch (error) {
+      failures.push({
+        provider: capability.provider,
+        code: 'native_skill_install_failed',
+        message: error instanceof Error ? error.message : 'Native skill installation failed.',
+      });
+    }
+  }
+  return { installed, failures };
+}
+
 export async function verifyAgentFabricSkillInstallation(input: {
   provider: ProviderId;
   workspace: string;
@@ -1855,6 +1887,7 @@ export async function activateAgyPlugin(input: {
   try { await access(manifest); }
   catch { await writeFile(manifest, `${JSON.stringify({ name: 'dharma-agent-fabric' }, null, 2)}\n`, { mode: 0o600 }); }
   await execute('agy', ['plugin', 'validate', root], { timeout: 30_000 });
+  await execute('agy', ['plugin', 'install', root], { timeout: 30_000 });
   await execute('agy', ['plugin', 'enable', 'dharma-agent-fabric'], { timeout: 30_000 });
 }
 

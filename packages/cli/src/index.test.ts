@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
   assertTaskSkillPin,
   installNativeAgentFabricBootstrap,
@@ -613,7 +614,7 @@ test('native bootstrap installation refuses to overwrite an unmanaged provider s
   }), /Refusing to replace an unmanaged codex skill/);
 });
 
-test('Agy activation validates the generated plugin before enabling it', async () => {
+test('Agy activation validates and registers the generated plugin before enabling it', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-agy-plugin-'));
   const calls: Array<{ executable: string; argv: string[] }> = [];
   await activateAgyPlugin({
@@ -625,8 +626,39 @@ test('Agy activation validates the generated plugin before enabling it', async (
   assert.deepEqual(JSON.parse(await readFile(join(root, 'plugin.json'), 'utf8')), { name: 'dharma-agent-fabric' });
   assert.deepEqual(calls, [
     { executable: 'agy', argv: ['plugin', 'validate', root] },
+    { executable: 'agy', argv: ['plugin', 'install', root] },
     { executable: 'agy', argv: ['plugin', 'enable', 'dharma-agent-fabric'] },
   ]);
+});
+
+test('native bootstrap installation isolates provider failures during onboarding', async () => {
+  const result = await installAvailableNativeAgentFabricBootstraps({
+    providers: [
+      { provider: 'codex', skillInstall: 'available' },
+      { provider: 'claude', skillInstall: 'unavailable' },
+      { provider: 'agy', skillInstall: 'available' },
+    ],
+    workspace: '/workspace',
+    workspaceId: 'workspace_test',
+    organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io',
+    install: async (input) => {
+      if (input.provider === 'agy') throw new Error('Agy plugin registration failed.');
+      return {
+        provider: input.provider,
+        nativeSkillDirectory: '/skills',
+        skillPath: '/skills/SKILL.md',
+        activation: 'next_session',
+        verified: true,
+      };
+    },
+  });
+  assert.deepEqual(result.installed.map((item) => item.provider), ['codex']);
+  assert.deepEqual(result.failures, [{
+    provider: 'agy',
+    code: 'native_skill_install_failed',
+    message: 'Agy plugin registration failed.',
+  }]);
 });
 
 test('evidence preview counts native turns without disclosing paths or prompt bodies', async () => {
