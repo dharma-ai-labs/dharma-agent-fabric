@@ -103,6 +103,114 @@ test('signed outbox retries the exact message after an unknown network outcome',
   assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });
 
+test('content-bearing trajectory outbox is discarded before a new session can replay it', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-outbox-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const paths: string[] = [];
+  let failTrajectory = true;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    paths.push(pathname);
+    if (failTrajectory && pathname.endsWith('/agent-fabric/trajectories')) {
+      failTrajectory = false;
+      throw new Error('unknown trajectory delivery outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(client.syncTrajectory({ secret: 'authorized-at-the-time' }), /unknown trajectory delivery/);
+  const durableState = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(durableState.pending, null);
+  assert.doesNotMatch(await readFile(statePath, 'utf8'), /authorized-at-the-time/);
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.openSession();
+  assert.equal(paths.filter((path) => path.endsWith('/agent-fabric/trajectories')).length, 1);
+  assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+});
+
+test('a later operation cannot implicitly replay an ambiguous content request', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-retry-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const calls: Array<{ path: string; body: string; sequence: number }> = [];
+  let failTrajectory = true;
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname;
+    calls.push({
+      path,
+      body: String(init?.body || ''),
+      sequence: Number(new Headers(init?.headers).get('x-dharma-sequence')),
+    });
+    if (failTrajectory && path.endsWith('/agent-fabric/trajectories')) {
+      failTrajectory = false;
+      throw new Error('unknown trajectory delivery outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(client.syncTrajectory({ secret: 'old-authorized-content' }), /unknown trajectory delivery/);
+  await client.registerWorkspace({ workspaceId: 'new-control-operation' });
+  assert.equal(calls.filter((call) => call.path.endsWith('/agent-fabric/trajectories')).length, 1);
+  assert.match(calls.at(-1)?.body || '', /new-control-operation/);
+  assert.deepEqual(calls.map((call) => call.sequence), [1, 2, 3]);
+});
+
+test('an ambiguous evidence response is neither persisted nor implicitly replayed', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-evidence-response-outbox-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const paths: string[] = [];
+  let failResponse = true;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    paths.push(pathname);
+    if (failResponse && pathname.endsWith('/responses')) {
+      failResponse = false;
+      throw new Error('unknown evidence-response delivery outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(
+    client.postEvidenceResponse('request-1', { contentBase64: 'customer-content' }),
+    /unknown evidence-response delivery/,
+  );
+  const persisted = await readFile(statePath, 'utf8');
+  assert.doesNotMatch(persisted, /customer-content/);
+  assert.equal(JSON.parse(persisted).nextSequence, 3);
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.registerWorkspace({ workspaceId: 'control-operation' });
+  assert.equal(paths.filter((path) => path.endsWith('/responses')).length, 1);
+});
+
 test('deterministic client rejection advances the outbox instead of blocking the device', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-rejection-'));

@@ -137,8 +137,33 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.trajectoryId, 'trajectory-retention');
   assert.equal(pending[0]?.revision, 2);
-  vault.markCapsuleSynced('trajectory-retention', 2);
+  vault.discardPendingCapsuleSync('trajectory-retention', 2, 'authorization_revoked');
   assert.deepEqual(await vault.listPendingCapsuleSyncs(), []);
+  const database = new DatabaseSync(join(root, 'vault.sqlite'), { readOnly: true });
+  const failure = database.prepare(`
+    select trajectory_id, revision, reason from capsule_sync_failures
+    where trajectory_id = ? and revision = ?
+  `).get('trajectory-retention', 2) as Record<string, unknown>;
+  assert.deepEqual({ ...failure }, {
+    trajectory_id: 'trajectory-retention', revision: 2, reason: 'authorization_revoked',
+  });
+  database.close();
+  vault.close();
+});
+
+test('vault returns only the requested immutable capsule revision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-revision-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  for (const revision of [1, 2]) {
+    const value = { trajectoryId: 'trajectory-versioned', revision };
+    const blobContentId = await vault.putBlob(Buffer.from(JSON.stringify(value)), 'trajectory-capsule');
+    vault.recordCapsule('trajectory-versioned', revision, `sha256:${String(revision).repeat(64)}`, blobContentId);
+  }
+  assert.deepEqual(await vault.getCapsule('trajectory-versioned', 1), {
+    trajectoryId: 'trajectory-versioned', revision: 1,
+  });
+  await assert.rejects(() => vault.getCapsule('trajectory-versioned', 3), /not available in the local vault/);
+  await assert.rejects(() => vault.getCapsule('trajectory-versioned', 0), /positive integer/);
   vault.close();
 });
 

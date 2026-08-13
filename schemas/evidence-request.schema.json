@@ -19,7 +19,8 @@
     "authorityDecisionId",
     "createdAt",
     "expiresAt",
-    "nonce"
+    "nonce",
+    "signature"
   ],
   "properties": {
     "schema": {
@@ -44,6 +45,14 @@
     "trajectoryId": {
       "type": "string",
       "format": "uuid"
+    },
+    "capsuleRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "capsuleHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
     },
     "purpose": {
       "type": "string",
@@ -116,6 +125,10 @@
       "format": "date-time"
     },
     "nonce": {
+      "type": "string",
+      "minLength": 1
+    },
+    "keyVersion": {
       "type": "string",
       "minLength": 1
     },

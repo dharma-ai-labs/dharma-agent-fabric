@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,23 +9,64 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  assertCapsuleAuthorizedByCurrentPolicy,
   assertTaskSkillPin,
   installNativeAgentFabricBootstrap,
   installRepositoryAgentFabricSkill,
   isDirectExecution,
   materializeWorkspacePolicy,
+  applyServerEvidencePolicy,
   materializeInlineSkillFiles,
   nativeSkillDirectory,
   rawLocalRetentionDays,
   relayProcessState,
+  releaseDailyContentUpload,
+  reserveDailyContentUpload,
   run,
   taskResponsePreview,
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 
 const execFileAsync = promisify(execFile);
+
+function memorySecureStore(): SecureSecretStore {
+  const values = new Map<string, string>();
+  return {
+    backend: 'linux-secret-service',
+    async get(account) { return values.get(account) ?? null; },
+    async put(account, value) { values.set(account, value); },
+    async delete(account) { values.delete(account); },
+  };
+}
+
+function signedPolicyAuthorization(policy: Record<string, unknown>, organizationId = 'org_northstar', workspaceId = 'workspace-northstar') {
+  const keys = generateKeyPairSync('ed25519');
+  const sourceEvidence = policy.evidence && typeof policy.evidence === 'object' && !Array.isArray(policy.evidence)
+    ? policy.evidence as Record<string, unknown> : {};
+  const signedPolicy = {
+    ...policy,
+    evidence: {
+      ...sourceEvidence,
+      maximumExpansionBytes: sourceEvidence.maximumExpansionBytes ?? 100_000,
+      excludePaths: sourceEvidence.excludePaths ?? ['**/.env', '**/*.key'],
+      pseudonymizeIdentity: true,
+    },
+  };
+  const unsigned = {
+    schema: 'dharma.workspace-policy-authorization/v1', organizationId, workspaceId, policy: signedPolicy,
+    issuedAt: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    keyVersion: 'test-key',
+  };
+  const publicJwk = keys.publicKey.export({ format: 'jwk' });
+  return {
+    envelope: { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey) },
+    publicKeyEd25519: publicJwk.x!,
+  };
+}
 
 test('organization raw evidence retention is validated and defaults explicitly', () => {
   assert.equal(rawLocalRetentionDays({ retention: {} }), 30);
@@ -35,7 +76,7 @@ test('organization raw evidence retention is validated and defaults explicitly',
 });
 
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.6' });
+  assert.deepEqual(await run(['version']), { version: '0.1.10' });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
@@ -63,6 +104,17 @@ test('unknown commands fail as usage errors', async () => {
   await assert.rejects(() => run(['unknown']), /Usage:/);
 });
 
+test('documented direct-sync commands enforce their required arguments', async () => {
+  await assert.rejects(
+    () => run(['workspace', 'sync', 'workspace-test', '--apply']),
+    /Missing required option --policy-revision/,
+  );
+  await assert.rejects(
+    () => run(['evidence', 'sync', '--workspace-id', 'workspace-test', '--policy', '.dharma/approved-policy.json']),
+    /Missing required option --file/,
+  );
+});
+
 test('status reports verified relay state and hides local identifiers by default', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-cli-status-'));
   const previous = process.env.DHARMA_HOME;
@@ -75,7 +127,7 @@ test('status reports verified relay state and hides local identifiers by default
       organizationId: 'org_private', deviceId: 'device_private',
     }));
     const status = await run(['status']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: '0.1.6', enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: '0.1.10', enrolled: true, relay: 'running' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -138,7 +190,7 @@ test('single capture selects an older session exactly and advances a changing se
       'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
       '--policy', policyPath, '--session-ids-file', allowlist,
     ]) as Record<string, unknown>;
-    assert.equal(first.sessionId, selectedSessionId);
+    assert.match(String(first.sessionId), /^sha256:[a-f0-9]{64}$/);
     assert.equal(first.revision, 1);
     events.push(
       { type: 'turn_context', payload: { turn_id: firstTurn, cwd: canonicalWorkspace }, timestamp: '2026-08-12T03:00:00Z' },
@@ -149,7 +201,7 @@ test('single capture selects an older session exactly and advances a changing se
       'evidence', 'capture', '--workspace', workspace, '--provider', 'codex', '--source-root', sessions,
       '--policy', policyPath, '--session-ids-file', allowlist,
     ]) as Record<string, unknown>;
-    assert.equal(second.sessionId, selectedSessionId);
+    assert.equal(second.sessionId, first.sessionId);
     assert.equal(second.revision, 2);
     assert.equal(second.previousRevisionHash, first.capsuleHash);
     const retry = await run([
@@ -177,6 +229,7 @@ test('repository onboarding skill records scoped API metadata without local path
   const skill = await readFile(join(workspace, result.skillPath), 'utf8');
   const connection = await readFile(join(workspace, result.connectionPath), 'utf8');
   assert.match(skill, /structured, task-bound handoff/);
+  assert.match(skill, /local deterministic self-analysis/);
   assert.match(skill, /dharma skills verify --provider codex --workspace \./);
   assert.match(skill, /dharma skills verify --provider claude --workspace \./);
   assert.match(skill, /dharma skills verify --provider agy --workspace \./);
@@ -222,8 +275,259 @@ test('blank-slate onboarding creates a conservative executable workspace policy'
   assert.deepEqual(generated.policy.tasks.writePaths, ['src/**']);
   assert.equal(generated.policy.tasks.defaultNetwork, 'deny');
   assert.equal(generated.policy.skills.automaticPromotionMaxRisk, 'R2');
+  assert.deepEqual(generated.policy.evidence.automaticDisclosure, { mode: 'local_analysis' });
   const persisted = JSON.parse(await readFile(join(workspace, generated.relativePath), 'utf8'));
   assert.equal(persisted.organizationId, 'org_northstar');
+});
+
+test('applies only a server-issued bounded content grant to the local workspace policy', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-server-policy-'));
+  const secureStore = memorySecureStore();
+  const previousHome = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = workspace;
+  await writeFile(join(workspace, 'device.json'), JSON.stringify({
+    schema: 'dharma.device-config/v1', hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_northstar',
+    deviceId: 'device-test', relayUrl: 'wss://relay.dharma-ai.io',
+  }));
+  const signed = signedPolicyAuthorization({
+    revision: 'agent-fabric-content-11111111-1111-4111-8111-111111111111',
+    evidence: {
+      automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent_11111111-1111-4111-8111-111111111111', allowedContentClasses: ['native_provider_payload'] },
+      maximumCapsuleBytes: 500_000, maximumDailyUploadBytes: 50_000_000,
+    },
+  });
+  const generated = await materializeWorkspacePolicy({
+    workspace,
+    organizationId: 'org_northstar',
+    revision: 'portal-bootstrap',
+    serverPolicyAuthorization: signed.envelope,
+    serverPublicKeyEd25519: signed.publicKeyEd25519,
+    workspaceId: 'workspace-northstar',
+    secureStore,
+  });
+  if (previousHome === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previousHome;
+  assert.equal(generated.policy.revision, 'agent-fabric-content-11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(generated.policy.evidence.automaticDisclosure, {
+    mode: 'customer_authorized_content',
+    consentReceiptId: 'consent_11111111-1111-4111-8111-111111111111',
+    allowedContentClasses: ['native_provider_payload'],
+  });
+  assert.equal(generated.policy.evidence.maximumCapsuleBytes, 500_000);
+  assert.equal(generated.policy.tasks.defaultNetwork, 'deny');
+  assert.throws(() => applyServerEvidencePolicy(generated.policy, { ...signed.envelope, signature: 'tampered' }, signed.publicKeyEd25519, 'org_northstar', 'workspace-northstar'), /signature is invalid/);
+});
+
+test('server evidence updates preserve existing workspace command and write authority', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-existing-policy-'));
+  const secureStore = memorySecureStore();
+  const previousHome = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = workspace;
+  await writeFile(join(workspace, 'device.json'), JSON.stringify({
+    schema: 'dharma.device-config/v1', hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_northstar',
+    deviceId: 'device-test', relayUrl: 'wss://relay.dharma-ai.io',
+  }));
+  await mkdir(join(workspace, '.dharma'), { recursive: true });
+  const initial = await materializeWorkspacePolicy({ workspace, organizationId: 'org_northstar', revision: 'initial' });
+  initial.policy.tasks.allowedCommands['customer.check'] = { argv: ['node', '--check', 'src/index.js'], timeoutSeconds: 60 };
+  initial.policy.tasks.writePaths = ['customer-src/**'];
+  await writeFile(join(workspace, initial.relativePath), JSON.stringify(initial.policy));
+  const signed = signedPolicyAuthorization({
+    revision: 'agent-fabric-local-analysis-v2',
+    evidence: { automaticDisclosure: { mode: 'local_analysis' }, maximumCapsuleBytes: 500_000, maximumDailyUploadBytes: 5_000_000 },
+  });
+  const updated = await materializeWorkspacePolicy({
+    workspace, organizationId: 'org_northstar', revision: 'ignored', serverPolicyAuthorization: signed.envelope,
+    serverPublicKeyEd25519: signed.publicKeyEd25519, workspaceId: 'workspace-northstar', secureStore,
+  });
+  if (previousHome === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previousHome;
+  assert.deepEqual(updated.policy.tasks.allowedCommands['customer.check']?.argv, ['node', '--check', 'src/index.js']);
+  assert.deepEqual(updated.policy.tasks.writePaths, ['customer-src/**']);
+});
+
+test('daily content disclosure ledger is durable, bounded, and idempotent by capsule hash', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-'));
+  process.env.DHARMA_HOME = home;
+  try {
+    const secureStore = memorySecureStore();
+    await writeFile(join(home, 'device.json'), JSON.stringify({ schema: 'dharma.device-config/v1',
+      hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_northstar', deviceId: 'device-ledger', relayUrl: 'wss://relay.dharma-ai.io' }));
+    const signed = signedPolicyAuthorization({
+      revision: 'content-v1',
+      evidence: {
+        automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-ledger', allowedContentClasses: ['native_provider_payload'] },
+        maximumCapsuleBytes: 1_000, maximumDailyUploadBytes: 700, maximumExpansionBytes: 100,
+      },
+    });
+    const generated = await materializeWorkspacePolicy({
+      workspace: home, organizationId: 'org_northstar', revision: 'content', workspaceId: 'workspace-northstar',
+      serverPolicyAuthorization: signed.envelope, serverPublicKeyEd25519: signed.publicKeyEd25519,
+      secureStore,
+    });
+    const policy = generated.policy;
+    const signCapsule = (unsigned: Record<string, unknown>) => ({
+      ...unsigned,
+      capsuleHash: `sha256:${createHash('sha256').update(canonicalize(unsigned)).digest('hex')}`,
+    });
+    const first = signCapsule({ automaticDisclosureMode: 'customer_authorized_content', text: 'x'.repeat(300) });
+    const second = signCapsule({ automaticDisclosureMode: 'customer_authorized_content', text: 'y'.repeat(300) });
+    await reserveDailyContentUpload(first, policy, secureStore);
+    await reserveDailyContentUpload(first, policy, secureStore);
+    await assert.rejects(() => reserveDailyContentUpload(second, policy, secureStore), /daily content upload limit/i);
+    await releaseDailyContentUpload(first, policy, secureStore);
+    await reserveDailyContentUpload(second, policy, secureStore);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('deleting the advisory local quota ledger does not bypass the authoritative server quota', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-delete-'));
+  process.env.DHARMA_HOME = home;
+  try {
+    const secureStore = memorySecureStore();
+    await writeFile(join(home, 'device.json'), JSON.stringify({ schema: 'dharma.device-config/v1',
+      hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_northstar', deviceId: 'device-delete', relayUrl: 'wss://relay.dharma-ai.io' }));
+    const signed = signedPolicyAuthorization({
+      revision: 'content-delete-v1',
+      evidence: {
+        automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-ledger-delete', allowedContentClasses: ['native_provider_payload'] },
+        maximumCapsuleBytes: 1_000, maximumDailyUploadBytes: 700, maximumExpansionBytes: 100,
+      },
+    });
+    const input = {
+      workspace: home, organizationId: 'org_northstar', revision: 'content-delete', workspaceId: 'workspace-northstar',
+      serverPolicyAuthorization: signed.envelope, serverPublicKeyEd25519: signed.publicKeyEd25519,
+      secureStore,
+    };
+    await materializeWorkspacePolicy(input);
+    await unlink(join(home, 'relay', 'evidence-upload-ledger.json'));
+    await materializeWorkspacePolicy(input);
+    assert.equal(JSON.parse(await readFile(join(home, 'relay', 'evidence-upload-ledger.json'), 'utf8')).totalBytes, 0);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('queued content must match the current signed consent and policy revision', async () => {
+  const base = await materializeWorkspacePolicy({ workspace: await mkdtemp(join(tmpdir(), 'dharma-current-grant-')), organizationId: 'org_northstar', revision: 'local' });
+  const signed = signedPolicyAuthorization({
+    revision: 'content-v2',
+    evidence: {
+      automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-current', allowedContentClasses: ['native_provider_payload'] },
+      maximumCapsuleBytes: 1_000, maximumDailyUploadBytes: 1_000, maximumExpansionBytes: 100,
+    },
+  });
+  const policy = applyServerEvidencePolicy(base.policy, signed.envelope, signed.publicKeyEd25519, 'org_northstar', 'workspace-northstar');
+  const current = { organizationId: 'org_northstar', workspaceId: 'workspace-northstar', automaticDisclosureMode: 'customer_authorized_content', events: [], redactionReceipt: { disclosureMode: 'customer_authorized_content', policyRevision: 'content-v2', consentReceiptId: 'consent-current' } };
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(current, policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({ ...current, redactionReceipt: { disclosureMode: 'customer_authorized_content', policyRevision: 'content-v1', consentReceiptId: 'consent-old' } }, policy), /no longer authorized/);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy(current, { ...policy, evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } } }), /invalid|no longer authorized/);
+});
+
+test('reduced capsules cannot disguise provider content as local analysis', async () => {
+  const base = await materializeWorkspacePolicy({ workspace: await mkdtemp(join(tmpdir(), 'dharma-reduced-boundary-')), organizationId: 'org_northstar', revision: 'local' });
+  const reduced = {
+    organizationId: 'org_northstar', workspaceId: 'workspace-northstar', deviceId: '22222222-2222-4222-8222-222222222222',
+    provider: 'codex', sessionId: `sha256:${'a'.repeat(64)}`, taskId: null,
+    evidenceMode: base.policy.evidence.defaultMode, status: 'completed',
+    coverage: { state: 'observed', admittedSessions: 1, excludedSessions: 0, missingFields: [] },
+    automaticDisclosureMode: 'local_analysis', repoState: {}, skillState: {}, validationResults: [], contentIndex: [],
+    events: [{
+      schema: 'dharma.agent-event/v1', eventId: '33333333-3333-4333-8333-333333333333',
+      organizationId: 'org_northstar', deviceId: '22222222-2222-4222-8222-222222222222', workspaceId: 'workspace-northstar',
+      provider: 'codex', sessionId: `sha256:${'a'.repeat(64)}`, sequence: 0, occurredAt: '2026-08-12T00:00:00.000Z', kind: 'user_message', coverage: 'observed', contentRefs: [],
+      payload: { nativeKind: 'user_message', recordBytes: 10, contentOmitted: true },
+      source: { nativeEventId: null, sourceKind: 'user_message', localLocatorId: null }, skillBundleId: null, providerModel: null,
+    }],
+    localAnalysis: {
+      schema: 'dharma.local-trajectory-analysis/v1', analyzer: 'deterministic', recordCount: 1,
+      recordBytes: { total: 10, maximum: 10 }, eventKinds: { user_message: 1 },
+      toolDiscipline: { calls: 0, results: 0, unmatchedCalls: 0, orphanResults: 0 },
+      outcomeSignals: { errorRecords: 0, incomplete: false, coverage: 'observed' }, durationMs: 1,
+      semanticReviewRecommended: false, reasonCodes: [],
+    },
+    redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['native_provider_payload'], classes: [] },
+  };
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: [{
+      kind: 'user_message',
+      payload: { nativeKind: 'user_message', recordBytes: 10, contentOmitted: true, nativeProviderPayload: 'private prompt' },
+      source: { nativeEventId: null, sourceKind: 'user_message' },
+    }],
+  }, base.policy), /unauthorized provider content/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: [{
+      kind: 'user_message', payload: { nativeKind: 'private prompt', recordBytes: 10, contentOmitted: true },
+      source: { nativeEventId: null, sourceKind: 'user_message' },
+    }],
+  }, base.policy), /unauthorized provider content/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    contentIndex: [{ contentId: `sha256:${'a'.repeat(64)}`, kind: 'private prompt', bytes: 10, uploaded: false,
+      availableLocally: true, mimeType: 'application/x-ndjson', normalizedPath: null }],
+  }, base.policy), /unauthorized content descriptor/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, repoState: { source: 'private code' },
+  }, base.policy), /unauthorized auxiliary content/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, localAnalysis: { ...reduced.localAnalysis, reasonCodes: ['secret=customer-token'] },
+  }, base.policy), /invalid free-form analysis/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: [{ ...reduced.events[0], providerModel: 'customer-secret-in-metadata' }],
+  }, base.policy), /unauthorized event descriptors/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: [{ ...reduced.events[0]!, source: { ...reduced.events[0]!.source, localLocatorId: 'customer-secret-in-metadata' } }],
+  }, base.policy), /unauthorized event descriptors/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, redactionReceipt: { ...reduced.redactionReceipt, classes: ['secret=customer-token'] },
+  }, base.policy), /invalid redaction receipt classes/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, coverage: { ...reduced.coverage, missingFields: ['customer-secret-in-metadata'] },
+  }, base.policy), /unauthorized identity or policy metadata/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, redactionReceipt: { ...reduced.redactionReceipt, disclosedClasses: ['customer-secret-in-metadata'] },
+  }, base.policy), /invalid redaction receipt classes/i);
+});
+
+test('server withdrawal resets a workspace to local analysis without retaining a consent receipt', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-local-policy-'));
+  const signed = signedPolicyAuthorization({
+    revision: 'agent-fabric-local-analysis-v1',
+    evidence: { automaticDisclosure: { mode: 'local_analysis' }, maximumCapsuleBytes: 1_048_576, maximumDailyUploadBytes: 50_000_000 },
+  });
+  const generated = await materializeWorkspacePolicy({
+    workspace,
+    organizationId: 'org_northstar',
+    revision: 'content-policy-old',
+    serverPolicyAuthorization: signed.envelope,
+    serverPublicKeyEd25519: signed.publicKeyEd25519,
+    workspaceId: 'workspace-northstar',
+  });
+  assert.equal(generated.policy.revision, 'agent-fabric-local-analysis-v1');
+  assert.deepEqual(generated.policy.evidence.automaticDisclosure, { mode: 'local_analysis' });
+});
+
+test('server may withdraw content to metadata-only and dry-run does not mutate the workspace policy', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-metadata-policy-'));
+  const policyPath = join(workspace, '.dharma', 'approved-policy.json');
+  const signed = signedPolicyAuthorization({
+    revision: 'agent-fabric-metadata-only-v1',
+    evidence: { automaticDisclosure: { mode: 'metadata_only' }, maximumCapsuleBytes: 1_048_576, maximumDailyUploadBytes: 50_000_000 },
+  });
+  const generated = await materializeWorkspacePolicy({
+    workspace, organizationId: 'org_northstar', revision: 'old', serverPolicyAuthorization: signed.envelope,
+    serverPublicKeyEd25519: signed.publicKeyEd25519, workspaceId: 'workspace-northstar', dryRun: true,
+  });
+  assert.equal(generated.applied, false);
+  assert.equal(generated.policy.evidence.automaticDisclosure?.mode, 'metadata_only');
+  await assert.rejects(() => readFile(policyPath, 'utf8'), /ENOENT/);
 });
 
 test('materializes signed inline files without repository credentials and rejects traversal', async () => {

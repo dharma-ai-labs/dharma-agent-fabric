@@ -2,22 +2,23 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import { loadOrganizationPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
-  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment, saveDeviceConfig, type DeviceConfig,
+  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
+  saveDeviceConfig, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 
-const VERSION = '0.1.6';
+const VERSION = '0.1.10';
 const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -86,6 +87,33 @@ function configPath() { return resolve(dharmaHome(), 'device.json'); }
 function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollment.json'); }
 function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-state.json'); }
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
+function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evidence-upload-ledger.json'); }
+function evidenceRequestReceiptPath(requestId: string) { return resolve(dharmaHome(), 'relay', 'evidence-requests', `${requestId}.json`); }
+
+type EvidenceUploadLedger = {
+  schema: 'dharma.evidence-upload-ledger/v2';
+  day: string;
+  totalBytes: number;
+  capsuleHashes: string[];
+  capsuleBytes: Record<string, number>;
+};
+
+function newEvidenceUploadLedger(day: string): EvidenceUploadLedger {
+  return { schema: 'dharma.evidence-upload-ledger/v2', day, totalBytes: 0, capsuleHashes: [], capsuleBytes: {} };
+}
+
+function assertEvidenceLedger(ledger: EvidenceUploadLedger, day: string) {
+  if (ledger.schema !== 'dharma.evidence-upload-ledger/v2' || ledger.day !== day
+    || !Number.isSafeInteger(ledger.totalBytes) || ledger.totalBytes < 0
+    || !Array.isArray(ledger.capsuleHashes) || new Set(ledger.capsuleHashes).size !== ledger.capsuleHashes.length
+    || ledger.capsuleHashes.some((hash) => !/^sha256:[a-f0-9]{64}$/.test(hash))
+    || !ledger.capsuleBytes || typeof ledger.capsuleBytes !== 'object'
+    || ledger.capsuleHashes.some((hash) => !Number.isSafeInteger(ledger.capsuleBytes[hash]) || ledger.capsuleBytes[hash]! < 0)
+    || Object.keys(ledger.capsuleBytes).some((hash) => !ledger.capsuleHashes.includes(hash))
+    || ledger.capsuleHashes.reduce((sum, hash) => sum + ledger.capsuleBytes[hash]!, 0) !== ledger.totalBytes) {
+    throw new Error('Evidence upload ledger is invalid.');
+  }
+}
 
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
@@ -120,21 +148,392 @@ export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retentio
 
 async function syncPendingRetentionCapsules(
   vault: {
-    listPendingCapsuleSyncs<T>(limit?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
+    listPendingCapsuleSyncs<T>(limit?: number, offset?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
     markCapsuleSynced(trajectoryId: string, revision: number): void;
+    discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void;
   },
   fabric: AgentFabricClient,
+  policy: OrganizationPolicy,
+  workspaceId: string,
 ): Promise<number> {
+  // The caller must obtain this policy from an authoritative control-plane
+  // refresh. An expired policy pauses the queue instead of mutating it.
+  assertPolicy(policy);
   let synced = 0;
+  let offset = 0;
   for (;;) {
-    const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
+    const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(1_000, offset);
     if (pending.length === 0) return synced;
+    let matched = 0;
     for (const item of pending) {
+      if (String(item.capsule.workspaceId || '') !== workspaceId) continue;
+      matched += 1;
+      try {
+        assertCapsuleIntegrity(item.capsule);
+      } catch {
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
+        continue;
+      }
+      // Policy expiry and signature failure pause the queue. Only a capsule
+      // mismatch under a still-current policy is an authoritative discard.
+      assertPolicy(policy);
+      try {
+        assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
+      } catch {
+        assertPolicy(policy);
+        // A successfully refreshed policy is authoritative. Retire only the
+        // superseded capsule so it cannot permanently block later valid work.
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
+        continue;
+      }
+      await reserveDailyContentUpload(item.capsule, policy);
       await fabric.syncTrajectory(item.capsule);
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
+    if (matched === 0) {
+      if (pending.length < 1_000) return synced;
+      offset += pending.length;
+    } else {
+      offset = 0;
+    }
   }
+}
+
+async function refreshVerifiedWorkspacePolicyForTransmission(
+  policyPath: string,
+  workspaceId: string,
+  fabric: AgentFabricClient,
+) {
+  if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
+  const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
+  if (!item) throw new Error('Content transmission workspace is not registered locally.');
+  const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
+  if (resolve(policyPath) !== canonicalPolicyPath) {
+    throw new Error('Content transmission requires the canonical registered workspace policy path.');
+  }
+  const current = await loadOrganizationPolicy(policyPath);
+  if (current.organizationId !== item.organizationId) {
+    throw new Error('Workspace policy organization does not match registration.');
+  }
+  await syncWorkspacePolicy(fabric, item, current.revision, true);
+  return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+}
+
+export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
+  const capsuleHash = String(capsule.capsuleHash || '');
+  const { capsuleHash: _capsuleHash, ...unsigned } = capsule;
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || sha256(canonicalize(unsigned)) !== capsuleHash) {
+    throw new Error('Trajectory capsule integrity check failed.');
+  }
+}
+
+export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+  assertPolicy(policy);
+  const mode = capsule.automaticDisclosureMode;
+  const receipt = capsule.redactionReceipt && typeof capsule.redactionReceipt === 'object' && !Array.isArray(capsule.redactionReceipt)
+    ? capsule.redactionReceipt as Record<string, unknown> : {};
+  if (!['metadata_only', 'local_analysis', 'customer_authorized_content'].includes(String(mode))
+    || receipt.disclosureMode !== mode
+    || mode !== (policy.evidence.automaticDisclosure?.mode || 'local_analysis')
+    || capsule.organizationId !== policy.organizationId
+    || (policy.serverAuthorization && capsule.workspaceId !== policy.serverAuthorization.workspaceId)) {
+    throw new Error('Trajectory capsule disclosure mode is invalid or inconsistent.');
+  }
+  const events = Array.isArray(capsule.events) ? capsule.events : [];
+  if (mode !== 'customer_authorized_content') {
+    const provider = String(capsule.provider || '');
+    const fixedEventKinds = new Set([
+      'user_message', 'agent_message', 'tool_call', 'tool_result', 'command', 'file_read', 'file_write',
+      'git', 'validation', 'permission', 'subagent', 'error', 'retry', 'session_state', 'metadata', 'collapsed_output',
+    ]);
+    const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+    const digest = /^sha256:[a-f0-9]{64}$/;
+    const allowedMissingFields = new Set([
+      'workspace_on_some_events', 'events_collapsed_for_size', 'native_payload_collapsed_for_size',
+    ]);
+    const allowedDisclosedClasses = new Set([
+      'tenant_identifier', 'device_identifier', 'workspace_identifier', 'pseudonymous_session_identifier',
+      'provider_name', 'event_kind', 'event_timestamp', 'event_coverage', 'source_kind', 'record_size',
+      'local_evidence_descriptor', 'local_deterministic_analysis',
+    ]);
+    const allowedExcludedClasses = new Set([
+      'encrypted_reasoning', 'execution_configuration', 'instruction_text', 'local_path', 'native_provider_payload',
+      'prompt_text', 'rate_limit_metadata', 'response_text', 'token_metadata', 'tool_schema', 'tool_input', 'tool_output',
+    ]);
+    const allowedRedactionClasses = new Set([
+      'automatic_content_omission', 'configured_excluded_path', 'invalid_unicode_nul', 'local_path',
+      'private_key', 'github_token', 'openai_key', 'aws_access_key', 'jwt', 'connection_string', 'authorization',
+      'google_api_key', 'slack_token', 'generic_secret', 'sensitive_field',
+    ]);
+    const coverage = capsule.coverage && typeof capsule.coverage === 'object' && !Array.isArray(capsule.coverage)
+      ? capsule.coverage as Record<string, unknown> : {};
+    const missingFields = Array.isArray(coverage.missingFields) ? coverage.missingFields : null;
+    if (!['codex', 'claude', 'agy'].includes(provider)
+      || !digest.test(String(capsule.sessionId || ''))
+      || capsule.taskId !== null
+      || !uuid.test(String(capsule.deviceId || ''))
+      || capsule.redactionReceipt === null
+      || receipt.policyRevision !== policy.revision
+      || capsule.evidenceMode !== policy.evidence.defaultMode
+      || !['completed', 'partial'].includes(String(capsule.status || ''))
+      || !['observed', 'partial'].includes(String(coverage.state || ''))
+      || !Number.isSafeInteger(coverage.admittedSessions) || Number(coverage.admittedSessions) < 0
+      || !Number.isSafeInteger(coverage.excludedSessions) || Number(coverage.excludedSessions) < 0
+      || !missingFields || missingFields.some((value) => typeof value !== 'string' || !allowedMissingFields.has(value))) {
+      throw new Error('Reduced trajectory capsule contains unauthorized identity or policy metadata.');
+    }
+    const emptyRecord = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value as Record<string, unknown>).length === 0;
+    if (!emptyRecord(capsule.repoState) || !emptyRecord(capsule.skillState)
+      || !Array.isArray(capsule.validationResults) || capsule.validationResults.length !== 0) {
+      throw new Error('Reduced trajectory capsule contains unauthorized auxiliary content.');
+    }
+    const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
+    if (contentIndex.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || !digest.test(String((entry as Record<string, unknown>).contentId || ''))
+      || (entry as Record<string, unknown>).uploaded !== false
+      || (entry as Record<string, unknown>).availableLocally !== true
+      || !Number.isSafeInteger((entry as Record<string, unknown>).bytes)
+      || Number((entry as Record<string, unknown>).bytes) < 0
+      || (entry as Record<string, unknown>).normalizedPath !== null
+      || !['raw-provider-session', 'raw-provider-turn'].includes(String((entry as Record<string, unknown>).kind || ''))
+      || (entry as Record<string, unknown>).mimeType !== 'application/x-ndjson')) {
+      throw new Error('Reduced trajectory capsule contains an unauthorized content descriptor.');
+    }
+    const localEvidenceAvailable = Array.isArray(capsule.localEvidenceAvailable) ? capsule.localEvidenceAvailable : [];
+    if (localEvidenceAvailable.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || !digest.test(String((entry as Record<string, unknown>).contentId || ''))
+      || !['raw-provider-session', 'raw-provider-turn'].includes(String((entry as Record<string, unknown>).kind || ''))
+      || !Number.isSafeInteger((entry as Record<string, unknown>).bytes)
+      || Number((entry as Record<string, unknown>).bytes) < 0)) {
+      throw new Error('Reduced trajectory capsule contains an unauthorized local evidence descriptor.');
+    }
+    for (const event of events) {
+      const payload = event && typeof event === 'object' && !Array.isArray(event)
+        ? (event as Record<string, unknown>).payload : null;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Reduced trajectory event payload is invalid.');
+      }
+      const record = payload as Record<string, unknown>;
+      const allowedKeys = new Set(['nativeKind', 'recordBytes', 'contentOmitted']);
+      if (Object.keys(record).some((key) => !allowedKeys.has(key)) || record.contentOmitted !== true
+        || !/^[A-Za-z0-9_.:-]{1,80}$/.test(String(record.nativeKind || ''))
+        || !Number.isSafeInteger(record.recordBytes) || Number(record.recordBytes) < 0) {
+        throw new Error('Reduced trajectory capsule contains unauthorized provider content.');
+      }
+      const eventRecord = event as Record<string, unknown>;
+      const allowedEventKeys = new Set([
+        'schema', 'eventId', 'organizationId', 'deviceId', 'workspaceId', 'provider', 'sessionId', 'sequence',
+        'occurredAt', 'kind', 'coverage', 'contentRefs', 'payload', 'source', 'skillBundleId', 'providerModel',
+      ]);
+      const source = eventRecord.source && typeof eventRecord.source === 'object' && !Array.isArray(eventRecord.source)
+        ? eventRecord.source as Record<string, unknown> : {};
+      const eventKind = String(eventRecord.kind || '');
+      if (Object.keys(eventRecord).some((key) => !allowedEventKeys.has(key))
+        || eventRecord.schema !== 'dharma.agent-event/v1'
+        || !uuid.test(String(eventRecord.eventId || ''))
+        || eventRecord.organizationId !== capsule.organizationId
+        || eventRecord.deviceId !== capsule.deviceId
+        || eventRecord.workspaceId !== capsule.workspaceId
+        || eventRecord.provider !== provider
+        || eventRecord.sessionId !== capsule.sessionId
+        || !Number.isSafeInteger(eventRecord.sequence) || Number(eventRecord.sequence) < 0
+        || !Number.isFinite(Date.parse(String(eventRecord.occurredAt || '')))
+        || !fixedEventKinds.has(eventKind)
+        || !['observed', 'partial', 'unavailable', 'excluded', 'redacted', 'out_of_window', 'not_supported'].includes(String(eventRecord.coverage || ''))
+        || !Array.isArray(eventRecord.contentRefs) || eventRecord.contentRefs.length !== 0
+        || source.nativeEventId !== null || source.localLocatorId !== null || source.sourceKind !== eventKind
+        || record.nativeKind !== eventKind
+        || eventRecord.skillBundleId !== null || eventRecord.providerModel !== null) {
+        throw new Error('Reduced trajectory capsule contains unauthorized event descriptors.');
+      }
+    }
+    if (receipt.consentReceiptId !== null && receipt.consentReceiptId !== undefined) {
+      throw new Error('Reduced trajectory capsule cannot claim a content consent receipt.');
+    }
+    const localAnalysis = capsule.localAnalysis;
+    if (mode === 'metadata_only' && localAnalysis !== null) {
+      throw new Error('Metadata-only trajectory capsule cannot contain local analysis.');
+    }
+    if (mode === 'local_analysis') {
+      if (!localAnalysis || typeof localAnalysis !== 'object' || Array.isArray(localAnalysis)) {
+        throw new Error('Local-analysis trajectory capsule is missing deterministic analysis.');
+      }
+      const analysis = localAnalysis as Record<string, unknown>;
+      const eventKinds = analysis.eventKinds && typeof analysis.eventKinds === 'object' && !Array.isArray(analysis.eventKinds)
+        ? analysis.eventKinds as Record<string, unknown> : null;
+      const reasonCodes = Array.isArray(analysis.reasonCodes) ? analysis.reasonCodes : null;
+      const allowedReasons = new Set(['runtime_failure_signal', 'tool_call_without_result', 'tool_result_without_call', 'partial_evidence']);
+      if (analysis.schema !== 'dharma.local-trajectory-analysis/v1' || analysis.analyzer !== 'deterministic'
+        || !eventKinds || Object.entries(eventKinds).some(([key, value]) => !fixedEventKinds.has(key)
+          || !Number.isSafeInteger(value) || Number(value) < 0)
+        || !reasonCodes || reasonCodes.some((value) => typeof value !== 'string' || !allowedReasons.has(value))) {
+        throw new Error('Local-analysis trajectory capsule contains invalid free-form analysis data.');
+      }
+    }
+    const validReceiptValues = (key: string, allowed: Set<string>) => Array.isArray(receipt[key])
+      && (receipt[key] as unknown[]).every((value) => typeof value === 'string' && allowed.has(value));
+    if (!validReceiptValues('disclosedClasses', allowedDisclosedClasses)
+      || !validReceiptValues('excludedClasses', allowedExcludedClasses)
+      || !validReceiptValues('classes', allowedRedactionClasses)) {
+      throw new Error('Reduced trajectory capsule contains invalid redaction receipt classes.');
+    }
+    return;
+  }
+  const disclosure = policy.evidence.automaticDisclosure;
+  if (disclosure?.mode !== 'customer_authorized_content'
+    || receipt.policyRevision !== policy.revision
+    || receipt.consentReceiptId !== disclosure.consentReceiptId
+    || !policy.serverAuthorization) {
+    throw new Error('Queued content capsule is no longer authorized by the current signed policy.');
+  }
+}
+
+async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessage: string): Promise<() => Promise<void>> {
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
+    try {
+      await writeFile(candidate, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
+      await link(candidate, lockPath);
+      await unlink(candidate);
+      return async () => { await unlink(lockPath).catch(() => undefined); };
+    } catch (error) {
+      await unlink(candidate).catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const recoveryPath = `${lockPath}.recovery`;
+      const recoveryCandidate = `${recoveryPath}.${process.pid}.${randomUUID()}.candidate`;
+      try {
+        await mkdir(recoveryCandidate);
+        await writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 });
+        await rename(recoveryCandidate, recoveryPath);
+        try {
+          let ownerPid = 0;
+          try { ownerPid = Number((await readFile(lockPath, 'utf8')).trim()); }
+          catch (readError) {
+            if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          }
+          let ownerAlive = Number.isSafeInteger(ownerPid) && ownerPid > 0;
+          if (ownerAlive) {
+            try { process.kill(ownerPid, 0); }
+            catch (killError) { ownerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+          }
+          if (!ownerAlive) {
+            const quarantine = `${lockPath}.dead.${randomUUID()}`;
+            try {
+              await rename(lockPath, quarantine);
+              await unlink(quarantine);
+              continue;
+            } catch (renameError) {
+              if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+            }
+          }
+        } finally {
+          await rm(recoveryPath, { recursive: true, force: true });
+        }
+      } catch (recoveryError) {
+        await rm(recoveryCandidate, { recursive: true, force: true });
+        if (!['EEXIST', 'ENOTEMPTY'].includes((recoveryError as NodeJS.ErrnoException).code || '')) throw recoveryError;
+        let recoveryOwner = 0;
+        try { recoveryOwner = Number((await readFile(resolve(recoveryPath, 'owner'), 'utf8')).trim()); } catch {}
+        let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
+        if (recoveryOwnerAlive) {
+          try { process.kill(recoveryOwner, 0); }
+          catch (killError) { recoveryOwnerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+        }
+        if (!recoveryOwnerAlive) {
+          const quarantine = `${recoveryPath}.dead.${randomUUID()}`;
+          try { await rename(recoveryPath, quarantine); await rm(quarantine, { recursive: true, force: true }); }
+          catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError; }
+        }
+      }
+      if (Date.now() >= deadline) throw new Error(timeoutMessage);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+  }
+}
+
+async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
+  const release = await acquirePidLock(
+    `${evidenceUploadLedgerPath()}.lock`,
+    5_000,
+    'Timed out waiting for the evidence upload ledger lock.',
+  );
+  try { return await operation(); }
+  finally { await release(); }
+}
+
+async function writeJsonAtomic(path: string, value: unknown) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: OrganizationPolicy, _store?: SecureSecretStore) {
+  if (!/^sha256:[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new Error('Evidence upload reservation is invalid.');
+  }
+  const day = new Date().toISOString().slice(0, 10);
+  await withEvidenceLedgerLock(async () => {
+    let ledger: EvidenceUploadLedger;
+    try {
+      ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
+      if (ledger.day !== day) {
+        ledger = newEvidenceUploadLedger(day);
+      } else {
+        assertEvidenceLedger(ledger, day);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        ledger = newEvidenceUploadLedger(day);
+      } else {
+        throw error;
+      }
+    }
+    if (ledger.capsuleHashes.includes(key)) return;
+    if (ledger.totalBytes + bytes > policy.evidence.maximumDailyUploadBytes) {
+      throw new Error('Organization daily content upload limit would be exceeded.');
+    }
+    ledger.totalBytes += bytes;
+    ledger.capsuleHashes.push(key);
+    ledger.capsuleBytes[key] = bytes;
+    await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+  });
+}
+
+export async function reserveDailyContentUpload(
+  capsule: Record<string, unknown>, policy: OrganizationPolicy, store?: SecureSecretStore,
+) {
+  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
+  const capsuleHash = String(capsule.capsuleHash || '');
+  assertCapsuleIntegrity(capsule);
+  const bytes = Buffer.byteLength(canonicalize(capsule));
+  await reserveDailyEvidenceBytes(capsuleHash, bytes, policy, store);
+}
+
+export async function releaseDailyContentUpload(
+  capsule: Record<string, unknown>, policy: OrganizationPolicy, _store?: SecureSecretStore,
+) {
+  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
+  const capsuleHash = String(capsule.capsuleHash || '');
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) return;
+  await withEvidenceLedgerLock(async () => {
+    try {
+      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
+      assertEvidenceLedger(ledger, new Date().toISOString().slice(0, 10));
+      if (!ledger.capsuleHashes.includes(capsuleHash)) return;
+      const reservedBytes = Number(ledger.capsuleBytes[capsuleHash] ?? Buffer.byteLength(canonicalize(capsule)));
+      ledger.capsuleHashes = ledger.capsuleHashes.filter((hash) => hash !== capsuleHash);
+      ledger.totalBytes = Math.max(0, ledger.totalBytes - (Number.isSafeInteger(reservedBytes) ? reservedBytes : 0));
+      delete ledger.capsuleBytes[capsuleHash];
+      await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  });
 }
 
 export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
@@ -159,6 +558,11 @@ export async function materializeWorkspacePolicy(input: {
   workspace: string;
   organizationId: string;
   revision: string;
+  serverPolicyAuthorization?: unknown;
+  serverPublicKeyEd25519?: string;
+  workspaceId?: string;
+  dryRun?: boolean;
+  secureStore?: SecureSecretStore;
 }) {
   const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
   try {
@@ -183,12 +587,13 @@ export async function materializeWorkspacePolicy(input: {
   for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
     if (await pathExists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
   }
-  const policy: OrganizationPolicy = {
-    schema: 'dharma.organization-policy/v1',
+  let policy: OrganizationPolicy = {
+    schema: 'dharma.organization-policy/v2',
     organizationId: input.organizationId,
     revision: input.revision,
     evidence: {
       defaultMode: 'deep',
+      automaticDisclosure: { mode: 'local_analysis' },
       registeredWorkspaceOnly: true,
       excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
       maximumCapsuleBytes: 1_000_000,
@@ -207,10 +612,206 @@ export async function materializeWorkspacePolicy(input: {
     retention: { rawLocalDays: 30, capsuleServerDays: 90 },
     budgets: { dailyAnalysisCents: 1_000 },
   };
+  const existingPath = resolve(input.workspace, '.dharma', 'approved-policy.json');
+  if (await pathExists(existingPath)) {
+    const existing = await loadOrganizationPolicy(existingPath);
+    if (existing.organizationId === input.organizationId) policy = existing;
+  }
+  if (input.serverPolicyAuthorization !== undefined && input.serverPolicyAuthorization !== null) {
+    if (!input.serverPublicKeyEd25519 || !input.workspaceId) {
+      throw new Error('Server policy authorization requires the enrolled server key and workspace ID.');
+    }
+    policy = applyServerEvidencePolicy(
+      policy,
+      input.serverPolicyAuthorization,
+      input.serverPublicKeyEd25519,
+      input.organizationId,
+      input.workspaceId,
+    );
+    if (!input.dryRun) {
+      await applyWorkspaceAuthorizationAtomically({
+        workspaceId: input.workspaceId,
+        authorization: policy.serverAuthorization!,
+        policyPath: existingPath,
+        policy,
+        secureStore: input.secureStore,
+      });
+    } else {
+      await assertWorkspaceAuthorizationCurrent(input.workspaceId, policy.serverAuthorization!, false);
+    }
+  }
+  assertPolicy(policy);
   const relativePath = '.dharma/approved-policy.json';
-  await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
-  await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
-  return { relativePath, policy };
+  if (!input.dryRun && !policy.serverAuthorization) {
+    await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
+    await writeJsonAtomic(resolve(input.workspace, relativePath), policy);
+  }
+  return { relativePath, policy, applied: !input.dryRun };
+}
+
+function workspaceAuthorizationStatePath(workspaceId: string) {
+  return resolve(dharmaHome(), 'registry', 'workspace-authorizations', `${workspaceId}.json`);
+}
+
+async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+  const release = await acquirePidLock(lockPath, 10_000, 'Timed out waiting for the workspace authorization lock.');
+  try { return await operation(); }
+  finally { await release(); }
+}
+
+async function assertWorkspaceAuthorizationCurrent(
+  workspaceId: string,
+  authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
+  requireExisting = true,
+) {
+  const statePath = workspaceAuthorizationStatePath(workspaceId);
+  type AuthorizationState = { issuedAt: string; signature: string };
+  let previous: AuthorizationState | null = null;
+  try { previous = JSON.parse(await readFile(statePath, 'utf8')) as AuthorizationState; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
+    throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+  }
+  if (previous) {
+    const incomingTime = Date.parse(authorization.issuedAt);
+    const previousTime = Date.parse(previous.issuedAt);
+    if (!Number.isFinite(previousTime)
+      || incomingTime < previousTime
+      || (incomingTime === previousTime && authorization.signature !== previous.signature)) {
+      throw new Error('Server workspace policy authorization is older than the last accepted authorization.');
+    }
+  }
+}
+
+async function applyWorkspaceAuthorizationAtomically(input: {
+  workspaceId: string;
+  authorization: NonNullable<OrganizationPolicy['serverAuthorization']>;
+  policyPath: string;
+  policy: OrganizationPolicy;
+  secureStore?: SecureSecretStore;
+}) {
+  const statePath = workspaceAuthorizationStatePath(input.workspaceId);
+  await withFileLock(`${statePath}.lock`, async () => {
+    await assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false);
+    let previous: { contentLedgerInitialized?: boolean } | null = null;
+    try { previous = JSON.parse(await readFile(statePath, 'utf8')) as { contentLedgerInitialized?: boolean }; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+      }
+    }
+    const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
+    const ledgerExists = await pathExists(evidenceUploadLedgerPath());
+    if (contentAuthorized && ledgerExists) {
+      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
+      assertEvidenceLedger(ledger, ledger.day);
+    }
+    if (contentAuthorized && !ledgerExists) {
+      const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
+      await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+    }
+    await writeJsonAtomic(statePath, {
+      issuedAt: input.authorization.issuedAt,
+      signature: input.authorization.signature,
+      contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
+    });
+    await writeJsonAtomic(input.policyPath, input.policy);
+  });
+}
+
+export function applyServerEvidencePolicy(
+  base: OrganizationPolicy,
+  value: unknown,
+  serverPublicKeyEd25519: string,
+  organizationId: string,
+  workspaceId: string,
+  now = new Date(),
+): OrganizationPolicy {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Server workspace policy authorization must be an object.');
+  }
+  const envelope = value as Record<string, unknown>;
+  const { signature, ...unsigned } = envelope;
+  if (envelope.schema !== 'dharma.workspace-policy-authorization/v1'
+    || envelope.organizationId !== organizationId
+    || envelope.workspaceId !== workspaceId
+    || typeof signature !== 'string'
+    || !Number.isFinite(Date.parse(String(envelope.issuedAt || '')))
+    || Date.parse(String(envelope.expiresAt || '')) <= now.getTime()) {
+    throw new Error('Server workspace policy authorization is invalid or expired.');
+  }
+  const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: serverPublicKeyEd25519 }, format: 'jwk' });
+  if (!verifyCanonicalObject(unsigned, signature, serverPublicKey)) {
+    throw new Error('Server workspace policy authorization signature is invalid.');
+  }
+  const fragment = envelope.policy;
+  if (!fragment || typeof fragment !== 'object' || Array.isArray(fragment)) {
+    throw new Error('Server workspace policy authorization has no policy.');
+  }
+  const policyFragment = fragment as Record<string, unknown>;
+  const evidence = policyFragment.evidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    throw new Error('Server workspace policy evidence must be an object.');
+  }
+  const grant = evidence as Record<string, unknown>;
+  const disclosure = grant.automaticDisclosure;
+  if (!disclosure || typeof disclosure !== 'object' || Array.isArray(disclosure)) {
+    throw new Error('Server workspace policy disclosure grant is required.');
+  }
+  const automaticDisclosure = disclosure as Record<string, unknown>;
+  const noContent = ['metadata_only', 'local_analysis'].includes(String(automaticDisclosure.mode))
+    && automaticDisclosure.consentReceiptId === undefined
+    && automaticDisclosure.allowedContentClasses === undefined;
+  const authorizedContent = automaticDisclosure.mode === 'customer_authorized_content'
+    && typeof automaticDisclosure.consentReceiptId === 'string'
+    && Array.isArray(automaticDisclosure.allowedContentClasses)
+    && automaticDisclosure.allowedContentClasses.length === 1
+    && automaticDisclosure.allowedContentClasses[0] === 'native_provider_payload';
+  if (!noContent && !authorizedContent) {
+    throw new Error('Server workspace policy contains an invalid content disclosure grant.');
+  }
+  const revision = policyFragment.revision;
+  const maximumCapsuleBytes = Number(grant.maximumCapsuleBytes);
+  const maximumDailyUploadBytes = Number(grant.maximumDailyUploadBytes);
+  const maximumExpansionBytes = Number(grant.maximumExpansionBytes);
+  const excludePaths = Array.isArray(grant.excludePaths) ? grant.excludePaths.map(String) : [];
+  if (typeof revision !== 'string' || !revision.trim()
+    || !Number.isSafeInteger(maximumCapsuleBytes)
+    || !Number.isSafeInteger(maximumDailyUploadBytes)
+    || !Number.isSafeInteger(maximumExpansionBytes)
+    || maximumExpansionBytes < 1 || maximumExpansionBytes > 262_144
+    || grant.pseudonymizeIdentity !== true
+    || excludePaths.length < 1 || excludePaths.some((item) => !item || item.length > 200)) {
+    throw new Error('Server workspace policy limits or revision are invalid.');
+  }
+  const policy: OrganizationPolicy = {
+    ...structuredClone(base),
+    schema: 'dharma.organization-policy/v2',
+    revision,
+    evidence: {
+      ...structuredClone(base.evidence),
+      automaticDisclosure: authorizedContent ? {
+        mode: 'customer_authorized_content',
+        consentReceiptId: String(automaticDisclosure.consentReceiptId),
+        allowedContentClasses: ['native_provider_payload'],
+      } : { mode: automaticDisclosure.mode as 'metadata_only' | 'local_analysis' },
+      maximumCapsuleBytes,
+      maximumDailyUploadBytes,
+      maximumExpansionBytes,
+      excludePaths,
+      pseudonymizeIdentity: true,
+    },
+    serverAuthorization: envelope as OrganizationPolicy['serverAuthorization'],
+  };
+  verifyServerAuthorizedPolicy({
+    policy,
+    publicKeyEd25519: serverPublicKeyEd25519,
+    organizationId,
+    workspaceId,
+    now,
+  });
+  assertPolicy(policy);
+  return policy;
 }
 
 function providerAdapter(provider: string) {
@@ -408,7 +1009,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   }
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policyPath = required(flags, 'policy');
   const adapter = providerAdapter(provider);
   if (!adapter) throw new Error(`Unsupported capture provider: ${provider}`);
   const root = flags.get('source-root');
@@ -432,8 +1033,10 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+  let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
+  if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
     masterKey: await loadOrCreateVaultMasterKey(),
@@ -442,7 +1045,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   try {
     const capsules = [];
     const syncResults = [];
-    if (fabric) await syncPendingRetentionCapsules(vault, fabric);
+    if (fabric) await syncPendingRetentionCapsules(vault, fabric, policy, registered.workspaceId);
     for (const selected of batch ? sessions : [session]) {
       const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       const rawContentId = sha256(rawTurn);
@@ -483,7 +1086,12 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
         });
       }
       capsules.push(capsule);
-      if (fabric) syncResults.push(await fabric.syncTrajectory(capsule));
+      if (fabric) {
+        await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
+        // An unknown delivery outcome retains the local advisory reservation.
+        // HQ performs the authoritative, idempotent organization/day charge.
+        syncResults.push(await fabric.syncTrajectory(capsule));
+      }
     }
     const output = flags.get('output');
     if (!batch) {
@@ -543,7 +1151,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     const registered = (await registry()).find((item) => item.path === workspace);
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
-    const policy = await loadOrganizationPolicy(policyPath);
+    const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
     const capsules = sessions.map((session) => {
       const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       return buildTrajectoryCapsule({
@@ -560,11 +1168,18 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     automaticDisclosure = {
       ready: true,
       disclosureClass: 'automatic_capsule',
+      disclosureMode: capsules[0]?.automaticDisclosureMode ?? policy.evidence.automaticDisclosure?.mode ?? 'local_analysis',
+      consentReceiptId: policy.evidence.automaticDisclosure?.consentReceiptId ?? null,
       disclosedClasses: [...new Set(capsules.flatMap((capsule) => capsule.redactionReceipt.disclosedClasses))].sort(),
       excludedClasses: [...new Set(capsules.flatMap((capsule) => capsule.redactionReceipt.excludedClasses))].sort(),
       capsuleBytes: capsules.reduce((total, capsule) => total + Buffer.byteLength(canonicalize(capsule)), 0),
       rawProviderBytesLocal: capsules.reduce((total, capsule) => total + (capsule.contentIndex[0]?.bytes || 0), 0),
-      rawProviderBytesUploaded: 0,
+      rawProviderBytesUploaded: capsules.reduce((total, capsule) => total + (
+        capsule.automaticDisclosureMode === 'customer_authorized_content'
+          ? Buffer.byteLength(canonicalize(capsule.events.map((event) => event.payload.nativeProviderPayload ?? null)))
+          : 0
+      ), 0),
+      semanticReviewCandidates: capsules.filter((capsule) => capsule.localAnalysis?.semanticReviewRecommended).length,
       syncRequiresExplicitFlag: true,
     };
   } else {
@@ -623,19 +1238,70 @@ async function workspaceAdd(flags: Map<string, string | boolean>, positional: st
 
 async function workspaceSync(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
   const workspaceId = positional[0] || required(flags, 'workspace-id');
+  const policyRevision = required(flags, 'policy-revision');
   const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
   if (!item) throw new Error('Workspace is not registered locally.');
+  if (!flags.has('apply')) {
+    return {
+      ok: true, workspaceId, planned: true, serverMutation: false, localMutation: false,
+      next: `dharma workspace sync ${workspaceId} --policy-revision ${policyRevision} --apply`,
+    };
+  }
+  return syncWorkspacePolicy(await client(), item, policyRevision, true);
+}
+
+async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string, apply = true) {
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
-  return (await client()).registerWorkspace({
+  const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
-    policyRevision: required(flags, 'policy-revision'), providers,
+    policyRevision, providers,
   });
+  const generated = await materializeWorkspacePolicy({
+    workspace: item.path,
+    organizationId: item.organizationId,
+    revision: String((response.workspace as Record<string, unknown> | undefined)?.policyRevision || policyRevision),
+    serverPolicyAuthorization: response.organizationPolicyAuthorization,
+    serverPublicKeyEd25519: (await readDeviceConfig())?.serverPublicKeyEd25519,
+    workspaceId: item.workspaceId,
+    dryRun: !apply,
+  });
+  return {
+    ...response,
+    localPolicy: {
+      path: generated.relativePath,
+      revision: generated.policy.revision,
+      disclosureMode: generated.policy.evidence.automaticDisclosure?.mode || 'local_analysis',
+      applied: generated.applied,
+    },
+  };
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
   try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
   catch { return null; }
+}
+
+async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
+  const policy = await loadOrganizationPolicy(path);
+  if (policy.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') return policy;
+  const config = await readDeviceConfig();
+  const authorizedWorkspaceId = workspaceId || policy.serverAuthorization?.workspaceId;
+  const registered = authorizedWorkspaceId
+    ? (await registry()).some((item) => item.workspaceId === authorizedWorkspaceId && item.organizationId === policy.organizationId)
+    : false;
+  if (!config || policy.organizationId !== config.organizationId || !authorizedWorkspaceId || !registered) {
+    throw new Error('Content policy does not match an enrolled organization and workspace.');
+  }
+  const verified = applyServerEvidencePolicy(
+    { ...structuredClone(policy), evidence: { ...structuredClone(policy.evidence), automaticDisclosure: { mode: 'local_analysis' } }, serverAuthorization: undefined },
+    policy.serverAuthorization,
+    config.serverPublicKeyEd25519,
+    config.organizationId,
+    authorizedWorkspaceId,
+  );
+  await assertWorkspaceAuthorizationCurrent(authorizedWorkspaceId, verified.serverAuthorization!);
+  return verified;
 }
 
 export async function installRepositoryAgentFabricSkill(input: {
@@ -662,7 +1328,7 @@ description: Connect this repository's coding agents to the organization's Dharm
 
 # Dharma Agent Fabric
 
-Use the installed \`dharma\` CLI for organization-scoped agent work. Never print, commit, or transmit provider credentials, developer tokens, local paths, or raw private trajectories.
+Use the installed \`dharma\` CLI for organization-scoped agent work. Never print or commit provider credentials, developer tokens, local paths, or raw private trajectories. Transmit content only when the organization policy contains an auditable customer-authorized content grant.
 
 ## Required flow
 
@@ -673,10 +1339,11 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
    Do not substitute a placeholder or shell variable. Stop unless the result reports \`ready: true\`. Restart the provider after the first installation so it discovers the native skill.
 2. Run \`dharma providers list\` to confirm the provider's independently tested evidence, task, continuation, skill, activation, and rollback capabilities.
 3. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\` or \`agy\` when that is the current agent. Then capture with the same bound and an explicit \`--sync\` or exact \`--session-ids-file\`.
-5. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
-6. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
-7. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
+4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\` or \`agy\` when that is the current agent. Confirm the policy mode and consent receipt before syncing.
+5. Run local deterministic self-analysis during capture. Deliver event counts, timing, coverage, failure signals, tool-discipline results, reason codes, and content availability metadata. Do not invent a semantic judgment from metadata. Sessions flagged \`semanticReviewRecommended\` require a policy-authorized evidence request or customer-authorized content mode before server judging.
+6. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
+7. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
+8. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
 
 The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
 `;
@@ -747,19 +1414,19 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     registered = (await registry()).find((item) => item.path === workspace);
   }
   if (!registered) throw new Error('Workspace registration failed.');
-  const generatedPolicy = await materializeWorkspacePolicy({
-    workspace,
-    organizationId,
-    revision: policyRevision,
-  });
+  const synced = await workspaceSync(new Map<string, string | boolean>([
+    ['policy-revision', policyRevision], ['apply', true],
+  ]), [registered.workspaceId]) as Record<string, unknown>;
+  const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
+  const authoritativeRevision = String(localPolicy?.revision || policyRevision);
+  const generatedPolicy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);
   const installed = await installRepositoryAgentFabricSkill({
     workspace,
     hqUrl,
     organizationId,
     workspaceId: registered.workspaceId,
-    policyRevision,
+    policyRevision: authoritativeRevision,
   });
-  const synced = await workspaceSync(new Map([['policy-revision', policyRevision]]), [registered.workspaceId]);
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
   const nativeSkills = [];
   for (const capability of providers) {
@@ -780,10 +1447,11 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     deviceId: config.deviceId,
     providers,
     organizationPolicy: {
-      path: generatedPolicy.relativePath,
-      revision: generatedPolicy.policy.revision,
-      commandIds: Object.keys(generatedPolicy.policy.tasks.allowedCommands).sort(),
-      writePaths: generatedPolicy.policy.tasks.writePaths,
+      path: '.dharma/approved-policy.json',
+      revision: generatedPolicy.revision,
+      disclosureMode: generatedPolicy.evidence.automaticDisclosure?.mode || 'local_analysis',
+      commandIds: Object.keys(generatedPolicy.tasks.allowedCommands).sort(),
+      writePaths: generatedPolicy.tasks.writePaths,
     },
     repositorySkill: installed,
     nativeSkills,
@@ -798,17 +1466,42 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 }
 
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
-  const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8'));
-  return (await client()).syncTrajectory(capsule);
+  const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8')) as Record<string, unknown>;
+  const workspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : String(capsule.workspaceId || '');
+  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+  if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
+  assertCapsuleIntegrity(capsule);
+  const trajectoryId = String(capsule.trajectoryId || '');
+  const revision = Number(capsule.revision);
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+  });
+  try {
+    const storedCapsule = await vault.getCapsule<Record<string, unknown>>(trajectoryId, revision);
+    if (canonicalize(storedCapsule) !== canonicalize(capsule)) {
+      throw new Error('Trajectory capsule file does not exactly match the encrypted local-vault revision.');
+    }
+    const fabric = await client();
+    const policy = await refreshVerifiedWorkspacePolicyForTransmission(required(flags, 'policy'), workspaceId, fabric);
+    assertCapsuleAuthorizedByCurrentPolicy(storedCapsule, policy);
+    await reserveDailyContentUpload(storedCapsule, policy);
+    return fabric.syncTrajectory(storedCapsule);
+  } finally {
+    vault.close();
+  }
 }
 
 type EvidenceRequest = {
-  schema: 'dharma.evidence-request/v1';
+  schema: 'dharma.evidence-request/v1' | 'dharma.evidence-request/v2';
   requestId: string;
   organizationId: string;
   deviceId: string;
   workspaceId: string;
   trajectoryId: string;
+  capsuleRevision?: number;
+  capsuleHash?: string;
   purpose: string;
   selectors: Array<{ contentId: string; range?: { start: number; end: number } | null; reason?: string | null }>;
   maximumBytes: number;
@@ -818,6 +1511,7 @@ type EvidenceRequest = {
   createdAt: string;
   expiresAt: string;
   nonce: string;
+  keyVersion?: string;
   signature: string;
 };
 
@@ -826,6 +1520,7 @@ async function processEvidenceRequest(
   policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
   workspaceId?: string,
 ): Promise<Record<string, unknown>> {
+  assertPolicy(policy);
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const workspaces = (await registry()).filter((item) => !workspaceId || item.workspaceId === workspaceId);
   if (workspaces.length === 0) throw new Error('Evidence workspace is not registered locally.');
@@ -840,7 +1535,10 @@ async function processEvidenceRequest(
     }
   }
   if (!request || !workspace) return { ok: true, request: null };
-  const contract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
+  const contractId = request.schema === 'dharma.evidence-request/v2'
+    ? 'https://schemas.dharma-ai.io/evidence-request/v2'
+    : 'https://schemas.dharma-ai.io/evidence-request/v1';
+  const contract = await validateContract(resolve(import.meta.dirname, 'schemas'), contractId, request);
   if (!contract.ok) throw new Error(`Evidence request failed schema validation: ${JSON.stringify(contract.errors)}`);
   const { signature, ...unsignedRequest } = request;
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
@@ -850,6 +1548,24 @@ async function processEvidenceRequest(
     throw new Error('Evidence request does not match the enrolled organization, device, workspace, or policy.');
   }
   if (Date.parse(request.expiresAt) <= Date.now()) throw new Error('Evidence request has expired.');
+  const requestReceipt = evidenceRequestReceiptPath(request.requestId);
+  await mkdir(dirname(requestReceipt), { recursive: true, mode: 0o700 });
+  let requestHandle;
+  try {
+    requestHandle = await open(requestReceipt, 'wx', 0o600);
+    await requestHandle.writeFile(`${JSON.stringify({
+      schema: 'dharma.evidence-request-receipt/v1',
+      requestId: request.requestId,
+      nonce: request.nonce,
+      state: 'processing',
+      acceptedAt: new Date().toISOString(),
+    })}\n`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Evidence request was already accepted locally.');
+    throw error;
+  } finally {
+    await requestHandle?.close().catch(() => undefined);
+  }
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
@@ -857,8 +1573,18 @@ async function processEvidenceRequest(
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
-    await syncPendingRetentionCapsules(vault, fabric);
+    await syncPendingRetentionCapsules(vault, fabric, policy, workspace.workspaceId);
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
+    assertCapsuleIntegrity(capsule);
+    if (!request.capsuleRevision || !request.capsuleHash) {
+      throw new Error('Legacy evidence request lacks a signed capsule revision and must be reissued.');
+    }
+    if (Number(capsule.revision) !== request.capsuleRevision || capsule.capsuleHash !== request.capsuleHash) {
+      throw new Error('Evidence request is not bound to the current local capsule revision.');
+    }
+    const capsuleReceipt = capsule.redactionReceipt && typeof capsule.redactionReceipt === 'object' && !Array.isArray(capsule.redactionReceipt)
+      ? capsule.redactionReceipt as Record<string, unknown> : {};
+    const expansionBlockedByExcludedPath = Number(capsuleReceipt.excludedPaths || 0) > 0;
     const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
     const available = new Set(contentIndex.flatMap((item) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
@@ -872,6 +1598,10 @@ async function processEvidenceRequest(
     const authorizedBytes = Math.min(request.maximumBytes, policy.evidence.maximumExpansionBytes);
     let bytesPrepared = 0;
     for (const selector of request.selectors) {
+      if (expansionBlockedByExcludedPath) {
+        excluded.push({ contentId: selector.contentId, reasonCode: 'configured_excluded_path' });
+        continue;
+      }
       if (!available.has(selector.contentId)) { excluded.push({ contentId: selector.contentId, reasonCode: 'not_available_in_capsule' }); continue; }
       try {
         const source = await vault.getBlob(selector.contentId);
@@ -881,12 +1611,26 @@ async function processEvidenceRequest(
           excluded.push({ contentId: selector.contentId, reasonCode: 'invalid_range' });
           continue;
         }
-        const redacted = Buffer.from(String(redactValue(
-          source.subarray(start, end).toString('utf8'),
-          stats,
-          '',
-          { pseudonymizeIdentity: policy.evidence.pseudonymizeIdentity },
-        )), 'utf8');
+        const selected = source.subarray(start, end).toString('utf8');
+        const sourceLines = selected.split(/\r?\n/).filter(Boolean);
+        const sourceRecords: unknown[] = [];
+        let structured = sourceLines.length > 0;
+        for (const line of sourceLines) {
+          try { sourceRecords.push(JSON.parse(line) as unknown); }
+          catch { structured = false; break; }
+        }
+        if (!structured) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'malformed_structured_content' });
+          continue;
+        }
+        if (referencesExcludedPath(sourceRecords, policy.evidence.excludePaths)) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'configured_excluded_path' });
+          continue;
+        }
+        const redactedValue = sourceRecords.map((record) => redactValue(record, stats, '', {
+          pseudonymizeIdentity: policy.evidence.pseudonymizeIdentity,
+        })).map((record) => JSON.stringify(record)).join('\n');
+        const redacted = Buffer.from(redactedValue, 'utf8');
         if (redacted.byteLength === 0) {
           excluded.push({ contentId: selector.contentId, reasonCode: 'redacted_empty' });
           continue;
@@ -914,11 +1658,22 @@ async function processEvidenceRequest(
     const response = { ...unsignedResponse, responseHash: sha256(canonicalize(unsignedResponse)), signature: null };
     const responseContract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
     if (!responseContract.ok) throw new Error(`Evidence response failed schema validation: ${JSON.stringify(responseContract.errors)}`);
+    const expansionReservation = sha256(canonicalize({ requestId: request.requestId, responseHash: response.responseHash }));
+    await reserveDailyEvidenceBytes(expansionReservation, bytesPrepared, policy);
     const accepted = await fabric.postEvidenceResponse(request.requestId, response);
     const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};
     const receiptHash = typeof receipt.hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(receipt.hash)
       ? receipt.hash : response.responseHash;
     vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
+    await writeJsonAtomic(requestReceipt, {
+      schema: 'dharma.evidence-request-receipt/v1',
+      requestId: request.requestId,
+      nonce: request.nonce,
+      state: 'completed',
+      responseId: unsignedResponse.responseId,
+      responseHash: response.responseHash,
+      completedAt: new Date().toISOString(),
+    });
     return {
       ok: true, requestId: request.requestId, responseId: unsignedResponse.responseId,
       approved: approved.length, excluded: excluded.length, bytesPrepared, receipt,
@@ -927,8 +1682,10 @@ async function processEvidenceRequest(
 }
 
 async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
-  return processEvidenceRequest(await client(), policy, typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+  const workspaceId = required(flags, 'workspace-id');
+  const fabric = await client();
+  const policy = await refreshVerifiedWorkspacePolicyForTransmission(required(flags, 'policy'), workspaceId, fabric);
+  return processEvidenceRequest(fabric, policy, workspaceId);
 }
 
 async function executeOneTask(
@@ -986,7 +1743,7 @@ async function executeOneTask(
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
   return executeOneTask(await client(), policy, Number(flags.get('lease-seconds') || 120));
 }
 
@@ -1026,7 +1783,7 @@ Use this skill only inside a repository containing \`.dharma/agent-fabric.json\`
 
 1. Run \`dharma status\` and \`dharma skills verify --provider ${input.provider} --workspace .\` before accepting work.
 2. Start \`dharma relay start --policy .dharma/approved-policy.json\` for signed task, evidence, and skill delivery.
-3. Preview evidence before sync. Never expose provider credentials, developer tokens, raw private trajectories, hidden evaluation truth, or unrelated local files.
+3. Preview evidence before sync. Run local deterministic self-analysis and disclose only the policy-selected metadata or customer-authorized content classes. Never expose provider credentials, hidden evaluation truth, or unrelated local files.
 4. Accept only organization-scoped tasks whose workspace, path, command, network, Git, budget, expiry, replay, and skill-pin checks pass locally.
 5. Treat cross-agent requests as structured, task-bound handoffs. Never infer shell, merge, deploy, secret, or unrelated-file authority.
 
@@ -1211,7 +1968,10 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
 }
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policyPath = resolve(required(flags, 'policy'));
+  const canonicalWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
+  if (!canonicalWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  let policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
@@ -1224,14 +1984,30 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
   let evidenceResponsesCompleted = 0;
+  let nextPolicyRefreshAt = 0;
+  let evidencePolicyFresh = false;
   try {
     do {
-      const evidence = await processEvidenceRequest(fabric, policy);
-      if (evidence.requestId) evidenceResponsesCompleted += 1;
+      if (Date.now() >= nextPolicyRefreshAt) {
+        try {
+          await syncWorkspacePolicy(fabric, canonicalWorkspace, policy.revision, true);
+          policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
+          evidencePolicyFresh = true;
+        } catch {
+          evidencePolicyFresh = false;
+        }
+        nextPolicyRefreshAt = Date.now() + 60_000;
+      }
+      let evidenceRequestId: string | undefined;
+      if (evidencePolicyFresh) {
+        const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
+        evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
+        if (evidenceRequestId) evidenceResponsesCompleted += 1;
+      }
       const result = await executeOneTask(fabric, policy, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
       if (flags.has('once')) break;
-      if (!result.taskId && !evidence.requestId) await new Promise((accept) => setTimeout(accept, pollMs));
+      if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
     process.removeListener('SIGINT', stop);

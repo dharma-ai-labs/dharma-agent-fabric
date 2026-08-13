@@ -84,6 +84,13 @@ export class LocalVault {
         created_at text not null,
         primary key (trajectory_id, revision)
       );
+      create table if not exists capsule_sync_failures (
+        trajectory_id text not null,
+        revision integer not null,
+        reason text not null,
+        recorded_at text not null,
+        primary key (trajectory_id, revision)
+      );
       create table if not exists capsule_content_refs (
         trajectory_id text not null,
         revision integer not null,
@@ -269,7 +276,18 @@ export class LocalVault {
     return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
   }
 
-  async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100): Promise<Array<{
+  async getCapsule<T = Record<string, unknown>>(trajectoryId: string, revision: number): Promise<T> {
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('Trajectory capsule revision must be a positive integer.');
+    }
+    const record = this.#database.prepare(`
+      select blob_content_id from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { blob_content_id: string } | undefined;
+    if (!record) throw new Error('Trajectory capsule revision is not available in the local vault.');
+    return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
+  }
+
+  async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100, offset = 0): Promise<Array<{
     trajectoryId: string;
     revision: number;
     capsule: T;
@@ -277,12 +295,13 @@ export class LocalVault {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
       throw new Error('Pending capsule sync limit must be between 1 and 1000.');
     }
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Pending capsule sync offset is invalid.');
     const records = this.#database.prepare(`
       select trajectory_id, revision, blob_content_id
       from capsule_sync_queue
       order by created_at asc, trajectory_id asc, revision asc
-      limit ?
-    `).all(limit) as Array<{ trajectory_id: string; revision: number; blob_content_id: string }>;
+      limit ? offset ?
+    `).all(limit, offset) as Array<{ trajectory_id: string; revision: number; blob_content_id: string }>;
     return Promise.all(records.map(async (record) => ({
       trajectoryId: record.trajectory_id,
       revision: record.revision,
@@ -294,6 +313,25 @@ export class LocalVault {
     this.#database.prepare(`
       delete from capsule_sync_queue where trajectory_id = ? and revision = ?
     `).run(trajectoryId, revision);
+  }
+
+  discardPendingCapsuleSync(trajectoryId: string, revision: number, reason = 'authorization_revoked'): void {
+    if (!reason || reason.length > 120) throw new Error('Capsule sync failure reason is invalid.');
+    this.#database.exec('begin immediate');
+    try {
+      this.#database.prepare(`
+        insert into capsule_sync_failures(trajectory_id, revision, reason, recorded_at)
+        values (?, ?, ?, ?)
+        on conflict(trajectory_id, revision) do update set reason = excluded.reason, recorded_at = excluded.recorded_at
+      `).run(trajectoryId, revision, reason, new Date().toISOString());
+      this.#database.prepare(`
+        delete from capsule_sync_queue where trajectory_id = ? and revision = ?
+      `).run(trajectoryId, revision);
+      this.#database.exec('commit');
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      throw error;
+    }
   }
 
   recordDisclosure(disclosureId: string, receiptHash: string, bytesUploaded: number): void {

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
-import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { buildTrajectoryCapsule } from './index.js';
 
 const policy: OrganizationPolicy = {
@@ -14,6 +16,44 @@ const policy: OrganizationPolicy = {
   skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
   retention: {}, budgets: {},
 };
+
+function customerAuthorizedPolicy(excludePaths: string[] = []): OrganizationPolicy {
+  const keys = generateKeyPairSync('ed25519');
+  const signedPolicy = {
+    revision: 'rev_1',
+    evidence: {
+      automaticDisclosure: { mode: 'customer_authorized_content' as const, consentReceiptId: 'consent_org_test_20260812', allowedContentClasses: ['native_provider_payload' as const] },
+      maximumCapsuleBytes: 100_000, maximumDailyUploadBytes: 1_000_000,
+      maximumExpansionBytes: 100_000, excludePaths, pseudonymizeIdentity: true as const,
+    },
+  };
+  const now = Date.now();
+  const unsigned = {
+    schema: 'dharma.workspace-policy-authorization/v1' as const, organizationId: 'org_test', workspaceId: 'workspace_test',
+    policy: signedPolicy, issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), keyVersion: 'test',
+  };
+  const authorizedPolicy: OrganizationPolicy = {
+    ...policy,
+    schema: 'dharma.organization-policy/v2',
+    evidence: {
+      ...policy.evidence,
+      excludePaths,
+      automaticDisclosure: {
+        mode: 'customer_authorized_content',
+        consentReceiptId: 'consent_org_test_20260812',
+        allowedContentClasses: ['native_provider_payload'],
+      },
+    },
+    serverAuthorization: {
+      ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey),
+    },
+  };
+  const publicJwk = keys.publicKey.export({ format: 'jwk' });
+  return verifyServerAuthorizedPolicy({
+    policy: authorizedPolicy, publicKeyEd25519: publicJwk.x!, organizationId: 'org_test', workspaceId: 'workspace_test',
+    now: new Date(now),
+  });
+}
 
 test('capsule strips secrets and remains deterministic', () => {
   const session = {
@@ -53,6 +93,236 @@ test('capsule strips secrets and remains deterministic', () => {
   });
   assert.equal(capsule.events[0]?.source.nativeEventId, null);
   assert.equal(capsule.events[0]?.providerModel, null);
+  assert.equal(capsule.automaticDisclosureMode, 'local_analysis');
+  assert.equal(capsule.localAnalysis?.recordCount, 1);
+  assert.equal(capsule.localAnalysis?.semanticReviewRecommended, false);
+  assert.equal(capsule.redactionReceipt.consentReceiptId, null);
+});
+
+test('local analysis delivers failure and tool-discipline metadata without content excerpts', () => {
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy,
+    rawContentId: `sha256:${'7'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'session_local_analysis', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'partial', startedAt: '2026-08-12T01:00:00.000Z', endedAt: '2026-08-12T01:00:02.000Z',
+      records: [
+        { native: { type: 'tool_call', arguments: { code: 'private source' } }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T01:00:00.000Z', kind: 'tool_call' },
+        { native: { type: 'runtime_error', message: 'confidential failure detail' }, sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-12T01:00:02.000Z', kind: 'runtime_error' },
+      ],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('private source'), false);
+  assert.equal(encoded.includes('confidential failure detail'), false);
+  assert.deepEqual(capsule.localAnalysis?.toolDiscipline, { calls: 1, results: 0, unmatchedCalls: 1, orphanResults: 0 });
+  assert.equal(capsule.localAnalysis?.outcomeSignals.errorRecords, 1);
+  assert.equal(capsule.localAnalysis?.durationMs, 2_000);
+  assert.deepEqual(capsule.localAnalysis?.reasonCodes, ['runtime_failure_signal', 'tool_call_without_result', 'partial_evidence']);
+  assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
+});
+
+test('local analysis recognizes Claude-native terminal failure signals', () => {
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
+    rawContentId: `sha256:${'5'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'claude', sessionId: 'claude_failure', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T01:00:00.000Z', endedAt: '2026-08-12T01:00:01.000Z',
+      records: [{
+        native: { type: 'result', is_error: true, subtype: 'error_max_turns' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T01:00:01.000Z', kind: 'result',
+      }],
+    },
+  });
+  assert.equal(capsule.localAnalysis?.outcomeSignals.errorRecords, 1);
+  assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
+});
+
+test('customer-authorized content includes redacted native payload under a consent receipt', () => {
+  const authorizedPolicy = customerAuthorizedPolicy();
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy: authorizedPolicy,
+    rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 2_000,
+    session: {
+      provider: 'codex', sessionId: 'session_authorized_content', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'user_message', text: 'Analyze checkout failure', cwd: '/home/alice/private-repo', authorization: 'Bearer secret-secret-secret' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'user_message',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(capsule.automaticDisclosureMode, 'customer_authorized_content');
+  assert.equal(capsule.redactionReceipt.consentReceiptId, 'consent_org_test_20260812');
+  assert.equal(capsule.contentIndex[0]?.uploaded, false);
+  assert.equal(capsule.redactionReceipt.classes.includes('customer_authorized_content'), true);
+  assert.equal(capsule.redactionReceipt.classes.includes('automatic_content_omission'), false);
+  assert.equal(encoded.includes('Analyze checkout failure'), true);
+  assert.equal(encoded.includes('secret-secret-secret'), false);
+  assert.equal(encoded.includes('/home/alice'), false);
+  assert.equal(encoded.includes('[REDACTED:sensitive_field]'), true);
+});
+
+test('customer-authorized content omits records that reference configured excluded paths', () => {
+  const authorizedPolicy = customerAuthorizedPolicy(['private/**']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'7'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'excluded_path', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_result', source_path: 'private/customer-record.json', text: 'must not synchronize' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('must not synchronize'), false);
+  assert.equal(encoded.includes('customer-record.json'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(encoded.includes('configured_excluded_path'), true);
+});
+
+test('customer-authorized content omits records with excluded paths in object property names', () => {
+  const authorizedPolicy = customerAuthorizedPolicy(['**/.env']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'2'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'excluded_property_name', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_result', files: { '/repo/.env': 'must not synchronize' } },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('/repo/.env'), false);
+  assert.equal(encoded.includes('must not synchronize'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(encoded.includes('configured_excluded_path'), true);
+});
+
+test('secret-shaped property names and provider kinds never enter a capsule', () => {
+  const authorizedPolicy = customerAuthorizedPolicy();
+  const secret = `sk-${'A'.repeat(32)}`;
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'3'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'secret_property_name', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: secret, [secret]: 'non-secret value' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: secret,
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes(secret), false);
+  assert.equal(capsule.events[0]?.kind, 'unknown');
+  assert.equal(capsule.events[0]?.payload.nativeKind, 'unknown');
+  assert.equal(capsule.events[0]?.source.sourceKind, 'unknown');
+  assert.deepEqual(capsule.localAnalysis?.eventKinds, { unknown: 1 });
+  assert.equal(capsule.redactionReceipt.classes.includes('openai_key'), true);
+});
+
+test('deep provider records are conservatively omitted without overflowing traversal', () => {
+  const authorizedPolicy = customerAuthorizedPolicy();
+  let nested: Record<string, unknown> = { value: 'deep customer content' };
+  for (let depth = 0; depth < 2_000; depth += 1) nested = { child: nested };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'1'.repeat(64)}`, rawBytes: 50_000,
+    session: {
+      provider: 'codex', sessionId: 'deep_provider_record', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_result', nested },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('deep customer content'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(encoded.includes('configured_excluded_path'), true);
+});
+
+test('provider record byte accounting matches JSON encoding without recursive serialization', () => {
+  const native = {
+    type: 'tool_result', ok: true, count: 12, nullable: null,
+    nested: { label: 'customer content', values: [1, false, 'three'] },
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: customerAuthorizedPolicy(),
+    rawContentId: `sha256:${'2'.repeat(64)}`, rawBytes: 500,
+    session: {
+      provider: 'codex', sessionId: 'byte_accounting', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo',
+        timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const expectedBytes = Buffer.byteLength(JSON.stringify(native));
+  assert.equal(capsule.localAnalysis?.recordBytes.total, expectedBytes);
+  assert.equal(capsule.localAnalysis?.recordBytes.maximum, expectedBytes);
+  assert.equal(capsule.events[0]?.payload.recordBytes, expectedBytes);
+});
+
+test('customer-authorized content detects excluded paths inside serialized tool arguments', () => {
+  const authorizedPolicy = customerAuthorizedPolicy(['.env', '**/*.key']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'4'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'serialized_excluded_path', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_call', arguments: '{"cmd":"cat .env"}', result: 'non-secret customer content' },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_call',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('non-secret customer content'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+});
+
+test('customer-authorized content handles root globs, camelCase paths, and common credential fields', () => {
+  const authorizedPolicy = customerAuthorizedPolicy(['**/*.key', '**/.env']);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'6'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'codex', sessionId: 'root_exclusions', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [
+        {
+          native: { type: 'tool_result', sourcePath: 'signing.key', text: 'must not synchronize' },
+          sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+        },
+        {
+          native: { type: 'tool_result', clientSecret: 'client-secret-value', refreshToken: 'refresh-token-value', xApiKey: 'api-key-value' },
+          sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-12T02:00:01.000Z', kind: 'tool_result',
+        },
+      ],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('must not synchronize'), false);
+  assert.equal(encoded.includes('client-secret-value'), false);
+  assert.equal(encoded.includes('refresh-token-value'), false);
+  assert.equal(encoded.includes('api-key-value'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
 });
 
 test('automatic capsules allowlist metadata and omit Codex content-bearing fields', () => {
@@ -110,6 +380,28 @@ test('automatic capsules allowlist metadata and omit Codex content-bearing field
   assert.equal(capsule.redactionReceipt.excludedClasses.includes('rate_limit_metadata'), true);
   assert.equal(capsule.redactionReceipt.excludedClasses.includes('encrypted_reasoning'), true);
   assert.equal(capsule.redactionReceipt.excludedClasses.includes('execution_configuration'), true);
+});
+
+test('serialized payload, body, message, and content fields cannot hide excluded paths or secret fields', () => {
+  const contentPolicy = customerAuthorizedPolicy(['**/.env', '**/*.key']);
+  for (const field of ['payload', 'body', 'message', 'content']) {
+    const capsule = buildTrajectoryCapsule({
+      organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: contentPolicy,
+      rawContentId: `sha256:${'9'.repeat(64)}`, rawBytes: 300,
+      session: {
+        provider: 'codex', sessionId: `serialized_secret_${field}`, sourcePath: '/private/source.jsonl', workspace: '/repo',
+        coverage: 'observed', startedAt: '2026-08-03T00:00:00.000Z', endedAt: '2026-08-03T00:00:01.000Z',
+        records: [{
+          native: { type: 'tool_call', [field]: JSON.stringify({ path: '/repo/.env', credential: 'private-secret-value' }) },
+          sourcePath: '/private/source.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-03T00:00:00.000Z', kind: 'tool_call',
+        }],
+      },
+    });
+    const encoded = JSON.stringify(capsule);
+    assert.equal(encoded.includes('private-secret-value'), false, field);
+    assert.equal(encoded.includes('/repo/.env'), false, field);
+    assert.equal(capsule.redactionReceipt.excludedPaths, 1, field);
+  }
 });
 
 test('bounded expansion redacts Unix, Windows, and WSL-local paths when identity is pseudonymized', async () => {

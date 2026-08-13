@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { canonicalize, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
@@ -15,6 +16,7 @@ export interface DeviceConfig {
   serverPublicKeyEd25519: string;
   relayUrl: string;
   enrolledAt: string;
+  evidenceQuotaLedgerInitializedAt?: string;
 }
 
 interface PendingRequest {
@@ -69,6 +71,54 @@ export function normalizeRelayUrl(value: string) {
 
 function accountFor(hqUrl: string, organizationId: string) {
   return `device-key-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId: string) {
+  return `evidence-quota-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
+}
+
+export interface EvidenceQuotaAnchor {
+  schema: 'dharma.evidence-quota-anchor/v1';
+  day: string;
+  totalBytes: number;
+  ledgerHash: string;
+  updatedAt: string;
+}
+
+export async function loadEvidenceQuotaAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  store?: SecureSecretStore;
+}): Promise<EvidenceQuotaAnchor | null> {
+  const store = input.store ?? await createSystemSecureStore();
+  const value = await store.get(evidenceQuotaAccountFor(
+    input.config.hqUrl, input.config.organizationId, input.config.deviceId,
+  ));
+  if (!value) return null;
+  const anchor = JSON.parse(value) as EvidenceQuotaAnchor;
+  if (anchor.schema !== 'dharma.evidence-quota-anchor/v1'
+    || !/^\d{4}-\d{2}-\d{2}$/.test(anchor.day)
+    || !Number.isSafeInteger(anchor.totalBytes) || anchor.totalBytes < 0
+    || !/^[a-f0-9]{64}$/.test(anchor.ledgerHash)
+    || !Number.isFinite(Date.parse(anchor.updatedAt))) {
+    throw new Error('Protected evidence quota anchor is corrupt.');
+  }
+  return anchor;
+}
+
+export async function saveEvidenceQuotaAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  anchor: EvidenceQuotaAnchor;
+  store?: SecureSecretStore;
+}): Promise<void> {
+  const store = input.store ?? await createSystemSecureStore();
+  const account = evidenceQuotaAccountFor(
+    input.config.hqUrl, input.config.organizationId, input.config.deviceId,
+  );
+  await store.put(account, JSON.stringify(input.anchor));
+  const confirmed = await store.get(account);
+  if (confirmed !== JSON.stringify(input.anchor)) {
+    throw new Error('Secure store did not confirm the evidence quota anchor write.');
+  }
 }
 
 async function atomicJson(path: string, value: unknown) {
@@ -178,7 +228,15 @@ export class AgentFabricClient {
   }
 
   async openSession(relayVersion = '0.1.0') {
-    if (this.#state.pending) await this.#sendPending();
+    if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
+      // Content-bearing requests are never replayed from durable state before
+      // the CLI has refreshed consent. A later explicit sync rebuilds and
+      // reauthorizes the request; server ingestion is capsule-hash idempotent.
+      this.#state.pending = null;
+      await this.#persist();
+    } else if (this.#state.pending) {
+      await this.#sendPending();
+    }
     this.#state = { schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null };
     await this.#persist();
     return this.signedPost('/agent-fabric/sessions', {
@@ -211,7 +269,17 @@ export class AgentFabricClient {
 
   async #signedPostNow(route: string, body: unknown): Promise<Record<string, unknown>> {
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
-    if (this.#state.pending) return this.#sendPending();
+    if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
+      // An ambiguous content delivery is never replayed implicitly. The next
+      // explicit caller must rebuild the capsule after rechecking disclosure
+      // policy; a skipped sequence is safe because the server enforces
+      // monotonic rather than contiguous device sequences.
+      this.#state.nextSequence += 1;
+      this.#state.pending = null;
+      await this.#persist();
+    } else if (this.#state.pending) {
+      return this.#sendPending();
+    }
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
     const serialized = canonicalize(body);
     const timestamp = new Date().toISOString();
@@ -324,5 +392,19 @@ export class AgentFabricClient {
     });
   }
 
-  #persist() { return atomicJson(this.#statePath, this.#state); }
+  #persist() {
+    // Authorized trajectory bodies may contain customer content. Keep an
+    // in-flight request in memory, but never copy that body into the plaintext
+    // protocol-state outbox. The encrypted local vault remains the durable
+    // source from which an explicitly authorized retry is rebuilt.
+    const durableState = this.#state.pending && isContentBearingPath(this.#state.pending.pathname)
+      ? { ...this.#state, nextSequence: this.#state.nextSequence + 1, pending: null }
+      : this.#state;
+    return atomicJson(this.#statePath, durableState);
+  }
+}
+
+export function isContentBearingPath(pathname: string): boolean {
+  return pathname.endsWith('/agent-fabric/trajectories')
+    || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname);
 }

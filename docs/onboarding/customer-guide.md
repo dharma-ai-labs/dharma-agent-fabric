@@ -176,7 +176,21 @@ dharma evidence capture-batch \
   --sync
 ```
 
-The policy-qualified preview reports the exact automatic-capsule bytes and disclosed/excluded content classes. Automatic capsules contain event kinds, timestamps, coverage, source kinds, record sizes, and pseudonymous identifiers only. Prompt/response text, instructions, tool schemas and I/O, execution configuration, token/rate metadata, encrypted reasoning, and local paths remain on the device unless a separate bounded evidence request is explicitly approved.
+The policy-qualified preview reports the disclosure mode, consent receipt, exact capsule bytes, semantic-review candidate count, and disclosed/excluded content classes.
+
+The default `local_analysis` mode performs deterministic self-analysis on the device and delivers:
+
+- provider, pseudonymous session, organization, device, and workspace identifiers;
+- event-kind counts, record counts and byte distributions;
+- start/end timestamps, duration, completion, and coverage;
+- tool-call/result counts and unmatched-call/orphan-result signals;
+- runtime failure, timeout, cancellation, and partial-evidence reason codes;
+- local evidence availability descriptors; skill activation is proven separately by signed installation receipts;
+- redaction, omission, policy revision, and capsule lineage receipts.
+
+It does not deliver prompt/response excerpts, instructions, tool arguments/results, source code, local paths, encrypted reasoning, or credentials. This metadata is enough for fleet coverage, operational triage, deterministic failure detection, clustering candidates, cost/latency aggregation where available, and selecting sessions for semantic review. It is the first pass, not the product endpoint. It is not enough to judge nuanced rationale or generate a trustworthy remediation by itself. A semantic evaluation must obtain the exact approved, redacted evidence spans it needs or return `insufficient_evidence`.
+
+The client policy contract supports `metadata_only`, `local_analysis`, or `customer_authorized_content`. An administrator may make content sync the organization default only after accepting the named content classes, size and daily limits, retention, and secondary-analysis use in a durable consent receipt. Authorized content is still locally secret-redacted, workspace-bound, previewable, capped, and auditable. Without that receipt, the CLI rejects the content mode. Production HQ must also enforce that receipt and its retention schedule; until that server gate is released, HQ rejects continuous content mode and semantic review uses explicit purpose-bound evidence requests.
 
 Batch capture is deliberately bounded. Use `--maximum-sessions` after reviewing the preview counts, or pass a JSON `--session-ids-file` to select exact sessions.
 
@@ -290,8 +304,8 @@ After a managed remediation is promoted, HQ creates exactly one KMS-signed local
 
 ## 10. Security, privacy, and offboarding
 
-- complete raw local evidence remains in the encrypted local vault;
-- metadata-only automatic capsules are the default upload;
+- complete raw local evidence remains in the encrypted local vault unless an organization administrator explicitly authorizes bounded content sync;
+- deterministic local analysis is the recommended initial automatic mode;
 - expanded evidence requires an explicit evidence request and audited approval;
 - all server mutations require organization capability checks and idempotency keys;
 - task and A2A messages are structured and bounded, not arbitrary remote shell;

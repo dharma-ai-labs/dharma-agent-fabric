@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/organization-policy/v2",
+  "title": "Agent Fabric Organization Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "revision",
+    "evidence",
+    "tasks",
+    "skills",
+    "retention",
+    "budgets"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.organization-policy/v2"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "string"
+    },
+    "serverAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "organizationId", "workspaceId", "policy", "issuedAt", "expiresAt", "signature", "keyVersion"],
+      "properties": {
+        "schema": { "const": "dharma.workspace-policy-authorization/v1" },
+        "organizationId": { "type": "string", "minLength": 1 },
+        "workspaceId": { "type": "string", "format": "uuid" },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revision", "evidence"],
+          "properties": {
+            "revision": { "type": "string", "minLength": 1 },
+            "evidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["automaticDisclosure", "maximumCapsuleBytes", "maximumDailyUploadBytes", "maximumExpansionBytes", "excludePaths", "pseudonymizeIdentity"],
+              "properties": {
+                "automaticDisclosure": { "type": "object" },
+                "maximumCapsuleBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+                "maximumDailyUploadBytes": { "type": "integer", "minimum": 1 },
+                "maximumExpansionBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+                "excludePaths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+                "pseudonymizeIdentity": { "const": true }
+              }
+            }
+          }
+        },
+        "issuedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "signature": { "type": "string", "minLength": 1 },
+        "keyVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultMode",
+        "registeredWorkspaceOnly",
+        "excludePaths",
+        "maximumCapsuleBytes",
+        "maximumDailyUploadBytes",
+        "maximumExpansionBytes"
+      ],
+      "properties": {
+        "defaultMode": {
+          "type": "string",
+          "enum": [
+            "structured",
+            "deep",
+            "reduced_full_session",
+            "incident_capture"
+          ]
+        },
+        "automaticDisclosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["metadata_only", "local_analysis", "customer_authorized_content"]
+            },
+            "consentReceiptId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "allowedContentClasses": {
+              "type": "array",
+              "items": { "const": "native_provider_payload" },
+              "uniqueItems": true
+            }
+          }
+        },
+        "registeredWorkspaceOnly": {
+          "const": true
+        },
+        "excludePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maximumCapsuleBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "maximumDailyUploadBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximumExpansionBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pseudonymizeIdentity": {
+          "type": "boolean"
+        }
+      }
+    },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultNetwork",
+        "defaultGit",
+        "allowedCommands",
+        "writePaths",
+        "requireLocalConfirmationFor"
+      ],
+      "properties": {
+        "defaultNetwork": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "package_registry_only",
+            "allowlisted_domains",
+            "inherit_local_provider"
+          ]
+        },
+        "defaultGit": {
+          "type": "string",
+          "enum": [
+            "read_only",
+            "task_branch",
+            "merge_allowed",
+            "deploy_allowed"
+          ]
+        },
+        "allowedCommands": {
+          "type": "object"
+        },
+        "writePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requireLocalConfirmationFor": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "automaticInstall",
+        "automaticPromotionMaxRisk",
+        "canaryPercent"
+      ],
+      "properties": {
+        "automaticInstall": {
+          "type": "boolean"
+        },
+        "automaticPromotionMaxRisk": {
+          "type": "string",
+          "enum": [
+            "R0",
+            "R1",
+            "R2",
+            "R3",
+            "R4"
+          ]
+        },
+        "canaryPercent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "retention": {
+      "type": "object"
+    },
+    "budgets": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+                "evidence": {
+                    "type": "object",
+                    "properties": {
+                        "automaticDisclosure": {
+                            "type": "object",
+                "properties": { "mode": { "const": "customer_authorized_content" } },
+                "required": ["mode"]
+              }
+            },
+            "required": ["automaticDisclosure"]
+          }
+        }
+      },
+      "then": {
+        "required": ["serverAuthorization"],
+                "properties": {
+                    "evidence": {
+                        "type": "object",
+                        "properties": {
+                            "automaticDisclosure": {
+                                "type": "object",
+                "required": ["mode", "consentReceiptId", "allowedContentClasses"],
+                "properties": {
+                                    "allowedContentClasses": {
+                                        "type": "array",
+                                        "minItems": 1,
+                    "maxItems": 1,
+                    "contains": { "const": "native_provider_payload" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
