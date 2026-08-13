@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, link, mkdir, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -122,30 +122,39 @@ export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retentio
 
 async function syncPendingRetentionCapsules(
   vault: {
-    listPendingCapsuleSyncs<T>(limit?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
+    listPendingCapsuleSyncs<T>(limit?: number, offset?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
     markCapsuleSynced(trajectoryId: string, revision: number): void;
     discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void;
   },
   fabric: AgentFabricClient,
   policy: OrganizationPolicy,
+  workspaceId: string,
 ): Promise<number> {
   // The caller must obtain this policy from an authoritative control-plane
   // refresh. An expired policy pauses the queue instead of mutating it.
   assertPolicy(policy);
   let synced = 0;
+  let offset = 0;
   for (;;) {
-    const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
+    const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(1_000, offset);
     if (pending.length === 0) return synced;
+    let matched = 0;
     for (const item of pending) {
+      if (String(item.capsule.workspaceId || '') !== workspaceId) continue;
+      matched += 1;
       try {
         assertCapsuleIntegrity(item.capsule);
       } catch {
         vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
         continue;
       }
+      // Policy expiry and signature failure pause the queue. Only a capsule
+      // mismatch under a still-current policy is an authoritative discard.
+      assertPolicy(policy);
       try {
         assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
       } catch {
+        assertPolicy(policy);
         // A successfully refreshed policy is authoritative. Retire only the
         // superseded capsule so it cannot permanently block later valid work.
         vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
@@ -155,6 +164,12 @@ async function syncPendingRetentionCapsules(
       await fabric.syncTrajectory(item.capsule);
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
+    }
+    if (matched === 0) {
+      if (pending.length < 1_000) return synced;
+      offset += pending.length;
+    } else {
+      offset = 0;
     }
   }
 }
@@ -193,7 +208,10 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
   const receipt = capsule.redactionReceipt && typeof capsule.redactionReceipt === 'object' && !Array.isArray(capsule.redactionReceipt)
     ? capsule.redactionReceipt as Record<string, unknown> : {};
   if (!['metadata_only', 'local_analysis', 'customer_authorized_content'].includes(String(mode))
-    || receipt.disclosureMode !== mode) {
+    || receipt.disclosureMode !== mode
+    || mode !== (policy.evidence.automaticDisclosure?.mode || 'local_analysis')
+    || capsule.organizationId !== policy.organizationId
+    || (policy.serverAuthorization && capsule.workspaceId !== policy.serverAuthorization.workspaceId)) {
     throw new Error('Trajectory capsule disclosure mode is invalid or inconsistent.');
   }
   const events = Array.isArray(capsule.events) ? capsule.events : [];
@@ -225,6 +243,31 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     if (receipt.consentReceiptId !== null && receipt.consentReceiptId !== undefined) {
       throw new Error('Reduced trajectory capsule cannot claim a content consent receipt.');
     }
+    const localAnalysis = capsule.localAnalysis;
+    if (mode === 'metadata_only' && localAnalysis !== null) {
+      throw new Error('Metadata-only trajectory capsule cannot contain local analysis.');
+    }
+    if (mode === 'local_analysis') {
+      if (!localAnalysis || typeof localAnalysis !== 'object' || Array.isArray(localAnalysis)) {
+        throw new Error('Local-analysis trajectory capsule is missing deterministic analysis.');
+      }
+      const analysis = localAnalysis as Record<string, unknown>;
+      const eventKinds = analysis.eventKinds && typeof analysis.eventKinds === 'object' && !Array.isArray(analysis.eventKinds)
+        ? analysis.eventKinds as Record<string, unknown> : null;
+      const reasonCodes = Array.isArray(analysis.reasonCodes) ? analysis.reasonCodes : null;
+      const allowedReasons = new Set(['runtime_failure_signal', 'tool_call_without_result', 'tool_result_without_call', 'partial_evidence']);
+      if (analysis.schema !== 'dharma.local-trajectory-analysis/v1' || analysis.analyzer !== 'deterministic'
+        || !eventKinds || Object.entries(eventKinds).some(([key, value]) => !/^[A-Za-z0-9_.:-]{1,80}$/.test(key)
+          || !Number.isSafeInteger(value) || Number(value) < 0)
+        || !reasonCodes || reasonCodes.some((value) => typeof value !== 'string' || !allowedReasons.has(value))) {
+        throw new Error('Local-analysis trajectory capsule contains invalid free-form analysis data.');
+      }
+    }
+    const receiptStringArrays = ['disclosedClasses', 'excludedClasses', 'classes'];
+    if (receiptStringArrays.some((key) => !Array.isArray(receipt[key])
+      || (receipt[key] as unknown[]).some((value) => typeof value !== 'string' || !/^[a-z0-9_.-]{1,80}$/.test(value)))) {
+      throw new Error('Reduced trajectory capsule contains invalid redaction receipt classes.');
+    }
     return;
   }
   const disclosure = policy.evidence.automaticDisclosure;
@@ -249,24 +292,8 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
     } catch (error) {
       await unlink(candidate).catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        const owner = Number((await readFile(lockPath, 'utf8')).trim());
-        if (Number.isSafeInteger(owner) && owner > 0) {
-          try { process.kill(owner, 0); }
-          catch (ownerError) {
-            if ((ownerError as NodeJS.ErrnoException).code === 'ESRCH') {
-              await unlink(lockPath);
-              continue;
-            }
-          }
-        } else {
-          const metadata = await stat(lockPath);
-          if (Date.now() - metadata.mtimeMs >= timeoutMs) {
-            await unlink(lockPath);
-            continue;
-          }
-        }
-      } catch {}
+      // Never unlink a lock another process may have replaced between stat and
+      // cleanup. A crashed lock fails closed and requires explicit recovery.
       if (Date.now() >= deadline) throw new Error(timeoutMessage);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
@@ -518,13 +545,18 @@ async function applyWorkspaceAuthorizationAtomically(input: {
     }
     const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
     const ledgerExists = await pathExists(evidenceUploadLedgerPath());
-    if (contentAuthorized && previous?.contentLedgerInitialized === true && !ledgerExists) {
+    let device: DeviceConfig;
+    try { device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
+    catch { throw new Error('Enrolled device state is required before applying a server evidence policy.'); }
+    if (contentAuthorized && device.evidenceQuotaLedgerInitializedAt && !ledgerExists) {
       throw new Error('Evidence upload quota ledger is missing; content transmission is disabled until the device is re-enrolled.');
     }
     if (contentAuthorized && !ledgerExists) {
       await writeJsonAtomic(evidenceUploadLedgerPath(), {
         day: new Date().toISOString().slice(0, 10), totalBytes: 0, capsuleHashes: [], capsuleBytes: {},
       });
+      device.evidenceQuotaLedgerInitializedAt = new Date().toISOString();
+      await writeJsonAtomic(configPath(), device);
     }
     await writeJsonAtomic(statePath, {
       issuedAt: input.authorization.issuedAt,
@@ -861,7 +893,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   try {
     const capsules = [];
     const syncResults = [];
-    if (fabric) await syncPendingRetentionCapsules(vault, fabric, policy);
+    if (fabric) await syncPendingRetentionCapsules(vault, fabric, policy, registered.workspaceId);
     for (const selected of batch ? sessions : [session]) {
       const rawTurn = Buffer.from(`${selected.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       const rawContentId = sha256(rawTurn);
@@ -1377,7 +1409,7 @@ async function processEvidenceRequest(
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
-    await syncPendingRetentionCapsules(vault, fabric, policy);
+    await syncPendingRetentionCapsules(vault, fabric, policy, workspace.workspaceId);
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
     assertCapsuleIntegrity(capsule);
     if (!request.capsuleRevision || !request.capsuleHash) {
@@ -1486,8 +1518,10 @@ async function processEvidenceRequest(
 }
 
 async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
-  return processEvidenceRequest(await client(), policy, typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+  const workspaceId = required(flags, 'workspace-id');
+  const fabric = await client();
+  const policy = await refreshVerifiedWorkspacePolicyForTransmission(required(flags, 'policy'), workspaceId, fabric);
+  return processEvidenceRequest(fabric, policy, workspaceId);
 }
 
 async function executeOneTask(
@@ -1771,7 +1805,9 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
   const policyPath = resolve(required(flags, 'policy'));
-  let policy = await loadVerifiedWorkspacePolicy(policyPath);
+  const canonicalWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
+  if (!canonicalWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  let policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
@@ -1789,27 +1825,18 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   try {
     do {
       if (Date.now() >= nextPolicyRefreshAt) {
-        let canonicalWorkspaceSeen = false;
-        let canonicalWorkspaceRefreshed = false;
-        for (const workspace of (await registry()).filter((item) => item.organizationId === policy.organizationId)) {
-          const isCanonicalWorkspace = policyPath === resolve(workspace.path, '.dharma', 'approved-policy.json');
-          if (isCanonicalWorkspace) canonicalWorkspaceSeen = true;
-          try {
-            await syncWorkspacePolicy(fabric, workspace, policy.revision, true);
-            if (isCanonicalWorkspace) {
-              policy = await loadVerifiedWorkspacePolicy(policyPath, workspace.workspaceId);
-              canonicalWorkspaceRefreshed = true;
-            }
-          } catch {
-            if (isCanonicalWorkspace) canonicalWorkspaceRefreshed = false;
-          }
+        try {
+          await syncWorkspacePolicy(fabric, canonicalWorkspace, policy.revision, true);
+          policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
+          evidencePolicyFresh = true;
+        } catch {
+          evidencePolicyFresh = false;
         }
-        evidencePolicyFresh = canonicalWorkspaceSeen && canonicalWorkspaceRefreshed;
         nextPolicyRefreshAt = Date.now() + 60_000;
       }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh) {
-        const evidence = await processEvidenceRequest(fabric, policy);
+        const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
         evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
         if (evidenceRequestId) evidenceResponsesCompleted += 1;
       }

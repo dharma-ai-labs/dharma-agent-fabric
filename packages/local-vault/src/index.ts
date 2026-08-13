@@ -276,7 +276,7 @@ export class LocalVault {
     return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
   }
 
-  async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100): Promise<Array<{
+  async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100, offset = 0): Promise<Array<{
     trajectoryId: string;
     revision: number;
     capsule: T;
@@ -284,12 +284,13 @@ export class LocalVault {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
       throw new Error('Pending capsule sync limit must be between 1 and 1000.');
     }
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Pending capsule sync offset is invalid.');
     const records = this.#database.prepare(`
       select trajectory_id, revision, blob_content_id
       from capsule_sync_queue
       order by created_at asc, trajectory_id asc, revision asc
-      limit ?
-    `).all(limit) as Array<{ trajectory_id: string; revision: number; blob_content_id: string }>;
+      limit ? offset ?
+    `).all(limit, offset) as Array<{ trajectory_id: string; revision: number; blob_content_id: string }>;
     return Promise.all(records.map(async (record) => ({
       trajectoryId: record.trajectory_id,
       revision: record.revision,

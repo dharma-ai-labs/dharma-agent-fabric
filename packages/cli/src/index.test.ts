@@ -310,6 +310,7 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
   const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-'));
   process.env.DHARMA_HOME = home;
   try {
+    await writeFile(join(home, 'device.json'), JSON.stringify({ schema: 'dharma.device-config/v1' }));
     const signed = signedPolicyAuthorization({
       revision: 'content-v1',
       evidence: {
@@ -343,6 +344,7 @@ test('deleting an initialized content quota ledger fails closed on policy refres
   const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-delete-'));
   process.env.DHARMA_HOME = home;
   try {
+    await writeFile(join(home, 'device.json'), JSON.stringify({ schema: 'dharma.device-config/v1' }));
     const signed = signedPolicyAuthorization({
       revision: 'content-delete-v1',
       evidence: {
@@ -372,7 +374,7 @@ test('queued content must match the current signed consent and policy revision',
     },
   });
   const policy = applyServerEvidencePolicy(base.policy, signed.envelope, signed.publicKeyEd25519, 'org_northstar', 'workspace-northstar');
-  const current = { automaticDisclosureMode: 'customer_authorized_content', events: [], redactionReceipt: { disclosureMode: 'customer_authorized_content', policyRevision: 'content-v2', consentReceiptId: 'consent-current' } };
+  const current = { organizationId: 'org_northstar', workspaceId: 'workspace-northstar', automaticDisclosureMode: 'customer_authorized_content', events: [], redactionReceipt: { disclosureMode: 'customer_authorized_content', policyRevision: 'content-v2', consentReceiptId: 'consent-current' } };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(current, policy));
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({ ...current, redactionReceipt: { disclosureMode: 'customer_authorized_content', policyRevision: 'content-v1', consentReceiptId: 'consent-old' } }, policy), /no longer authorized/);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy(current, { ...policy, evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } } }), /invalid|no longer authorized/);
@@ -381,9 +383,17 @@ test('queued content must match the current signed consent and policy revision',
 test('reduced capsules cannot disguise provider content as local analysis', async () => {
   const base = await materializeWorkspacePolicy({ workspace: await mkdtemp(join(tmpdir(), 'dharma-reduced-boundary-')), organizationId: 'org_northstar', revision: 'local' });
   const reduced = {
+    organizationId: 'org_northstar', workspaceId: 'workspace-northstar',
     automaticDisclosureMode: 'local_analysis', repoState: {}, skillState: {}, validationResults: [], contentIndex: [],
     events: [{ payload: { nativeKind: 'user_message', recordBytes: 10, contentOmitted: true } }],
-    redactionReceipt: { disclosureMode: 'local_analysis', consentReceiptId: null },
+    localAnalysis: {
+      schema: 'dharma.local-trajectory-analysis/v1', analyzer: 'deterministic', recordCount: 1,
+      recordBytes: { total: 10, maximum: 10 }, eventKinds: { user_message: 1 },
+      toolDiscipline: { calls: 0, results: 0, unmatchedCalls: 0, orphanResults: 0 },
+      outcomeSignals: { errorRecords: 0, incomplete: false, coverage: 'observed' }, durationMs: 1,
+      semanticReviewRecommended: false, reasonCodes: [],
+    },
+    redactionReceipt: { disclosureMode: 'local_analysis', consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['provider_prompt'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
@@ -393,6 +403,12 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced, repoState: { source: 'private code' },
   }, base.policy), /unauthorized auxiliary content/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, localAnalysis: { ...reduced.localAnalysis, reasonCodes: ['secret=customer-token'] },
+  }, base.policy), /invalid free-form analysis/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, redactionReceipt: { ...reduced.redactionReceipt, classes: ['secret=customer-token'] },
+  }, base.policy), /invalid redaction receipt classes/i);
 });
 
 test('server withdrawal resets a workspace to local analysis without retaining a consent receipt', async () => {

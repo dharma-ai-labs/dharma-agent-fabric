@@ -15,6 +15,7 @@ export interface DeviceConfig {
   serverPublicKeyEd25519: string;
   relayUrl: string;
   enrolledAt: string;
+  evidenceQuotaLedgerInitializedAt?: string;
 }
 
 interface PendingRequest {
