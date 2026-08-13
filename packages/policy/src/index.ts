@@ -68,7 +68,7 @@ export interface OrganizationPolicy {
 }
 
 export const MAXIMUM_TRAJECTORY_CAPSULE_BYTES = 1_048_576;
-const verifiedContentPolicies = new WeakSet<object>();
+const verifiedContentPolicies = new WeakMap<object, { expiresAt: number; fingerprint: string }>();
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -78,6 +78,14 @@ function canonicalValue(value: unknown): unknown {
       .map(([key, item]) => [key, canonicalValue(item)]));
   }
   return value;
+}
+
+function contentAuthorizationFingerprint(policy: OrganizationPolicy): string {
+  return JSON.stringify(canonicalValue({
+    revision: policy.revision,
+    evidence: policy.evidence,
+    serverAuthorization: policy.serverAuthorization,
+  }));
 }
 
 export function verifyServerAuthorizedPolicy(input: {
@@ -98,7 +106,7 @@ export function verifyServerAuthorizedPolicy(input: {
     || !Number.isFinite(expiresAt) || expiresAt <= now.getTime()) {
     throw new Error('Server workspace policy authorization is invalid or expired.');
   }
-  const { signature, keyVersion: _keyVersion, ...unsigned } = authorization;
+  const { signature, ...unsigned } = authorization;
   const publicKey = createPublicKey({
     key: { kty: 'OKP', crv: 'Ed25519', x: input.publicKeyEd25519 },
     format: 'jwk',
@@ -121,7 +129,10 @@ export function verifyServerAuthorizedPolicy(input: {
     || input.policy.evidence.pseudonymizeIdentity !== true) {
     throw new Error('Local evidence policy does not match its signed server authorization.');
   }
-  verifiedContentPolicies.add(input.policy);
+  verifiedContentPolicies.set(input.policy, {
+    expiresAt,
+    fingerprint: contentAuthorizationFingerprint(input.policy),
+  });
   return input.policy;
 }
 
@@ -161,8 +172,13 @@ export function assertPolicy(policy: OrganizationPolicy, options: { allowUnverif
     if (policy.serverAuthorization?.schema !== 'dharma.workspace-policy-authorization/v1') {
       throw new Error('customer_authorized_content requires a server-signed workspace authorization.');
     }
-    if (!options.allowUnverifiedAuthorization && !verifiedContentPolicies.has(policy)) {
-      throw new Error('customer_authorized_content requires cryptographic server authorization verification.');
+    if (!options.allowUnverifiedAuthorization) {
+      const verification = verifiedContentPolicies.get(policy);
+      if (!verification
+        || verification.expiresAt <= Date.now()
+        || verification.fingerprint !== contentAuthorizationFingerprint(policy)) {
+        throw new Error('customer_authorized_content requires current immutable cryptographic server authorization verification.');
+      }
     }
   } else if (disclosure?.consentReceiptId || disclosure?.allowedContentClasses?.length) {
     throw new Error('Content grants are only valid for customer_authorized_content.');

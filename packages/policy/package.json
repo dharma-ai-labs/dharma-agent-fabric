@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-policy",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Fail-closed workspace, evidence, command, and network policy for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/policy#readme",

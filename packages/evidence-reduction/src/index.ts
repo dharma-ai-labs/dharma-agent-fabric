@@ -117,14 +117,20 @@ function normalizedFieldName(key: string) {
   return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[-\s]+/g, '_').toLowerCase();
 }
 
-function referencesExcludedPath(value: unknown, excludePaths: string[], key = '', depth = 0): boolean {
-  if (depth > 10) return false;
+export function referencesExcludedPath(value: unknown, excludePaths: string[], key = '', depth = 0): boolean {
+  if (depth > 64) return true;
   if (typeof value === 'string') {
     const normalizedKey = normalizedFieldName(key);
     const pathBearingKey = /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedKey);
     const argumentBearingKey = /(?:^|_)(?:arguments?|args|command|cmd|input)(?:$|_)/i.test(normalizedKey);
     if (pathBearingKey || argumentBearingKey) {
-      const candidates = value.replaceAll('\\', '/').split(/[\s"'`=,:;()[\]{}]+/).filter(Boolean);
+      const normalized = value.replaceAll('\\', '/');
+      const candidates = [
+        ...(pathBearingKey ? [normalized.trim()] : []),
+        ...[...normalized.matchAll(/"([^"]+)"|'([^']+)'|`([^`]+)`|([^\s=,:;()[\]{}]+)/g)]
+          .map((match) => match[1] || match[2] || match[3] || match[4])
+          .filter((candidate): candidate is string => Boolean(candidate)),
+      ];
       if (candidates.some((candidate) => excludePaths.some((pattern) => globPattern(pattern).test(candidate.replace(/^\.\//, ''))))) {
         return true;
       }
@@ -144,7 +150,7 @@ function referencesExcludedPath(value: unknown, excludePaths: string[], key = ''
 }
 
 const LOCAL_PATH_PATTERNS = [
-  /\/(?:home|Users)\/[A-Za-z0-9._-]+(?:\/[^\s"'<>|,}\]]+)*/g,
+  /\/(?!api(?:\/|\b)|help(?:\b|\/))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._~@%+=:, -]+)+/g,
   /\b[A-Za-z]:\\{1,}[^\s"'<>|,}\]]+/g,
   /\\{2,}(?:wsl(?:\.localhost)?\\{1,})?[^\s"'<>|,}\]]+/gi,
 ];
@@ -178,7 +184,7 @@ function redactString(value: string, stats: RedactionStats, options: RedactionOp
 
 function redactValue(value: unknown, stats: RedactionStats, key = '', options: RedactionOptions = {}): unknown {
   const normalizedKey = normalizedFieldName(key);
-  if (/^(authorization|cookie|set_cookie|password|secret|token|api_key|x_api_key|client_secret|refresh_token|auth_token|access_token|aws_secret_access_key)$/i.test(normalizedKey)) {
+  if (/^(authorization|authorization_header|proxy_authorization|proxy_authorization_header|cookie|set_cookie|password|passwd|credential|credentials|private_key|secret|token|api_key|x_api_key|client_secret|refresh_token|auth_token|access_token|aws_secret_access_key)$/i.test(normalizedKey)) {
     if (value !== null && value !== undefined) {
       stats.classes.add('sensitive_field');
       stats.redactedValues += 1;
@@ -192,7 +198,15 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
     stats.redactedValues += 1;
     return '[REDACTED:local_path]';
   }
-  if (typeof value === 'string') return redactString(value, stats, options);
+  if (typeof value === 'string') {
+    if (/^(?:arguments?|args|input|payload|body|data|message|content)$/i.test(normalizedKey)
+      && /^[\[{]/.test(value.trim())) {
+      try {
+        return JSON.stringify(redactValue(JSON.parse(value), stats, normalizedKey, options));
+      } catch {}
+    }
+    return redactString(value, stats, options);
+  }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, stats, '', options));
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([childKey, child]) => [
@@ -362,7 +376,16 @@ export function buildTrajectoryCapsule(input: {
       recordBytes: nativeRecordBytes(record),
       contentOmitted: mode !== 'customer_authorized_content',
     };
-    if (mode === 'customer_authorized_content') payload.nativeProviderPayload = redactedNative;
+    if (mode === 'customer_authorized_content') {
+      const serializedNative = canonicalize(redactedNative);
+      payload.nativeProviderPayload = Buffer.byteLength(serializedNative) > Math.floor(input.policy.evidence.maximumCapsuleBytes / 2)
+        ? {
+          contentOmitted: true,
+          omissionReason: 'record_exceeds_capsule_limit',
+          redactedPayloadHash: sha256(serializedNative),
+        }
+        : redactedNative;
+    }
     automaticInputBytes += payload.recordBytes;
     automaticOutputBytes += Buffer.byteLength(canonicalize(payload));
     excludedContentClasses(record).forEach((value) => excludedClasses.add(value));
@@ -470,8 +493,19 @@ export function buildTrajectoryCapsule(input: {
       base.coverage.missingFields.push('events_collapsed_for_size');
     }
   }
+  if (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes && base.events.length === 1) {
+    base.events[0]!.payload = {
+      nativeKind: base.events[0]!.payload.nativeKind,
+      recordBytes: base.events[0]!.payload.recordBytes,
+      contentOmitted: true,
+      omissionReason: 'capsule_size_limit',
+    };
+    base.coverage.state = 'partial';
+    base.status = 'partial';
+    base.coverage.missingFields.push('native_payload_collapsed_for_size');
+  }
   if (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes) {
-    throw new Error('Trajectory capsule cannot fit the organization maximumCapsuleBytes policy.');
+    throw new Error('Trajectory capsule metadata cannot fit the organization maximumCapsuleBytes policy.');
   }
   return { ...base, capsuleHash: sha256(canonicalize(base)) };
 }

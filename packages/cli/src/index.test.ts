@@ -48,10 +48,11 @@ function signedPolicyAuthorization(policy: Record<string, unknown>, organization
   const unsigned = {
     schema: 'dharma.workspace-policy-authorization/v1', organizationId, workspaceId, policy: signedPolicy,
     issuedAt: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    keyVersion: 'test-key',
   };
   const publicJwk = keys.publicKey.export({ format: 'jwk' });
   return {
-    envelope: { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey), keyVersion: 'test-key' },
+    envelope: { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey) },
     publicKeyEd25519: publicJwk.x!,
   };
 }
@@ -64,7 +65,7 @@ test('organization raw evidence retention is validated and defaults explicitly',
 });
 
 test('version is parser-safe structured output', async () => {
-  assert.deepEqual(await run(['version']), { version: '0.1.9' });
+  assert.deepEqual(await run(['version']), { version: '0.1.10' });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {

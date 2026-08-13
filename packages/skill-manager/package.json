@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-skill-manager",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Signed Skill bundle verification, activation, receipts, and rollback for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/skill-manager#readme",
@@ -15,6 +15,6 @@
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.2",
-    "@dharma-ai-labs/agent-fabric-policy": "0.1.3"
+    "@dharma-ai-labs/agent-fabric-policy": "0.1.4"
   }
 }

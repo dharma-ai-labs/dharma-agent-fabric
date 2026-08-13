@@ -11,8 +11,6 @@
     "deviceId",
     "workspaceId",
     "trajectoryId",
-    "capsuleRevision",
-    "capsuleHash",
     "purpose",
     "selectors",
     "maximumBytes",
@@ -126,6 +124,10 @@
       "format": "date-time"
     },
     "nonce": {
+      "type": "string",
+      "minLength": 1
+    },
+    "keyVersion": {
       "type": "string",
       "minLength": 1
     },

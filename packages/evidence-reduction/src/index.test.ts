@@ -29,7 +29,7 @@ function customerAuthorizedPolicy(excludePaths: string[] = []): OrganizationPoli
   };
   const unsigned = {
     schema: 'dharma.workspace-policy-authorization/v1' as const, organizationId: 'org_test', workspaceId: 'workspace_test',
-    policy: signedPolicy, issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z',
+    policy: signedPolicy, issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', keyVersion: 'test',
   };
   const authorizedPolicy: OrganizationPolicy = {
     ...policy,
@@ -44,7 +44,7 @@ function customerAuthorizedPolicy(excludePaths: string[] = []): OrganizationPoli
       },
     },
     serverAuthorization: {
-      ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey), keyVersion: 'test',
+      ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey),
     },
   };
   const publicJwk = keys.publicKey.export({ format: 'jwk' });

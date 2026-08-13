@@ -84,6 +84,13 @@ export class LocalVault {
         created_at text not null,
         primary key (trajectory_id, revision)
       );
+      create table if not exists capsule_sync_failures (
+        trajectory_id text not null,
+        revision integer not null,
+        reason text not null,
+        recorded_at text not null,
+        primary key (trajectory_id, revision)
+      );
       create table if not exists capsule_content_refs (
         trajectory_id text not null,
         revision integer not null,
@@ -294,6 +301,25 @@ export class LocalVault {
     this.#database.prepare(`
       delete from capsule_sync_queue where trajectory_id = ? and revision = ?
     `).run(trajectoryId, revision);
+  }
+
+  discardPendingCapsuleSync(trajectoryId: string, revision: number, reason = 'authorization_revoked'): void {
+    if (!reason || reason.length > 120) throw new Error('Capsule sync failure reason is invalid.');
+    this.#database.exec('begin immediate');
+    try {
+      this.#database.prepare(`
+        insert into capsule_sync_failures(trajectory_id, revision, reason, recorded_at)
+        values (?, ?, ?, ?)
+        on conflict(trajectory_id, revision) do update set reason = excluded.reason, recorded_at = excluded.recorded_at
+      `).run(trajectoryId, revision, reason, new Date().toISOString());
+      this.#database.prepare(`
+        delete from capsule_sync_queue where trajectory_id = ? and revision = ?
+      `).run(trajectoryId, revision);
+      this.#database.exec('commit');
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      throw error;
+    }
   }
 
   recordDisclosure(disclosureId: string, receiptHash: string, bytesUploaded: number): void {

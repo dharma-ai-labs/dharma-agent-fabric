@@ -209,5 +209,46 @@
     "budgets": {
       "type": "object"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+                "evidence": {
+                    "type": "object",
+                    "properties": {
+                        "automaticDisclosure": {
+                            "type": "object",
+                "properties": { "mode": { "const": "customer_authorized_content" } },
+                "required": ["mode"]
+              }
+            },
+            "required": ["automaticDisclosure"]
+          }
+        }
+      },
+      "then": {
+        "required": ["serverAuthorization"],
+                "properties": {
+                    "evidence": {
+                        "type": "object",
+                        "properties": {
+                            "automaticDisclosure": {
+                                "type": "object",
+                "required": ["mode", "consentReceiptId", "allowedContentClasses"],
+                "properties": {
+                                    "allowedContentClasses": {
+                                        "type": "array",
+                                        "minItems": 1,
+                    "maxItems": 1,
+                    "contains": { "const": "native_provider_payload" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

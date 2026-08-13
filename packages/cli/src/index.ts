@@ -2,13 +2,13 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, mkdir, open, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
@@ -87,6 +87,7 @@ function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollm
 function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-state.json'); }
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
 function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evidence-upload-ledger.json'); }
+function evidenceRequestReceiptPath(requestId: string) { return resolve(dharmaHome(), 'relay', 'evidence-requests', `${requestId}.json`); }
 
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
@@ -123,6 +124,7 @@ async function syncPendingRetentionCapsules(
   vault: {
     listPendingCapsuleSyncs<T>(limit?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
     markCapsuleSynced(trajectoryId: string, revision: number): void;
+    discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void;
   },
   fabric: AgentFabricClient,
   policy: OrganizationPolicy,
@@ -132,17 +134,26 @@ async function syncPendingRetentionCapsules(
     const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(100);
     if (pending.length === 0) return synced;
     for (const item of pending) {
-      assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
-      await reserveDailyContentUpload(item.capsule, policy);
       try {
-        await fabric.syncTrajectory(item.capsule);
-      } catch (error) {
-        await releaseDailyContentUpload(item.capsule, policy).catch(() => undefined);
-        throw error;
+        assertCapsuleIntegrity(item.capsule);
+        assertCapsuleAuthorizedByCurrentPolicy(item.capsule, policy);
+      } catch {
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_revoked_or_integrity_failed');
+        continue;
       }
+      await reserveDailyContentUpload(item.capsule, policy);
+      await fabric.syncTrajectory(item.capsule);
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
+  }
+}
+
+export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
+  const capsuleHash = String(capsule.capsuleHash || '');
+  const { capsuleHash: _capsuleHash, ...unsigned } = capsule;
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || sha256(canonicalize(unsigned)) !== capsuleHash) {
+    throw new Error('Trajectory capsule integrity check failed.');
   }
 }
 
@@ -170,10 +181,6 @@ async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        const lockStat = await stat(lockPath);
-        if (Date.now() - lockStat.mtimeMs > 60_000) await unlink(lockPath);
-      } catch {}
       if (Date.now() >= deadline) throw new Error('Timed out waiting for the evidence upload ledger lock.');
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
@@ -185,11 +192,17 @@ async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T
   }
 }
 
-export async function reserveDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
-  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
-  const capsuleHash = String(capsule.capsuleHash || '');
-  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) throw new Error('Content capsule hash is invalid.');
-  const bytes = Buffer.byteLength(canonicalize(capsule));
+async function writeJsonAtomic(path: string, value: unknown) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: OrganizationPolicy) {
+  if (!/^sha256:[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new Error('Evidence upload reservation is invalid.');
+  }
   const day = new Date().toISOString().slice(0, 10);
   await withEvidenceLedgerLock(async () => {
     let ledger: { day: string; totalBytes: number; capsuleHashes: string[]; capsuleBytes: Record<string, number> } = {
@@ -197,19 +210,34 @@ export async function reserveDailyContentUpload(capsule: Record<string, unknown>
     };
     try {
       const stored = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as typeof ledger;
-      if (stored.day === day && Number.isSafeInteger(stored.totalBytes) && Array.isArray(stored.capsuleHashes)) {
-        ledger = { ...stored, capsuleBytes: stored.capsuleBytes && typeof stored.capsuleBytes === 'object' ? stored.capsuleBytes : {} };
+      if (stored.day !== day) {
+        ledger = { day, totalBytes: 0, capsuleHashes: [], capsuleBytes: {} };
+      } else if (Number.isSafeInteger(stored.totalBytes) && stored.totalBytes >= 0
+        && Array.isArray(stored.capsuleHashes) && stored.capsuleBytes && typeof stored.capsuleBytes === 'object') {
+        ledger = stored;
+      } else {
+        throw new Error('Evidence upload ledger is invalid.');
       }
-    } catch {}
-    if (ledger.capsuleHashes.includes(capsuleHash)) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (ledger.capsuleHashes.includes(key)) return;
     if (ledger.totalBytes + bytes > policy.evidence.maximumDailyUploadBytes) {
       throw new Error('Organization daily content upload limit would be exceeded.');
     }
     ledger.totalBytes += bytes;
-    ledger.capsuleHashes.push(capsuleHash);
-    ledger.capsuleBytes[capsuleHash] = bytes;
-    await writeFile(evidenceUploadLedgerPath(), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+    ledger.capsuleHashes.push(key);
+    ledger.capsuleBytes[key] = bytes;
+    await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
   });
+}
+
+export async function reserveDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
+  if (capsule.automaticDisclosureMode !== 'customer_authorized_content') return;
+  const capsuleHash = String(capsule.capsuleHash || '');
+  assertCapsuleIntegrity(capsule);
+  const bytes = Buffer.byteLength(canonicalize(capsule));
+  await reserveDailyEvidenceBytes(capsuleHash, bytes, policy);
 }
 
 export async function releaseDailyContentUpload(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
@@ -226,8 +254,10 @@ export async function releaseDailyContentUpload(capsule: Record<string, unknown>
       ledger.capsuleHashes = ledger.capsuleHashes.filter((hash) => hash !== capsuleHash);
       ledger.totalBytes = Math.max(0, ledger.totalBytes - (Number.isSafeInteger(reservedBytes) ? reservedBytes : 0));
       if (ledger.capsuleBytes) delete ledger.capsuleBytes[capsuleHash];
-      await writeFile(evidenceUploadLedgerPath(), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
-    } catch {}
+      await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   });
 }
 
@@ -322,17 +352,22 @@ export async function materializeWorkspacePolicy(input: {
       input.organizationId,
       input.workspaceId,
     );
-    await assertAndRecordWorkspaceAuthorization({
-      workspaceId: input.workspaceId,
-      authorization: policy.serverAuthorization!,
-      apply: !input.dryRun,
-    });
+    if (!input.dryRun) {
+      await applyWorkspaceAuthorizationAtomically({
+        workspaceId: input.workspaceId,
+        authorization: policy.serverAuthorization!,
+        policyPath: existingPath,
+        policy,
+      });
+    } else {
+      await assertWorkspaceAuthorizationCurrent(input.workspaceId, policy.serverAuthorization!, false);
+    }
   }
   assertPolicy(policy);
   const relativePath = '.dharma/approved-policy.json';
-  if (!input.dryRun) {
+  if (!input.dryRun && !policy.serverAuthorization) {
     await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
-    await writeFile(resolve(input.workspace, relativePath), `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+    await writeJsonAtomic(resolve(input.workspace, relativePath), policy);
   }
   return { relativePath, policy, applied: !input.dryRun };
 }
@@ -341,28 +376,64 @@ function workspaceAuthorizationStatePath(workspaceId: string) {
   return resolve(dharmaHome(), 'registry', 'workspace-authorizations', `${workspaceId}.json`);
 }
 
-async function assertAndRecordWorkspaceAuthorization(input: {
-  workspaceId: string;
-  authorization: NonNullable<OrganizationPolicy['serverAuthorization']>;
-  apply: boolean;
-}) {
-  const statePath = workspaceAuthorizationStatePath(input.workspaceId);
+async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + 10_000;
+  let handle;
+  for (;;) {
+    try { handle = await open(lockPath, 'wx', 0o600); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for the workspace authorization lock.');
+      await new Promise((accept) => setTimeout(accept, 25));
+    }
+  }
+  try { return await operation(); }
+  finally {
+    await handle.close().catch(() => undefined);
+    await unlink(lockPath).catch(() => undefined);
+  }
+}
+
+async function assertWorkspaceAuthorizationCurrent(
+  workspaceId: string,
+  authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
+  requireExisting = true,
+) {
+  const statePath = workspaceAuthorizationStatePath(workspaceId);
   type AuthorizationState = { issuedAt: string; signature: string };
   let previous: AuthorizationState | null = null;
-  try { previous = JSON.parse(await readFile(statePath, 'utf8')) as AuthorizationState; } catch {}
+  try { previous = JSON.parse(await readFile(statePath, 'utf8')) as AuthorizationState; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
+    throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+  }
   if (previous) {
-    const incomingTime = Date.parse(input.authorization.issuedAt);
+    const incomingTime = Date.parse(authorization.issuedAt);
     const previousTime = Date.parse(previous.issuedAt);
-    if (incomingTime < previousTime || (incomingTime === previousTime && input.authorization.signature !== previous.signature)) {
+    if (!Number.isFinite(previousTime)
+      || incomingTime < previousTime
+      || (incomingTime === previousTime && authorization.signature !== previous.signature)) {
       throw new Error('Server workspace policy authorization is older than the last accepted authorization.');
     }
   }
-  if (!input.apply) return;
-  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
-  await writeFile(statePath, `${JSON.stringify({
-    issuedAt: input.authorization.issuedAt,
-    signature: input.authorization.signature,
-  }, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function applyWorkspaceAuthorizationAtomically(input: {
+  workspaceId: string;
+  authorization: NonNullable<OrganizationPolicy['serverAuthorization']>;
+  policyPath: string;
+  policy: OrganizationPolicy;
+}) {
+  const statePath = workspaceAuthorizationStatePath(input.workspaceId);
+  await withFileLock(`${statePath}.lock`, async () => {
+    await assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false);
+    await writeJsonAtomic(statePath, {
+      issuedAt: input.authorization.issuedAt,
+      signature: input.authorization.signature,
+    });
+    await writeJsonAtomic(input.policyPath, input.policy);
+  });
 }
 
 export function applyServerEvidencePolicy(
@@ -377,7 +448,7 @@ export function applyServerEvidencePolicy(
     throw new Error('Server workspace policy authorization must be an object.');
   }
   const envelope = value as Record<string, unknown>;
-  const { signature, keyVersion: _keyVersion, ...unsigned } = envelope;
+  const { signature, ...unsigned } = envelope;
   if (envelope.schema !== 'dharma.workspace-policy-authorization/v1'
     || envelope.organizationId !== organizationId
     || envelope.workspaceId !== workspaceId
@@ -948,11 +1019,7 @@ async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
     config.organizationId,
     authorizedWorkspaceId,
   );
-  await assertAndRecordWorkspaceAuthorization({
-    workspaceId: authorizedWorkspaceId,
-    authorization: verified.serverAuthorization!,
-    apply: false,
-  });
+  await assertWorkspaceAuthorizationCurrent(authorizedWorkspaceId, verified.serverAuthorization!);
   return verified;
 }
 
@@ -1120,19 +1187,21 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
   const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8'));
   const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+  assertCapsuleIntegrity(capsule);
+  assertCapsuleAuthorizedByCurrentPolicy(capsule, policy);
   await reserveDailyContentUpload(capsule, policy);
   return (await client()).syncTrajectory(capsule);
 }
 
 type EvidenceRequest = {
-  schema: 'dharma.evidence-request/v1';
+  schema: 'dharma.evidence-request/v1' | 'dharma.evidence-request/v2';
   requestId: string;
   organizationId: string;
   deviceId: string;
   workspaceId: string;
   trajectoryId: string;
-  capsuleRevision: number;
-  capsuleHash: string;
+  capsuleRevision?: number;
+  capsuleHash?: string;
   purpose: string;
   selectors: Array<{ contentId: string; range?: { start: number; end: number } | null; reason?: string | null }>;
   maximumBytes: number;
@@ -1142,6 +1211,7 @@ type EvidenceRequest = {
   createdAt: string;
   expiresAt: string;
   nonce: string;
+  keyVersion?: string;
   signature: string;
 };
 
@@ -1164,7 +1234,10 @@ async function processEvidenceRequest(
     }
   }
   if (!request || !workspace) return { ok: true, request: null };
-  const contract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-request/v1', request);
+  const contractId = request.schema === 'dharma.evidence-request/v2'
+    ? 'https://schemas.dharma-ai.io/evidence-request/v2'
+    : 'https://schemas.dharma-ai.io/evidence-request/v1';
+  const contract = await validateContract(resolve(import.meta.dirname, 'schemas'), contractId, request);
   if (!contract.ok) throw new Error(`Evidence request failed schema validation: ${JSON.stringify(contract.errors)}`);
   const { signature, ...unsignedRequest } = request;
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
@@ -1174,6 +1247,24 @@ async function processEvidenceRequest(
     throw new Error('Evidence request does not match the enrolled organization, device, workspace, or policy.');
   }
   if (Date.parse(request.expiresAt) <= Date.now()) throw new Error('Evidence request has expired.');
+  const requestReceipt = evidenceRequestReceiptPath(request.requestId);
+  await mkdir(dirname(requestReceipt), { recursive: true, mode: 0o700 });
+  let requestHandle;
+  try {
+    requestHandle = await open(requestReceipt, 'wx', 0o600);
+    await requestHandle.writeFile(`${JSON.stringify({
+      schema: 'dharma.evidence-request-receipt/v1',
+      requestId: request.requestId,
+      nonce: request.nonce,
+      state: 'processing',
+      acceptedAt: new Date().toISOString(),
+    })}\n`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Evidence request was already accepted locally.');
+    throw error;
+  } finally {
+    await requestHandle?.close().catch(() => undefined);
+  }
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
@@ -1183,6 +1274,10 @@ async function processEvidenceRequest(
   try {
     await syncPendingRetentionCapsules(vault, fabric, policy);
     const capsule = await vault.getLatestCapsule<Record<string, unknown>>(request.trajectoryId);
+    assertCapsuleIntegrity(capsule);
+    if (!request.capsuleRevision || !request.capsuleHash) {
+      throw new Error('Legacy evidence request lacks a signed capsule revision and must be reissued.');
+    }
     if (Number(capsule.revision) !== request.capsuleRevision || capsule.capsuleHash !== request.capsuleHash) {
       throw new Error('Evidence request is not bound to the current local capsule revision.');
     }
@@ -1215,8 +1310,16 @@ async function processEvidenceRequest(
           excluded.push({ contentId: selector.contentId, reasonCode: 'invalid_range' });
           continue;
         }
+        const selected = source.subarray(start, end).toString('utf8');
+        const sourceRecords = selected.split(/\r?\n/).filter(Boolean).map((line) => {
+          try { return JSON.parse(line) as unknown; } catch { return line; }
+        });
+        if (referencesExcludedPath(sourceRecords, policy.evidence.excludePaths)) {
+          excluded.push({ contentId: selector.contentId, reasonCode: 'configured_excluded_path' });
+          continue;
+        }
         const redacted = Buffer.from(String(redactValue(
-          source.subarray(start, end).toString('utf8'),
+          selected,
           stats,
           '',
           { pseudonymizeIdentity: policy.evidence.pseudonymizeIdentity },
@@ -1248,11 +1351,22 @@ async function processEvidenceRequest(
     const response = { ...unsignedResponse, responseHash: sha256(canonicalize(unsignedResponse)), signature: null };
     const responseContract = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/evidence-response/v1', response);
     if (!responseContract.ok) throw new Error(`Evidence response failed schema validation: ${JSON.stringify(responseContract.errors)}`);
+    const expansionReservation = sha256(canonicalize({ requestId: request.requestId, responseHash: response.responseHash }));
+    await reserveDailyEvidenceBytes(expansionReservation, bytesPrepared, policy);
     const accepted = await fabric.postEvidenceResponse(request.requestId, response);
     const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};
     const receiptHash = typeof receipt.hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(receipt.hash)
       ? receipt.hash : response.responseHash;
     vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
+    await writeJsonAtomic(requestReceipt, {
+      schema: 'dharma.evidence-request-receipt/v1',
+      requestId: request.requestId,
+      nonce: request.nonce,
+      state: 'completed',
+      responseId: unsignedResponse.responseId,
+      responseHash: response.responseHash,
+      completedAt: new Date().toISOString(),
+    });
     return {
       ok: true, requestId: request.requestId, responseId: unsignedResponse.responseId,
       approved: approved.length, excluded: excluded.length, bytesPrepared, receipt,

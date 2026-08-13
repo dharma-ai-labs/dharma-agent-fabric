@@ -137,8 +137,16 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.trajectoryId, 'trajectory-retention');
   assert.equal(pending[0]?.revision, 2);
-  vault.markCapsuleSynced('trajectory-retention', 2);
+  vault.discardPendingCapsuleSync('trajectory-retention', 2, 'authorization_revoked');
   assert.deepEqual(await vault.listPendingCapsuleSyncs(), []);
+  const database = new DatabaseSync(join(root, 'vault.sqlite'), { readOnly: true });
+  assert.deepEqual(database.prepare(`
+    select trajectory_id, revision, reason from capsule_sync_failures
+    where trajectory_id = ? and revision = ?
+  `).get('trajectory-retention', 2), {
+    trajectory_id: 'trajectory-retention', revision: 2, reason: 'authorization_revoked',
+  });
+  database.close();
   vault.close();
 });
 

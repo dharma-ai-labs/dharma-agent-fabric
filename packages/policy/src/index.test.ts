@@ -61,7 +61,7 @@ test('content disclosure requires an explicit customer consent receipt, class gr
   const unsigned = {
     schema: 'dharma.workspace-policy-authorization/v1' as const, organizationId: 'org_test', workspaceId: 'workspace_test',
     policy: { revision: 'rev_1', evidence: { automaticDisclosure: { mode: 'customer_authorized_content' as const, consentReceiptId: 'consent_org_test_20260812', allowedContentClasses: ['native_provider_payload' as const] }, maximumCapsuleBytes: 1_000_000, maximumDailyUploadBytes: 5_000_000, maximumExpansionBytes: 100_000, excludePaths: ['**/.env'], pseudonymizeIdentity: true as const } },
-    issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z',
+    issuedAt: '2026-08-12T00:00:00.000Z', expiresAt: '2026-08-13T00:00:00.000Z', keyVersion: 'test',
   };
   const authorizedPolicy: OrganizationPolicy = {
     ...policy,
@@ -78,7 +78,7 @@ test('content disclosure requires an explicit customer consent receipt, class gr
       },
     },
     serverAuthorization: {
-      ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey), keyVersion: 'test',
+      ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey),
     },
   };
   assert.throws(() => assertPolicy(authorizedPolicy), /cryptographic server authorization verification/);
@@ -91,6 +91,8 @@ test('content disclosure requires an explicit customer consent receipt, class gr
     now: new Date('2026-08-12T12:00:00.000Z'),
   }));
   assert.doesNotThrow(() => assertPolicy(authorizedPolicy));
+  authorizedPolicy.evidence.excludePaths.push('private/**');
+  assert.throws(() => assertPolicy(authorizedPolicy), /current immutable cryptographic/);
 });
 
 test('v1 remains valid for local analysis but cannot carry content authorization', () => {
