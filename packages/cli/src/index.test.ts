@@ -420,6 +420,8 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
   const reduced = {
     organizationId: 'org_northstar', workspaceId: 'workspace-northstar', deviceId: '22222222-2222-4222-8222-222222222222',
     provider: 'codex', sessionId: `sha256:${'a'.repeat(64)}`, taskId: null,
+    evidenceMode: base.policy.evidence.defaultMode, status: 'completed',
+    coverage: { state: 'observed', admittedSessions: 1, excludedSessions: 0, missingFields: [] },
     automaticDisclosureMode: 'local_analysis', repoState: {}, skillState: {}, validationResults: [], contentIndex: [],
     events: [{
       schema: 'dharma.agent-event/v1', eventId: '33333333-3333-4333-8333-333333333333',
@@ -435,7 +437,7 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
       outcomeSignals: { errorRecords: 0, incomplete: false, coverage: 'observed' }, durationMs: 1,
       semanticReviewRecommended: false, reasonCodes: [],
     },
-    redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['provider_prompt'], classes: [] },
+    redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['native_provider_payload'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
@@ -474,6 +476,12 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
   }, base.policy), /unauthorized event descriptors/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced, redactionReceipt: { ...reduced.redactionReceipt, classes: ['secret=customer-token'] },
+  }, base.policy), /invalid redaction receipt classes/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, coverage: { ...reduced.coverage, missingFields: ['customer-secret-in-metadata'] },
+  }, base.policy), /unauthorized identity or policy metadata/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced, redactionReceipt: { ...reduced.redactionReceipt, disclosedClasses: ['customer-secret-in-metadata'] },
   }, base.policy), /invalid redaction receipt classes/i);
 });
 

@@ -249,12 +249,38 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     ]);
     const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
     const digest = /^sha256:[a-f0-9]{64}$/;
+    const allowedMissingFields = new Set([
+      'workspace_on_some_events', 'events_collapsed_for_size', 'native_payload_collapsed_for_size',
+    ]);
+    const allowedDisclosedClasses = new Set([
+      'tenant_identifier', 'device_identifier', 'workspace_identifier', 'pseudonymous_session_identifier',
+      'provider_name', 'event_kind', 'event_timestamp', 'event_coverage', 'source_kind', 'record_size',
+      'local_evidence_descriptor', 'local_deterministic_analysis',
+    ]);
+    const allowedExcludedClasses = new Set([
+      'encrypted_reasoning', 'execution_configuration', 'instruction_text', 'local_path', 'native_provider_payload',
+      'prompt_text', 'rate_limit_metadata', 'response_text', 'token_metadata', 'tool_schema', 'tool_input', 'tool_output',
+    ]);
+    const allowedRedactionClasses = new Set([
+      'automatic_content_omission', 'configured_excluded_path', 'invalid_unicode_nul', 'local_path',
+      'private_key', 'github_token', 'openai_key', 'aws_access_key', 'jwt', 'connection_string', 'authorization',
+      'google_api_key', 'slack_token', 'generic_secret', 'sensitive_field',
+    ]);
+    const coverage = capsule.coverage && typeof capsule.coverage === 'object' && !Array.isArray(capsule.coverage)
+      ? capsule.coverage as Record<string, unknown> : {};
+    const missingFields = Array.isArray(coverage.missingFields) ? coverage.missingFields : null;
     if (!['codex', 'claude', 'agy'].includes(provider)
       || !digest.test(String(capsule.sessionId || ''))
       || capsule.taskId !== null
       || !uuid.test(String(capsule.deviceId || ''))
       || capsule.redactionReceipt === null
-      || receipt.policyRevision !== policy.revision) {
+      || receipt.policyRevision !== policy.revision
+      || capsule.evidenceMode !== policy.evidence.defaultMode
+      || !['completed', 'partial'].includes(String(capsule.status || ''))
+      || !['observed', 'partial'].includes(String(coverage.state || ''))
+      || !Number.isSafeInteger(coverage.admittedSessions) || Number(coverage.admittedSessions) < 0
+      || !Number.isSafeInteger(coverage.excludedSessions) || Number(coverage.excludedSessions) < 0
+      || !missingFields || missingFields.some((value) => typeof value !== 'string' || !allowedMissingFields.has(value))) {
       throw new Error('Reduced trajectory capsule contains unauthorized identity or policy metadata.');
     }
     const emptyRecord = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
@@ -265,7 +291,11 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     }
     const contentIndex = Array.isArray(capsule.contentIndex) ? capsule.contentIndex : [];
     if (contentIndex.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || !digest.test(String((entry as Record<string, unknown>).contentId || ''))
       || (entry as Record<string, unknown>).uploaded !== false
+      || (entry as Record<string, unknown>).availableLocally !== true
+      || !Number.isSafeInteger((entry as Record<string, unknown>).bytes)
+      || Number((entry as Record<string, unknown>).bytes) < 0
       || (entry as Record<string, unknown>).normalizedPath !== null
       || !['raw-provider-session', 'raw-provider-turn'].includes(String((entry as Record<string, unknown>).kind || ''))
       || (entry as Record<string, unknown>).mimeType !== 'application/x-ndjson')) {
@@ -273,6 +303,7 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     }
     const localEvidenceAvailable = Array.isArray(capsule.localEvidenceAvailable) ? capsule.localEvidenceAvailable : [];
     if (localEvidenceAvailable.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || !digest.test(String((entry as Record<string, unknown>).contentId || ''))
       || !['raw-provider-session', 'raw-provider-turn'].includes(String((entry as Record<string, unknown>).kind || ''))
       || !Number.isSafeInteger((entry as Record<string, unknown>).bytes)
       || Number((entry as Record<string, unknown>).bytes) < 0)) {
@@ -335,15 +366,17 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
       const reasonCodes = Array.isArray(analysis.reasonCodes) ? analysis.reasonCodes : null;
       const allowedReasons = new Set(['runtime_failure_signal', 'tool_call_without_result', 'tool_result_without_call', 'partial_evidence']);
       if (analysis.schema !== 'dharma.local-trajectory-analysis/v1' || analysis.analyzer !== 'deterministic'
-        || !eventKinds || Object.entries(eventKinds).some(([key, value]) => !/^[A-Za-z0-9_.:-]{1,80}$/.test(key)
+        || !eventKinds || Object.entries(eventKinds).some(([key, value]) => !fixedEventKinds.has(key)
           || !Number.isSafeInteger(value) || Number(value) < 0)
         || !reasonCodes || reasonCodes.some((value) => typeof value !== 'string' || !allowedReasons.has(value))) {
         throw new Error('Local-analysis trajectory capsule contains invalid free-form analysis data.');
       }
     }
-    const receiptStringArrays = ['disclosedClasses', 'excludedClasses', 'classes'];
-    if (receiptStringArrays.some((key) => !Array.isArray(receipt[key])
-      || (receipt[key] as unknown[]).some((value) => typeof value !== 'string' || !/^[a-z0-9_.-]{1,80}$/.test(value)))) {
+    const validReceiptValues = (key: string, allowed: Set<string>) => Array.isArray(receipt[key])
+      && (receipt[key] as unknown[]).every((value) => typeof value === 'string' && allowed.has(value));
+    if (!validReceiptValues('disclosedClasses', allowedDisclosedClasses)
+      || !validReceiptValues('excludedClasses', allowedExcludedClasses)
+      || !validReceiptValues('classes', allowedRedactionClasses)) {
       throw new Error('Reduced trajectory capsule contains invalid redaction receipt classes.');
     }
     return;
