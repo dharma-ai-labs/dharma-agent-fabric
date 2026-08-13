@@ -186,7 +186,12 @@ function redactString(value: string, stats: RedactionStats, options: RedactionOp
   return output;
 }
 
-function redactValue(value: unknown, stats: RedactionStats, key = '', options: RedactionOptions = {}): unknown {
+function redactValue(value: unknown, stats: RedactionStats, key = '', options: RedactionOptions = {}, depth = 0): unknown {
+  if (depth > 64) {
+    stats.classes.add('maximum_redaction_depth');
+    stats.redactedValues += 1;
+    return '[REDACTED:maximum_depth]';
+  }
   const normalizedKey = normalizedFieldName(key);
   if (/^(authorization|authorization_header|proxy_authorization|proxy_authorization_header|cookie|set_cookie|password|passwd|credential|credentials|private_key|secret|token|api_key|x_api_key|client_secret|refresh_token|auth_token|access_token|aws_secret_access_key)$/i.test(normalizedKey)) {
     if (value !== null && value !== undefined) {
@@ -206,12 +211,12 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
     if (/^(?:arguments?|args|input|payload|body|data|message|content)$/i.test(normalizedKey)
       && /^[\[{]/.test(value.trim())) {
       try {
-        return JSON.stringify(redactValue(JSON.parse(value), stats, normalizedKey, options));
+        return JSON.stringify(redactValue(JSON.parse(value), stats, normalizedKey, options, depth + 1));
       } catch {}
     }
     return redactString(value, stats, options);
   }
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, stats, '', options));
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, stats, '', options, depth + 1));
   if (value && typeof value === 'object') {
     const output: Record<string, unknown> = {};
     for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
@@ -219,7 +224,7 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
       const safeKey = redactedKey === childKey
         ? childKey
         : `redacted_key_${sha256(childKey).slice(7, 23)}`;
-      output[safeKey] = redactValue(child, stats, childKey, options);
+      output[safeKey] = redactValue(child, stats, childKey, options, depth + 1);
     }
     return output;
   }
@@ -331,7 +336,12 @@ function excludedContentClasses(record: SourceRecord): string[] {
   if (record.kind === 'agent_message') classes.add('response_text');
   if (record.kind === 'tool_call') classes.add('tool_input');
   if (record.kind === 'tool_result') classes.add('tool_output');
-  const visit = (value: unknown, key = ''): void => {
+  const pending: Array<{ value: unknown; key: string; depth: number }> = [
+    { value: record.native, key: '', depth: 0 },
+  ];
+  while (pending.length > 0) {
+    const { value, key, depth } = pending.pop()!;
+    if (depth > 64) continue;
     const normalized = key.toLowerCase().replaceAll('-', '_');
     if (/(instruction|system_prompt|developer_message)/.test(normalized)) classes.add('instruction_text');
     if (/(tool.*schema|input_schema)/.test(normalized)) classes.add('tool_schema');
@@ -344,12 +354,12 @@ function excludedContentClasses(record: SourceRecord): string[] {
     if (/(model|approval_policy|sandbox|collaboration|configuration|config)/.test(normalized)) {
       classes.add('execution_configuration');
     }
-    if (Array.isArray(value)) value.forEach((item) => visit(item));
+    if (Array.isArray(value)) value.forEach((item) => pending.push({ value: item, key: '', depth: depth + 1 }));
     else if (value && typeof value === 'object') {
-      Object.entries(value as Record<string, unknown>).forEach(([childKey, child]) => visit(child, childKey));
+      Object.entries(value as Record<string, unknown>)
+        .forEach(([childKey, child]) => pending.push({ value: child, key: childKey, depth: depth + 1 }));
     }
-  };
-  visit(record.native);
+  }
   return [...classes];
 }
 

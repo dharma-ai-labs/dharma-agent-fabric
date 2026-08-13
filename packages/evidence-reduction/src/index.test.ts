@@ -233,6 +233,28 @@ test('secret-shaped property names and provider kinds never enter a capsule', ()
   assert.equal(capsule.redactionReceipt.classes.includes('openai_key'), true);
 });
 
+test('deep provider records are conservatively omitted without overflowing traversal', () => {
+  const authorizedPolicy = customerAuthorizedPolicy();
+  let nested: Record<string, unknown> = { value: 'deep customer content' };
+  for (let depth = 0; depth < 2_000; depth += 1) nested = { child: nested };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy: authorizedPolicy,
+    rawContentId: `sha256:${'1'.repeat(64)}`, rawBytes: 50_000,
+    session: {
+      provider: 'codex', sessionId: 'deep_provider_record', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-12T02:00:00.000Z', endedAt: '2026-08-12T02:00:01.000Z',
+      records: [{
+        native: { type: 'tool_result', nested },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-12T02:00:00.000Z', kind: 'tool_result',
+      }],
+    },
+  });
+  const encoded = JSON.stringify(capsule);
+  assert.equal(encoded.includes('deep customer content'), false);
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(encoded.includes('configured_excluded_path'), true);
+});
+
 test('customer-authorized content detects excluded paths inside serialized tool arguments', () => {
   const authorizedPolicy = customerAuthorizedPolicy(['.env', '**/*.key']);
   const capsule = buildTrajectoryCapsule({
