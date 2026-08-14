@@ -57,6 +57,39 @@ test('enrollment sends only the public device key and an idempotency key', async
   assert.deepEqual(Object.keys(parsed).sort(), ['name', 'organizationId', 'platform', 'publicKeyEd25519']);
 });
 
+test('repository-agent connection uses the signed organization relay route', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-repository-agent-client-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  const calls: Array<{ path: string; body: Record<string, unknown>; signed: boolean }> = [];
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    calls.push({
+      path: new URL(String(url)).pathname,
+      body: JSON.parse(String(init?.body || '{}')) as Record<string, unknown>,
+      signed: Boolean(headers.get('x-dharma-signature')),
+    });
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath: resolve(root, 'state.json'), store, fetcher });
+  await client.openSession();
+  await client.connectRepositoryAgent({
+    sourceFingerprint: `sha256:${'a'.repeat(64)}`,
+    displayName: 'Northstar',
+    defaultSourceRef: 'main',
+  });
+  assert.equal(calls.at(-1)?.path, '/api/v1/orgs/org_a/agent-fabric/repository-agents');
+  assert.equal(calls.at(-1)?.signed, true);
+  assert.equal(calls.at(-1)?.body.displayName, 'Northstar');
+});
+
 test('signed outbox retries the exact message after an unknown network outcome', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-client-'));

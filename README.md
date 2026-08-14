@@ -51,25 +51,33 @@ that task execution, continuation, or Skill activation works for that host.
 
 ## Customer onboarding
 
-An organization starts in the Dharma dashboard after a paid offer or an
-explicit sponsored canary entitlement is recorded. The dashboard provisions
-the private remediation repository and selected runtime, then provides one
-organization-scoped command:
+An organization starts at `https://www.dharma-ai.io/subscribe` with a local-agent
+trial, a paid package, or an explicitly sponsored canary. Dharma creates one
+private control repository under `dharma-ai-labs` and invites the customer's
+GitHub account. Each selected source repository becomes one logical agent and
+one permanent `agents/<slug>-<hash8>` branch in that control repository.
+
+Install and enroll the CLI, then select repositories explicitly:
 
 ```bash
-npx --yes @dharma-ai-labs/agent-fabric@latest onboard \
+npm install --global @dharma-ai-labs/agent-fabric
+dharma login \
   --hq-url https://www.dharma-ai.io \
+  --organization-id <organization-id>
+dharma repositories discover --root "$HOME/work"
+dharma repositories connect \
+  --repo "$PWD" \
   --organization-id <organization-id> \
-  --policy-revision <dashboard-policy-revision> \
-  --workspace "$PWD"
+  --policy-revision <dashboard-policy-revision>
 ```
 
-The command opens browser approval against the customer's Clerk session,
-enrolls an Ed25519 device identity, registers the workspace, discovers each
-provider independently, and installs both the repository-scoped Agent Fabric
-Skill and a managed bootstrap Skill in every detected provider's native Skill
-directory. It never writes a bearer token, local path, provider key, or runtime
-identity into the repository.
+Browser approval enrolls an Ed25519 device identity. Repository identity comes
+from a credential-free normalized Git remote hash or an explicit stable key,
+never an absolute path. Connecting the same repository from another machine or
+provider reuses the logical agent and adds an endpoint. The CLI installs the
+repository-scoped Agent Fabric Skill and a managed bootstrap Skill in every
+detected provider's native Skill directory. It never writes a bearer token,
+provider key, or runtime identity into the repository.
 
 The command waits for browser approval and completes without a second resume
 command. Verify Codex installation immediately afterwards:

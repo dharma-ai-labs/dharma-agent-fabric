@@ -11,12 +11,24 @@ installs signed Skill releases with receipts and rollback ancestry.
 Requires Node.js 22.20 or later.
 
 ```bash
-npx --yes @dharma-ai-labs/agent-fabric@latest onboard \
+npm install --global @dharma-ai-labs/agent-fabric
+dharma login \
   --hq-url https://www.dharma-ai.io \
+  --organization-id <organization-id>
+dharma repositories discover --root "$HOME/work"
+dharma repositories connect \
+  --repo "$PWD" \
   --organization-id <organization-id> \
-  --policy-revision <dashboard-policy-revision> \
-  --workspace "$PWD"
+  --policy-revision <dashboard-policy-revision>
+dharma repositories status --repo "$PWD" --json
 ```
+
+One selected source repository becomes one logical organization agent and one
+permanent branch in the organization's private Dharma control repository.
+Connecting that repository from another machine or provider adds an endpoint to
+the same agent. The CLI derives repository identity from a credential-free
+normalized Git remote. Repositories without a remote require an explicit stable
+`--repository-key`; absolute paths are never identity.
 
 Current provider adapters are Codex, Claude Code, and Agy. Run
 `dharma providers list` because evidence, task, continuation, Skill installation,

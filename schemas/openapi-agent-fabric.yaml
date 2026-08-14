@@ -1,259 +1,937 @@
-openapi: 3.1.0
-info:
-  title: Dharma Agent Fabric Organization API
-  version: 0.1.0
-  description: Organization-scoped API for devices, workspaces, trajectories, tasks, evaluations, remediations, Skills, rollouts, and usage.
-servers:
-  - url: https://api.dharma-ai.io
-security:
-  - oauth2: []
-paths:
-  /api/orgs/{orgId}/agent-fabric/devices:
-    get:
-      operationId: listDevices
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-      responses:
-        '200':
-          description: Device list
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      type: object
-  /api/orgs/{orgId}/agent-fabric/workspaces:
-    get:
-      operationId: listWorkspaces
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-      responses:
-        '200':
-          description: Workspace list
-    post:
-      operationId: registerWorkspace
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [deviceId, repositoryIdentity, displayName]
-              properties:
-                deviceId: {type: string}
-                repositoryIdentity: {type: string}
-                displayName: {type: string}
-      responses:
-        '201':
-          description: Workspace registered
-  /api/orgs/{orgId}/agent-fabric/trajectories:
-    get:
-      operationId: listTrajectories
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: workspaceId
-          in: query
-          schema: {type: string}
-        - name: provider
-          in: query
-          schema: {type: string}
-      responses:
-        '200':
-          description: Trajectory summaries
-  /api/orgs/{orgId}/agent-fabric/trajectories/{trajectoryId}/evidence-requests:
-    post:
-      operationId: requestAdditionalEvidence
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: trajectoryId
-          in: path
-          required: true
-          schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: './evidence-request.schema.json'
-      responses:
-        '202':
-          description: Evidence request queued
-  /api/orgs/{orgId}/agent-fabric/tasks:
-    get:
-      operationId: listTasks
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-      responses:
-        '200':
-          description: Task list
-    post:
-      operationId: dispatchTask
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: './task-envelope.schema.json'
-      responses:
-        '202':
-          description: Task accepted for dispatch
-  /api/orgs/{orgId}/agent-fabric/tasks/{taskId}/cancel:
-    post:
-      operationId: cancelTask
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: taskId
-          in: path
-          required: true
-          schema: {type: string, format: uuid}
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '202':
-          description: Cancellation requested
-  /api/orgs/{orgId}/agent-fabric/conversations/{conversationId}/messages:
-    post:
-      operationId: sendAgentMessage
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: conversationId
-          in: path
-          required: true
-          schema: {type: string, format: uuid}
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: './agent-message.schema.json'
-      responses:
-        '202':
-          description: Message queued
-  /api/orgs/{orgId}/agent-fabric/evaluation-runs:
-    post:
-      operationId: createEvaluation
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [evaluationContractId, inputSelector, maximumCostCents]
-              properties:
-                evaluationContractId: {type: string}
-                inputSelector: {type: object}
-                maximumCostCents: {type: integer, minimum: 0}
-      responses:
-        '202':
-          description: Evaluation queued
-  /api/orgs/{orgId}/agent-fabric/failure-families:
-    get:
-      operationId: listFailureFamilies
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-      responses:
-        '200':
-          description: Failure families
-  /api/orgs/{orgId}/agent-fabric/failure-families/{failureFamilyId}/remediations:
-    post:
-      operationId: proposeRemediation
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: failureFamilyId
-          in: path
-          required: true
-          schema: {type: string}
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '202':
-          description: Remediation proposal queued
-  /api/orgs/{orgId}/agent-fabric/skill-bundles/{bundleId}/release:
-    post:
-      operationId: rolloutSkillRelease
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: bundleId
-          in: path
-          required: true
-          schema: {type: string}
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '202':
-          description: Rollout started
-  /api/orgs/{orgId}/agent-fabric/rollouts/{rolloutId}/rollback:
-    post:
-      operationId: rollbackSkillRelease
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - name: rolloutId
-          in: path
-          required: true
-          schema: {type: string}
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '202':
-          description: Rollback started
-  /api/orgs/{orgId}/agent-fabric/cost-estimates:
-    post:
-      operationId: estimateCost
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [purpose, executionMode]
-              properties:
-                purpose: {type: string}
-                executionMode: {type: string}
-                model: {type: string}
-                inputEstimate: {type: object}
-      responses:
-        '200':
-          description: Cost estimate
-components:
-  parameters:
-    OrgId:
-      name: orgId
-      in: path
-      required: true
-      schema: {type: string}
-    IdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      schema: {type: string, format: uuid}
-  securitySchemes:
-    oauth2:
-      type: oauth2
-      flows:
-        authorizationCode:
-          authorizationUrl: https://api.dharma-ai.io/oauth/authorize
-          tokenUrl: https://api.dharma-ai.io/oauth/token
-          scopes:
-            agent_fabric.devices.read: Read connected devices
-            agent_fabric.workspaces.read: Read registered workspaces
-            agent_fabric.trajectories.read: Read trajectory summaries
-            agent_fabric.evidence.request: Request bounded additional evidence
-            agent_fabric.tasks.create: Dispatch bounded tasks
-            agent_fabric.tasks.cancel: Cancel tasks
-            agent_fabric.messages.send: Send A2A messages
-            agent_fabric.evals.create: Create evaluations
-            agent_fabric.remediations.propose: Propose remediations
-            agent_fabric.skills.release: Release Skill bundles
-            agent_fabric.skills.rollback: Roll back Skill rollouts
-            agent_fabric.billing.read: Read usage and estimates
+{
+  "openapi": "3.1.0",
+  "info":
+    {
+      "title": "Dharma Agent Fabric API",
+      "version": "0.1.0",
+      "description": "Organization-scoped control-plane API for onboarding, local
+        agents, managed ADK, cloud BYOK, trajectories, evaluation, remediation,
+        skills, A2A tasks, and usage. Customer credentials authenticate only to
+        Dharma HQ."
+    },
+  "servers": [ { "url": "https://www.dharma-ai.io" } ],
+  "security": [ { "organizationToken": [] } ],
+  "paths":
+    {
+      "/api/v1/orgs/{orgId}/agent-fabric/onboarding":
+        {
+          "get":
+            {
+              "operationId": "getAgentFabricOnboarding",
+              "summary": "Get the autonomous onboarding state",
+              "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+              "responses":
+                {
+                  "200": { "$ref": "#/components/responses/Success" },
+                  "401": { "$ref": "#/components/responses/Error" },
+                  "403": { "$ref": "#/components/responses/Error" }
+                }
+            },
+          "post":
+            {
+              "operationId": "startAgentFabricOnboarding",
+              "summary": "Start idempotent purchase-backed provisioning",
+              "parameters":
+                [
+                  { "$ref": "#/components/parameters/orgId" },
+                  { "$ref": "#/components/parameters/idempotencyKey" }
+                ],
+              "requestBody":
+                {
+                  "required": true,
+                  "content":
+                    {
+                      "application/json": { "schema": { "$ref": "#/components/schemas/OnboardingRequest" } }
+                    }
+                },
+              "responses":
+                {
+                  "202": { "$ref": "#/components/responses/Success" },
+                  "400": { "$ref": "#/components/responses/Error" },
+                  "403": { "$ref": "#/components/responses/Error" },
+                  "409": { "$ref": "#/components/responses/Error" }
+                }
+            }
+        },
+      "/api/v1/orgs/{orgId}/agent-fabric/byok/gcp":
+        {
+          "get":
+            {
+              "operationId": "getGcpByokBinding",
+              "summary": "Get the credential-free GCP BYOK setup state",
+              "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+              "responses":
+                {
+                  "200": { "$ref": "#/components/responses/Success" },
+                  "403": { "$ref": "#/components/responses/Error" }
+                }
+            },
+          "post":
+            {
+              "operationId": "configureOrVerifyGcpByokBinding",
+              "summary": "Configure or verify GCP BYOK through workload identity federation",
+              "parameters":
+                [
+                  { "$ref": "#/components/parameters/orgId" },
+                  { "$ref": "#/components/parameters/idempotencyKey" }
+                ],
+              "requestBody":
+                {
+                  "required": true,
+                  "content":
+                    {
+                      "application/json": { "schema": { "$ref": "#/components/schemas/GcpByokRequest" } }
+                    }
+                },
+              "responses":
+                {
+                  "200": { "$ref": "#/components/responses/Success" },
+                  "400": { "$ref": "#/components/responses/Error" },
+                  "403": { "$ref": "#/components/responses/Error" },
+                  "409": { "$ref": "#/components/responses/Error" }
+                }
+            }
+        },
+      "/api/v1/orgs/{orgId}/agent-fabric/devices": { "$ref": "#/components/pathItems/devices" },
+      "/api/v1/orgs/{orgId}/agent-fabric/instructions": { "$ref": "#/components/pathItems/instructions" },
+      "/api/v1/orgs/{orgId}/agent-fabric/repository-agents": { "$ref": "#/components/pathItems/repositoryAgents" },
+      "/api/v1/orgs/{orgId}/agent-fabric/workspaces": { "$ref": "#/components/pathItems/workspaces" },
+      "/api/v1/orgs/{orgId}/agent-fabric/agents": { "$ref": "#/components/pathItems/agents" },
+      "/api/v1/orgs/{orgId}/agent-fabric/agents/{agentId}/endpoints": { "$ref": "#/components/pathItems/endpoints" },
+      "/api/v1/orgs/{orgId}/agent-fabric/trajectories": { "$ref": "#/components/pathItems/trajectories" },
+      "/api/v1/orgs/{orgId}/agent-fabric/evals": { "$ref": "#/components/pathItems/evals" },
+      "/api/v1/orgs/{orgId}/agent-fabric/failures": { "$ref": "#/components/pathItems/failures" },
+      "/api/v1/orgs/{orgId}/agent-fabric/remediations": { "$ref": "#/components/pathItems/remediations" },
+      "/api/v1/orgs/{orgId}/agent-fabric/remediations/{targetId}": { "$ref": "#/components/pathItems/remediationTarget" },
+      "/api/v1/orgs/{orgId}/agent-fabric/tasks": { "$ref": "#/components/pathItems/tasks" },
+      "/api/v1/orgs/{orgId}/agent-fabric/conversations": { "$ref": "#/components/pathItems/conversations" },
+      "/api/v1/orgs/{orgId}/agent-fabric/skills": { "$ref": "#/components/pathItems/skills" },
+      "/api/v1/orgs/{orgId}/agent-fabric/usage": { "$ref": "#/components/pathItems/usage" },
+      "/api/orgs/{orgId}/managed-agents": { "$ref": "#/components/pathItems/managedAgents" },
+      "/api/orgs/{orgId}/agent-runs": { "$ref": "#/components/pathItems/agentRuns" },
+      "/api/orgs/{orgId}/agent-runs/{runId}":
+        {
+          "get":
+            {
+              "operationId": "getAgentRun",
+              "summary": "Get an asynchronous run",
+              "parameters":
+                [
+                  { "$ref": "#/components/parameters/orgId" },
+                  { "$ref": "#/components/parameters/runId" }
+                ],
+              "responses":
+                {
+                  "200": { "$ref": "#/components/responses/Success" },
+                  "404": { "$ref": "#/components/responses/Error" }
+                }
+            }
+        },
+      "/api/orgs/{orgId}/agent-runs/{runId}/events":
+        {
+          "get":
+            {
+              "operationId": "getAgentRunEvents",
+              "summary": "Get ordered run events and trace references",
+              "parameters":
+                [
+                  { "$ref": "#/components/parameters/orgId" },
+                  { "$ref": "#/components/parameters/runId" }
+                ],
+              "responses": { "200": { "$ref": "#/components/responses/Success" } }
+            }
+        },
+      "/api/orgs/{orgId}/managed-evals/campaigns": { "$ref": "#/components/pathItems/managedEvals" },
+      "/api/orgs/{orgId}/managed-traces": { "$ref": "#/components/pathItems/managedTraces" },
+      "/api/orgs/{orgId}/managed-remediation/candidates": { "$ref": "#/components/pathItems/remediationCandidates" }
+    },
+  "components":
+    {
+      "securitySchemes":
+        {
+          "organizationToken":
+            {
+              "type": "http",
+              "scheme": "bearer",
+              "bearerFormat": "Dharma organization token"
+            }
+        },
+      "parameters":
+        {
+          "orgId":
+            {
+              "name": "orgId",
+              "in": "path",
+              "required": true,
+              "schema": { "type": "string", "minLength": 1 }
+            },
+          "agentId":
+            {
+              "name": "agentId",
+              "in": "path",
+              "required": true,
+              "schema": { "type": "string", "format": "uuid" }
+            },
+          "runId":
+            {
+              "name": "runId",
+              "in": "path",
+              "required": true,
+              "schema": { "type": "string", "format": "uuid" }
+            },
+          "targetId":
+            {
+              "name": "targetId",
+              "in": "path",
+              "required": true,
+              "schema": { "type": "string", "format": "uuid" }
+            },
+          "idempotencyKey":
+            {
+              "name": "Idempotency-Key",
+              "in": "header",
+              "required": true,
+              "schema": { "type": "string", "minLength": 8, "maxLength": 200 }
+            }
+        },
+      "schemas":
+        {
+          "Object": { "type": "object", "additionalProperties": true },
+          "OnboardingRequest":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties":
+                {
+                  "action": { "type": "string", "enum": [ "start", "advance" ], "default": "start" },
+                  "companyName": { "type": "string", "maxLength": 120 },
+                  "runtimeMode":
+                    {
+                      "type": "string",
+                      "enum": [ "dharma_managed", "gcp_vertex_byok", "local_byok" ],
+                      "default": "dharma_managed"
+                    },
+                  "spendCeilingUsd": { "type": "number", "minimum": 1, "maximum": 100 }
+                }
+            },
+          "GcpByokRequest":
+            {
+              "oneOf":
+                [
+                  {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [ "action" ],
+                      "properties": { "action": { "const": "verify" } }
+                    },
+                  {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required":
+                        [
+                          "projectId",
+                          "projectNumber",
+                          "region",
+                          "runtimeUrl",
+                          "runtimeServiceName",
+                          "serviceAccountEmail"
+                        ],
+                      "properties":
+                        {
+                          "action": { "const": "configure" },
+                          "projectId": { "type": "string" },
+                          "projectNumber": { "type": "string", "pattern": "^[0-9]{6,20}$" },
+                          "region": { "type": "string" },
+                          "runtimeUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+                          "runtimeServiceName": { "type": "string" },
+                          "serviceAccountEmail": { "type": "string", "format": "email" },
+                          "spendCeilingUsd": { "type": "number", "minimum": 1, "maximum": 100 }
+                        }
+                    }
+                ]
+            },
+          "RepositoryAgentRequest":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "sourceFingerprint", "displayName" ],
+              "properties":
+                {
+                  "sourceFingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+                  "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+                  "defaultSourceRef": { "type": [ "string", "null" ], "maxLength": 240 }
+                }
+            },
+          "AgentEndpointRequest":
+            {
+              "oneOf":
+                [
+                  {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [ "workspaceId", "provider" ],
+                      "properties":
+                        {
+                          "workspaceId": { "type": "string", "format": "uuid" },
+                          "provider": { "type": "string", "enum": [ "codex", "claude", "agy" ] },
+                          "priority": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 100 }
+                        }
+                    },
+                  {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [ "endpointKind", "managedAgentId", "runtimeBindingId" ],
+                      "properties":
+                        {
+                          "endpointKind": { "type": "string", "enum": [ "managed_runtime", "cloud_byok" ] },
+                          "managedAgentId": { "type": "string", "format": "uuid" },
+                          "runtimeBindingId": { "type": "string", "format": "uuid" },
+                          "priority": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 100 }
+                        }
+                    }
+                ]
+            },
+          "AnalysisScope":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "mode" ],
+              "properties":
+                {
+                  "mode": { "type": "string", "enum": [ "organization", "agents", "endpoints" ] },
+                  "organizationAgentIds":
+                    {
+                      "type": "array",
+                      "maxItems": 500,
+                      "items": { "type": "string", "format": "uuid" }
+                    },
+                  "endpointIds":
+                    {
+                      "type": "array",
+                      "maxItems": 500,
+                      "items": { "type": "string", "format": "uuid" }
+                    }
+                }
+            },
+          "AnalysisRequest":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties":
+                {
+                  "trajectoryTarget": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 },
+                  "retryWindowId": { "type": "string", "format": "uuid" },
+                  "reprocessWindowId": { "type": "string", "format": "uuid" },
+                  "scope": { "$ref": "#/components/schemas/AnalysisScope" }
+                }
+            },
+          "RemediationTargetAction":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "action" ],
+              "properties":
+                {
+                  "action":
+                    {
+                      "type": "string",
+                      "enum": [ "link_backtest", "approve", "merge_pr", "release", "expand", "rollback" ]
+                    },
+                  "campaignId": { "type": "string", "format": "uuid" },
+                  "establishAutoUpdatePolicy": { "type": "boolean", "default": false }
+                }
+            },
+          "ManagedRunImageAttachment":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "displayName", "mimeType", "dataBase64", "sha256" ],
+              "properties":
+                {
+                  "displayName": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$" },
+                  "mimeType": { "type": "string", "enum": [ "image/jpeg", "image/png", "image/webp" ] },
+                  "dataBase64":
+                    {
+                      "type": "string",
+                      "contentEncoding": "base64",
+                      "maxLength": 700000,
+                      "description": "Inline image bytes. At most two images and 512 KiB decoded total
+                        per request."
+                    },
+                  "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+                }
+            },
+          "ManagedRunRequest":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "agentId", "prompt" ],
+              "properties":
+                {
+                  "agentId": { "type": "string", "minLength": 1 },
+                  "prompt": { "type": "string", "minLength": 1, "maxLength": 100000 },
+                  "attachments":
+                    {
+                      "type": "array",
+                      "maxItems": 2,
+                      "items": { "$ref": "#/components/schemas/ManagedRunImageAttachment" }
+                    },
+                  "metadata": { "type": "object", "additionalProperties": true },
+                  "maxRuntimeSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+                  "estimatedCredits": { "type": "integer", "minimum": 1, "maximum": 500000 }
+                }
+            },
+          "A2aStateEnvelope":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required":
+                [
+                  "intent",
+                  "evidence_used",
+                  "known_state",
+                  "unknown_or_missing_state",
+                  "allowed_next_actions",
+                  "blocked_actions",
+                  "decision_authority",
+                  "tool_results"
+                ],
+              "properties":
+                {
+                  "intent": { "type": "string", "maxLength": 1000 },
+                  "evidence_used":
+                    {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": { "type": "string", "maxLength": 500 }
+                    },
+                  "known_state": { "type": "object", "additionalProperties": true },
+                  "unknown_or_missing_state":
+                    {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": { "type": "string", "maxLength": 1000 }
+                    },
+                  "allowed_next_actions":
+                    {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": { "type": "string", "maxLength": 500 }
+                    },
+                  "blocked_actions":
+                    {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": { "type": "string", "maxLength": 500 }
+                    },
+                  "decision_authority": { "type": "string", "maxLength": 1000 },
+                  "tool_results": { "type": "array", "maxItems": 50 }
+                }
+            },
+          "A2aHandoffRequest":
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "sourceTaskId", "targetEndpointId", "requestedResponse", "stateEnvelope" ],
+              "properties":
+                {
+                  "sourceTaskId": { "type": "string", "format": "uuid" },
+                  "targetEndpointId": { "type": "string", "format": "uuid" },
+                  "conversationId": { "type": "string", "format": "uuid" },
+                  "requestedResponse":
+                    {
+                      "type": "string",
+                      "enum":
+                        [
+                          "status_update",
+                          "proposal",
+                          "evidence_request",
+                          "task_result",
+                          "clarification"
+                        ]
+                    },
+                  "responseInstructions": { "type": "string", "maxLength": 2000 },
+                  "stateEnvelope": { "$ref": "#/components/schemas/A2aStateEnvelope" },
+                  "evidenceReferences":
+                    {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items":
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [ "trajectoryId", "revision", "capsuleHash" ],
+                          "properties":
+                            {
+                              "trajectoryId": { "type": "string", "format": "uuid" },
+                              "revision": { "type": "integer", "minimum": 1 },
+                              "capsuleHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+                            }
+                        }
+                    }
+                }
+            },
+          "ErrorEnvelope":
+            {
+              "type": "object",
+              "required": [ "ok", "error" ],
+              "properties":
+                {
+                  "ok": { "const": false },
+                  "error":
+                    {
+                      "type": "object",
+                      "required": [ "code", "message" ],
+                      "properties":
+                        {
+                          "code": { "type": "string" },
+                          "message": { "type": "string" },
+                          "correlationId": { "type": [ "string", "null" ] }
+                        }
+                    }
+                }
+            }
+        },
+      "responses":
+        {
+          "Success":
+            {
+              "description": "Organization-scoped response",
+              "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+            },
+          "Accepted":
+            {
+              "description": "Asynchronous work accepted",
+              "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+            },
+          "Created":
+            {
+              "description": "Resource created",
+              "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+            },
+          "Error":
+            {
+              "description": "Stable non-enumerating error",
+              "content":
+                {
+                  "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+                }
+            }
+        },
+      "pathItems":
+        {
+          "devices":
+            {
+              "get":
+                {
+                  "operationId": "listDevices",
+                  "summary": "List enrolled organization devices",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "instructions":
+            {
+              "get":
+                {
+                  "operationId": "getAgentFabricInstructions",
+                  "summary": "Get credential-free organization setup commands and role boundaries",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "repositoryAgents":
+            {
+              "get":
+                {
+                  "operationId": "listRepositoryAgents",
+                  "summary": "List one logical agent per connected source repository",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "connectRepositoryAgent",
+                  "summary": "Idempotently connect a source repository to its permanent control
+                    branch",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content":
+                        {
+                          "application/json": { "schema": { "$ref": "#/components/schemas/RepositoryAgentRequest" } }
+                        }
+                    },
+                  "responses":
+                    {
+                      "200": { "$ref": "#/components/responses/Success" },
+                      "201": { "$ref": "#/components/responses/Created" },
+                      "409": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+          "workspaces":
+            {
+              "get":
+                {
+                  "operationId": "listWorkspaces",
+                  "summary": "List registered workspaces and independent provider capabilities",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "agents":
+            {
+              "get":
+                {
+                  "operationId": "listAgents",
+                  "summary": "List logical agents",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "createAgent",
+                  "summary": "Create a logical agent",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+                    },
+                  "responses": { "201": { "$ref": "#/components/responses/Created" } }
+                }
+            },
+          "endpoints":
+            {
+              "post":
+                {
+                  "operationId": "bindAgentEndpoint",
+                  "summary": "Bind a verified local, managed ADK, or GCP Vertex BYOK endpoint to
+                    one repository agent",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/agentId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content":
+                        {
+                          "application/json": { "schema": { "$ref": "#/components/schemas/AgentEndpointRequest" } }
+                        }
+                    },
+                  "responses":
+                    {
+                      "201": { "$ref": "#/components/responses/Created" },
+                      "400": { "$ref": "#/components/responses/Error" },
+                      "403": { "$ref": "#/components/responses/Error" },
+                      "409": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+          "trajectories":
+            {
+              "get":
+                {
+                  "operationId": "listTrajectories",
+                  "summary": "List reduced trajectory capsules",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "evals":
+            {
+              "get":
+                {
+                  "operationId": "listEvaluations",
+                  "summary": "List scoped analysis windows and evaluations",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "requestAnalysis",
+                  "summary": "Close an organization, logical-agent, or endpoint-scoped analysis
+                    window",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content":
+                        {
+                          "application/json": { "schema": { "$ref": "#/components/schemas/AnalysisRequest" } }
+                        }
+                    },
+                  "responses": { "201": { "$ref": "#/components/responses/Created" } }
+                }
+            },
+          "failures":
+            {
+              "get":
+                {
+                  "operationId": "listFailureAtlas",
+                  "summary": "List customer-isolated Failure Atlas families",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "remediations":
+            {
+              "get":
+                {
+                  "operationId": "listRemediationCampaigns",
+                  "summary": "List coordinated parent campaigns and independently reversible agent
+                    targets",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "remediationTarget":
+            {
+              "get":
+                {
+                  "operationId": "getRemediationTarget",
+                  "summary": "Inspect one independently reversible repository-agent release",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/targetId" }
+                    ],
+                  "responses":
+                    {
+                      "200": { "$ref": "#/components/responses/Success" },
+                      "404": { "$ref": "#/components/responses/Error" }
+                    }
+                },
+              "post":
+                {
+                  "operationId": "transitionRemediationTarget",
+                  "summary": "Advance or roll back one repository-agent child release after its
+                    required gates",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/targetId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content":
+                        {
+                          "application/json": { "schema": { "$ref": "#/components/schemas/RemediationTargetAction" } }
+                        }
+                    },
+                  "responses":
+                    {
+                      "200": { "$ref": "#/components/responses/Success" },
+                      "400": { "$ref": "#/components/responses/Error" },
+                      "403": { "$ref": "#/components/responses/Error" },
+                      "409": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+          "tasks":
+            {
+              "get":
+                {
+                  "operationId": "listTasks",
+                  "summary": "List bounded signed tasks",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "dispatchTask",
+                  "summary": "Dispatch a signed task to an allowed endpoint",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+                    },
+                  "responses": { "201": { "$ref": "#/components/responses/Created" } }
+                }
+            },
+          "conversations":
+            {
+              "get":
+                {
+                  "operationId": "listHandoffs",
+                  "summary": "List task-bound A2A handoffs",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "dispatchHandoff",
+                  "summary": "Request structured help from another same-organization agent",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content":
+                        {
+                          "application/json": { "schema": { "$ref": "#/components/schemas/A2aHandoffRequest" } }
+                        }
+                    },
+                  "responses": { "201": { "$ref": "#/components/responses/Created" } }
+                }
+            },
+          "skills":
+            {
+              "get":
+                {
+                  "operationId": "listSkills",
+                  "summary": "List signed skill releases and rollouts",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "releaseSkill",
+                  "summary": "Create a signed skill release after evaluation gates",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+                    },
+                  "responses": { "201": { "$ref": "#/components/responses/Created" } }
+                }
+            },
+          "usage":
+            {
+              "get":
+                {
+                  "operationId": "getUsage",
+                  "summary": "Get customer-visible credits and usage",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "managedAgents":
+            {
+              "get":
+                {
+                  "operationId": "listManagedAgents",
+                  "summary": "List immutable managed ADK agents",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "createManagedAgent",
+                  "summary": "Create a managed ADK agent",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+                    },
+                  "responses": { "201": { "$ref": "#/components/responses/Created" } }
+                }
+            },
+          "agentRuns":
+            {
+              "get":
+                {
+                  "operationId": "listAgentRuns",
+                  "summary": "List managed and GCP BYOK runs",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                },
+              "post":
+                {
+                  "operationId": "submitAgentRun",
+                  "summary": "Submit an asynchronous multimodal agent run",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content":
+                        {
+                          "application/json": { "schema": { "$ref": "#/components/schemas/ManagedRunRequest" } }
+                        }
+                    },
+                  "responses": { "202": { "$ref": "#/components/responses/Accepted" } }
+                }
+            },
+          "managedEvals":
+            {
+              "post":
+                {
+                  "operationId": "createManagedEvaluation",
+                  "summary": "Launch direct and stateful evaluation arms",
+                  "parameters":
+                    [
+                      { "$ref": "#/components/parameters/orgId" },
+                      { "$ref": "#/components/parameters/idempotencyKey" }
+                    ],
+                  "requestBody":
+                    {
+                      "required": true,
+                      "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Object" } } }
+                    },
+                  "responses": { "202": { "$ref": "#/components/responses/Accepted" } }
+                }
+            },
+          "managedTraces":
+            {
+              "get":
+                {
+                  "operationId": "listManagedTraces",
+                  "summary": "List customer-visible run traces",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            },
+          "remediationCandidates":
+            {
+              "get":
+                {
+                  "operationId": "listRemediationCandidates",
+                  "summary": "List GitHub-backed remediation candidates and held-out evidence",
+                  "parameters": [ { "$ref": "#/components/parameters/orgId" } ],
+                  "responses": { "200": { "$ref": "#/components/responses/Success" } }
+                }
+            }
+        }
+    }
+}

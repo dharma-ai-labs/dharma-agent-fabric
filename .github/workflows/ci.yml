@@ -47,6 +47,10 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+      - name: Build relay container
+        if: runner.os == 'Linux'
+        run: docker build --file apps/relay-gateway/Dockerfile --tag dharma-agent-fabric-relay:ci .
+
       - name: Generate CycloneDX SBOM
         if: runner.os == 'Linux'
         shell: bash

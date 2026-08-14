@@ -245,6 +245,7 @@ export class AgentFabricClient {
   }
 
   registerWorkspace(body: unknown) { return this.signedPost('/agent-fabric/workspaces', body); }
+  connectRepositoryAgent(body: unknown) { return this.signedPost('/agent-fabric/repository-agents', body); }
   syncTrajectory(body: unknown) { return this.signedPost('/agent-fabric/trajectories', body); }
   pollEvidence(body: { workspaceId: string }) { return this.signedPost('/agent-fabric/evidence-requests/poll', body); }
   postEvidenceResponse(requestId: string, body: unknown) {

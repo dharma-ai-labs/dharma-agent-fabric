@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, link, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,11 +15,13 @@ import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   saveDeviceConfig, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
+import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
 import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
+import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.13';
-const USAGE = 'Usage: dharma <onboard|login|status|providers list|workspace add|workspace sync|evidence preview|evidence capture|evidence capture-batch|evidence sync|evidence run-request|relay start|tasks run-once|skills sync|skills status|skills verify> [options]';
+const VERSION = '0.1.14';
+const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
 
@@ -30,23 +32,42 @@ interface WorkspaceRecord {
   path: string;
   routeHash: string;
   repositoryRemoteHash: string | null;
+  repositoryIdentityVersion?: 'normalized-v1' | 'legacy-v0';
+  repositoryAgentId?: string | null;
+  repositoryBindingId?: string | null;
+  repositoryAgentKey?: string | null;
+  controlBranch?: string | null;
   defaultBranch: string | null;
   status: 'active';
 }
 
-function options(args: string[]): { positional: string[]; flags: Map<string, string | boolean> } {
+export function parseCliOptions(args: string[]): {
+  positional: string[];
+  flags: Map<string, string | boolean>;
+  repeated: Map<string, Array<string | boolean>>;
+} {
   const positional: string[] = [];
   const flags = new Map<string, string | boolean>();
+  const repeated = new Map<string, Array<string | boolean>>();
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index]!;
     if (!value.startsWith('--')) { positional.push(value); continue; }
-    const [rawKey, inline] = value.slice(2).split('=', 2);
-    if (inline !== undefined) { flags.set(rawKey!, inline); continue; }
+    const rawOption = value.slice(2);
+    const separator = rawOption.indexOf('=');
+    const rawKey = separator < 0 ? rawOption : rawOption.slice(0, separator);
+    const inline = separator < 0 ? undefined : rawOption.slice(separator + 1);
+    if (inline !== undefined) {
+      flags.set(rawKey!, inline);
+      repeated.set(rawKey!, [...(repeated.get(rawKey!) || []), inline]);
+      continue;
+    }
     const next = args[index + 1];
-    if (next && !next.startsWith('--')) { flags.set(rawKey!, next); index += 1; }
-    else flags.set(rawKey!, true);
+    const parsed = next && !next.startsWith('--') ? next : true;
+    flags.set(rawKey!, parsed);
+    repeated.set(rawKey!, [...(repeated.get(rawKey!) || []), parsed]);
+    if (parsed !== true) index += 1;
   }
-  return { positional, flags };
+  return { positional, flags, repeated };
 }
 
 function required(flags: Map<string, string | boolean>, name: string): string {
@@ -829,6 +850,58 @@ function deterministicUuid(value: string) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export function normalizeGitRemoteIdentity(value: string): string {
+  const raw = value.trim();
+  if (!raw || /[\u0000-\u001f\u007f]/.test(raw)) throw new Error('Git remote is empty or invalid.');
+  let host: string;
+  let repositoryPath: string;
+  const scp = raw.match(/^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/);
+  if (!raw.includes('://') && scp && !/^[A-Za-z]:[\\/]/.test(raw)) {
+    host = scp[1]!.toLowerCase();
+    repositoryPath = scp[2]!;
+  } else {
+    let remote: URL;
+    try { remote = new URL(raw); }
+    catch { throw new Error('Git remote must be a hosted URL or use --repository-key.'); }
+    if (!['https:', 'http:', 'ssh:', 'git:'].includes(remote.protocol) || !remote.hostname) {
+      throw new Error('Local and file Git remotes require an explicit stable --repository-key.');
+    }
+    host = remote.hostname.toLowerCase();
+    const port = remote.port && !((remote.protocol === 'https:' && remote.port === '443') || (remote.protocol === 'http:' && remote.port === '80'))
+      ? `:${remote.port}` : '';
+    host += port;
+    repositoryPath = remote.pathname;
+  }
+  repositoryPath = repositoryPath.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
+  if (!repositoryPath || repositoryPath.includes('..') || /\s/.test(repositoryPath)) {
+    throw new Error('Git remote repository path is invalid.');
+  }
+  if (host === 'github.com' || host === 'gitlab.com') repositoryPath = repositoryPath.toLowerCase();
+  return `${host}/${repositoryPath}`;
+}
+
+export function sourceRepositoryFingerprint(remote: string | null, explicitKey?: string | null): {
+  fingerprint: string;
+  source: 'remote' | 'explicit_key';
+} {
+  const key = explicitKey?.trim();
+  let identity: string;
+  let source: 'remote' | 'explicit_key';
+  if (key) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(key) || key.includes('..')) {
+      throw new Error('--repository-key must be a stable 1-160 character identifier without secrets or path traversal.');
+    }
+    identity = `key:${key}`;
+    source = 'explicit_key';
+  } else if (remote) {
+    identity = `remote:${normalizeGitRemoteIdentity(remote)}`;
+    source = 'remote';
+  } else {
+    throw new Error('Repository has no hosted Git remote. Supply a stable --repository-key for this repository.');
+  }
+  return { fingerprint: `sha256:${createHash('sha256').update(identity).digest('hex')}`, source };
+}
+
 function responseTextFromEvent(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const event = value as Record<string, unknown>;
@@ -910,6 +983,17 @@ async function registry(): Promise<WorkspaceRecord[]> {
   catch { return []; }
 }
 
+async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
+  await mkdir(resolve(dharmaHome(), 'registry'), { recursive: true, mode: 0o700 });
+  await writeFile(workspaceRegistryPath(), `${JSON.stringify(items, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
+  const items = (await registry()).filter((item) => item.workspaceId !== entry.workspaceId);
+  items.push(entry);
+  await saveRegistry(items);
+}
+
 async function gitValue(workspace: string, argv: string[]) {
   try { return (await execFileAsync('git', ['-C', workspace, ...argv], { timeout: 10_000 })).stdout.trim() || null; }
   catch { return null; }
@@ -919,6 +1003,111 @@ async function client() {
   const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath() });
   await instance.openSession(VERSION);
   return instance;
+}
+
+async function organizationApi(flags: Map<string, string | boolean>) {
+  let enrolled: DeviceConfig | null = null;
+  try { enrolled = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; } catch {}
+  const organizationId = String(flags.get('organization-id') || enrolled?.organizationId || '').trim();
+  if (!organizationId) throw new Error('Organization command requires --organization-id or an enrolled device.');
+  const token = String(process.env.DHARMA_ORG_API_TOKEN || '').trim();
+  if (!token) throw new Error('Organization command requires DHARMA_ORG_API_TOKEN. Tokens are not accepted on the command line.');
+  return new AgentFabricApiClient({
+    organizationId,
+    token,
+    baseUrl: String(flags.get('hq-url') || enrolled?.hqUrl || 'https://www.dharma-ai.io'),
+  });
+}
+
+async function commandJsonBody(flags: Map<string, string | boolean>) {
+  const inline = flags.get('json-body');
+  const path = flags.get('body-file');
+  if (typeof inline === 'string' && typeof path === 'string') {
+    throw new Error('Use either --json-body or --body-file, not both.');
+  }
+  const serialized = typeof inline === 'string'
+    ? inline
+    : typeof path === 'string'
+      ? await readFile(resolve(path), 'utf8')
+      : '{}';
+  const parsed = JSON.parse(serialized) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Command body must be a JSON object.');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+export function requireExplicitConfirmation(flags: Map<string, string | boolean>, action: string) {
+  if (flags.get('confirm') !== true) {
+    throw new Error(`${action} requires --confirm after reviewing organization scope, cost, and authority.`);
+  }
+}
+
+async function runOrganizationCommand(command: string | undefined, subcommand: string | undefined, flags: Map<string, string | boolean>) {
+  const api = await organizationApi(flags);
+  if (command === 'organization' && subcommand === 'status') return api.instructions();
+  if (command === 'agents' && subcommand === 'list') return api.listAgents();
+  if (command === 'agents' && subcommand === 'bind-runtime') {
+    requireExplicitConfirmation(flags, 'Binding a managed or cloud BYOK runtime endpoint');
+    const agentId = required(flags, 'agent-id');
+    const body = await commandJsonBody(flags);
+    const endpointKind = String(body.endpointKind || '');
+    if (!['managed_runtime', 'cloud_byok'].includes(endpointKind)) {
+      throw new Error('Runtime endpoint kind must be managed_runtime or cloud_byok.');
+    }
+    return api.bindRuntimeEndpoint(agentId, {
+      endpointKind: endpointKind as 'managed_runtime' | 'cloud_byok',
+      managedAgentId: String(body.managedAgentId || ''),
+      runtimeBindingId: String(body.runtimeBindingId || ''),
+      ...(body.priority === undefined ? {} : { priority: Number(body.priority) }),
+    });
+  }
+  if (command === 'experiments' && subcommand === 'list') return api.listAnalysisWindows();
+  if (command === 'experiments' && subcommand === 'run') {
+    requireExplicitConfirmation(flags, 'Running an experiment');
+    return api.requestAnalysis(await commandJsonBody(flags));
+  }
+  if (command === 'failures' && subcommand === 'list') return api.listFailures();
+  if (command === 'remediations' && subcommand === 'list') return api.listRemediations();
+  if (command === 'remediations' && subcommand === 'act') {
+    requireExplicitConfirmation(flags, 'Changing a repository remediation release');
+    const targetId = required(flags, 'target-id');
+    const body = await commandJsonBody(flags);
+    const action = String(flags.get('action') || body.action || '');
+    if (!['link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
+      throw new Error('Remediation action must be link_backtest, approve, merge_pr, release, expand, or rollback.');
+    }
+    return api.transitionRemediationTarget(targetId, {
+      ...body,
+      action: action as 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
+    });
+  }
+  if (command === 'skills' && subcommand === 'list') return api.listSkills();
+  if (command === 'skills' && subcommand === 'release') {
+    requireExplicitConfirmation(flags, 'Releasing a skill');
+    return api.releaseSkill(await commandJsonBody(flags));
+  }
+  if (command === 'skills' && (subcommand === 'rollout' || subcommand === 'rollback')) {
+    requireExplicitConfirmation(flags, `${subcommand === 'rollback' ? 'Rolling back' : 'Rolling out'} a skill`);
+    const bundleId = required(flags, 'bundle-id');
+    const body = await commandJsonBody(flags);
+    return api.transitionSkillRollout(bundleId, {
+      action: subcommand === 'rollback' ? 'rollback' : String(body.action || 'start') as 'start' | 'expand',
+      ...(body.canaryPercent === undefined ? {} : { canaryPercent: Number(body.canaryPercent) }),
+    });
+  }
+  if (command === 'tasks' && subcommand === 'list') return api.listTasks();
+  if (command === 'tasks' && subcommand === 'dispatch') {
+    requireExplicitConfirmation(flags, 'Dispatching a task');
+    return api.dispatchTask(await commandJsonBody(flags));
+  }
+  if (command === 'handoffs' && subcommand === 'list') return api.listHandoffs();
+  if (command === 'handoffs' && subcommand === 'dispatch') {
+    requireExplicitConfirmation(flags, 'Dispatching an A2A handoff');
+    return api.dispatchHandoff(await commandJsonBody(flags) as unknown as Parameters<typeof api.dispatchHandoff>[0]);
+  }
+  if (command === 'usage' && subcommand === 'list') return api.usage();
+  return null;
 }
 
 async function openVerificationUri(url: string) {
@@ -1221,19 +1410,187 @@ async function workspaceAdd(flags: Map<string, string | boolean>, positional: st
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const organizationId = String(flags.get('organization-id') || device.organizationId);
   if (organizationId !== device.organizationId) throw new Error('Workspace organization must match the enrolled device.');
-  await mkdir(resolve(dharmaHome(), 'registry'), { recursive: true, mode: 0o700 });
   const workspaceId = deterministicUuid(`${organizationId}:${device.deviceId}:${path}`);
   const remote = await gitValue(path, ['config', '--get', 'remote.origin.url']);
+  const identity = sourceRepositoryFingerprint(remote, typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null);
   const entry: WorkspaceRecord = {
     workspaceId, organizationId, name: String(flags.get('name') || basename(path)), path,
     routeHash: `sha256:${createHash('sha256').update(path).digest('hex')}`,
-    repositoryRemoteHash: remote ? `sha256:${createHash('sha256').update(remote).digest('hex')}` : null,
+    repositoryRemoteHash: identity.fingerprint,
+    repositoryIdentityVersion: 'normalized-v1',
+    repositoryAgentId: null,
+    repositoryBindingId: null,
+    repositoryAgentKey: null,
+    controlBranch: null,
     defaultBranch: await gitValue(path, ['branch', '--show-current']), status: 'active',
   };
-  const without = (await registry()).filter((item) => item.workspaceId !== workspaceId);
-  without.push(entry);
-  await writeFile(workspaceRegistryPath(), `${JSON.stringify(without, null, 2)}\n`, { mode: 0o600 });
-  return { ok: true, workspaceId, organizationId, pathStoredLocally: true, pathDisclosedToServer: false };
+  await saveWorkspaceRecord(entry);
+  return {
+    ok: true,
+    workspaceId,
+    organizationId,
+    sourceFingerprint: identity.fingerprint,
+    repositoryIdentitySource: identity.source,
+    pathStoredLocally: true,
+    pathDisclosedToServer: false,
+  };
+}
+
+async function discoverRepositoryAt(path: string) {
+  const canonical = await realpath(path);
+  const topLevel = await gitValue(canonical, ['rev-parse', '--show-toplevel']);
+  if (!topLevel) return null;
+  const workspace = await realpath(topLevel);
+  const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+  let normalizedRemote: string | null = null;
+  let fingerprint: string | null = null;
+  if (remote) {
+    normalizedRemote = normalizeGitRemoteIdentity(remote);
+    fingerprint = sourceRepositoryFingerprint(remote).fingerprint;
+  }
+  return {
+    name: basename(workspace),
+    path: workspace,
+    remote: normalizedRemote,
+    sourceFingerprint: fingerprint,
+    defaultBranch: await gitValue(workspace, ['branch', '--show-current']),
+    connectable: Boolean(fingerprint),
+    requiredAction: fingerprint ? null : 'Supply --repository-key when connecting this repository.',
+  };
+}
+
+async function repositoriesDiscover(flags: Map<string, string | boolean>, positional: string[], roots: Array<string | boolean>): Promise<Output> {
+  const requested = [...positional, ...roots.filter((value): value is string => typeof value === 'string')];
+  if (requested.length === 0) requested.push(String(flags.get('root') || '.'));
+  const discovered = new Map<string, Awaited<ReturnType<typeof discoverRepositoryAt>>>();
+  for (const requestedRoot of requested) {
+    const root = await realpath(requestedRoot);
+    const direct = await discoverRepositoryAt(root);
+    if (direct) {
+      discovered.set(direct.path, direct);
+      continue;
+    }
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = await discoverRepositoryAt(resolve(root, entry.name));
+      if (candidate) discovered.set(candidate.path, candidate);
+    }
+  }
+  return {
+    ok: true,
+    scanBoundary: 'explicit_roots_and_immediate_children',
+    repositories: [...discovered.values()].filter(Boolean),
+  };
+}
+
+function repositoryKeyAssignments(paths: string[], values: Array<string | boolean>): Map<number, string> {
+  const keys = values.filter((value): value is string => typeof value === 'string');
+  const assignments = new Map<number, string>();
+  if (keys.length === 0) return assignments;
+  const named = keys.filter((value) => value.includes('='));
+  if (named.length > 0 && named.length !== keys.length) {
+    throw new Error('Use either ordered --repository-key values or path=key assignments, not both.');
+  }
+  if (named.length > 0) {
+    for (const value of named) {
+      const split = value.indexOf('=');
+      const path = resolve(value.slice(0, split));
+      const index = paths.findIndex((candidate) => resolve(candidate) === path);
+      if (index < 0) throw new Error(`Repository key assignment does not match a selected repository: ${value.slice(0, split)}`);
+      assignments.set(index, value.slice(split + 1));
+    }
+    return assignments;
+  }
+  if (keys.length !== paths.length) {
+    if (paths.length === 1 && keys.length === 1) return new Map([[0, keys[0]!]]);
+    throw new Error('Provide one ordered --repository-key per selected repository without a hosted remote.');
+  }
+  keys.forEach((key, index) => assignments.set(index, key));
+  return assignments;
+}
+
+async function repositoriesConnect(
+  flags: Map<string, string | boolean>,
+  positional: string[],
+  repeatedRepos: Array<string | boolean>,
+  repeatedKeys: Array<string | boolean>,
+): Promise<Output> {
+  const selected = [...positional, ...repeatedRepos.filter((value): value is string => typeof value === 'string')];
+  if (selected.length === 0) selected.push(String(flags.get('repo') || '.'));
+  const canonical = await Promise.all(selected.map((path) => realpath(path)));
+  const unique = [...new Set(canonical)];
+  const keys = repositoryKeyAssignments(unique, repeatedKeys.length ? repeatedKeys : (
+    typeof flags.get('repository-key') === 'string' ? [String(flags.get('repository-key'))] : []
+  ));
+  const results: Output[] = [];
+  for (let index = 0; index < unique.length; index += 1) {
+    const connectFlags = new Map(flags);
+    connectFlags.set('workspace', unique[index]!);
+    const repositoryKey = keys.get(index);
+    if (repositoryKey) connectFlags.set('repository-key', repositoryKey);
+    else connectFlags.delete('repository-key');
+    const result = await onboard(connectFlags);
+    results.push(result);
+    if ((result as Record<string, unknown>)?.stage === 'approve_device') break;
+  }
+  return { ok: true, requested: unique.length, connected: results.length, repositories: results };
+}
+
+async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
+  const verbose = flags.has('verbose') || flags.has('diagnostic');
+  return {
+    ok: true,
+    repositories: (await registry()).map((item) => ({
+      workspaceId: item.workspaceId,
+      name: item.name,
+      repositoryAgentId: item.repositoryAgentId || null,
+      repositoryAgentKey: item.repositoryAgentKey || null,
+      controlBranch: item.controlBranch || null,
+      connected: Boolean(item.repositoryAgentId && item.controlBranch),
+      ...(verbose ? { localPath: item.path, sourceFingerprint: item.repositoryRemoteHash } : {}),
+    })),
+  };
+}
+
+async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRecord): Promise<WorkspaceRecord> {
+  if (item.repositoryAgentId && item.repositoryBindingId && item.repositoryAgentKey && item.controlBranch) return item;
+  const remote = await gitValue(item.path, ['config', '--get', 'remote.origin.url']);
+  const currentIdentity = item.repositoryIdentityVersion === 'normalized-v1'
+    ? item.repositoryRemoteHash
+    : remote ? sourceRepositoryFingerprint(remote).fingerprint : item.repositoryRemoteHash;
+  if (!currentIdentity) {
+    throw new Error('Repository identity is missing. Re-run dharma workspace add with --repository-key.');
+  }
+  const response = await fabric.connectRepositoryAgent({
+    sourceFingerprint: currentIdentity,
+    displayName: item.name,
+    defaultSourceRef: item.defaultBranch,
+    workspaceId: item.workspaceId,
+    legacySourceFingerprint: item.repositoryIdentityVersion === 'normalized-v1' ? null : item.repositoryRemoteHash,
+  });
+  const repositoryAgent = response.repositoryAgent && typeof response.repositoryAgent === 'object'
+    ? response.repositoryAgent as Record<string, unknown>
+    : null;
+  const branch = repositoryAgent?.branch && typeof repositoryAgent.branch === 'object'
+    ? repositoryAgent.branch as Record<string, unknown>
+    : null;
+  const updated: WorkspaceRecord = {
+    ...item,
+    repositoryRemoteHash: currentIdentity,
+    repositoryIdentityVersion: 'normalized-v1',
+    repositoryAgentId: String(repositoryAgent?.organization_agent_id || ''),
+    repositoryBindingId: String(repositoryAgent?.id || ''),
+    repositoryAgentKey: String(repositoryAgent?.agent_key || ''),
+    controlBranch: String(repositoryAgent?.control_branch || branch?.branch || ''),
+  };
+  if (!/^[0-9a-f-]{36}$/i.test(updated.repositoryAgentId || '')
+    || !/^[0-9a-f-]{36}$/i.test(updated.repositoryBindingId || '')
+    || !/^repo:[a-f0-9]{24}$/.test(updated.repositoryAgentKey || '')
+    || !/^agents\/[a-z0-9][a-z0-9._-]*-[a-f0-9]{8}$/.test(updated.controlBranch || '')) {
+    throw new Error('Dharma HQ returned an invalid repository-agent binding.');
+  }
+  await saveWorkspaceRecord(updated);
+  return updated;
 }
 
 async function workspaceSync(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
@@ -1247,7 +1604,8 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
       next: `dharma workspace sync ${workspaceId} --policy-revision ${policyRevision} --apply`,
     };
   }
-  return syncWorkspacePolicy(await client(), item, policyRevision, true);
+  const fabric = await client();
+  return syncWorkspacePolicy(fabric, await bindRepositoryAgent(fabric, item), policyRevision, true);
 }
 
 async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string, apply = true) {
@@ -1255,6 +1613,7 @@ async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRec
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
+    repositoryAgentId: item.repositoryAgentId,
     policyRevision, providers,
   });
   const generated = await materializeWorkspacePolicy({
@@ -1310,6 +1669,9 @@ export async function installRepositoryAgentFabricSkill(input: {
   organizationId: string;
   workspaceId: string;
   policyRevision: string;
+  repositoryAgentId?: string | null;
+  repositoryAgentKey?: string | null;
+  controlBranch?: string | null;
 }) {
   const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
   const marker = resolve(skillRoot, '.dharma-agent-fabric.json');
@@ -1344,34 +1706,52 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
 6. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
 7. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
 8. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
+9. Use the organization MCP connection for role-scoped status, experiments, failures, remediations, rollouts, and profile administration. Reads may run directly. Paid evals, task dispatch, GitHub writes, approvals, rollout, rollback, and profile mutation require the granted scope and explicit confirmation.
 
-The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
+The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`; the logical repository-agent identity is recorded in \`.dharma/repository-agent.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
 `;
   const reference = `# Organization connection
 
 - HQ API: ${input.hqUrl}
 - Organization: ${input.organizationId}
 - Workspace: ${input.workspaceId}
+- Repository agent: ${input.repositoryAgentKey || 'pending'}
+- Permanent control branch: ${input.controlBranch || 'pending'}
 - Policy revision: ${input.policyRevision}
 - OpenAPI: ${input.hqUrl}/api/v1/agent-fabric/openapi.json
+- Organization instructions: ${input.hqUrl}/api/v1/orgs/${input.organizationId}/agent-fabric/instructions
 
 The CLI enrolls this device through browser-confirmed Clerk organization consent. Local provider credentials remain on this device. Managed and cloud BYOK execution are brokered by Dharma HQ and expose neither private runtime URLs nor cloud credentials.
 `;
   const connection = {
-    schema: 'dharma.repository-connection/v1',
+    schema: 'dharma.repository-connection/v2',
     hqUrl: input.hqUrl,
     organizationId: input.organizationId,
     workspaceId: input.workspaceId,
+    repositoryAgentId: input.repositoryAgentId || null,
+    repositoryAgentKey: input.repositoryAgentKey || null,
+    controlBranch: input.controlBranch || null,
     policyRevision: input.policyRevision,
     openapiUrl: `${input.hqUrl}/api/v1/agent-fabric/openapi.json`,
+    instructionsUrl: `${input.hqUrl}/api/v1/orgs/${input.organizationId}/agent-fabric/instructions`,
+  };
+  const repositoryAgent = {
+    schema: 'dharma.repository-agent/v1',
+    organizationId: input.organizationId,
+    organizationAgentId: input.repositoryAgentId || null,
+    agentKey: input.repositoryAgentKey || null,
+    controlBranch: input.controlBranch || null,
+    workspaceId: input.workspaceId,
   };
   await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
   await writeFile(resolve(skillRoot, 'references', 'organization.md'), reference, { mode: 0o600 });
   await writeFile(marker, `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`, { mode: 0o600 });
   await writeFile(resolve(input.workspace, '.dharma', 'agent-fabric.json'), `${JSON.stringify(connection, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(resolve(input.workspace, '.dharma', 'repository-agent.json'), `${JSON.stringify(repositoryAgent, null, 2)}\n`, { mode: 0o600 });
   return {
     skillPath: '.agents/skills/dharma-agent-fabric/SKILL.md',
     connectionPath: '.dharma/agent-fabric.json',
+    repositoryAgentPath: '.dharma/repository-agent.json',
   };
 }
 
@@ -1385,6 +1765,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     const loginFlags = new Map(flags);
     loginFlags.set('hq-url', requestedHqUrl);
     loginFlags.set('organization-id', organizationId);
+    if (flags.has('non-interactive')) {
+      loginFlags.set('no-browser', true);
+      loginFlags.set('no-wait', true);
+    }
     const enrollment = await login(loginFlags) as Record<string, unknown>;
     if (enrollment.status !== 'approved') {
       return {
@@ -1405,18 +1789,20 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   }
   const hqUrl = config.hqUrl;
   let registered = (await registry()).find((item) => item.path === workspace);
-  if (!registered) {
-    await workspaceAdd(new Map<string, string | boolean>([
+  if (!registered || (!registered.repositoryRemoteHash && typeof flags.get('repository-key') === 'string')) {
+    const addFlags = new Map<string, string | boolean>([
       ['organization-id', organizationId],
       ['path', workspace],
       ['name', String(flags.get('name') || basename(workspace))],
-    ]), [workspace]);
+    ]);
+    if (typeof flags.get('repository-key') === 'string') addFlags.set('repository-key', String(flags.get('repository-key')));
+    await workspaceAdd(addFlags, [workspace]);
     registered = (await registry()).find((item) => item.path === workspace);
   }
   if (!registered) throw new Error('Workspace registration failed.');
-  const synced = await workspaceSync(new Map<string, string | boolean>([
-    ['policy-revision', policyRevision], ['apply', true],
-  ]), [registered.workspaceId]) as Record<string, unknown>;
+  const fabric = await client();
+  registered = await bindRepositoryAgent(fabric, registered);
+  const synced = await syncWorkspacePolicy(fabric, registered, policyRevision, true) as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
   const generatedPolicy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);
@@ -1425,6 +1811,9 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     hqUrl,
     organizationId,
     workspaceId: registered.workspaceId,
+    repositoryAgentId: registered.repositoryAgentId,
+    repositoryAgentKey: registered.repositoryAgentKey,
+    controlBranch: registered.controlBranch,
     policyRevision: authoritativeRevision,
   });
   const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
@@ -1440,6 +1829,12 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     stage: nativeSkillResult.failures.length ? 'ready_with_provider_actions' : 'ready',
     organizationId,
     workspaceId: registered.workspaceId,
+    repositoryAgent: {
+      id: registered.repositoryAgentId,
+      key: registered.repositoryAgentKey,
+      bindingId: registered.repositoryBindingId,
+      controlBranch: registered.controlBranch,
+    },
     deviceId: config.deviceId,
     providers,
     organizationPolicy: {
@@ -2051,13 +2446,33 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
 }
 
 export async function run(argv: string[]): Promise<Output> {
-  const { positional, flags } = options(argv);
+  const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return { providers: await Promise.all(providerAdapters.map((adapter) => adapter.capability())) };
+  if (command === 'repositories' && subcommand === 'discover') {
+    return repositoriesDiscover(flags, positional.slice(2), repeated.get('root') || []);
+  }
+  if (command === 'repositories' && subcommand === 'connect') {
+    return repositoriesConnect(
+      flags,
+      positional.slice(2),
+      repeated.get('repo') || [],
+      repeated.get('repository-key') || [],
+    );
+  }
+  if (command === 'repositories' && subcommand === 'list') return repositoriesList(flags);
+  if (command === 'repositories' && subcommand === 'status') {
+    const listed = await repositoriesList(flags) as Record<string, unknown>;
+    return {
+      ...listed,
+      relay: await relayProcessState(),
+      providers: await Promise.all(providerAdapters.map((adapter) => adapter.capability())),
+    };
+  }
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));
   if (command === 'workspace' && subcommand === 'sync') return workspaceSync(flags, positional.slice(2));
   if (command === 'capture' || (command === 'evidence' && subcommand === 'capture')) return capture(flags);
@@ -2080,9 +2495,17 @@ export async function run(argv: string[]): Promise<Output> {
       return status;
     }
   }
+  if ([
+    'organization', 'agents', 'experiments', 'failures', 'remediations', 'handoffs', 'usage',
+  ].includes(String(command)) || (
+    ['tasks', 'skills'].includes(String(command))
+    && ['list', 'dispatch', 'release', 'rollout', 'rollback'].includes(String(subcommand))
+  )) {
+    const result = await runOrganizationCommand(command, subcommand, flags);
+    if (result) return result;
+  }
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);
-  if (command === 'tasks' && subcommand === 'list') return { tasks: [], coverage: 'server_poll_requires_relay' };
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
   if (command === 'skills' && subcommand === 'status') {
     const providerValue = required(flags, 'provider');
