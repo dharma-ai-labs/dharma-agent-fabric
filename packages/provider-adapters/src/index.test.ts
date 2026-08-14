@@ -60,6 +60,39 @@ test('Agy discovery uses supported workspace history and reports partial evidenc
   assert.equal(result[0]?.records[0]?.native.display, 'Inspect checkout');
 });
 
+test('Agy discovery reads the current native transcript bound by its workspace cache', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-native-'));
+  const workspace = join(root, 'repo');
+  const config = join(root, 'agy');
+  const conversationId = '632da697-07a4-4dfe-9139-78729df9bac4';
+  const logs = join(config, 'brain', conversationId, '.system_generated', 'logs');
+  await mkdir(workspace);
+  await mkdir(join(config, 'cache'), { recursive: true });
+  await mkdir(logs, { recursive: true });
+  await writeFile(join(config, 'cache', 'last_conversations.json'), JSON.stringify({
+    [workspace]: conversationId,
+    [join(root, 'foreign')]: '176b23b1-bbef-46be-a993-92c4febc2440',
+  }));
+  await writeFile(join(logs, 'transcript_full.jsonl'), [
+    JSON.stringify({ type: 'USER_INPUT', content: 'Inspect authority.', created_at: '2026-08-14T22:52:34Z' }),
+    JSON.stringify({ type: 'PLANNER_RESPONSE', content: 'Approval is missing.', created_at: '2026-08-14T22:52:35Z' }),
+  ].join('\n'));
+  const previous = process.env.AGY_CONFIG_DIR;
+  process.env.AGY_CONFIG_DIR = config;
+  try {
+    const result = await agyAdapter.discover({ workspace });
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.provider, 'agy');
+    assert.equal(result[0]?.coverage, 'observed');
+    assert.equal(result[0]?.records.length, 2);
+    assert.equal(result[0]?.records[0]?.workspace, workspace);
+    assert.equal(result[0]?.records[1]?.native.content, 'Approval is missing.');
+  } finally {
+    if (previous === undefined) delete process.env.AGY_CONFIG_DIR;
+    else process.env.AGY_CONFIG_DIR = previous;
+  }
+});
+
 test('Codex discovery supports no-copy JSONL source selectors', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-adapter-symlink-'));
   const workspace = join(root, 'repo');
