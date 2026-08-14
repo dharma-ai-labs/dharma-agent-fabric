@@ -5,7 +5,7 @@ This guide is for a company administrator connecting local coding agents and pro
 ## What the customer receives
 
 - an organization workspace at `https://www.dharma-ai.io/portal`;
-- a private, organization-owned agent-control repository created through the Dharma Remediation GitHub App;
+- a private agent-control repository under `dharma-ai-labs`, with the company administrator invited as a collaborator;
 - a scoped organization API key for the public HQ API;
 - the open-source `@dharma-ai-labs/agent-fabric` CLI;
 - repository-local instructions and policy for Codex, Claude Code, and Agy;
@@ -21,9 +21,9 @@ Customer tokens authenticate only to Dharma HQ. They never expose a GCP service 
 
 ```mermaid
 flowchart LR
-  A[Purchase eligible offer] --> B[Accept Clerk invite]
-  B --> C[Install GitHub App]
-  C --> D[Private control repo created]
+  A[Start trial or purchase] --> B[Create Clerk account]
+  B --> C[Provide GitHub username]
+  C --> D[Private control repo and collaborator invite]
   D --> E[Choose managed, GCP BYOK, or local BYOK]
   E --> F[Create scoped API key]
   F --> G[Run dharma onboard]
@@ -37,19 +37,19 @@ flowchart LR
   M -->|failed| O[Automatic rollback]
 ```
 
-Two steps require explicit customer consent because GitHub and Google forbid a vendor from granting itself authority:
+Two steps require customer action:
 
-1. the company admin installs the GitHub App into the selected GitHub organization;
+1. the company admin accepts the collaborator invitation to the private control repository;
 2. for GCP BYOK only, a company cloud admin applies the generated Workload Identity Federation IAM bindings.
 
 The dashboard performs or monitors the remaining work.
 
 ## 1. Purchase and sign in
 
-1. Open the signed Dharma offer link supplied by the account owner.
-2. Accept the order and complete the Stripe payment page.
-3. Open the organization invitation sent to the designated first admin.
-4. Sign in with that identity and select the new organization in the HQ portal.
+1. Open `https://www.dharma-ai.io/subscribe`.
+2. Choose the local-agent trial or the production package.
+3. Create a Clerk account or sign in. The verified identity becomes the first organization owner.
+4. For production, complete the hosted Stripe checkout. For the trial, continue directly to the organization workspace.
 
 Agent Fabric activates only after the paid invoice webhook records an eligible package. The default package gate is USD 1,000 and 5,000,000 Dharma credits. A separately recorded sponsored canary can replace payment for an approved proof tenant.
 
@@ -59,11 +59,11 @@ After payment, return to the same organization in the dashboard. The onboarding 
 
 The onboarding page shows the exact order if payment is incomplete. It does not treat an issued or accepted order as paid.
 
-## 2. Connect GitHub
+## 2. Receive the control repository
 
-Select **Connect GitHub** in Agent Fabric onboarding. GitHub opens the Dharma Remediation App installation screen.
+Enter the GitHub username that should receive access. Dharma creates one private repository named `<company-slug>-agent-control` under `dharma-ai-labs` and sends that account a collaborator invitation. The centrally installed Dharma Remediation GitHub App owns automation for every customer control repository; a customer does not install a second copy of the App.
 
-Choose the company's GitHub organization and approve only the repositories intended for Dharma. After the callback succeeds, the dashboard creates a private repository named `<company-slug>-agent-control` containing:
+The control repository contains:
 
 - `.dharma/agent-fabric.json`: organization and API coordinates, no secret;
 - `AGENTS.md`: safe coding-agent behavior;
@@ -74,6 +74,14 @@ Choose the company's GitHub organization and approve only the repositories inten
 - `docs/DHARMA_AGENT_FABRIC.md`: company-specific start guide.
 
 Hidden evaluation truth, customer API keys, provider credentials, and raw local trajectories are never committed.
+
+Each source repository selected through the CLI creates one logical agent and one permanent branch in this control repository:
+
+```text
+agents/<repository-slug>-<fingerprint-prefix>
+```
+
+The branch stores Dharma manifests, skills, eval definitions, releases, and receipts. It does not mirror the source repository. Connecting the same source repository from another machine or provider adds an endpoint to the existing agent and branch.
 
 ## 3. Select an execution boundary
 
@@ -126,25 +134,40 @@ dharma --version
 
 The dashboard shows this install command only after the exact version is available from npm and its signed GitHub Release. A **CLI release gate pending** notice means the operator proof may use a reviewed source checkout, but the customer installation path is not yet released and onboarding must not be described as GA.
 
-Copy the organization-specific command from the dashboard and run it inside the source repository:
+Copy the organization-specific login command from the dashboard:
 
 ```bash
-dharma onboard \
+dharma login \
   --hq-url https://www.dharma-ai.io \
-  --organization-id <organization-id> \
-  --policy-revision agent-fabric-policy-v1 \
-  --workspace .
+  --organization-id <organization-id>
 ```
 
-The CLI opens a short-lived browser approval page. After the company user approves the device, the CLI:
+The CLI opens a short-lived browser approval page. After the company user approves the device, select repositories only from roots the user names:
+
+```bash
+dharma repositories discover --root ~/work --json
+dharma repositories connect \
+  --repo ~/work/checkout-api \
+  --organization-id <organization-id> \
+  --policy-revision agent-fabric-policy-v1
+dharma repositories list --json
+dharma repositories status --repo ~/work/checkout-api --json
+```
+
+For CI or coding-agent setup, repeat `--repo` or pass `--repository-key` for a repository without a Git remote. Absolute paths never become repository identity, and discovery never scans outside the approved roots.
+
+For each selected repository, the CLI:
 
 1. creates an Ed25519 device identity sealed by the operating-system credential store;
-2. registers a workspace using hashes rather than disclosing its absolute local path;
-3. detects Codex, Claude Code, and Agy independently;
-4. writes `.dharma/approved-policy.json` with registered commands and bounded write paths;
-5. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill in every detected provider's native Skill directory;
-6. waits for browser approval and continues automatically without a manual resume command;
-7. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
+2. derives a credential-free normalized Git remote fingerprint, or uses the explicit stable repository key;
+3. reuses the existing logical agent when the repository is already connected;
+4. registers the current device, workspace, and provider as endpoints of that agent;
+5. obtains the permanent control branch and agent identity from HQ;
+6. writes the repository bootstrap without storing the source path or Git credential;
+7. detects Codex, Claude Code, and Agy independently;
+8. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill in every detected provider's native Skill directory;
+9. waits for browser approval and continues automatically without a manual resume command;
+10. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
 
 Verify the Codex installation before capturing evidence:
 
@@ -279,6 +302,8 @@ Every completed trajectory receives deterministic checks. The daily scheduler cl
 
 Semantic judging is invoked only when deterministic checks cannot author a rubric, score a nuanced outcome, cluster a failure, or synthesize a remediation. Each judge event records the rubric version, model, prompt version, confidence threshold, usage, and cost.
 
+An analysis or experiment can target the whole organization, selected logical agents, or selected endpoints. Organization-wide automatic analysis defaults to the logical agents represented by the chosen trajectories; it does not attach an unrelated agent to a remediation campaign.
+
 The company sees:
 
 1. the visible evidence capsule and lineage;
@@ -293,14 +318,23 @@ An improvement is not labeled successful until matched before/after evidence pas
 
 ## 9. Skill release behavior
 
-After a managed remediation is promoted, HQ creates exactly one KMS-signed local-provider bundle for the corresponding managed skill revision. If the company has no prior bundle, HQ also creates a signed clear baseline as the rollback ancestor.
+HQ creates one organization remediation campaign and one child target for each affected logical agent. Every child receives its own branch, pull request, held-out result, signed bundle, rollout, installation receipts, and rollback ancestor:
+
+```text
+remediation/<agent-key>/<candidate-id>
+```
+
+The pull request targets the agent's permanent branch, not `main` and not another agent's branch. A parent campaign can coordinate a cross-agent change while each child remains independently testable and reversible.
 
 - R0-R2: eligible for policy-controlled advancement after all evaluation and security gates;
 - R3-R4: require an organization-admin approval before promotion;
 - all releases: begin with a 10 percent canary;
+- all child releases: require at least 20 non-source held-out trajectories, regression checks, security checks, and a successful canary;
 - active installation receipt with no failure: rollout expands;
 - any failed or rolled-back receipt: rollout returns to its signed ancestor;
 - in-flight tasks stay pinned to the bundle present when the task began.
+
+The first approved release establishes the organization's auto-update policy. Later R0-R2 releases can advance automatically after every gate passes. R3-R4 releases always stop for an organization administrator.
 
 ## 10. Security, privacy, and offboarding
 
@@ -316,7 +350,7 @@ After a managed remediation is promoted, HQ creates exactly one KMS-signed local
 - WIF removal stops BYOK invocation;
 - organization kill switches can stop onboarding, evidence, tasks, analysis, GitHub writes, or rollout independently.
 
-For offboarding, revoke devices, revoke API keys, remove the GitHub App installation, remove WIF bindings, disable runtime execution, export the required audit package, and apply the contracted retention/deletion policy.
+For offboarding, revoke devices and API keys, remove the customer collaborator, archive the control repository, remove WIF bindings, disable runtime execution, export the required audit package, and apply the contracted retention/deletion policy. A Dharma operator also removes that control repository from the central GitHub App installation.
 
 ## Availability labels
 
