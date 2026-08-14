@@ -490,6 +490,89 @@ async function parseAgyHistoryFile(path: string, workspace: string): Promise<Pro
   return sessions;
 }
 
+async function parseAgyTranscriptFile(
+  path: string,
+  workspace: string,
+  conversationId: string,
+  limits: { maximumBytes?: number; maximumRecordBytes?: number } = {},
+): Promise<ProviderSession | null> {
+  const fileStat = await stat(path);
+  const maximumBytes = Math.min(Math.max(limits.maximumBytes ?? 8_388_608, 65_536), 67_108_864);
+  const maximumRecordBytes = Math.min(Math.max(limits.maximumRecordBytes ?? 262_144, 4_096), 1_048_576);
+  const bounded = await boundedJsonlLines(path, fileStat.size, maximumBytes);
+  const records: SourceRecord[] = [];
+  let omitted = fileStat.size > maximumBytes;
+  for (const [index, value] of bounded.lines.entries()) {
+    if (Buffer.byteLength(value) > maximumRecordBytes) {
+      omitted = true;
+      continue;
+    }
+    let native: Record<string, unknown>;
+    try { native = JSON.parse(value) as Record<string, unknown>; }
+    catch {
+      omitted = true;
+      continue;
+    }
+    const timestamp = normalizeTimestamp(
+      findString(native, ['created_at', 'createdAt', 'timestamp', 'time']),
+      fileStat.mtime,
+    );
+    records.push({
+      native,
+      sourcePath: path,
+      line: index + 1,
+      workspace: resolve(workspace),
+      timestamp,
+      kind: inferKind(native),
+      coverage: omitted ? 'partial' : 'observed',
+    });
+  }
+  if (records.length === 0) return null;
+  const sourceHash = createHash('sha256').update(conversationId).digest('hex').slice(0, 24);
+  return {
+    provider: 'agy',
+    sessionId: `agy-${sourceHash}`,
+    sourcePath: path,
+    workspace: resolve(workspace),
+    records,
+    coverage: omitted ? 'partial' : 'observed',
+    startedAt: records[0]!.timestamp!,
+    endedAt: records.at(-1)!.timestamp!,
+  };
+}
+
+async function discoverAgyNativeTranscripts(
+  configRoot: string,
+  request: DiscoveryRequest,
+): Promise<ProviderSession[]> {
+  const mappingPath = resolve(configRoot, 'cache', 'last_conversations.json');
+  let mapping: Record<string, unknown>;
+  try { mapping = JSON.parse(await readFile(mappingPath, 'utf8')) as Record<string, unknown>; }
+  catch { return []; }
+  const sessions: ProviderSession[] = [];
+  for (const [recordedWorkspace, rawConversationId] of Object.entries(mapping)) {
+    if (resolve(recordedWorkspace) !== resolve(request.workspace)) continue;
+    if (typeof rawConversationId !== 'string' || !/^[0-9a-f-]{36}$/i.test(rawConversationId)) continue;
+    const candidates = [
+      resolve(configRoot, 'brain', rawConversationId, '.system_generated', 'logs', 'transcript_full.jsonl'),
+      resolve(configRoot, 'brain', rawConversationId, '.system_generated', 'logs', 'transcript.jsonl'),
+    ];
+    for (const path of candidates) {
+      try {
+        const session = await parseAgyTranscriptFile(path, request.workspace, rawConversationId, {
+          maximumBytes: request.maximumBytesPerSession,
+          maximumRecordBytes: request.maximumRecordBytes,
+        });
+        if (session) sessions.push(session);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  }
+  return sessions;
+}
+
 function defaultRoots(provider: ProviderId): string[] {
   if (provider === 'codex') {
     return [resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'sessions')];
@@ -570,10 +653,15 @@ export const agyAdapter: ProviderAdapter = {
     const maximumSessions = Math.min(Math.max(request.maximumSessions ?? 100, 1), 1_000);
     const requestedSessionIds = request.sessionIds ? new Set(request.sessionIds) : null;
     const sessions: ProviderSession[] = [];
-    for (const root of request.roots ?? defaultRoots('agy')) {
+    const roots = request.roots;
+    for (const root of roots ?? defaultRoots('agy')) {
       for (const path of await jsonlFiles(root)) {
         sessions.push(...await parseAgyHistoryFile(path, request.workspace));
       }
+    }
+    if (!roots) {
+      const configRoot = resolve(process.env.AGY_CONFIG_DIR || resolve(homedir(), '.gemini', 'antigravity-cli'));
+      sessions.push(...await discoverAgyNativeTranscripts(configRoot, request));
     }
     const ordered = sessions
       .filter((session) => !request.since || Date.parse(session.endedAt) >= request.since.getTime())
@@ -586,4 +674,4 @@ export const agyAdapter: ProviderAdapter = {
 export const codexAdapter = adapter('codex', 'codex');
 export const claudeAdapter = adapter('claude', 'claude');
 export const providerAdapters: ProviderAdapter[] = [codexAdapter, claudeAdapter, agyAdapter];
-export { insideWorkspace, parseAgyHistoryFile, parseSessionFile };
+export { insideWorkspace, parseAgyHistoryFile, parseAgyTranscriptFile, parseSessionFile };
