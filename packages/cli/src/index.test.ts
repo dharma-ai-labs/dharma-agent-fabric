@@ -21,6 +21,7 @@ import {
   nativeSkillDirectory,
   normalizeGitRemoteIdentity,
   parseCliOptions,
+  parseSelectedProviderIds,
   rawLocalRetentionDays,
   relayProcessState,
   releaseDailyContentUpload,
@@ -190,15 +191,19 @@ test('repository identity is credential-free and stable across Git transport for
   assert.throws(() => normalizeGitRemoteIdentity('file:///tmp/private-repo'), /explicit stable/);
 });
 
-test('CLI parser preserves repeated repository selections and keys', () => {
+test('CLI parser preserves repeated repository, key, and provider selections', () => {
   const parsed = parseCliOptions([
     'repositories', 'connect', '--repo', 'one', '--repo=two', '--repository-key', 'one=northstar-one',
-    '--repository-key=two=northstar-two', '--non-interactive', '--json',
+    '--repository-key=two=northstar-two', '--provider', 'codex', '--provider=claude', '--non-interactive', '--json',
   ]);
   assert.deepEqual(parsed.positional, ['repositories', 'connect']);
   assert.deepEqual(parsed.repeated.get('repo'), ['one', 'two']);
   assert.deepEqual(parsed.repeated.get('repository-key'), ['one=northstar-one', 'two=northstar-two']);
+  assert.deepEqual(parsed.repeated.get('provider'), ['codex', 'claude']);
   assert.equal(parsed.flags.get('non-interactive'), true);
+  assert.deepEqual(parseSelectedProviderIds(parsed.repeated.get('provider') || []), ['codex', 'claude']);
+  assert.deepEqual(parseSelectedProviderIds(['agy,codex', 'agy']), ['agy', 'codex']);
+  assert.throws(() => parseSelectedProviderIds(['unsupported']), /codex, claude, or agy/);
 });
 
 test('workspace registration reuses a normalized repository identity across local paths', async () => {

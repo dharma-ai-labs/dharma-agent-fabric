@@ -1514,6 +1514,7 @@ async function repositoriesConnect(
   positional: string[],
   repeatedRepos: Array<string | boolean>,
   repeatedKeys: Array<string | boolean>,
+  repeatedProviders: Array<string | boolean>,
 ): Promise<Output> {
   const selected = [...positional, ...repeatedRepos.filter((value): value is string => typeof value === 'string')];
   if (selected.length === 0) selected.push(String(flags.get('repo') || '.'));
@@ -1522,6 +1523,9 @@ async function repositoriesConnect(
   const keys = repositoryKeyAssignments(unique, repeatedKeys.length ? repeatedKeys : (
     typeof flags.get('repository-key') === 'string' ? [String(flags.get('repository-key'))] : []
   ));
+  const providerIds = parseSelectedProviderIds(repeatedProviders.length ? repeatedProviders : (
+    typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []
+  ));
   const results: Output[] = [];
   for (let index = 0; index < unique.length; index += 1) {
     const connectFlags = new Map(flags);
@@ -1529,11 +1533,31 @@ async function repositoriesConnect(
     const repositoryKey = keys.get(index);
     if (repositoryKey) connectFlags.set('repository-key', repositoryKey);
     else connectFlags.delete('repository-key');
+    if (providerIds) connectFlags.set('providers', providerIds.join(','));
     const result = await onboard(connectFlags);
     results.push(result);
     if ((result as Record<string, unknown>)?.stage === 'approve_device') break;
   }
   return { ok: true, requested: unique.length, connected: results.length, repositories: results };
+}
+
+export function parseSelectedProviderIds(values: Array<string | boolean>): ProviderId[] | null {
+  const selected = [...new Set(values
+    .filter((value): value is string => typeof value === 'string')
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean))];
+  if (selected.length === 0) return null;
+  if (selected.some((value) => !['codex', 'claude', 'agy'].includes(value))) {
+    throw new Error('Repository providers must be codex, claude, or agy. Repeat --provider to select more than one.');
+  }
+  return selected as ProviderId[];
+}
+
+function selectedProviderAdapters(providerIds: ProviderId[] | null) {
+  return providerIds
+    ? providerAdapters.filter((adapter) => providerIds.includes(adapter.providerId))
+    : providerAdapters;
 }
 
 async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
@@ -1605,11 +1629,18 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
     };
   }
   const fabric = await client();
-  return syncWorkspacePolicy(fabric, await bindRepositoryAgent(fabric, item), policyRevision, true);
+  const providerIds = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
+  return syncWorkspacePolicy(fabric, await bindRepositoryAgent(fabric, item), policyRevision, true, providerIds);
 }
 
-async function syncWorkspacePolicy(fabric: AgentFabricClient, item: WorkspaceRecord, policyRevision: string, apply = true) {
-  const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
+async function syncWorkspacePolicy(
+  fabric: AgentFabricClient,
+  item: WorkspaceRecord,
+  policyRevision: string,
+  apply = true,
+  providerIds: ProviderId[] | null = null,
+) {
+  const providers = await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability()));
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
@@ -1788,6 +1819,9 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     throw new Error('This device is enrolled to a different Dharma HQ origin. Use a separate DHARMA_HOME for each HQ origin.');
   }
   const hqUrl = config.hqUrl;
+  const providerIds = parseSelectedProviderIds(typeof flags.get('providers') === 'string'
+    ? [String(flags.get('providers'))]
+    : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
   let registered = (await registry()).find((item) => item.path === workspace);
   if (!registered || (!registered.repositoryRemoteHash && typeof flags.get('repository-key') === 'string')) {
     const addFlags = new Map<string, string | boolean>([
@@ -1802,7 +1836,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   if (!registered) throw new Error('Workspace registration failed.');
   const fabric = await client();
   registered = await bindRepositoryAgent(fabric, registered);
-  const synced = await syncWorkspacePolicy(fabric, registered, policyRevision, true) as Record<string, unknown>;
+  const synced = await syncWorkspacePolicy(fabric, registered, policyRevision, true, providerIds) as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
   const generatedPolicy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);
@@ -1816,7 +1850,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     controlBranch: registered.controlBranch,
     policyRevision: authoritativeRevision,
   });
-  const providers = await Promise.all(providerAdapters.map((adapter) => adapter.capability()));
+  const providers = await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability()));
   const nativeSkillResult = await installAvailableNativeAgentFabricBootstraps({
     providers,
     workspace,
@@ -1824,6 +1858,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     organizationId,
     hqUrl,
   });
+  const primaryProvider = providers[0]?.provider || 'codex';
   return {
     ok: true,
     stage: nativeSkillResult.failures.length ? 'ready_with_provider_actions' : 'ready',
@@ -1849,10 +1884,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     nativeSkillFailures: nativeSkillResult.failures,
     workspaceSync: synced,
     next: {
-      preview: 'dharma evidence preview --workspace . --provider codex',
-      sync: 'dharma evidence capture-batch --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20 --sync',
+      preview: `dharma evidence preview --workspace . --provider ${primaryProvider}`,
+      sync: `dharma evidence capture-batch --workspace . --provider ${primaryProvider} --policy .dharma/approved-policy.json --maximum-sessions 20 --sync`,
       relay: 'dharma relay start --policy .dharma/approved-policy.json',
-      verifySkill: 'dharma skills verify --provider codex --workspace .',
+      verifySkill: `dharma skills verify --provider ${primaryProvider} --workspace .`,
     },
   };
 }
@@ -2462,6 +2497,7 @@ export async function run(argv: string[]): Promise<Output> {
       positional.slice(2),
       repeated.get('repo') || [],
       repeated.get('repository-key') || [],
+      repeated.get('provider') || [],
     );
   }
   if (command === 'repositories' && subcommand === 'list') return repositoriesList(flags);

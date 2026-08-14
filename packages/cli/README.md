@@ -18,10 +18,16 @@ dharma login \
 dharma repositories discover --root "$HOME/work"
 dharma repositories connect \
   --repo "$PWD" \
+  --provider codex \
+  --provider claude \
   --organization-id <organization-id> \
   --policy-revision <dashboard-policy-revision>
 dharma repositories status --repo "$PWD" --json
 ```
+
+Repeat `--provider` to attach only the local runtimes that should serve the
+selected repository agent. Omitting it preserves compatibility by attaching
+every installed supported provider.
 
 One selected source repository becomes one logical organization agent and one
 permanent branch in the organization's private Dharma control repository.
