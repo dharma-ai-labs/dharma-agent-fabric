@@ -76,6 +76,10 @@ function required(flags: Map<string, string | boolean>, name: string): string {
   return value;
 }
 
+export function portalUrl(flags: Map<string, string | boolean>, fallback = 'https://www.dharma-ai.io'): string {
+  return String(flags.get('portal-url') || flags.get('hq-url') || fallback);
+}
+
 function print(value: Output): void {
   process.stdout.write(typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -1015,7 +1019,7 @@ async function organizationApi(flags: Map<string, string | boolean>) {
   return new AgentFabricApiClient({
     organizationId,
     token,
-    baseUrl: String(flags.get('hq-url') || enrolled?.hqUrl || 'https://www.dharma-ai.io'),
+    baseUrl: portalUrl(flags, enrolled?.hqUrl || 'https://www.dharma-ai.io'),
   });
 }
 
@@ -1145,7 +1149,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   if (flags.has('resume')) {
     pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
   } else {
-    const hqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
+    const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
@@ -1790,7 +1794,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const workspace = await realpath(String(flags.get('workspace') || flags.get('path') || '.'));
   const organizationId = required(flags, 'organization-id');
   const policyRevision = required(flags, 'policy-revision');
-  const requestedHqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
+  const requestedHqUrl = normalizeHqUrl(portalUrl(flags));
   let config = await readDeviceConfig();
   if (!config) {
     const loginFlags = new Map(flags);
@@ -1815,8 +1819,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   if (config.organizationId !== organizationId) {
     throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
   }
-  if (flags.has('hq-url') && config.hqUrl !== requestedHqUrl) {
-    throw new Error('This device is enrolled to a different Dharma HQ origin. Use a separate DHARMA_HOME for each HQ origin.');
+  if ((flags.has('portal-url') || flags.has('hq-url')) && config.hqUrl !== requestedHqUrl) {
+    throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
   }
   const hqUrl = config.hqUrl;
   const providerIds = parseSelectedProviderIds(typeof flags.get('providers') === 'string'

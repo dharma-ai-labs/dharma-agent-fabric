@@ -138,7 +138,7 @@ Copy the organization-specific login command from the dashboard:
 
 ```bash
 dharma login \
-  --hq-url https://www.dharma-ai.io \
+  --portal-url https://www.dharma-ai.io \
   --organization-id <organization-id>
 ```
 

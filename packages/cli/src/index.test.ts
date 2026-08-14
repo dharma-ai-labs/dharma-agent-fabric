@@ -22,6 +22,7 @@ import {
   normalizeGitRemoteIdentity,
   parseCliOptions,
   parseSelectedProviderIds,
+  portalUrl,
   rawLocalRetentionDays,
   relayProcessState,
   releaseDailyContentUpload,
@@ -38,6 +39,15 @@ import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-clien
 import { CLI_USAGE } from './usage.js';
 
 const execFileAsync = promisify(execFile);
+
+test('uses the production B2B portal and keeps hq-url as a compatibility alias', () => {
+  assert.equal(portalUrl(new Map()), 'https://www.dharma-ai.io');
+  assert.equal(portalUrl(new Map([['hq-url', 'https://legacy.example']])), 'https://legacy.example');
+  assert.equal(portalUrl(new Map([
+    ['hq-url', 'https://legacy.example'],
+    ['portal-url', 'https://www.dharma-ai.io'],
+  ])), 'https://www.dharma-ai.io');
+});
 
 function memorySecureStore(): SecureSecretStore {
   const values = new Map<string, string>();
