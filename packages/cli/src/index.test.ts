@@ -538,6 +538,71 @@ test('daily content disclosure ledger is durable, bounded, and idempotent by cap
   }
 });
 
+test('content authorization upgrades an empty legacy ledger and resets a stale daily ledger', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-upgrade-'));
+  process.env.DHARMA_HOME = home;
+  try {
+    const secureStore = memorySecureStore();
+    await mkdir(join(home, 'relay'), { recursive: true });
+    await writeFile(join(home, 'device.json'), JSON.stringify({ schema: 'dharma.device-config/v1',
+      hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_northstar', deviceId: 'device-upgrade', relayUrl: 'wss://relay.dharma-ai.io' }));
+    const signed = signedPolicyAuthorization({
+      revision: 'content-upgrade-v1',
+      evidence: {
+        automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-upgrade', allowedContentClasses: ['native_provider_payload'] },
+        maximumCapsuleBytes: 1_000, maximumDailyUploadBytes: 10_000, maximumExpansionBytes: 100,
+      },
+    });
+    const input = {
+      workspace: home, organizationId: 'org_northstar', revision: 'content-upgrade', workspaceId: 'workspace-northstar',
+      serverPolicyAuthorization: signed.envelope, serverPublicKeyEd25519: signed.publicKeyEd25519,
+      secureStore,
+    };
+    const today = new Date().toISOString().slice(0, 10);
+    await writeFile(join(home, 'relay', 'evidence-upload-ledger.json'), JSON.stringify({ day: today, totalBytes: 0, capsuleHashes: [] }));
+    await materializeWorkspacePolicy(input);
+    let ledger = JSON.parse(await readFile(join(home, 'relay', 'evidence-upload-ledger.json'), 'utf8'));
+    assert.deepEqual(ledger, { schema: 'dharma.evidence-upload-ledger/v2', day: today, totalBytes: 0, capsuleHashes: [], capsuleBytes: {} });
+
+    await writeFile(join(home, 'relay', 'evidence-upload-ledger.json'), JSON.stringify({ day: '2020-01-01', totalBytes: 100, capsuleHashes: ['legacy-entry'] }));
+    await materializeWorkspacePolicy(input);
+    ledger = JSON.parse(await readFile(join(home, 'relay', 'evidence-upload-ledger.json'), 'utf8'));
+    assert.deepEqual(ledger, { schema: 'dharma.evidence-upload-ledger/v2', day: today, totalBytes: 0, capsuleHashes: [], capsuleBytes: {} });
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('content authorization rejects a non-empty legacy ledger for the current day', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-reject-'));
+  process.env.DHARMA_HOME = home;
+  try {
+    const secureStore = memorySecureStore();
+    await mkdir(join(home, 'relay'), { recursive: true });
+    await writeFile(join(home, 'device.json'), JSON.stringify({ schema: 'dharma.device-config/v1',
+      hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_northstar', deviceId: 'device-reject', relayUrl: 'wss://relay.dharma-ai.io' }));
+    await writeFile(join(home, 'relay', 'evidence-upload-ledger.json'), JSON.stringify({
+      day: new Date().toISOString().slice(0, 10), totalBytes: 100, capsuleHashes: ['legacy-entry'],
+    }));
+    const signed = signedPolicyAuthorization({
+      revision: 'content-reject-v1',
+      evidence: {
+        automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-reject', allowedContentClasses: ['native_provider_payload'] },
+        maximumCapsuleBytes: 1_000, maximumDailyUploadBytes: 10_000, maximumExpansionBytes: 100,
+      },
+    });
+    await assert.rejects(() => materializeWorkspacePolicy({
+      workspace: home, organizationId: 'org_northstar', revision: 'content-reject', workspaceId: 'workspace-northstar',
+      serverPolicyAuthorization: signed.envelope, serverPublicKeyEd25519: signed.publicKeyEd25519,
+      secureStore,
+    }), /Evidence upload ledger is invalid/);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+  }
+});
+
 test('deleting the advisory local quota ledger does not bypass the authoritative server quota', async () => {
   const previous = process.env.DHARMA_HOME;
   const home = await mkdtemp(join(tmpdir(), 'dharma-content-ledger-delete-'));
