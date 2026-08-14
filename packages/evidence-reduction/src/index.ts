@@ -160,7 +160,7 @@ const LOCAL_PATH_PATTERNS = [
   /\\{2,}(?:wsl(?:\.localhost)?\\{1,})?[^\s"'<>|,}\]]+/gi,
 ];
 
-function redactString(value: string, stats: RedactionStats, options: RedactionOptions): string {
+function redactString(value: string, stats: RedactionStats, _options: RedactionOptions): string {
   stats.inputBytes += Buffer.byteLength(value);
   let output = value.replaceAll('\u0000', () => {
     stats.classes.add('invalid_unicode_nul');
@@ -174,14 +174,12 @@ function redactString(value: string, stats: RedactionStats, options: RedactionOp
       return `[REDACTED:${rule.name}]`;
     });
   }
-  if (options.pseudonymizeIdentity) {
-    for (const pattern of LOCAL_PATH_PATTERNS) {
-      output = output.replace(pattern, () => {
-        stats.classes.add('local_path');
-        stats.redactedValues += 1;
-        return '[REDACTED:local_path]';
-      });
-    }
+  for (const pattern of LOCAL_PATH_PATTERNS) {
+    output = output.replace(pattern, () => {
+      stats.classes.add('local_path');
+      stats.redactedValues += 1;
+      return '[REDACTED:local_path]';
+    });
   }
   stats.outputBytes += Buffer.byteLength(output);
   return output;
@@ -201,7 +199,7 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
     }
     return '[REDACTED:sensitive_field]';
   }
-  if (options.pseudonymizeIdentity && /^(cwd|source_path|workspace_path|local_path)$/i.test(normalizedKey) && typeof value === 'string') {
+  if (/^(cwd|source_path|workspace_path|local_path)$/i.test(normalizedKey) && typeof value === 'string') {
     stats.inputBytes += Buffer.byteLength(value);
     stats.outputBytes += Buffer.byteLength('[REDACTED:local_path]');
     stats.classes.add('local_path');

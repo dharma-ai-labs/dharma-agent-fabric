@@ -426,6 +426,19 @@ test('bounded expansion redacts file URIs and local paths while preserving web U
   assert.equal(stats.redactedValues, 5);
 });
 
+test('customer-authorized content never discloses local paths when identity pseudonymization is disabled', async () => {
+  const { redactValue } = await import('./index.js');
+  const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const redacted = redactValue({
+    cwd: '/home/alice/company/private-repo',
+    arguments: JSON.stringify({ command: 'cat /home/alice/company/private-repo/src/app.ts' }),
+  }, stats, '', { pseudonymizeIdentity: false });
+  const encoded = JSON.stringify(redacted);
+  assert.equal(encoded.includes('/home/alice'), false);
+  assert.equal(encoded.includes('[REDACTED:local_path]'), true);
+  assert.equal(stats.classes.has('local_path'), true);
+});
+
 test('identical source sessions produce an identical capsule revision hash', () => {
   const session = {
     provider: 'codex' as const,
