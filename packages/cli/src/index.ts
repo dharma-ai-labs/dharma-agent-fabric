@@ -20,7 +20,7 @@ import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type Ski
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.16';
+const VERSION = '0.1.17';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
