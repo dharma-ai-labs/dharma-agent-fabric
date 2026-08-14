@@ -143,12 +143,17 @@ test('SDK exposes repository agents, instructions, and scoped analysis through H
   await client.transitionRemediationTarget('22222222-2222-4222-8222-222222222222', {
     action: 'approve', establishAutoUpdatePolicy: true,
   }, { idempotencyKey: 'remediation-approve-1' });
+  const heldOutTrajectoryIds = Array.from({ length: 20 }, (_, index) => `trajectory-${index + 1}`);
+  await client.transitionRemediationTarget('33333333-3333-4333-8333-333333333333', {
+    action: 'run_backtest', trajectoryIds: heldOutTrajectoryIds,
+  }, { idempotencyKey: 'remediation-backtest-1' });
   assert.deepEqual(requests.map((request) => new URL(request.url).pathname), [
     '/api/v1/orgs/org_northstar/agent-fabric/instructions',
     '/api/v1/orgs/org_northstar/agent-fabric/repository-agents',
     '/api/v1/orgs/org_northstar/agent-fabric/repository-agents',
     '/api/v1/orgs/org_northstar/agent-fabric/evals',
     '/api/v1/orgs/org_northstar/agent-fabric/remediations/22222222-2222-4222-8222-222222222222',
+    '/api/v1/orgs/org_northstar/agent-fabric/remediations/33333333-3333-4333-8333-333333333333',
   ]);
   assert.equal(new Headers(requests[2]!.headers).get('idempotency-key'), 'repository-agent-1');
   assert.deepEqual(JSON.parse(await requests[3]!.text()).scope, {
@@ -156,6 +161,7 @@ test('SDK exposes repository agents, instructions, and scoped analysis through H
     organizationAgentIds: ['11111111-1111-4111-8111-111111111111'],
   });
   assert.deepEqual(JSON.parse(await requests[4]!.text()), { action: 'approve', establishAutoUpdatePolicy: true });
+  assert.deepEqual(JSON.parse(await requests[5]!.text()), { action: 'run_backtest', trajectoryIds: heldOutTrajectoryIds });
   assert.equal(requests.every((request) => !request.url.includes('run.app')), true);
 });
 

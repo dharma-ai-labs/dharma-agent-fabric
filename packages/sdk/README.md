@@ -13,7 +13,17 @@ const fabric = new AgentFabricClient({
   organizationId: process.env.DHARMA_ORGANIZATION_ID!,
   token: process.env.DHARMA_ORG_API_TOKEN!,
 });
+
+const heldOutTrajectoryIds = [/* 20 to 100 later non-source trajectory IDs */];
+await fabric.transitionRemediationTarget('<target-id>', {
+  action: 'run_backtest',
+  trajectoryIds: heldOutTrajectoryIds,
+}, { idempotencyKey: crypto.randomUUID() });
 ```
+
+`run_backtest` scores retained trajectories collected after the candidate was
+created and binds the result to that repository agent. It does not accept source
+evidence from the remediation analysis window.
 
 - [OpenAPI contract](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/openapi/agent-fabric.openapi.json)
 - [Managed runtime, BYOK, and billing](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/09-managed-runtime-byok-and-billing.md)

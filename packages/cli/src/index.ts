@@ -1074,12 +1074,12 @@ async function runOrganizationCommand(command: string | undefined, subcommand: s
     const targetId = required(flags, 'target-id');
     const body = await commandJsonBody(flags);
     const action = String(flags.get('action') || body.action || '');
-    if (!['link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
-      throw new Error('Remediation action must be link_backtest, approve, merge_pr, release, expand, or rollback.');
+    if (!['run_backtest', 'link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
+      throw new Error('Remediation action must be run_backtest, link_backtest, approve, merge_pr, release, expand, or rollback.');
     }
     return api.transitionRemediationTarget(targetId, {
       ...body,
-      action: action as 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
+      action: action as 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
     });
   }
   if (command === 'skills' && subcommand === 'list') return api.listSkills();

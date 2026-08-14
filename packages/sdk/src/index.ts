@@ -92,10 +92,11 @@ export interface AgentFabricAnalysisScope {
   endpointIds?: string[];
 }
 
-export type AgentFabricRemediationAction = 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback';
+export type AgentFabricRemediationAction = 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback';
 
 export interface AgentFabricRemediationActionInput {
   action: AgentFabricRemediationAction;
+  trajectoryIds?: string[];
   campaignId?: string;
   establishAutoUpdatePolicy?: boolean;
 }
