@@ -20,7 +20,7 @@ import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type Ski
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.14';
+const VERSION = '0.1.16';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -74,6 +74,10 @@ function required(flags: Map<string, string | boolean>, name: string): string {
   const value = flags.get(name);
   if (typeof value !== 'string' || value.length === 0) throw new Error(`Missing required option --${name}.`);
   return value;
+}
+
+export function portalUrl(flags: Map<string, string | boolean>, fallback = 'https://www.dharma-ai.io'): string {
+  return String(flags.get('portal-url') || flags.get('hq-url') || fallback);
 }
 
 function print(value: Output): void {
@@ -1015,7 +1019,7 @@ async function organizationApi(flags: Map<string, string | boolean>) {
   return new AgentFabricApiClient({
     organizationId,
     token,
-    baseUrl: String(flags.get('hq-url') || enrolled?.hqUrl || 'https://www.dharma-ai.io'),
+    baseUrl: portalUrl(flags, enrolled?.hqUrl || 'https://www.dharma-ai.io'),
   });
 }
 
@@ -1074,12 +1078,12 @@ async function runOrganizationCommand(command: string | undefined, subcommand: s
     const targetId = required(flags, 'target-id');
     const body = await commandJsonBody(flags);
     const action = String(flags.get('action') || body.action || '');
-    if (!['link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
-      throw new Error('Remediation action must be link_backtest, approve, merge_pr, release, expand, or rollback.');
+    if (!['run_backtest', 'link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
+      throw new Error('Remediation action must be run_backtest, link_backtest, approve, merge_pr, release, expand, or rollback.');
     }
     return api.transitionRemediationTarget(targetId, {
       ...body,
-      action: action as 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
+      action: action as 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
     });
   }
   if (command === 'skills' && subcommand === 'list') return api.listSkills();
@@ -1145,7 +1149,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   if (flags.has('resume')) {
     pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
   } else {
-    const hqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
+    const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
@@ -1790,7 +1794,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const workspace = await realpath(String(flags.get('workspace') || flags.get('path') || '.'));
   const organizationId = required(flags, 'organization-id');
   const policyRevision = required(flags, 'policy-revision');
-  const requestedHqUrl = normalizeHqUrl(String(flags.get('hq-url') || 'https://www.dharma-ai.io'));
+  const requestedHqUrl = normalizeHqUrl(portalUrl(flags));
   let config = await readDeviceConfig();
   if (!config) {
     const loginFlags = new Map(flags);
@@ -1815,8 +1819,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   if (config.organizationId !== organizationId) {
     throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
   }
-  if (flags.has('hq-url') && config.hqUrl !== requestedHqUrl) {
-    throw new Error('This device is enrolled to a different Dharma HQ origin. Use a separate DHARMA_HOME for each HQ origin.');
+  if ((flags.has('portal-url') || flags.has('hq-url')) && config.hqUrl !== requestedHqUrl) {
+    throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
   }
   const hqUrl = config.hqUrl;
   const providerIds = parseSelectedProviderIds(typeof flags.get('providers') === 'string'
@@ -2129,7 +2133,7 @@ async function executeOneTask(
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider));
+  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider), task.workspaceId);
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
   } catch (error) {
@@ -2287,6 +2291,11 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const nativeMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
   const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
   const nativeInstalled = await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath);
+  let workspaceId: string | undefined;
+  try {
+    const connection = JSON.parse(await readFile(connectionPath, 'utf8')) as { workspaceId?: unknown };
+    if (typeof connection.workspaceId === 'string') workspaceId = connection.workspaceId;
+  } catch {}
   return {
     provider: input.provider,
     ready: repositoryInstalled && nativeInstalled,
@@ -2295,7 +2304,8 @@ export async function verifyAgentFabricSkillInstallation(input: {
     repositorySkillPath,
     connectionPath,
     nativeSkillPath,
-    activeBundleId: await getActiveSkillBundleId(nativeRoot),
+    workspaceId: workspaceId || null,
+    activeBundleId: workspaceId ? await getActiveSkillBundleId(nativeRoot, workspaceId) : null,
     activation: 'next_session',
     nextAction: repositoryInstalled && nativeInstalled
       ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
@@ -2376,7 +2386,11 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
   const destination = nativeSkillDirectory(provider);
   const fabric = await client();
-  const response = await fabric.pollSkill({ workspaceId, provider, installedBundleId: await getActiveSkillBundleId(destination) });
+  const response = await fabric.pollSkill({
+    workspaceId,
+    provider,
+    installedBundleId: await getActiveSkillBundleId(destination, workspaceId),
+  });
   const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
   if (!rollout) return { ok: true, rollout: null, changed: false };
   if (typeof rollout.id !== 'string' || !rollout.bundle || typeof rollout.bundle !== 'object') throw new Error('Skill rollout response is invalid.');
@@ -2547,7 +2561,13 @@ export async function run(argv: string[]): Promise<Output> {
     const providerValue = required(flags, 'provider');
     if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
     const root = nativeSkillDirectory(providerValue as ProviderId);
-    return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
+    const workspaceId = required(flags, 'workspace-id');
+    return {
+      provider: providerValue,
+      workspaceId,
+      activeBundleId: await getActiveSkillBundleId(root, workspaceId),
+      nativeSkillDirectory: root,
+    };
   }
   if (command === 'skills' && subcommand === 'verify') {
     const providerValue = required(flags, 'provider');

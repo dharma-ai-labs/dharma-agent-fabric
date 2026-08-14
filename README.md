@@ -62,7 +62,7 @@ Install and enroll the CLI, then select repositories explicitly:
 ```bash
 npm install --global @dharma-ai-labs/agent-fabric
 dharma login \
-  --hq-url https://www.dharma-ai.io \
+  --portal-url https://www.dharma-ai.io \
   --organization-id <organization-id>
 dharma repositories discover --root "$HOME/work"
 dharma repositories connect \

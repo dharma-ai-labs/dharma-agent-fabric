@@ -227,7 +227,8 @@ test('Claude task execution exposes only bounded edit tools and registered comma
     },
   });
   assert.ok(argv.includes('--verbose'));
-  assert.ok(argv.includes('--bare'));
+  assert.ok(argv.includes('--safe-mode'));
+  assert.ok(!argv.includes('--bare'));
   assert.ok(argv.includes('--no-session-persistence'));
   assert.equal(completeOnResultJson, true);
   assert.ok(argv.includes('Read,Edit,Write,Bash(npm test)'));

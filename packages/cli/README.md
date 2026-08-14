@@ -13,7 +13,7 @@ Requires Node.js 22.20 or later.
 ```bash
 npm install --global @dharma-ai-labs/agent-fabric
 dharma login \
-  --hq-url https://www.dharma-ai.io \
+  --portal-url https://www.dharma-ai.io \
   --organization-id <organization-id>
 dharma repositories discover --root "$HOME/work"
 dharma repositories connect \
@@ -52,6 +52,23 @@ minute, so an admin grant or withdrawal does not require a manual sync command.
 Local metadata analysis is operational triage, not semantic Cognitive Integrity
 evaluation. Nuanced scoring and remediation require approved, redacted evidence;
 missing evidence must produce `insufficient_evidence`.
+
+After a candidate pull request exists and 20 later non-source trajectories have
+been captured, an authorized operator can run the same held-out gate exposed in
+the portal:
+
+```bash
+dharma remediations act \
+  --organization-id <organization-id> \
+  --target-id <repository-remediation-target-id> \
+  --action run_backtest \
+  --body-file held-out-trajectories.json \
+  --confirm
+```
+
+`held-out-trajectories.json` contains a `trajectoryIds` array with 20 to 100
+UUIDs for that repository agent. HQ rejects source, older, cross-agent, deleted,
+or unavailable evidence.
 
 - [Dharma AI](https://www.dharma-ai.io)
 - [Source and issue tracker](https://github.com/dharma-ai-labs/dharma-agent-fabric)

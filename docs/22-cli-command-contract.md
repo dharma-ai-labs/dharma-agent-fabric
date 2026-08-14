@@ -85,12 +85,12 @@ dharma messages send --conversation <id> --target <selector> --state <state.json
 ## Skills
 
 ```text
-dharma skills status --provider <codex|claude|agy>
+dharma skills status --workspace-id <id> --provider <codex|claude|agy>
 dharma skills verify --provider <codex|claude|agy> --workspace <path>
 dharma skills sync --workspace-id <id> --provider <codex|claude|agy> --policy <path>
 ```
 
-`skills verify` checks both the repository-scoped Skill and the provider-native managed bootstrap. `skills sync` polls for an approved, signed rollout and installs it with a receipt. Bundle inspection, planning, promotion, and rollback remain dashboard/control-plane operations; they are not public CLI commands in this release.
+`skills verify` checks both the repository-scoped Skill and the provider-native managed bootstrap. `skills sync` polls for an approved, signed rollout and installs it with a receipt. Active bundle state is workspace-scoped, so one provider installation can retain independently reversible releases for several connected repositories. Bundle inspection, planning, promotion, and rollback remain dashboard/control-plane operations; they are not public CLI commands in this release.
 
 ## Policy
 

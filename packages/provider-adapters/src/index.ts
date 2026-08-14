@@ -163,7 +163,7 @@ export async function executeProviderTask(input: {
     const bashTools = input.allowedCommandArgv.map((parts) => `Bash(${parts.join(' ')})`);
     const allowedTools = input.allowWrites ? ['Read', 'Edit', 'Write', ...bashTools] : ['Read', ...bashTools];
     argv = [
-      '--print', '--verbose', '--bare', '--no-session-persistence',
+      '--print', '--verbose', '--safe-mode', '--no-session-persistence',
       ...(configuredModel ? ['--model', configuredModel] : []),
       '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits',
       '--allowedTools', allowedTools.join(','), '--disallowedTools', 'WebFetch,WebSearch',

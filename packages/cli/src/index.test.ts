@@ -22,6 +22,7 @@ import {
   normalizeGitRemoteIdentity,
   parseCliOptions,
   parseSelectedProviderIds,
+  portalUrl,
   rawLocalRetentionDays,
   relayProcessState,
   releaseDailyContentUpload,
@@ -38,6 +39,15 @@ import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-clien
 import { CLI_USAGE } from './usage.js';
 
 const execFileAsync = promisify(execFile);
+
+test('uses the production B2B portal and keeps hq-url as a compatibility alias', () => {
+  assert.equal(portalUrl(new Map()), 'https://www.dharma-ai.io');
+  assert.equal(portalUrl(new Map([['hq-url', 'https://legacy.example']])), 'https://legacy.example');
+  assert.equal(portalUrl(new Map([
+    ['hq-url', 'https://legacy.example'],
+    ['portal-url', 'https://www.dharma-ai.io'],
+  ])), 'https://www.dharma-ai.io');
+});
 
 function memorySecureStore(): SecureSecretStore {
   const values = new Map<string, string>();
@@ -167,6 +177,14 @@ test('organization commands require environment credentials and explicit confirm
     ]);
     assert.match(requests[3]!.url, /agent-fabric\/remediations\/target-1$/);
     assert.deepEqual(JSON.parse(String(requests[3]!.init?.body)), { establishAutoUpdatePolicy: true, action: 'approve' });
+    const heldOutTrajectoryIds = Array.from({ length: 20 }, (_, index) => `trajectory-${index + 1}`);
+    await run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'run_backtest',
+      '--json-body', JSON.stringify({ trajectoryIds: heldOutTrajectoryIds }), '--confirm',
+    ]);
+    assert.match(requests[4]!.url, /agent-fabric\/remediations\/target-2$/);
+    assert.deepEqual(JSON.parse(String(requests[4]!.init?.body)), { trajectoryIds: heldOutTrajectoryIds, action: 'run_backtest' });
   } finally {
     globalThis.fetch = originalFetch;
     if (originalToken === undefined) delete process.env.DHARMA_ORG_API_TOKEN;
