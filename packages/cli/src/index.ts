@@ -20,7 +20,7 @@ import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type Ski
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.16';
+const VERSION = '0.1.17';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -138,6 +138,32 @@ function assertEvidenceLedger(ledger: EvidenceUploadLedger, day: string) {
     || ledger.capsuleHashes.reduce((sum, hash) => sum + ledger.capsuleBytes[hash]!, 0) !== ledger.totalBytes) {
     throw new Error('Evidence upload ledger is invalid.');
   }
+}
+
+function evidenceLedgerForPolicyActivation(value: unknown, day: string): EvidenceUploadLedger {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Evidence upload ledger is invalid.');
+  }
+  const ledger = value as Partial<EvidenceUploadLedger>;
+  if (typeof ledger.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ledger.day)) {
+    throw new Error('Evidence upload ledger is invalid.');
+  }
+  if (ledger.day !== day) {
+    if (ledger.day > day) throw new Error('Evidence upload ledger is invalid.');
+    return newEvidenceUploadLedger(day);
+  }
+  if (ledger.schema === 'dharma.evidence-upload-ledger/v2') {
+    assertEvidenceLedger(ledger as EvidenceUploadLedger, day);
+    return ledger as EvidenceUploadLedger;
+  }
+  const legacyEmpty = ledger.schema === undefined
+    && ledger.totalBytes === 0
+    && Array.isArray(ledger.capsuleHashes)
+    && ledger.capsuleHashes.length === 0
+    && (ledger.capsuleBytes === undefined
+      || (typeof ledger.capsuleBytes === 'object' && Object.keys(ledger.capsuleBytes).length === 0));
+  if (!legacyEmpty) throw new Error('Evidence upload ledger is invalid.');
+  return newEvidenceUploadLedger(day);
 }
 
 async function pathExists(path: string) {
@@ -728,8 +754,11 @@ async function applyWorkspaceAuthorizationAtomically(input: {
     const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
     const ledgerExists = await pathExists(evidenceUploadLedgerPath());
     if (contentAuthorized && ledgerExists) {
-      const ledger = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as EvidenceUploadLedger;
-      assertEvidenceLedger(ledger, ledger.day);
+      const current = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as unknown;
+      const ledger = evidenceLedgerForPolicyActivation(current, new Date().toISOString().slice(0, 10));
+      if (JSON.stringify(current) !== JSON.stringify(ledger)) {
+        await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+      }
     }
     if (contentAuthorized && !ledgerExists) {
       const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
