@@ -67,6 +67,39 @@ export interface AgentFabricManagedRunInput {
   estimatedCredits?: number;
 }
 
+export interface AgentFabricRepositoryAgentInput {
+  sourceFingerprint: `sha256:${string}`;
+  displayName: string;
+  defaultSourceRef?: string | null;
+}
+
+export interface AgentFabricLocalEndpointInput {
+  workspaceId: string;
+  provider: 'codex' | 'claude' | 'agy';
+  priority?: number;
+}
+
+export interface AgentFabricRuntimeEndpointInput {
+  endpointKind: 'managed_runtime' | 'cloud_byok';
+  managedAgentId: string;
+  runtimeBindingId: string;
+  priority?: number;
+}
+
+export interface AgentFabricAnalysisScope {
+  mode: 'organization' | 'agents' | 'endpoints';
+  organizationAgentIds?: string[];
+  endpointIds?: string[];
+}
+
+export type AgentFabricRemediationAction = 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback';
+
+export interface AgentFabricRemediationActionInput {
+  action: AgentFabricRemediationAction;
+  campaignId?: string;
+  establishAutoUpdatePolicy?: boolean;
+}
+
 export interface AgentFabricErrorEnvelope {
   ok: false;
   error: { code: string; message: string; correlationId?: string | null };
@@ -165,9 +198,26 @@ export class AgentFabricClient {
     return this.request<Record<string, unknown>>('POST', this.orgPath('/byok/gcp'), { action: 'verify' }, options);
   }
   listDevices() { return this.request<Record<string, unknown>>('GET', this.orgPath('/devices')); }
+  instructions() { return this.request<Record<string, unknown>>('GET', this.orgPath('/instructions')); }
+  listAgents() { return this.request<Record<string, unknown>>('GET', this.orgPath('/agents')); }
+  listRepositoryAgents() { return this.request<Record<string, unknown>>('GET', this.orgPath('/repository-agents')); }
+  connectRepositoryAgent(input: AgentFabricRepositoryAgentInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath('/repository-agents'), input, options);
+  }
+  bindLocalEndpoint(agentId: string, input: AgentFabricLocalEndpointInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath(`/agents/${encodeURIComponent(agentId)}/endpoints`), input, options);
+  }
+  bindRuntimeEndpoint(agentId: string, input: AgentFabricRuntimeEndpointInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath(`/agents/${encodeURIComponent(agentId)}/endpoints`), input, options);
+  }
   listWorkspaces() { return this.request<Record<string, unknown>>('GET', this.orgPath('/workspaces')); }
   listTrajectories(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/trajectories${query}`)); }
   listFailures(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/failures${query}`)); }
+  listAnalysisWindows(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/evals${query}`)); }
+  listRemediations(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/remediations${query}`)); }
+  transitionRemediationTarget(targetId: string, input: AgentFabricRemediationActionInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath(`/remediations/${encodeURIComponent(targetId)}`), input, options);
+  }
   listSkills(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/skills${query}`)); }
   usage(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/usage${query}`)); }
   dispatchTask(input: Record<string, unknown>, options?: AgentFabricRequestOptions) {
@@ -178,8 +228,19 @@ export class AgentFabricClient {
   dispatchHandoff(input: AgentFabricHandoffInput, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', this.orgPath('/conversations'), input, options);
   }
-  requestAnalysis(input: { trajectoryIds?: string[]; windowSize?: number; reason?: string }, options?: AgentFabricRequestOptions) {
+  requestAnalysis(input: {
+    trajectoryTarget?: number;
+    retryWindowId?: string;
+    reprocessWindowId?: string;
+    scope?: AgentFabricAnalysisScope;
+  }, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', this.orgPath('/evals'), input, options);
+  }
+  releaseSkill(input: Record<string, unknown>, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath('/skills'), input, options);
+  }
+  transitionSkillRollout(bundleId: string, input: { action: 'start' | 'expand' | 'rollback'; canaryPercent?: number }, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath(`/skills/${encodeURIComponent(bundleId)}/rollouts`), input, options);
   }
   createManagedAgent(input: Record<string, unknown>, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', `/api/orgs/${encodeURIComponent(this.organizationId)}/managed-agents`, input, options);

@@ -19,11 +19,14 @@ import {
   applyServerEvidencePolicy,
   materializeInlineSkillFiles,
   nativeSkillDirectory,
+  normalizeGitRemoteIdentity,
+  parseCliOptions,
   rawLocalRetentionDays,
   relayProcessState,
   releaseDailyContentUpload,
   reserveDailyContentUpload,
   run,
+  sourceRepositoryFingerprint,
   taskResponsePreview,
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
@@ -31,6 +34,7 @@ import {
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
+import { CLI_USAGE } from './usage.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,7 +86,7 @@ test('version is parser-safe structured output', async () => {
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {
-  assert.match(String(await run(['--help'])), /^Usage: dharma/);
+  assert.equal(String(await run(['--help'])), CLI_USAGE);
   const entrypoint = new URL('./index.js', import.meta.url);
   for (const argv of [['--help'], ['--version']]) {
     const result = await execFileAsync(process.execPath, [fileURLToPath(entrypoint), ...argv], { encoding: 'utf8' });
@@ -91,7 +95,7 @@ test('help is successful and direct basic commands keep stdout and stderr clean'
   }
   const bin = new URL('./bin.js', import.meta.url);
   const help = await execFileAsync(process.execPath, [fileURLToPath(bin), '--help'], { encoding: 'utf8' });
-  assert.match(help.stdout, /^Usage: dharma/);
+  assert.equal(help.stdout.trim(), CLI_USAGE);
   assert.equal(help.stderr, '');
 });
 
@@ -108,6 +112,129 @@ test('global npm symlinks still execute the CLI entrypoint', async () => {
 
 test('unknown commands fail as usage errors', async () => {
   await assert.rejects(() => run(['unknown']), /Usage:/);
+});
+
+test('organization commands require environment credentials and explicit confirmation for mutations', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.DHARMA_ORG_API_TOKEN;
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  process.env.DHARMA_ORG_API_TOKEN = 'test-organization-token';
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({ url: String(input), init });
+    return new Response(JSON.stringify({ ok: true, agents: [{ id: 'agent-1' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  try {
+    const listed = await run([
+      'agents', 'list', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+    ]) as Record<string, unknown>;
+    assert.equal(listed.ok, true);
+    assert.match(requests[0]!.url, /org_northstar\/agent-fabric\/agents$/);
+    assert.equal((requests[0]!.init?.headers as Record<string, string>).authorization, 'Bearer test-organization-token');
+    await assert.rejects(() => run([
+      'agents', 'bind-runtime', '--organization-id', 'org_northstar', '--agent-id', 'agent-1',
+      '--json-body', '{"endpointKind":"managed_runtime","managedAgentId":"managed-1","runtimeBindingId":"binding-1"}',
+    ]), /requires --confirm/);
+    await run([
+      'agents', 'bind-runtime', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--agent-id', 'agent-1',
+      '--json-body', '{"endpointKind":"managed_runtime","managedAgentId":"managed-1","runtimeBindingId":"binding-1"}',
+      '--confirm',
+    ]);
+    assert.match(requests[1]!.url, /agent-fabric\/agents\/agent-1\/endpoints$/);
+    assert.deepEqual(JSON.parse(String(requests[1]!.init?.body)), {
+      endpointKind: 'managed_runtime', managedAgentId: 'managed-1', runtimeBindingId: 'binding-1',
+    });
+    await assert.rejects(() => run([
+      'experiments', 'run', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--json-body', '{"trajectoryTarget":100}',
+    ]), /requires --confirm/);
+    await run([
+      'experiments', 'run', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--json-body', '{"trajectoryTarget":100,"scope":{"mode":"agents","organizationAgentIds":["agent-1"]}}', '--confirm',
+    ]);
+    assert.equal(requests[2]!.init?.method, 'POST');
+    assert.match(String(requests[2]!.init?.body), /organizationAgentIds/);
+    await assert.rejects(() => run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--target-id', 'target-1', '--action', 'rollback',
+    ]), /requires --confirm/);
+    await run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-1', '--action', 'approve', '--json-body', '{"establishAutoUpdatePolicy":true}', '--confirm',
+    ]);
+    assert.match(requests[3]!.url, /agent-fabric\/remediations\/target-1$/);
+    assert.deepEqual(JSON.parse(String(requests[3]!.init?.body)), { establishAutoUpdatePolicy: true, action: 'approve' });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.DHARMA_ORG_API_TOKEN;
+    else process.env.DHARMA_ORG_API_TOKEN = originalToken;
+  }
+});
+
+test('repository identity is credential-free and stable across Git transport forms', () => {
+  assert.equal(
+    normalizeGitRemoteIdentity('git@github.com:Dharma-AI-Labs/Northstar.git'),
+    'github.com/dharma-ai-labs/northstar',
+  );
+  assert.equal(
+    normalizeGitRemoteIdentity('https://oauth-token@github.com/dharma-ai-labs/northstar.git?ignored=1'),
+    'github.com/dharma-ai-labs/northstar',
+  );
+  assert.equal(
+    sourceRepositoryFingerprint('git@github.com:Dharma-AI-Labs/Northstar.git').fingerprint,
+    sourceRepositoryFingerprint('https://token@github.com/dharma-ai-labs/northstar.git').fingerprint,
+  );
+  assert.throws(() => sourceRepositoryFingerprint(null), /--repository-key/);
+  assert.throws(() => normalizeGitRemoteIdentity('file:///tmp/private-repo'), /explicit stable/);
+});
+
+test('CLI parser preserves repeated repository selections and keys', () => {
+  const parsed = parseCliOptions([
+    'repositories', 'connect', '--repo', 'one', '--repo=two', '--repository-key', 'one=northstar-one',
+    '--repository-key=two=northstar-two', '--non-interactive', '--json',
+  ]);
+  assert.deepEqual(parsed.positional, ['repositories', 'connect']);
+  assert.deepEqual(parsed.repeated.get('repo'), ['one', 'two']);
+  assert.deepEqual(parsed.repeated.get('repository-key'), ['one=northstar-one', 'two=northstar-two']);
+  assert.equal(parsed.flags.get('non-interactive'), true);
+});
+
+test('workspace registration reuses a normalized repository identity across local paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-repository-identity-'));
+  const home = join(root, 'home');
+  const first = join(root, 'machine-a');
+  const second = join(root, 'machine-b');
+  const unhosted = join(root, 'unhosted');
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, 'device.json'), JSON.stringify({
+    organizationId: 'org_northstar',
+    deviceId: 'device-northstar',
+  }));
+  for (const repository of [first, second, unhosted]) {
+    await mkdir(repository);
+    await execFileAsync('git', ['init', repository]);
+  }
+  await execFileAsync('git', ['-C', first, 'remote', 'add', 'origin', 'git@github.com:Dharma-AI-Labs/Northstar.git']);
+  await execFileAsync('git', ['-C', second, 'remote', 'add', 'origin', 'https://token@github.com/dharma-ai-labs/northstar.git']);
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    const left = await run(['workspace', 'add', first]) as Record<string, unknown>;
+    const right = await run(['workspace', 'add', second]) as Record<string, unknown>;
+    assert.notEqual(left.workspaceId, right.workspaceId);
+    assert.equal(left.sourceFingerprint, right.sourceFingerprint);
+    await assert.rejects(() => run(['workspace', 'add', unhosted]), /--repository-key/);
+    const explicit = await run(['workspace', 'add', unhosted, '--repository-key', 'northstar/unhosted']) as Record<string, unknown>;
+    assert.match(String(explicit.sourceFingerprint), /^sha256:[a-f0-9]{64}$/);
+    const listed = await run(['repositories', 'list', '--verbose']) as { repositories: Array<Record<string, unknown>> };
+    assert.equal(listed.repositories.length, 3);
+    assert.equal(listed.repositories.every((entry) => entry.connected === false), true);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
 });
 
 test('documented direct-sync commands enforce their required arguments', async () => {

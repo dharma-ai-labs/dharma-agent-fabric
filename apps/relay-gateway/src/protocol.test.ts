@@ -23,6 +23,14 @@ test('relay permits only Agent Fabric routes and strips ambient credentials', ()
   assert.equal(parsed.pathname, request.pathname);
 });
 
+test('relay permits the repository-agent control operation', () => {
+  const parsed = parseRelayRequest({
+    ...request,
+    pathname: '/api/v1/orgs/org_customer/agent-fabric/repository-agents',
+  });
+  assert.equal(parsed.pathname.endsWith('/repository-agents'), true);
+});
+
 test('relay rejects arbitrary HQ, worker, and admin paths', () => {
   for (const pathname of ['/api/admin', '/api/workers/agent-executor', '/api/v1/orgs/org_customer/managed-agents']) {
     assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);

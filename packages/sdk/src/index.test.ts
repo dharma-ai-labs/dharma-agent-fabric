@@ -118,3 +118,77 @@ test('SDK submits the bounded multimodal managed-run contract to HQ only', async
   assert.equal(payload.attachments[0].mimeType, 'image/png');
   assert.equal(captured.url.includes('run.app'), false);
 });
+
+test('SDK exposes repository agents, instructions, and scoped analysis through HQ only', async () => {
+  const requests: Request[] = [];
+  const client = new AgentFabricClient({
+    organizationId: 'org_northstar',
+    token: 'dharma_org_test',
+    fetcher: async (input, init) => {
+      requests.push(new Request(input, init));
+      return new Response(JSON.stringify({ ok: true }), { status: init?.method === 'POST' ? 201 : 200 });
+    },
+  });
+  await client.instructions();
+  await client.listRepositoryAgents();
+  await client.connectRepositoryAgent({
+    sourceFingerprint: `sha256:${'b'.repeat(64)}`,
+    displayName: 'Northstar checkout',
+    defaultSourceRef: 'main',
+  }, { idempotencyKey: 'repository-agent-1' });
+  await client.requestAnalysis({
+    trajectoryTarget: 100,
+    scope: { mode: 'agents', organizationAgentIds: ['11111111-1111-4111-8111-111111111111'] },
+  }, { idempotencyKey: 'analysis-1' });
+  await client.transitionRemediationTarget('22222222-2222-4222-8222-222222222222', {
+    action: 'approve', establishAutoUpdatePolicy: true,
+  }, { idempotencyKey: 'remediation-approve-1' });
+  assert.deepEqual(requests.map((request) => new URL(request.url).pathname), [
+    '/api/v1/orgs/org_northstar/agent-fabric/instructions',
+    '/api/v1/orgs/org_northstar/agent-fabric/repository-agents',
+    '/api/v1/orgs/org_northstar/agent-fabric/repository-agents',
+    '/api/v1/orgs/org_northstar/agent-fabric/evals',
+    '/api/v1/orgs/org_northstar/agent-fabric/remediations/22222222-2222-4222-8222-222222222222',
+  ]);
+  assert.equal(new Headers(requests[2]!.headers).get('idempotency-key'), 'repository-agent-1');
+  assert.deepEqual(JSON.parse(await requests[3]!.text()).scope, {
+    mode: 'agents',
+    organizationAgentIds: ['11111111-1111-4111-8111-111111111111'],
+  });
+  assert.deepEqual(JSON.parse(await requests[4]!.text()), { action: 'approve', establishAutoUpdatePolicy: true });
+  assert.equal(requests.every((request) => !request.url.includes('run.app')), true);
+});
+
+test('SDK binds local, managed ADK, and Vertex BYOK endpoints to one repository agent through HQ', async () => {
+  const requests: Request[] = [];
+  const client = new AgentFabricClient({
+    organizationId: 'org_northstar',
+    token: 'dharma_org_test',
+    fetcher: async (input, init) => {
+      requests.push(new Request(input, init));
+      return new Response(JSON.stringify({ ok: true, endpoint: { id: 'endpoint-1' } }), { status: 201 });
+    },
+  });
+  const agentId = '11111111-1111-4111-8111-111111111111';
+  await client.bindLocalEndpoint(agentId, {
+    workspaceId: '22222222-2222-4222-8222-222222222222', provider: 'codex', priority: 25,
+  }, { idempotencyKey: 'bind-local-1' });
+  await client.bindRuntimeEndpoint(agentId, {
+    endpointKind: 'managed_runtime',
+    managedAgentId: '33333333-3333-4333-8333-333333333333',
+    runtimeBindingId: '44444444-4444-4444-8444-444444444444',
+  }, { idempotencyKey: 'bind-managed-1' });
+  await client.bindRuntimeEndpoint(agentId, {
+    endpointKind: 'cloud_byok',
+    managedAgentId: '55555555-5555-4555-8555-555555555555',
+    runtimeBindingId: '66666666-6666-4666-8666-666666666666',
+  }, { idempotencyKey: 'bind-byok-1' });
+  assert.equal(requests.length, 3);
+  assert.equal(requests.every((request) => new URL(request.url).pathname.endsWith(`/agents/${agentId}/endpoints`)), true);
+  assert.deepEqual(JSON.parse(await requests[1]!.text()), {
+    endpointKind: 'managed_runtime',
+    managedAgentId: '33333333-3333-4333-8333-333333333333',
+    runtimeBindingId: '44444444-4444-4444-8444-444444444444',
+  });
+  assert.equal(requests.every((request) => !request.url.includes('run.app')), true);
+});
