@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, installSkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleId, installSkillBundle, type SkillBundle } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
@@ -21,8 +21,8 @@ const policy: OrganizationPolicy = {
   skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
 };
 
-async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey']): Promise<SkillBundle> {
-  const skill = { skillId: 'dharma-boundary', version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
+async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'], skillId = 'dharma-boundary'): Promise<SkillBundle> {
+  const skill = { skillId, version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
   const base = {
     schema: 'dharma.skill-bundle/v1' as const, bundleId, organizationId: 'org_test', version: '1.0.0', operation: 'install' as const, skills: [skill],
     riskClass: 'R2' as const, targetSelectors: { providers: ['codex'] }, activationPolicy: 'next_session' as const,
@@ -47,15 +47,16 @@ test('verified skill activates and a failed canary restores the prior bundle', a
   const first = await signedBundle(source, firstBundleId, server.privateKey);
   const receipt = await installSkillBundle({ bundle: first, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, workspaceId, provider: 'codex', smokeCommandId: 'smokePass' });
   assert.equal(receipt.status, 'active');
-  assert.match(await readFile(resolve(native, '.dharma-managed/active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
   assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
   await writeFile(resolve(source, 'SKILL.md'), '# Broken candidate\n');
   const second = await signedBundle(source, secondBundleId, server.privateKey);
   const rollback = await installSkillBundle({ bundle: second, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, workspaceId, provider: 'codex', smokeCommandId: 'smokeFail' });
   assert.equal(rollback.status, 'rolled_back');
-  assert.match(await readFile(resolve(native, '.dharma-managed/active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
+  assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
   assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
-  assert.equal((await readFile(resolve(native, '.dharma-managed/ACTIVE_BUNDLE'), 'utf8')).trim(), firstBundleId);
+  assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), firstBundleId);
 });
 
 test('R3 bundles cannot install without explicit organization approval', async () => {
@@ -101,5 +102,52 @@ test('signed clear baseline removes managed skills and preserves unmanaged provi
   assert.equal(receipt.previousBundleId, installed.bundleId);
   await assert.rejects(readFile(resolve(native, 'dharma-boundary', 'SKILL.md')), /ENOENT/);
   assert.match(await readFile(resolve(native, 'customer-skill', 'SKILL.md'), 'utf8'), /Customer owned/);
-  assert.equal((await readFile(resolve(native, '.dharma-managed/ACTIVE_BUNDLE'), 'utf8')).trim(), clear.bundleId);
+  assert.equal((await readFile(resolve(native, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE'), 'utf8')).trim(), clear.bundleId);
+});
+
+test('two repository workspaces retain independent active bundles and native skills', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-multi-workspace-'));
+  const native = resolve(root, 'native');
+  const sourceA = resolve(root, 'source-a', 'skill');
+  const sourceB = resolve(root, 'source-b', 'skill');
+  await mkdir(sourceA, { recursive: true });
+  await mkdir(sourceB, { recursive: true });
+  await writeFile(resolve(sourceA, 'SKILL.md'), '# Garment evidence boundary\n');
+  await writeFile(resolve(sourceB, 'SKILL.md'), '# Support authority boundary\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceA = randomUUID();
+  const workspaceB = randomUUID();
+  const bundleA = await signedBundle(sourceA, randomUUID(), server.privateKey, 'garment-boundary');
+  const bundleB = await signedBundle(sourceB, randomUUID(), server.privateKey, 'support-boundary');
+
+  await installSkillBundle({
+    bundle: bundleA, sourceDirectory: resolve(root, 'source-a'), nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, workspaceId: workspaceA, provider: 'codex',
+  });
+  await installSkillBundle({
+    bundle: bundleB, sourceDirectory: resolve(root, 'source-b'), nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, workspaceId: workspaceB, provider: 'codex',
+  });
+
+  assert.equal(await getActiveSkillBundleId(native, workspaceA), bundleA.bundleId);
+  assert.equal(await getActiveSkillBundleId(native, workspaceB), bundleB.bundleId);
+  assert.match(await readFile(resolve(native, 'garment-boundary/SKILL.md'), 'utf8'), /Garment/);
+  assert.match(await readFile(resolve(native, 'support-boundary/SKILL.md'), 'utf8'), /Support/);
+
+  await writeFile(resolve(sourceA, 'SKILL.md'), '# Broken garment candidate\n');
+  const brokenA = await signedBundle(sourceA, randomUUID(), server.privateKey, 'garment-boundary');
+  const rollback = await installSkillBundle({
+    bundle: brokenA, sourceDirectory: resolve(root, 'source-a'), nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, workspaceId: workspaceA, provider: 'codex', smokeCommandId: 'smokeFail',
+  });
+  assert.equal(rollback.status, 'rolled_back');
+  assert.equal(await getActiveSkillBundleId(native, workspaceA), bundleA.bundleId);
+  assert.equal(await getActiveSkillBundleId(native, workspaceB), bundleB.bundleId);
+  assert.match(await readFile(resolve(native, 'garment-boundary/SKILL.md'), 'utf8'), /Garment/);
+  assert.match(await readFile(resolve(native, 'support-boundary/SKILL.md'), 'utf8'), /Support/);
 });

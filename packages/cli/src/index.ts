@@ -20,7 +20,7 @@ import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type Ski
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.15';
+const VERSION = '0.1.16';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -2129,7 +2129,7 @@ async function executeOneTask(
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider));
+  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider), task.workspaceId);
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
   } catch (error) {
@@ -2287,6 +2287,11 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const nativeMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
   const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
   const nativeInstalled = await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath);
+  let workspaceId: string | undefined;
+  try {
+    const connection = JSON.parse(await readFile(connectionPath, 'utf8')) as { workspaceId?: unknown };
+    if (typeof connection.workspaceId === 'string') workspaceId = connection.workspaceId;
+  } catch {}
   return {
     provider: input.provider,
     ready: repositoryInstalled && nativeInstalled,
@@ -2295,7 +2300,8 @@ export async function verifyAgentFabricSkillInstallation(input: {
     repositorySkillPath,
     connectionPath,
     nativeSkillPath,
-    activeBundleId: await getActiveSkillBundleId(nativeRoot),
+    workspaceId: workspaceId || null,
+    activeBundleId: workspaceId ? await getActiveSkillBundleId(nativeRoot, workspaceId) : null,
     activation: 'next_session',
     nextAction: repositoryInstalled && nativeInstalled
       ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
@@ -2376,7 +2382,11 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
   const destination = nativeSkillDirectory(provider);
   const fabric = await client();
-  const response = await fabric.pollSkill({ workspaceId, provider, installedBundleId: await getActiveSkillBundleId(destination) });
+  const response = await fabric.pollSkill({
+    workspaceId,
+    provider,
+    installedBundleId: await getActiveSkillBundleId(destination, workspaceId),
+  });
   const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
   if (!rollout) return { ok: true, rollout: null, changed: false };
   if (typeof rollout.id !== 'string' || !rollout.bundle || typeof rollout.bundle !== 'object') throw new Error('Skill rollout response is invalid.');
@@ -2547,7 +2557,13 @@ export async function run(argv: string[]): Promise<Output> {
     const providerValue = required(flags, 'provider');
     if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
     const root = nativeSkillDirectory(providerValue as ProviderId);
-    return { provider: providerValue, activeBundleId: await getActiveSkillBundleId(root), nativeSkillDirectory: root };
+    const workspaceId = required(flags, 'workspace-id');
+    return {
+      provider: providerValue,
+      workspaceId,
+      activeBundleId: await getActiveSkillBundleId(root, workspaceId),
+      nativeSkillDirectory: root,
+    };
   }
   if (command === 'skills' && subcommand === 'verify') {
     const providerValue = required(flags, 'provider');

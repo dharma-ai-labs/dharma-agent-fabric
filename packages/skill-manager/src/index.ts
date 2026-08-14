@@ -113,6 +113,13 @@ async function readActiveBundleId(root: string): Promise<string | null> {
   }
 }
 
+function workspaceManagedRoot(nativeSkillDirectory: string, workspaceId: string) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspaceId)) {
+    throw new Error('Workspace ID is invalid for managed skill state.');
+  }
+  return resolve(nativeSkillDirectory, '.dharma-managed', 'workspaces', workspaceId);
+}
+
 async function pathExists(path: string) {
   try { await lstat(path); return true; }
   catch (error) {
@@ -135,6 +142,7 @@ async function activateNativeSkills(input: {
   nativeSkillDirectory: string;
   release: string;
   bundleId: string;
+  workspaceId: string;
   skillIds: string[];
   removeSkillIds: string[];
 }) {
@@ -145,6 +153,10 @@ async function activateNativeSkills(input: {
     if (await pathExists(target)) {
       const marker = resolve(target, '.dharma-agent-fabric.json');
       if (!await pathExists(marker)) throw new Error(`Refusing to replace unmanaged provider skill: ${skillId}`);
+      const ownership = JSON.parse(await readFile(marker, 'utf8')) as { workspaceId?: unknown };
+      if (typeof ownership.workspaceId === 'string' && ownership.workspaceId !== input.workspaceId) {
+        throw new Error(`Refusing to replace a provider skill managed by another workspace: ${skillId}`);
+      }
     }
   }
 
@@ -165,7 +177,7 @@ async function activateNativeSkills(input: {
       await cp(source, staged, { recursive: true, errorOnExist: true, force: false });
       await writeFile(
         resolve(staged, '.dharma-agent-fabric.json'),
-        `${JSON.stringify({ bundleId: input.bundleId, skillId })}\n`,
+        `${JSON.stringify({ bundleId: input.bundleId, skillId, workspaceId: input.workspaceId })}\n`,
         { mode: 0o600 },
       );
     }
@@ -199,8 +211,12 @@ async function activateNativeSkills(input: {
   }
 }
 
-export async function getActiveSkillBundleId(nativeSkillDirectory: string) {
-  return readActiveBundleId(resolve(nativeSkillDirectory, '.dharma-managed'));
+export async function getActiveSkillBundleId(nativeSkillDirectory: string, workspaceId?: string) {
+  return readActiveBundleId(
+    workspaceId
+      ? workspaceManagedRoot(nativeSkillDirectory, workspaceId)
+      : resolve(nativeSkillDirectory, '.dharma-managed'),
+  );
 }
 
 export async function installSkillBundle(input: {
@@ -226,7 +242,7 @@ export async function installSkillBundle(input: {
   }
   if (!input.policy.skills.automaticInstall) throw new Error('Automatic skill installation is disabled by policy.');
 
-  const managedRoot = resolve(input.nativeSkillDirectory, '.dharma-managed');
+  const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
   const releases = resolve(managedRoot, 'releases');
   const release = assertContained(releases, resolve(releases, input.bundle.bundleId));
   const active = resolve(managedRoot, 'active');
@@ -245,7 +261,11 @@ export async function installSkillBundle(input: {
     checks.push({ name: `content:${skill.skillId}`, status: 'pass', details: actualHash });
   }
   const skillIds = input.bundle.skills.map((skill) => skill.skillId);
-  await writeFile(resolve(release, 'BUNDLE.json'), `${JSON.stringify({ bundleId: input.bundle.bundleId, skillIds })}\n`, { mode: 0o600 });
+  await writeFile(
+    resolve(release, 'BUNDLE.json'),
+    `${JSON.stringify({ bundleId: input.bundle.bundleId, workspaceId: input.workspaceId, skillIds })}\n`,
+    { mode: 0o600 },
+  );
   const previousRelease = previousBundleId ? resolve(releases, previousBundleId) : null;
   const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
 
@@ -257,6 +277,7 @@ export async function installSkillBundle(input: {
     nativeSkillDirectory: input.nativeSkillDirectory,
     release,
     bundleId: input.bundle.bundleId,
+    workspaceId: input.workspaceId,
     skillIds,
     removeSkillIds: previousSkillIds,
   });
@@ -275,6 +296,7 @@ export async function installSkillBundle(input: {
         nativeSkillDirectory: input.nativeSkillDirectory,
         release: previousRelease || release,
         bundleId: previousBundleId || input.bundle.bundleId,
+        workspaceId: input.workspaceId,
         skillIds: previousBundleId ? previousSkillIds : [],
         removeSkillIds: skillIds,
       });
