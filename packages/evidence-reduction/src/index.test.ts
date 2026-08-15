@@ -167,6 +167,31 @@ test('customer-authorized content includes redacted native payload under a conse
   assert.equal(encoded.includes('[REDACTED:sensitive_field]'), true);
 });
 
+test('customer-authorized content redacts every labeled-secret form rejected by HQ', () => {
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy: customerAuthorizedPolicy(),
+    rawContentId: `sha256:${'9'.repeat(64)}`, rawBytes: 2_000,
+    session: {
+      provider: 'codex', sessionId: 'session_labeled_secret', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-15T00:00:00.000Z', endedAt: '2026-08-15T00:00:01.000Z',
+      records: [{
+        native: {
+          output: [{
+            text: 'access_token: customer-value-with-markdown] refresh-token="second-value-123"',
+          }],
+        },
+        sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo',
+        timestamp: '2026-08-15T00:00:00.000Z', kind: 'agent_message',
+      }],
+    },
+  });
+  const serialized = JSON.stringify(capsule.events);
+  assert.equal(serialized.includes('customer-value-with-markdown'), false);
+  assert.equal(serialized.includes('second-value-123'), false);
+  assert.equal(capsule.redactionReceipt.classes.includes('authorization'), true);
+});
+
 test('customer-authorized content omits records that reference configured excluded paths', () => {
   const authorizedPolicy = customerAuthorizedPolicy(['private/**']);
   const capsule = buildTrajectoryCapsule({
