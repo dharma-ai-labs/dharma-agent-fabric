@@ -11,7 +11,10 @@ const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   { name: 'aws_access_key', pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g },
   { name: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   { name: 'connection_string', pattern: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s"']+/gi },
-  { name: 'authorization', pattern: /\b(?:authorization|api[_-]?key|access[_-]?token|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{12,}["']?/gi },
+  // Keep this value grammar at least as broad as HQ's SECRET_VALUE gate. The
+  // client must redact labeled secrets before signing instead of relying on a
+  // server rejection after the local capsule has been committed.
+  { name: 'authorization', pattern: /\b(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*[^\s,;]{8,}/gi },
   { name: 'google_api_key', pattern: /\bAIza[0-9A-Za-z_-]{30,}\b/g },
   { name: 'slack_token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
   { name: 'generic_secret', pattern: /\b(?:client[_-]?secret|refresh[_-]?token|aws[_-]?secret[_-]?access[_-]?key|auth[_-]?token|x[_-]?api[_-]?key)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}["']?/gi },
