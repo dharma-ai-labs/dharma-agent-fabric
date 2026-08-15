@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-task-runner",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Signed, leased, policy-bound local task runner for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/task-runner#readme",
@@ -16,6 +16,6 @@
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.2",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.4",
-    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.2"
+    "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.5"
   }
 }
