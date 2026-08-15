@@ -194,6 +194,34 @@ test('Codex Desktop nested payloads retain semantic event kinds', async () => {
   ]);
 });
 
+test('Codex discovery strips encrypted reasoning while retaining visible provider evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
+  const workspace = join(root, 'repo');
+  const sessions = join(root, 'sessions');
+  await mkdir(workspace);
+  await mkdir(sessions);
+  await writeFile(join(sessions, 'protected.jsonl'), [
+    { type: 'session_meta', payload: { cwd: workspace } },
+    {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Visible evidence.' }],
+        encrypted_content: 'opaque-protected-reasoning',
+        encryptedReasoning: 'opaque-protected-reasoning-v2',
+      },
+    },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+
+  const result = await codexAdapter.discover({ workspace, roots: [sessions] });
+  const message = result[0]?.records[1]?.native as Record<string, unknown>;
+  const payload = message.payload as Record<string, unknown>;
+  assert.deepEqual(payload.content, [{ type: 'output_text', text: 'Visible evidence.' }]);
+  assert.equal('encrypted_content' in payload, false);
+  assert.equal('encryptedReasoning' in payload, false);
+});
+
 test('Codex Desktop discovery emits one session per real turn context', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   const workspace = join(root, 'repo');
