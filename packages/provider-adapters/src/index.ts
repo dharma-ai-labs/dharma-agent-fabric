@@ -281,6 +281,21 @@ function inferKind(record: Record<string, unknown>): string {
   return 'metadata';
 }
 
+const PROTECTED_NATIVE_FIELDS = new Set([
+  'encrypted_content',
+  'encryptedContent',
+  'encrypted_reasoning',
+  'encryptedReasoning',
+]);
+
+function stripProtectedNativeContent(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripProtectedNativeContent);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !PROTECTED_NATIVE_FIELDS.has(key))
+    .map(([key, child]) => [key, stripProtectedNativeContent(child)]));
+}
+
 async function jsonlFiles(root: string): Promise<string[]> {
   try { await access(root); } catch { return []; }
   const rootStat = await stat(root);
@@ -357,7 +372,7 @@ async function parseSessionFile(
       continue;
     }
     let native: Record<string, unknown>;
-    try { native = JSON.parse(value) as Record<string, unknown>; } catch {
+    try { native = stripProtectedNativeContent(JSON.parse(value)) as Record<string, unknown>; } catch {
       omitted = true;
       markCurrentTurnPartial();
       continue;
