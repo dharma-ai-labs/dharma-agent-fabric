@@ -41,10 +41,30 @@ const workspaceDirectories = [
   'packages/cli',
 ];
 
+const workspaceManifests = new Map();
+for (const workspace of workspaceDirectories) {
+  const manifest = JSON.parse(await readFile(resolve(root, workspace, 'package.json'), 'utf8'));
+  workspaceManifests.set(manifest.name, manifest);
+}
+
+const providerAdapter = workspaceManifests.get('@dharma-ai-labs/agent-fabric-provider-adapters');
+for (const packageName of [
+  '@dharma-ai-labs/agent-fabric-evidence-reduction',
+  '@dharma-ai-labs/agent-fabric-task-runner',
+]) {
+  const manifest = workspaceManifests.get(packageName);
+  const pinnedVersion = manifest?.dependencies?.['@dharma-ai-labs/agent-fabric-provider-adapters'];
+  if (pinnedVersion !== providerAdapter?.version) {
+    throw new Error(
+      `${packageName} must use the current provider adapter ${providerAdapter?.version}; found ${pinnedVersion || 'missing'}.`,
+    );
+  }
+}
+
 for (const workspace of workspaceDirectories) {
   const manifestPath = resolve(root, workspace, 'package.json');
   const readmePath = resolve(root, workspace, 'README.md');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const manifest = workspaceManifests.get(JSON.parse(await readFile(manifestPath, 'utf8')).name);
   await access(readmePath, constants.R_OK);
   for (const field of ['description', 'homepage', 'bugs', 'license']) {
     if (!manifest[field]) throw new Error(`${manifest.name} is missing ${field}.`);
