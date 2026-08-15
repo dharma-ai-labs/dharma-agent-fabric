@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -37,6 +37,12 @@ import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { CLI_USAGE } from './usage.js';
+import {
+  isSupportedNodeVersion,
+  launchWithRuntime,
+  nodeRuntimeCandidates,
+  runtimeBootstrapHint,
+} from './runtime-bootstrap.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -94,6 +100,54 @@ test('organization raw evidence retention is validated and defaults explicitly',
 test('version is parser-safe structured output', async () => {
   const packageMetadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
   assert.deepEqual(await run(['version']), { version: packageMetadata.version });
+});
+
+test('runtime bootstrap accepts supported LTS runtimes and rejects unsupported versions', () => {
+  assert.equal(isSupportedNodeVersion('v18.19.1'), false);
+  assert.equal(isSupportedNodeVersion('22.19.0'), false);
+  assert.equal(isSupportedNodeVersion('v22.20.0'), true);
+  assert.equal(isSupportedNodeVersion('24.15.0'), true);
+  assert.equal(isSupportedNodeVersion('25.0.0'), false);
+});
+
+test('runtime bootstrap discovers explicit and local agent runtimes without duplicates', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-runtime-bootstrap-'));
+  const localNode = join(root, '.local', 'bin', 'node');
+  await mkdir(join(root, '.local', 'bin'), { recursive: true });
+  await writeFile(localNode, '#!/bin/sh\n');
+  const candidates = nodeRuntimeCandidates({
+    env: { PATH: join(root, '.local', 'bin'), DHARMA_NODE_BINARY: localNode },
+    home: root,
+    platform: 'linux',
+    execPath: localNode,
+  });
+  const selectedCandidate = candidates[0];
+  assert.ok(selectedCandidate);
+  const [candidateMetadata, requestedMetadata] = await Promise.all([
+    stat(selectedCandidate),
+    stat(localNode),
+  ]);
+  assert.equal(candidateMetadata.dev, requestedMetadata.dev);
+  assert.equal(candidateMetadata.ino, requestedMetadata.ino);
+  assert.equal(new Set(candidates).size, candidates.length);
+  assert.match(runtimeBootstrapHint({ DHARMA_NODE_BINARY: localNode }), /DHARMA_NODE_BINARY/);
+});
+
+test('runtime bootstrap ignores PATH-only executables and forwards argv and bootstrap state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-runtime-launch-'));
+  const pathOnlyNode = join(root, 'node');
+  const probe = join(root, 'probe.mjs');
+  const output = join(root, 'result.json');
+  await writeFile(pathOnlyNode, '#!/bin/sh\n');
+  await writeFile(probe, `import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.OUTPUT_FILE, JSON.stringify({ args: process.argv.slice(2), bootstrapped: process.env.DHARMA_NODE_BOOTSTRAPPED }));\n`);
+  const candidates = nodeRuntimeCandidates({ env: { PATH: root }, home: join(root, 'home'), execPath: '/missing/node' });
+  assert.equal(candidates.includes(await realpath(pathOnlyNode)), false);
+  const child = launchWithRuntime(process.execPath, probe, ['status', '--json'], { OUTPUT_FILE: output });
+  assert.equal(child.status, 0);
+  assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), {
+    args: ['status', '--json'],
+    bootstrapped: '1',
+  });
 });
 
 test('help is successful and direct basic commands keep stdout and stderr clean', async () => {

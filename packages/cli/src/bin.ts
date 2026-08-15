@@ -1,17 +1,33 @@
 #!/usr/bin/env node
 
+import { fileURLToPath } from 'node:url';
 import { CLI_USAGE } from './usage.js';
+import {
+  findSupportedNodeRuntime,
+  isSupportedNodeVersion,
+  launchWithRuntime,
+  runtimeBootstrapHint,
+} from './runtime-bootstrap.js';
 
 const args = process.argv.slice(2);
-const [major, minor] = process.versions.node.split('.').map(Number);
 if (args.includes('--help') || args.includes('-h')) {
   process.stdout.write(`${CLI_USAGE}\n`);
-} else if ((major ?? 0) < 22 || ((major ?? 0) === 22 && (minor ?? 0) < 20)) {
-  process.stderr.write(
-    `Dharma Agent Fabric requires Node.js 22.20 or newer. Current runtime: ${process.versions.node}. `
-    + 'Install the current Node.js 22 LTS release, reopen the terminal, and rerun the command.\n',
-  );
-  process.exitCode = 1;
+} else if (!isSupportedNodeVersion(process.versions.node)) {
+  const runtime = process.env.DHARMA_NODE_BOOTSTRAPPED ? null : findSupportedNodeRuntime();
+  if (!runtime) {
+    process.stderr.write(`${runtimeBootstrapHint()} Current runtime: ${process.versions.node}.\n`);
+    process.exitCode = 1;
+  } else {
+    const child = launchWithRuntime(runtime, fileURLToPath(import.meta.url), args, process.env);
+    if (child.error) {
+      process.stderr.write(`Unable to start the supported Dharma Node.js runtime: ${child.error.message}\n`);
+      process.exitCode = 1;
+    } else if (child.signal) {
+      process.kill(process.pid, child.signal);
+    } else {
+      process.exitCode = child.status ?? 1;
+    }
+  }
 } else {
   const { run } = await import('./index.js');
   run(args).then((value: unknown) => {
