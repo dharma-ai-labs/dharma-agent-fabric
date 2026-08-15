@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -121,7 +121,14 @@ test('runtime bootstrap discovers explicit and local agent runtimes without dupl
     platform: 'linux',
     execPath: localNode,
   });
-  assert.equal(candidates[0], await realpath(localNode));
+  const selectedCandidate = candidates[0];
+  assert.ok(selectedCandidate);
+  const [candidateMetadata, requestedMetadata] = await Promise.all([
+    stat(selectedCandidate),
+    stat(localNode),
+  ]);
+  assert.equal(candidateMetadata.dev, requestedMetadata.dev);
+  assert.equal(candidateMetadata.ino, requestedMetadata.ino);
   assert.equal(new Set(candidates).size, candidates.length);
   assert.match(runtimeBootstrapHint({ DHARMA_NODE_BINARY: localNode }), /DHARMA_NODE_BINARY/);
 });
