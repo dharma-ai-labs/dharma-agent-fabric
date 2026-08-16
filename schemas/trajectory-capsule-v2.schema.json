@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.dharma-ai.io/trajectory-capsule/v1",
+  "$id": "https://schemas.dharma-ai.io/trajectory-capsule/v2",
   "title": "Dharma Trajectory Capsule",
   "type": "object",
   "additionalProperties": false,
@@ -13,6 +13,7 @@
     "workspaceId",
     "provider",
     "sessionId",
+    "captureProvenance",
     "timeRange",
     "status",
     "evidenceMode",
@@ -26,7 +27,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "dharma.trajectory-capsule/v1"
+      "const": "dharma.trajectory-capsule/v2"
     },
     "trajectoryId": {
       "type": "string",
@@ -67,6 +68,22 @@
         "string",
         "null"
       ]
+    },
+    "captureProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceClass", "collectedAt", "taskReceiptHash"],
+      "properties": {
+        "sourceClass": {
+          "type": "string",
+          "enum": ["provider_discovery", "explicit_import", "signed_task_execution"]
+        },
+        "collectedAt": { "type": "string", "format": "date-time" },
+        "taskReceiptHash": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+        }
+      }
     },
     "timeRange": {
       "type": "object",
@@ -358,3 +375,5 @@
     }
   }
 }
+
+

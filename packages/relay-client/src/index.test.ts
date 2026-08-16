@@ -69,7 +69,7 @@ test('secure enrollment anchor rejects mutable device configuration substitution
   );
 });
 
-test('legacy production enrollment is anchored only after signed server identity confirmation', async () => {
+test('legacy production enrollment requires explicit re-login without contacting mutable relay metadata', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-anchor-'));
   const hqUrl = 'https://www.dharma-ai.io';
@@ -84,24 +84,15 @@ test('legacy production enrollment is anchored only after signed server identity
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl, enrolledAt: new Date().toISOString(),
   });
-  let confirmations = 0;
-  const fetcher = async (_url: string | URL | Request, init?: RequestInit) => {
-    confirmations += 1;
-    assert.ok(new Headers(init?.headers).get('x-dharma-signature'));
-    return new Response(JSON.stringify({
-      ok: true, organizationId, relayUrl,
-      serverPublicKeyEd25519: identity.publicKeyEd25519,
-    }), { status: 201 });
-  };
-  await AgentFabricClient.open({ configPath, statePath, store, fetcher });
-  assert.equal(confirmations, 1);
-  await AgentFabricClient.open({
+  let contacted = false;
+  await assert.rejects(AgentFabricClient.open({
     configPath, statePath, store,
-    fetcher: async () => { throw new Error('anchored enrollment must not call the server'); },
-  });
+    fetcher: async () => { contacted = true; throw new Error('legacy enrollment must not contact mutable transport'); },
+  }), /must be reauthenticated with dharma login/);
+  assert.equal(contacted, false);
 });
 
-test('legacy enrollment fails closed when the server identity does not match', async () => {
+test('legacy enrollment never trusts a replacement server identity from device configuration', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-mismatch-'));
   const hqUrl = 'https://www.dharma-ai.io';
@@ -116,11 +107,8 @@ test('legacy enrollment fails closed when the server identity does not match', a
   });
   await assert.rejects(AgentFabricClient.open({
     configPath, statePath: resolve(root, 'state.json'), store,
-    fetcher: async () => new Response(JSON.stringify({
-      ok: true, organizationId, relayUrl: 'wss://relay.dharma-ai.io',
-      serverPublicKeyEd25519: generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x,
-    }), { status: 201 }),
-  }), /did not match the enrolled server identity/);
+    fetcher: async () => { throw new Error('legacy enrollment must not contact mutable transport'); },
+  }), /must be reauthenticated with dharma login/);
 });
 
 test('legacy enrollment on a custom origin requires explicit re-login', async () => {
@@ -139,7 +127,7 @@ test('legacy enrollment on a custom origin requires explicit re-login', async ()
   await assert.rejects(AgentFabricClient.open({
     configPath, statePath: resolve(root, 'state.json'), store,
     fetcher: async () => { throw new Error('custom origin must not be contacted'); },
-  }), /non-production origin must be confirmed by running dharma login again/);
+  }), /must be reauthenticated with dharma login/);
 });
 
 test('enrollment sends only the public device key and an idempotency key', async () => {

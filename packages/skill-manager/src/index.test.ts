@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, installSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
 
 const organizationAgentId = '11111111-1111-4111-8111-111111111111';
 
@@ -22,6 +22,21 @@ const policy: OrganizationPolicy = {
   },
   skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
 };
+
+test('legacy v1 bundle can identify itself only for a signed-server upgrade poll', async () => {
+  const native = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-skill-'));
+  const workspaceId = 'workspace-legacy';
+  const bundleId = randomUUID();
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  const active = resolve(managed, 'active');
+  await mkdir(active, { recursive: true });
+  await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
+  await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ schema: 'dharma.skill-bundle/v1', bundleId }));
+  await writeFile(resolve(active, 'AUTHORIZATION.json'), JSON.stringify({ schema: 'dharma.skill-bundle/v1', bundleId }));
+  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), bundleId);
+  await writeFile(resolve(active, 'AUTHORIZATION.json'), JSON.stringify({ schema: 'dharma.skill-bundle/v2', bundleId }));
+  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), null);
+});
 
 async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'], skillId = 'dharma-boundary'): Promise<SkillBundle> {
   const skill = { skillId, version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };

@@ -17,7 +17,7 @@ import {
   saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleAuthorization, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
@@ -279,6 +279,14 @@ export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
   if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || sha256(canonicalize(unsigned)) !== capsuleHash) {
     throw new Error('Trajectory capsule integrity check failed.');
   }
+}
+
+function trajectoryCapsuleSchemaId(capsule: unknown) {
+  const schema = capsule && typeof capsule === 'object' && !Array.isArray(capsule)
+    ? (capsule as { schema?: unknown }).schema : null;
+  if (schema === 'dharma.trajectory-capsule/v1') return 'https://schemas.dharma-ai.io/trajectory-capsule/v1';
+  if (schema === 'dharma.trajectory-capsule/v2') return 'https://schemas.dharma-ai.io/trajectory-capsule/v2';
+  throw new Error('Trajectory capsule schema is unsupported.');
 }
 
 export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
@@ -1327,7 +1335,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
             captureProvenance: captureProvenance(selected.endedAt),
           })
           : firstRevision;
-      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
       if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
       if (!latestCapsule || latestCapsule.capsuleHash !== capsule.capsuleHash) {
         await vault.commitCapture({
@@ -2008,7 +2016,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
   const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8')) as Record<string, unknown>;
   const workspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : String(capsule.workspaceId || '');
-  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
   if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
   assertCapsuleIntegrity(capsule);
   const trajectoryId = String(capsule.trajectoryId || '');
@@ -2296,7 +2304,7 @@ async function syncSignedTaskTrajectory(input: {
   });
   const validation = await validateContract(
     resolve(import.meta.dirname, 'schemas'),
-    'https://schemas.dharma-ai.io/trajectory-capsule/v1',
+    trajectoryCapsuleSchemaId(capsule),
     capsule,
   );
   if (!validation.ok) throw new Error(`Signed task capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
@@ -2619,9 +2627,19 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const destination = nativeSkillDirectory(provider);
   const fabric = await client();
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-  const activeBundleId = (await activeSkillAuthorization(
-    provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
-  ))?.bundleId ?? null;
+  let activeBundleId: string | null;
+  try {
+    activeBundleId = (await activeSkillAuthorization(
+      provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
+    ))?.bundleId ?? null;
+  } catch (error) {
+    const legacyBundleId = await getLegacySkillBundleIdForUpgrade({
+      nativeSkillDirectory: destination,
+      workspaceId,
+    });
+    if (!legacyBundleId) throw error;
+    activeBundleId = legacyBundleId;
+  }
   const response = await fabric.pollSkill({
     workspaceId,
     provider,

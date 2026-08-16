@@ -195,6 +195,24 @@ function workspaceManagedRoot(nativeSkillDirectory: string, workspaceId: string)
   return resolve(nativeSkillDirectory, '.dharma-managed', 'workspaces', workspaceId);
 }
 
+export async function getLegacySkillBundleIdForUpgrade(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+}): Promise<string | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  const authorization = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as {
+    schema?: unknown;
+    bundleId?: unknown;
+  };
+  if (authorization.schema !== 'dharma.skill-bundle/v1' || authorization.bundleId !== bundleId) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
+    throw new Error('Legacy skill bundle identifier is invalid.');
+  }
+  return bundleId;
+}
+
 async function pathExists(path: string) {
   try { await lstat(path); return true; }
   catch (error) {

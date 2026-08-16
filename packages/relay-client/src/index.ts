@@ -69,11 +69,6 @@ export function normalizeRelayUrl(value: string) {
   return url.origin;
 }
 
-function isLoopbackHqOrigin(value: string) {
-  const url = new URL(value);
-  return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-}
-
 function accountFor(hqUrl: string, organizationId: string) {
   return `device-key-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
 }
@@ -367,26 +362,15 @@ export class AgentFabricClient {
     const config = await loadDeviceConfig(input.configPath);
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId, store: input.store });
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
-    let state: ProtocolState = { schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null };
-    try { state = JSON.parse(await readFile(input.statePath, 'utf8')) as ProtocolState; } catch {}
-    const client = new AgentFabricClient({ config, privateJwk: identity.privateJwk, statePath: input.statePath, state, fetcher: input.fetcher });
     try {
       await loadDeviceEnrollmentAnchor({ config, store: input.store });
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes('not anchored in secure storage')) throw error;
-      const origin = normalizeHqUrl(config.hqUrl);
-      if (origin !== 'https://www.dharma-ai.io' && !isLoopbackHqOrigin(origin)) {
-        throw new Error('Legacy device enrollment on a non-production origin must be confirmed by running dharma login again.');
-      }
-      const confirmation = await client.openSession('0.2.0-enrollment-anchor-migration');
-      if (confirmation.organizationId !== config.organizationId
-        || confirmation.serverPublicKeyEd25519 !== config.serverPublicKeyEd25519
-        || normalizeRelayUrl(String(confirmation.relayUrl || '')) !== normalizeRelayUrl(config.relayUrl)) {
-        throw new Error('Legacy device enrollment confirmation did not match the enrolled server identity. Run dharma login again.');
-      }
-      await saveDeviceEnrollmentAnchor({ config, store: input.store });
+      throw new Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.');
     }
-    return client;
+    let state: ProtocolState = { schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null };
+    try { state = JSON.parse(await readFile(input.statePath, 'utf8')) as ProtocolState; } catch {}
+    return new AgentFabricClient({ config, privateJwk: identity.privateJwk, statePath: input.statePath, state, fetcher: input.fetcher });
   }
 
   async openSession(relayVersion = '0.1.0') {

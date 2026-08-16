@@ -48,7 +48,7 @@ export interface AgentEvent {
 }
 
 export interface TrajectoryCapsule {
-  schema: 'dharma.trajectory-capsule/v1';
+  schema: 'dharma.trajectory-capsule/v2';
   trajectoryId: string;
   revision: number;
   previousRevisionHash: string | null;
@@ -552,7 +552,7 @@ export function buildTrajectoryCapsule(input: {
     throw new Error('A later trajectory capsule revision requires the previous capsule hash.');
   }
   const base = {
-    schema: 'dharma.trajectory-capsule/v1' as const,
+    schema: 'dharma.trajectory-capsule/v2' as const,
     trajectoryId,
     revision,
     previousRevisionHash: input.previousRevisionHash ?? null,
