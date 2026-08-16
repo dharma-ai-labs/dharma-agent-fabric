@@ -2292,6 +2292,7 @@ function prepareSignedTaskTrajectory(input: {
   workspace: WorkspaceRecord;
   device: DeviceConfig;
   activeSkill: Awaited<ReturnType<typeof activeSkillAuthorization>>;
+  activeSkillVerifiedAt: string;
 }) {
   if (!input.activeSkill || input.task.skillBundle?.bundleId !== input.activeSkill.bundleId) {
     throw new Error('Signed task trajectory requires the active task-pinned skill bundle.');
@@ -2317,6 +2318,7 @@ function prepareSignedTaskTrajectory(input: {
     activeSkillBundleId: input.activeSkill.bundleId,
     activeSkillBundleActivatedAt: input.activeSkill.activatedAt,
     activeSkillBundleExpiresAt: input.activeSkill.expiresAt,
+    activeSkillBundleVerifiedAt: input.activeSkillVerifiedAt,
   });
   return { capsule, rawTurn, rawContentId, session };
 }
@@ -2384,6 +2386,7 @@ async function executeOneTask(
   const activeSkill = await activeSkillAuthorization(
     task.target.provider, task.workspaceId, String(workspace.repositoryAgentId || ''), config,
   );
+  const activeSkillVerifiedAt = new Date().toISOString();
   const activeBundleId = activeSkill?.bundleId ?? null;
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
@@ -2425,6 +2428,7 @@ async function executeOneTask(
     ? prepareSignedTaskTrajectory({
       policy, task, receipt, taskReceiptHash: `sha256:${'0'.repeat(64)}`, collectedAt,
       workspace, device: config, activeSkill,
+      activeSkillVerifiedAt,
     })
     : null;
   const completion = await fabric.postTaskEvent(task.taskId, receipt.status, {

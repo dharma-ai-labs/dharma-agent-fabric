@@ -46,9 +46,14 @@ test('legacy v1 installation without authorization metadata remains upgradeable'
   const active = resolve(managed, 'active');
   await mkdir(active, { recursive: true });
   await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
-  await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ schema: 'dharma.skill-bundle/v1', bundleId }));
-  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), bundleId);
+  await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ bundleId, workspaceId, skillIds: ['dharma-boundary'] }));
+  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), null);
   assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), bundleId);
+  await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ bundleId, workspaceId: 'another-workspace', skillIds: ['dharma-boundary'] }));
+  await assert.rejects(
+    getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }),
+    /recovery metadata is invalid/,
+  );
 });
 
 test('expired v2 installation remains identifiable only for a replacement poll', async () => {

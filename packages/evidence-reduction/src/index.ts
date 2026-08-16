@@ -447,6 +447,7 @@ export function buildTrajectoryCapsule(input: {
   activeSkillBundleId?: string | null;
   activeSkillBundleActivatedAt?: string | null;
   activeSkillBundleExpiresAt?: string | null;
+  activeSkillBundleVerifiedAt?: string | null;
   taskId?: string | null;
   captureProvenance?: TrajectoryCapsule['captureProvenance'];
 }): TrajectoryCapsule {
@@ -475,8 +476,13 @@ export function buildTrajectoryCapsule(input: {
   }
   const activatedAt = input.activeSkillBundleActivatedAt == null ? null : Date.parse(input.activeSkillBundleActivatedAt);
   const expiresAt = input.activeSkillBundleExpiresAt == null ? null : Date.parse(input.activeSkillBundleExpiresAt);
+  const verifiedAt = input.activeSkillBundleVerifiedAt == null ? null : Date.parse(input.activeSkillBundleVerifiedAt);
   if (input.activeSkillBundleId != null && (!Number.isFinite(activatedAt) || (expiresAt != null && !Number.isFinite(expiresAt)))) {
     throw new Error('Active skill bundle requires a valid activation window.');
+  }
+  if (input.activeSkillBundleId != null && (!Number.isFinite(verifiedAt)
+    || verifiedAt! < activatedAt! || (expiresAt != null && verifiedAt! >= expiresAt))) {
+    throw new Error('Active skill bundle must be verified inside its authorization window before task execution.');
   }
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
@@ -523,12 +529,9 @@ export function buildTrajectoryCapsule(input: {
     if (seen.has(fingerprint)) continue;
     seen.add(fingerprint);
     const occurredAt = record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt;
-    const occurredAtMs = Date.parse(signedTaskCapture ? captureProvenance.collectedAt : occurredAt);
     const bundleWasActive = signedTaskCapture
       && input.activeSkillBundleId != null
-      && Number.isFinite(occurredAtMs)
-      && occurredAtMs >= activatedAt!
-      && (expiresAt == null || occurredAtMs < expiresAt);
+      && verifiedAt != null;
     events.push({
       schema: 'dharma.agent-event/v1',
       eventId: deterministicUuid(`${trajectoryId}:${index}:${fingerprint}`),

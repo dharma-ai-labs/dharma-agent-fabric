@@ -229,15 +229,23 @@ export async function getInstalledSkillBundleIdForRecovery(input: {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
     throw new Error('Installed skill bundle identifier is invalid.');
   }
-  let manifest: { schema?: unknown; bundleId?: unknown };
+  let manifest: { schema?: unknown; bundleId?: unknown; workspaceId?: unknown; skillIds?: unknown };
+  let source: 'authorization' | 'legacy-manifest' = 'authorization';
   try {
     manifest = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as typeof manifest;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    source = 'legacy-manifest';
     manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as typeof manifest;
   }
-  if (!['dharma.skill-bundle/v1', 'dharma.skill-bundle/v2'].includes(String(manifest.schema))
-    || manifest.bundleId !== bundleId) {
+  const authorizedManifest = source === 'authorization'
+    && ['dharma.skill-bundle/v1', 'dharma.skill-bundle/v2'].includes(String(manifest.schema));
+  const legacyInstallManifest = source === 'legacy-manifest'
+    && manifest.schema === undefined
+    && manifest.workspaceId === input.workspaceId
+    && Array.isArray(manifest.skillIds)
+    && manifest.skillIds.every((skillId) => typeof skillId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillId));
+  if ((!authorizedManifest && !legacyInstallManifest) || manifest.bundleId !== bundleId) {
     throw new Error('Installed skill recovery metadata is invalid.');
   }
   return bundleId;

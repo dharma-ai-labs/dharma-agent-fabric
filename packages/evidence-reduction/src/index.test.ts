@@ -130,6 +130,7 @@ test('reduced trajectory events retain only the active skill bundle UUID as prov
     policy, activeSkillBundleId: bundleId,
     activeSkillBundleActivatedAt: '2026-08-16T00:59:59.000Z',
     activeSkillBundleExpiresAt: '2026-08-17T00:00:00.000Z',
+    activeSkillBundleVerifiedAt: '2026-08-16T01:00:00.000Z',
     taskId: '11111111-1111-4111-8111-111111111111',
     captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:01.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
     rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
@@ -154,22 +155,23 @@ test('reduced trajectory events retain only the active skill bundle UUID as prov
   }), /bundle ID must be a UUID/);
 });
 
-test('signed task evidence is attributed from collection time instead of editable provider timestamps', () => {
+test('signed task evidence remains pinned when an authorized task finishes after bundle expiry', () => {
   const bundleId = '77777777-7777-4777-8777-777777777777';
   const capsule = buildTrajectoryCapsule({
     organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
     activeSkillBundleId: bundleId,
     activeSkillBundleActivatedAt: '2026-08-16T01:00:01.500Z',
     activeSkillBundleExpiresAt: '2026-08-16T01:00:03.000Z',
+    activeSkillBundleVerifiedAt: '2026-08-16T01:00:02.000Z',
     taskId: '11111111-1111-4111-8111-111111111111',
-    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:02.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:05.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
     rawContentId: `sha256:${'9'.repeat(64)}`, rawBytes: 100,
     session: {
       provider: 'codex', sessionId: 'session_bundle_window', sourcePath: '/private/session.jsonl', workspace: '/repo',
-      coverage: 'observed', startedAt: '2026-08-16T01:00:00.000Z', endedAt: '2026-08-16T01:00:02.000Z',
+      coverage: 'observed', startedAt: '2026-08-16T01:00:02.000Z', endedAt: '2026-08-16T01:00:05.000Z',
       records: [
-        { native: { type: 'agent_message', text: 'before' }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-16T01:00:01.000Z', kind: 'agent_message' },
-        { native: { type: 'agent_message', text: 'after' }, sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-16T01:00:02.000Z', kind: 'agent_message' },
+        { native: { type: 'agent_message', text: 'before' }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-16T01:00:02.500Z', kind: 'agent_message' },
+        { native: { type: 'agent_message', text: 'after' }, sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-16T01:00:05.000Z', kind: 'agent_message' },
       ],
     },
   });
