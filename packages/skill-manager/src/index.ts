@@ -219,6 +219,30 @@ export async function getLegacySkillBundleIdForUpgrade(input: {
   return bundleId;
 }
 
+export async function getInstalledSkillBundleIdForRecovery(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+}): Promise<string | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
+    throw new Error('Installed skill bundle identifier is invalid.');
+  }
+  let manifest: { schema?: unknown; bundleId?: unknown };
+  try {
+    manifest = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as typeof manifest;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as typeof manifest;
+  }
+  if (!['dharma.skill-bundle/v1', 'dharma.skill-bundle/v2'].includes(String(manifest.schema))
+    || manifest.bundleId !== bundleId) {
+    throw new Error('Installed skill recovery metadata is invalid.');
+  }
+  return bundleId;
+}
+
 async function pathExists(path: string) {
   try { await lstat(path); return true; }
   catch (error) {

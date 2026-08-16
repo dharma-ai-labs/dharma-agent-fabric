@@ -167,6 +167,25 @@ test('vault returns only the requested immutable capsule revision', async () => 
   vault.close();
 });
 
+test('vault durably queues and acknowledges an explicit capsule sync', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-sync-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const capsule = { trajectoryId: 'trajectory-sync', revision: 1 };
+  const blobContentId = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
+  vault.recordCapsule('trajectory-sync', 1, `sha256:${'a'.repeat(64)}`, blobContentId);
+  vault.queueCapsuleSync('trajectory-sync', 1);
+  vault.queueCapsuleSync('trajectory-sync', 1);
+  assert.deepEqual(await vault.listPendingCapsuleSyncs(), [{
+    trajectoryId: 'trajectory-sync',
+    revision: 1,
+    capsule,
+  }]);
+  vault.markCapsuleSynced('trajectory-sync', 1);
+  assert.deepEqual(await vault.listPendingCapsuleSyncs(), []);
+  assert.throws(() => vault.queueCapsuleSync('missing', 1), /not available/);
+  vault.close();
+});
+
 test('raw retention drains every expired batch and creates lookup indexes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });

@@ -7,10 +7,13 @@ import { test } from 'node:test';
 import {
   AgentFabricClient,
   beginEnrollment,
+  deleteActiveSkillAuthorizationAnchor,
+  loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity,
   normalizeHqUrl,
   normalizeRelayUrl,
   saveDeviceConfig,
+  saveActiveSkillAuthorizationAnchor,
   saveDeviceEnrollmentAnchor,
 } from './index.js';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
@@ -46,6 +49,30 @@ test('device identity remains stable in the OS secret store', async () => {
   const second = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
   assert.equal(first.publicKeyEd25519, second.publicKeyEd25519);
   assert.ok(first.privateJwk.d);
+});
+
+test('active skill authorization anchors can be restored or removed transactionally', async () => {
+  const store = memoryStore();
+  const config = {
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915',
+  };
+  const input = {
+    config,
+    workspaceId: 'workspace-a',
+    organizationAgentId: '11111111-1111-4111-8111-111111111111',
+    provider: 'codex' as const,
+    bundleId: '22222222-2222-4222-8222-222222222222',
+    receiptHash: `sha256:${'a'.repeat(64)}`,
+    activatedAt: '2026-08-16T12:00:00.000Z',
+    expiresAt: null,
+    store,
+  };
+  await saveActiveSkillAuthorizationAnchor(input);
+  assert.equal((await loadActiveSkillAuthorizationAnchor(input))?.bundleId, input.bundleId);
+  await deleteActiveSkillAuthorizationAnchor({ config, workspaceId: input.workspaceId, provider: input.provider, store });
+  assert.equal(await loadActiveSkillAuthorizationAnchor(input), null);
 });
 
 test('secure enrollment anchor rejects mutable device configuration substitution', async () => {

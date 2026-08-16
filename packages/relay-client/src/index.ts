@@ -217,6 +217,18 @@ export async function loadActiveSkillAuthorizationAnchor(input: {
   return anchor;
 }
 
+export async function deleteActiveSkillAuthorizationAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  workspaceId: string;
+  provider: ProviderId;
+  store?: SecureSecretStore;
+}): Promise<void> {
+  const store = input.store ?? await createSystemSecureStore();
+  const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  await store.delete(account);
+  if (await store.get(account) !== null) throw new Error('Secure store did not confirm the active skill anchor deletion.');
+}
+
 export interface EvidenceQuotaAnchor {
   schema: 'dharma.evidence-quota-anchor/v1';
   day: string;

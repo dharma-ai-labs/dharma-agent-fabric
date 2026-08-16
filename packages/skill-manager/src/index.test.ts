@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getInstalledSkillBundleIdForRecovery, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
 
 const organizationAgentId = '11111111-1111-4111-8111-111111111111';
 
@@ -48,6 +48,22 @@ test('legacy v1 installation without authorization metadata remains upgradeable'
   await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
   await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ schema: 'dharma.skill-bundle/v1', bundleId }));
   assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), bundleId);
+  assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), bundleId);
+});
+
+test('expired v2 installation remains identifiable only for a replacement poll', async () => {
+  const native = await mkdtemp(resolve(tmpdir(), 'fabric-expired-recovery-'));
+  const workspaceId = 'workspace-expired-recovery';
+  const bundleId = randomUUID();
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  const active = resolve(managed, 'active');
+  await mkdir(active, { recursive: true });
+  await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
+  await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ bundleId, skillIds: [] }));
+  await writeFile(resolve(active, 'AUTHORIZATION.json'), JSON.stringify({
+    schema: 'dharma.skill-bundle/v2', bundleId, expiresAt: '2026-08-16T00:00:00.000Z',
+  }));
+  assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), bundleId);
 });
 
 test('legacy v1 bundle cannot authorize installation or task execution', async () => {

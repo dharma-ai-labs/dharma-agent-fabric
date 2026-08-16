@@ -2,9 +2,6 @@ import { spawnSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-const npmCli = process.env.npm_execpath;
-if (!npmCli) throw new Error('npm_execpath is required to run workspace tests deterministically.');
-
 const workspaces = [];
 for (const parent of ['apps', 'packages']) {
   for (const name of (await readdir(resolve(parent), { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()) {
@@ -15,14 +12,17 @@ for (const parent of ['apps', 'packages']) {
       if (error?.code === 'ENOENT') continue;
       throw error;
     }
-    if (typeof manifest.name === 'string' && typeof manifest.scripts?.test === 'string') workspaces.push(manifest.name);
+    if (typeof manifest.name === 'string' && typeof manifest.scripts?.test === 'string') {
+      workspaces.push({ name: manifest.name, directory: resolve(parent, name), test: manifest.scripts.test });
+    }
   }
 }
 
 for (const workspace of workspaces) {
-  const result = spawnSync(process.execPath, [npmCli, 'run', 'test', '--workspace', workspace], {
-    cwd: process.cwd(),
+  const result = spawnSync(workspace.test, {
+    cwd: workspace.directory,
     env: process.env,
+    shell: true,
     stdio: 'inherit',
   });
   if (result.error) throw result.error;

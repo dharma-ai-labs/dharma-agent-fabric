@@ -309,6 +309,21 @@ export class LocalVault {
     })));
   }
 
+  queueCapsuleSync(trajectoryId: string, revision: number): void {
+    if (!trajectoryId || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('Pending capsule sync identity is invalid.');
+    }
+    const capsule = this.#database.prepare(`
+      select blob_content_id from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { blob_content_id: string } | undefined;
+    if (!capsule) throw new Error('Pending capsule sync is not available in the local vault.');
+    this.#database.prepare(`
+      insert into capsule_sync_queue(trajectory_id, revision, blob_content_id, created_at)
+      values (?, ?, ?, ?)
+      on conflict(trajectory_id, revision) do nothing
+    `).run(trajectoryId, revision, capsule.blob_content_id, new Date().toISOString());
+  }
+
   markCapsuleSynced(trajectoryId: string, revision: number): void {
     this.#database.prepare(`
       delete from capsule_sync_queue where trajectory_id = ? and revision = ?

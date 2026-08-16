@@ -13,11 +13,11 @@ import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, typ
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
-  loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
+  deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, getInstalledSkillBundleIdForRecovery, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
@@ -2357,8 +2357,11 @@ async function syncSignedTaskTrajectory(input: {
     } else if (latest.capsuleHash !== capsule.capsuleHash) {
       throw new Error('Signed task evidence already exists with different immutable content.');
     }
+    vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
     await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, input.policy);
-    return input.fabric.syncTrajectory(capsule);
+    const synced = await input.fabric.syncTrajectory(capsule);
+    vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+    return synced;
   } finally {
     vault.close();
   }
@@ -2675,7 +2678,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
     ))?.bundleId ?? null;
   } catch (error) {
-    const legacyBundleId = await getLegacySkillBundleIdForUpgrade({
+    const legacyBundleId = await getInstalledSkillBundleIdForRecovery({
       nativeSkillDirectory: destination,
       workspaceId,
     });
@@ -2717,6 +2720,12 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
   }
   try {
+    const previousAnchor = await loadActiveSkillAuthorizationAnchor({
+      config,
+      workspaceId,
+      organizationAgentId: String(workspace.repositoryAgentId || ''),
+      provider,
+    });
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
     const receipt = await installSkillBundle({
       bundle,
@@ -2732,28 +2741,57 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
       organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
     });
+    const restoreAnchor = async () => {
+      if (previousAnchor) {
+        await saveActiveSkillAuthorizationAnchor({
+          config,
+          workspaceId,
+          organizationAgentId: previousAnchor.organizationAgentId,
+          provider,
+          bundleId: previousAnchor.bundleId,
+          receiptHash: previousAnchor.receiptHash,
+          activatedAt: previousAnchor.activatedAt,
+          expiresAt: previousAnchor.expiresAt,
+        });
+      } else {
+        await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider });
+      }
+    };
     try {
+      if (receipt.status === 'active') {
+        await saveActiveSkillAuthorizationAnchor({
+          config,
+          workspaceId,
+          organizationAgentId: String(workspace.repositoryAgentId || ''),
+          provider,
+          bundleId: receipt.bundleId,
+          receiptHash: receipt.receiptHash,
+          activatedAt: receipt.completedAt,
+          expiresAt: bundle.expiresAt ?? null,
+        });
+        if (provider === 'agy') await activateAgyPlugin();
+      }
       await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
     } catch (error) {
-      await rollbackUnconfirmedSkillBundle({
-        nativeSkillDirectory: destination,
-        workspaceId,
-        receipt,
-      });
+      const recoveryErrors: unknown[] = [];
+      try {
+        await rollbackUnconfirmedSkillBundle({
+          nativeSkillDirectory: destination,
+          workspaceId,
+          receipt,
+        });
+      } catch (rollbackError) {
+        recoveryErrors.push(rollbackError);
+      }
+      try {
+        await restoreAnchor();
+      } catch (anchorError) {
+        recoveryErrors.push(anchorError);
+      }
+      if (recoveryErrors.length) {
+        throw new AggregateError([error, ...recoveryErrors], 'Skill installation failed and local recovery was incomplete.');
+      }
       throw error;
-    }
-    if (receipt.status === 'active') {
-      await saveActiveSkillAuthorizationAnchor({
-        config,
-        workspaceId,
-        organizationAgentId: String(workspace.repositoryAgentId || ''),
-        provider,
-        bundleId: receipt.bundleId,
-        receiptHash: receipt.receiptHash,
-        activatedAt: receipt.completedAt,
-        expiresAt: bundle.expiresAt ?? null,
-      });
-      if (provider === 'agy') await activateAgyPlugin();
     }
     return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };
   } finally {
@@ -2778,8 +2816,15 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
   let evidenceResponsesCompleted = 0;
+  let trajectorySyncsCompleted = 0;
   let nextPolicyRefreshAt = 0;
   let evidencePolicyFresh = false;
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(policy),
+  });
   try {
     do {
       if (Date.now() >= nextPolicyRefreshAt) {
@@ -2794,6 +2839,12 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh) {
+        trajectorySyncsCompleted += await syncPendingRetentionCapsules(
+          vault,
+          fabric,
+          policy,
+          canonicalWorkspace.workspaceId,
+        );
         const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
         evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
         if (evidenceRequestId) evidenceResponsesCompleted += 1;
@@ -2804,11 +2855,12 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
+    vault.close();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     await rm(pidPath, { force: true });
   }
-  return { ok: true, stopped: true, tasksCompleted, evidenceResponsesCompleted };
+  return { ok: true, stopped: true, tasksCompleted, evidenceResponsesCompleted, trajectorySyncsCompleted };
 }
 
 export async function run(argv: string[]): Promise<Output> {
