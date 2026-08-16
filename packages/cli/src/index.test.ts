@@ -1167,19 +1167,16 @@ test('recovered signed-task evidence is bound to its registered workspace policy
   const workspace = { workspaceId: 'workspace-a', organizationId: 'org-a' };
   assert.doesNotThrow(() => assertRecoveredTaskWorkspacePolicy({
     recoveryWorkspaceId: 'workspace-a',
-    requestedWorkspaceId: 'workspace-a',
     workspace,
     policy: { organizationId: 'org-a', serverAuthorization: undefined },
   }));
   assert.throws(() => assertRecoveredTaskWorkspacePolicy({
-    recoveryWorkspaceId: 'workspace-a',
-    requestedWorkspaceId: 'workspace-b',
+    recoveryWorkspaceId: 'workspace-b',
     workspace,
     policy: { organizationId: 'org-a', serverAuthorization: undefined },
-  }), /does not match the selected workspace/);
+  }), /does not match its registered workspace/);
   assert.throws(() => assertRecoveredTaskWorkspacePolicy({
     recoveryWorkspaceId: 'workspace-a',
-    requestedWorkspaceId: 'workspace-a',
     workspace,
     policy: { organizationId: 'org-b', serverAuthorization: undefined },
   }), /does not authorize its workspace/);

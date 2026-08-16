@@ -2399,13 +2399,11 @@ type SignedTaskTrajectoryRecovery = {
 
 export function assertRecoveredTaskWorkspacePolicy(input: {
   recoveryWorkspaceId: string;
-  requestedWorkspaceId: string;
   workspace: { workspaceId: string; organizationId: string };
   policy: Pick<OrganizationPolicy, 'organizationId' | 'serverAuthorization'>;
 }): void {
-  if (input.recoveryWorkspaceId !== input.requestedWorkspaceId
-    || input.workspace.workspaceId !== input.requestedWorkspaceId) {
-    throw new Error('Recovered task completion does not match the selected workspace.');
+  if (input.workspace.workspaceId !== input.recoveryWorkspaceId) {
+    throw new Error('Recovered task completion does not match its registered workspace.');
   }
   if (input.policy.organizationId !== input.workspace.organizationId
     || (input.policy.serverAuthorization
@@ -2459,7 +2457,6 @@ async function stageSignedTaskTrajectoryRecovery(
 async function finalizeRecoveredSignedTaskTrajectories(
   fabric: AgentFabricClient,
   vaultPolicy: OrganizationPolicy,
-  workspaceId: string,
   onlyTaskId?: string,
 ): Promise<Array<{ taskId: string; trajectory: Record<string, unknown> }>> {
   const completions = fabric.listRecoveredTaskCompletions()
@@ -2482,7 +2479,6 @@ async function finalizeRecoveredSignedTaskTrajectories(
       || recovery.taskId !== completion.taskId) {
       throw new Error(`Recovered task completion ${completion.taskId} is missing its encrypted local evidence.`);
     }
-    if (recovery.workspaceId !== workspaceId) continue;
     const workspace = (await registry()).find((item) => item.workspaceId === recovery.workspaceId);
     if (!workspace) throw new Error(`Recovered task completion ${completion.taskId} has no registered workspace.`);
     const recoveryPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
@@ -2492,7 +2488,6 @@ async function finalizeRecoveredSignedTaskTrajectories(
     );
     assertRecoveredTaskWorkspacePolicy({
       recoveryWorkspaceId: recovery.workspaceId,
-      requestedWorkspaceId: workspaceId,
       workspace,
       policy: recoveryPolicy,
     });
@@ -2611,7 +2606,6 @@ async function executeOneTask(
     const finalized = await finalizeRecoveredSignedTaskTrajectories(
       fabric,
       taskPolicy,
-      workspace.workspaceId,
       task.taskId,
     );
     trajectory = finalized[0]?.trajectory || null;
@@ -2634,7 +2628,6 @@ async function runOneTask(flags: Map<string, string | boolean>): Promise<Output>
   const recoveredTaskTrajectories = await finalizeRecoveredSignedTaskTrajectories(
     fabric,
     policy,
-    selectedWorkspace.workspaceId,
   );
   const result = await executeOneTask(fabric, Number(flags.get('lease-seconds') || 120));
   return recoveredTaskTrajectories.length ? { ...result, recoveredTaskTrajectories } : result;
@@ -3029,7 +3022,6 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     taskTrajectoriesRecovered += (await finalizeRecoveredSignedTaskTrajectories(
       fabric,
       policy,
-      canonicalWorkspace.workspaceId,
     )).length;
     do {
       if (Date.now() >= nextPolicyRefreshAt) {

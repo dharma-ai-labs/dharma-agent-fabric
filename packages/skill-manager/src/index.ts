@@ -488,15 +488,6 @@ export async function installSkillBundle(input: {
       status = await restorePreviousBundle();
     }
   }
-  if (status === 'active') {
-    await rm(rollback, { recursive: true, force: true });
-    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${input.bundle.bundleId}\n`, { mode: 0o600 });
-  } else if (previousBundleId) {
-    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
-  } else {
-    await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
-  }
-
   const receiptBase = {
     schema: 'dharma.install-receipt/v1' as const,
     installationId: randomUUID(),
@@ -517,8 +508,32 @@ export async function installSkillBundle(input: {
   const signature = signCanonicalObject({ ...receiptBase, receiptHash }, input.devicePrivateKey);
   const receipt = { ...receiptBase, receiptHash, signature };
   if (status === 'active') {
-    await writeFile(resolve(release, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-    await writeFile(resolve(active, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+    try {
+      await writeFile(resolve(release, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+      await writeFile(resolve(active, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+      await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${input.bundle.bundleId}\n`, { mode: 0o600 });
+    } catch (error) {
+      const recoveryErrors: unknown[] = [];
+      try { await restorePreviousBundle(); }
+      catch (recoveryError) { recoveryErrors.push(recoveryError); }
+      try {
+        if (previousBundleId) {
+          await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
+        } else {
+          await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
+        }
+      } catch (recoveryError) {
+        recoveryErrors.push(recoveryError);
+      }
+      if (recoveryErrors.length) {
+        throw new AggregateError([error, ...recoveryErrors], 'Skill receipt persistence failed and local recovery was incomplete.');
+      }
+      throw error;
+    }
+  } else if (previousBundleId) {
+    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
+  } else {
+    await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
   }
   return receipt;
 }

@@ -186,6 +186,46 @@ test('a server-rejected active receipt restores the prior local authorization', 
   assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /Prior release/);
 });
 
+test('receipt persistence failure restores the prior bundle before publishing activation', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-receipt-failure-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Prior durable release\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const prior = await signedBundle(source, randomUUID(), server.privateKey);
+  await installSkillBundle({
+    bundle: prior, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId,
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+
+  await writeFile(resolve(source, 'SKILL.md'), '# Candidate with colliding receipt path\n');
+  const candidate = await signedBundle(
+    source,
+    randomUUID(),
+    server.privateKey,
+    'INSTALL_RECEIPT.json',
+  );
+  await assert.rejects(
+    installSkillBundle({
+      bundle: candidate, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+      serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId,
+      organizationAgentId, workspaceId, provider: 'codex',
+    }),
+    /EISDIR|illegal operation on a directory/,
+  );
+
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), prior.bundleId);
+  assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /Prior durable/);
+  assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /Prior durable/);
+  await assert.rejects(readFile(resolve(native, 'INSTALL_RECEIPT.json', 'SKILL.md')), /ENOENT/);
+});
+
 test('R3 bundles cannot install without explicit organization approval', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-r3-'));
   const source = resolve(root, 'source', 'skill');
