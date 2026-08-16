@@ -38,6 +38,26 @@ test('legacy v1 bundle can identify itself only for a signed-server upgrade poll
   assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), null);
 });
 
+test('legacy v1 bundle cannot authorize installation or task execution', async () => {
+  const server = generateKeyPairSync('ed25519');
+  const source = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-auth-'));
+  await writeFile(resolve(source, 'SKILL.md'), '# Legacy bundle\n');
+  const signed = await signedBundle(source, randomUUID(), server.privateKey);
+  const { signature: _signature, bundleHash: _bundleHash, ...v2Unsigned } = signed;
+  const v1Unsigned = { ...v2Unsigned, schema: 'dharma.skill-bundle/v1' };
+  const bundleHash = calculateBundleHash(v1Unsigned as never);
+  const v1Bundle = {
+    ...v1Unsigned,
+    bundleHash,
+    signature: signCanonicalObject({ ...v1Unsigned, bundleHash }, server.privateKey),
+  } as unknown as SkillBundle;
+
+  assert.throws(
+    () => verifySkillBundle(v1Bundle, server.publicKey),
+    /schema is not authorized for installation or task execution/,
+  );
+});
+
 async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'], skillId = 'dharma-boundary'): Promise<SkillBundle> {
   const skill = { skillId, version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
   const base = {

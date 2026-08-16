@@ -93,6 +93,9 @@ export function calculateBundleHash(bundle: Omit<SkillBundle, 'signature' | 'bun
 }
 
 export function verifySkillBundle(bundle: SkillBundle, serverPublicKey: KeyObject, now = new Date()): void {
+  if (bundle.schema !== 'dharma.skill-bundle/v2') {
+    throw new Error('Skill bundle schema is not authorized for installation or task execution.');
+  }
   if (bundle.expiresAt) {
     const expiresAt = Date.parse(bundle.expiresAt);
     if (!Number.isFinite(expiresAt)) throw new Error('Skill bundle expiry is invalid.');
