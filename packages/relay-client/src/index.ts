@@ -373,8 +373,18 @@ export class AgentFabricClient {
       relay.pathname = '/v1/connect';
       relay.search = '';
       const socket = new WebSocket(relay);
-      const timeout = setTimeout(() => { socket.close(); reject(new Error('Relay response timed out.')); }, 35_000);
-      const finish = (callback: () => void) => { clearTimeout(timeout); socket.close(); callback(); };
+      let settled = false;
+      const finish = (callback: () => void, closeSocket = true) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        callback();
+        if (closeSocket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
+      };
+      const timeout = setTimeout(
+        () => finish(() => reject(new Error('Relay response timed out.'))),
+        35_000,
+      );
       socket.addEventListener('open', () => socket.send(JSON.stringify({
         requestId: pending.headers['x-dharma-message-id'], method: pending.method,
         pathname: pending.pathname, headers: pending.headers, body: pending.body,
@@ -388,7 +398,10 @@ export class AgentFabricClient {
       });
       socket.addEventListener('error', () => finish(() => reject(new Error('Relay connection failed.'))));
       socket.addEventListener('close', (event) => {
-        if (event.code !== 1000) { clearTimeout(timeout); reject(new Error(`Relay closed before acknowledgement (${event.code}).`)); }
+        finish(
+          () => reject(new Error(`Relay closed before acknowledgement (${event.code}).`)),
+          false,
+        );
       });
     });
   }
