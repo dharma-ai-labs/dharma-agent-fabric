@@ -761,6 +761,23 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
     redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['native_provider_payload'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
+  const signedTaskBundleId = '44444444-4444-4444-8444-444444444444';
+  const signedTask = {
+    ...reduced,
+    schema: 'dharma.trajectory-capsule/v3',
+    taskId: '55555555-5555-4555-8555-555555555555',
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: '2026-08-12T00:00:01.000Z',
+      taskReceiptHash: `sha256:${'b'.repeat(64)}`,
+    },
+    events: reduced.events.map((event) => ({ ...event, skillBundleId: signedTaskBundleId })),
+  };
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(signedTask, base.policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...signedTask,
+    captureProvenance: { ...signedTask.captureProvenance, taskReceiptHash: null },
+  }, base.policy), /unauthorized identity or policy metadata/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced,
     events: reduced.events.map((event) => ({ ...event, skillBundleId: '44444444-4444-4444-8444-444444444444' })),

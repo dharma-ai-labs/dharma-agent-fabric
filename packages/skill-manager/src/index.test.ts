@@ -38,6 +38,18 @@ test('legacy v1 bundle can identify itself only for a signed-server upgrade poll
   assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), null);
 });
 
+test('legacy v1 installation without authorization metadata remains upgradeable', async () => {
+  const native = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-no-authorization-'));
+  const workspaceId = 'workspace-legacy-no-authorization';
+  const bundleId = randomUUID();
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  const active = resolve(managed, 'active');
+  await mkdir(active, { recursive: true });
+  await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
+  await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ schema: 'dharma.skill-bundle/v1', bundleId }));
+  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), bundleId);
+});
+
 test('legacy v1 bundle cannot authorize installation or task execution', async () => {
   const server = generateKeyPairSync('ed25519');
   const source = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-auth-'));

@@ -304,6 +304,10 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
   const events = Array.isArray(capsule.events) ? capsule.events : [];
   if (mode !== 'customer_authorized_content') {
     const provider = String(capsule.provider || '');
+    const capsuleSchema = String(capsule.schema || '');
+    const captureProvenance = capsule.captureProvenance && typeof capsule.captureProvenance === 'object'
+      && !Array.isArray(capsule.captureProvenance)
+      ? capsule.captureProvenance as Record<string, unknown> : {};
     const fixedEventKinds = new Set([
       'user_message', 'agent_message', 'tool_call', 'tool_result', 'command', 'file_read', 'file_write',
       'git', 'validation', 'permission', 'subagent', 'error', 'retry', 'session_state', 'metadata', 'collapsed_output',
@@ -330,9 +334,21 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     const coverage = capsule.coverage && typeof capsule.coverage === 'object' && !Array.isArray(capsule.coverage)
       ? capsule.coverage as Record<string, unknown> : {};
     const missingFields = Array.isArray(coverage.missingFields) ? coverage.missingFields : null;
+    const signedTaskCapture = capsuleSchema === 'dharma.trajectory-capsule/v3'
+      && captureProvenance.sourceClass === 'signed_task_execution';
+    const signedTaskBundleIds = [...new Set(events.map((event) => (
+      event && typeof event === 'object' && !Array.isArray(event)
+        ? String((event as Record<string, unknown>).skillBundleId || '') : ''
+    )).filter(Boolean))];
     if (!['codex', 'claude', 'agy'].includes(provider)
       || !digest.test(String(capsule.sessionId || ''))
-      || capsule.taskId !== null
+      || (signedTaskCapture
+        ? !uuid.test(String(capsule.taskId || ''))
+          || !digest.test(String(captureProvenance.taskReceiptHash || ''))
+          || !Number.isFinite(Date.parse(String(captureProvenance.collectedAt || '')))
+          || signedTaskBundleIds.length !== 1
+          || !uuid.test(signedTaskBundleIds[0] || '')
+        : capsule.taskId !== null || capsuleSchema === 'dharma.trajectory-capsule/v3')
       || !uuid.test(String(capsule.deviceId || ''))
       || capsule.redactionReceipt === null
       || receipt.policyRevision !== policy.revision
@@ -406,7 +422,7 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
         || !Array.isArray(eventRecord.contentRefs) || eventRecord.contentRefs.length !== 0
         || source.nativeEventId !== null || source.localLocatorId !== null || source.sourceKind !== eventKind
         || record.nativeKind !== eventKind
-        || eventRecord.skillBundleId !== null
+        || eventRecord.skillBundleId !== (signedTaskCapture ? signedTaskBundleIds[0] : null)
         || eventRecord.providerModel !== null) {
         throw new Error('Reduced trajectory capsule contains unauthorized event descriptors.');
       }

@@ -205,14 +205,17 @@ export async function getLegacySkillBundleIdForUpgrade(input: {
   const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
   const bundleId = await readActiveBundlePointer(root);
   if (!bundleId) return null;
-  const authorization = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as {
-    schema?: unknown;
-    bundleId?: unknown;
-  };
-  if (authorization.schema !== 'dharma.skill-bundle/v1' || authorization.bundleId !== bundleId) return null;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
     throw new Error('Legacy skill bundle identifier is invalid.');
   }
+  let authorization: { schema?: unknown; bundleId?: unknown };
+  try {
+    authorization = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as typeof authorization;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    authorization = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as typeof authorization;
+  }
+  if (authorization.schema !== 'dharma.skill-bundle/v1' || authorization.bundleId !== bundleId) return null;
   return bundleId;
 }
 
