@@ -1008,6 +1008,22 @@ test('task response preview extracts the final agent message and removes secrets
   assert.ok((preview?.redactedValues || 0) >= 1);
 });
 
+test('task response preview exposes bounded Agy success output', () => {
+  const receipt = {
+    taskId: 'task', status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/task',
+    startedAt: '2026-08-16T00:00:00Z', completedAt: '2026-08-16T00:00:01Z',
+    commandResults: [{
+      commandId: 'provider.agy', exitCode: 0, signal: null, timedOut: false,
+      stdout: JSON.stringify({ status: 'SUCCESS', response: 'Agy answer. api_key=secret-secret-secret' }),
+      stderr: '', stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+  const preview = taskResponsePreview(receipt);
+  assert.match(preview?.text || '', /Agy answer/);
+  assert.equal(preview?.text.includes('secret-secret-secret'), false);
+  assert.ok((preview?.redactedValues || 0) >= 1);
+});
+
 test('task execution requires the signed bundle pin to match the active native bundle', () => {
   const pin = { bundleId: 'bundle-1', bundleHash: `sha256:${'a'.repeat(64)}` };
   assert.doesNotThrow(() => assertTaskSkillPin(pin, 'bundle-1'));
