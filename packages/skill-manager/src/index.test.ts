@@ -250,6 +250,20 @@ test('active bundle identity must match the installed release manifest', async (
   );
 });
 
+test('an active bundle pointer fails closed when its release manifest is missing', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-missing-manifest-'));
+  const native = resolve(root, 'native');
+  const workspaceId = randomUUID();
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  await mkdir(resolve(managed, 'active'), { recursive: true });
+  await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${randomUUID()}\n`);
+
+  await assert.rejects(
+    getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }),
+    /Active bundle manifest is missing/,
+  );
+});
+
 test('active bundle authorization rejects locally rewritten release metadata', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-forged-'));
   const source = resolve(root, 'source', 'skill');

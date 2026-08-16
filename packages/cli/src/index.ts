@@ -2397,6 +2397,37 @@ type SignedTaskTrajectoryRecovery = {
   };
 };
 
+export function assertRecoveredTaskWorkspacePolicy(input: {
+  recoveryWorkspaceId: string;
+  requestedWorkspaceId: string;
+  workspace: { workspaceId: string; organizationId: string };
+  policy: Pick<OrganizationPolicy, 'organizationId' | 'serverAuthorization'>;
+}): void {
+  if (input.recoveryWorkspaceId !== input.requestedWorkspaceId
+    || input.workspace.workspaceId !== input.requestedWorkspaceId) {
+    throw new Error('Recovered task completion does not match the selected workspace.');
+  }
+  if (input.policy.organizationId !== input.workspace.organizationId
+    || (input.policy.serverAuthorization
+      && input.policy.serverAuthorization.workspaceId !== input.workspace.workspaceId)) {
+    throw new Error('Recovered task completion policy does not authorize its workspace.');
+  }
+}
+
+export function assertTaskWorkspacePolicy(input: {
+  task: Pick<TaskEnvelope, 'organizationId' | 'workspaceId'>;
+  workspace: { workspaceId: string; organizationId: string };
+  policy: Pick<OrganizationPolicy, 'organizationId' | 'serverAuthorization'>;
+}): void {
+  if (input.task.workspaceId !== input.workspace.workspaceId
+    || input.task.organizationId !== input.workspace.organizationId
+    || input.policy.organizationId !== input.workspace.organizationId
+    || (input.policy.serverAuthorization
+      && input.policy.serverAuthorization.workspaceId !== input.workspace.workspaceId)) {
+    throw new Error('Task workspace policy does not match the signed task and local registration.');
+  }
+}
+
 async function stageSignedTaskTrajectoryRecovery(
   taskId: string,
   workspaceId: string,
@@ -2427,7 +2458,8 @@ async function stageSignedTaskTrajectoryRecovery(
 
 async function finalizeRecoveredSignedTaskTrajectories(
   fabric: AgentFabricClient,
-  policy: OrganizationPolicy,
+  vaultPolicy: OrganizationPolicy,
+  workspaceId: string,
   onlyTaskId?: string,
 ): Promise<Array<{ taskId: string; trajectory: Record<string, unknown> }>> {
   const completions = fabric.listRecoveredTaskCompletions()
@@ -2438,7 +2470,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
     const vault = await LocalVault.open({
       root: resolve(dharmaHome(), 'vault'),
       masterKey: await loadOrCreateVaultMasterKey(),
-      rawLocalDays: rawLocalRetentionDays(policy),
+      rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     let recovery: SignedTaskTrajectoryRecovery | null;
     try {
@@ -2450,8 +2482,20 @@ async function finalizeRecoveredSignedTaskTrajectories(
       || recovery.taskId !== completion.taskId) {
       throw new Error(`Recovered task completion ${completion.taskId} is missing its encrypted local evidence.`);
     }
+    if (recovery.workspaceId !== workspaceId) continue;
     const workspace = (await registry()).find((item) => item.workspaceId === recovery.workspaceId);
     if (!workspace) throw new Error(`Recovered task completion ${completion.taskId} has no registered workspace.`);
+    const recoveryPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
+      resolve(workspace.path, '.dharma', 'approved-policy.json'),
+      recovery.workspaceId,
+      fabric,
+    );
+    assertRecoveredTaskWorkspacePolicy({
+      recoveryWorkspaceId: recovery.workspaceId,
+      requestedWorkspaceId: workspaceId,
+      workspace,
+      policy: recoveryPolicy,
+    });
     const rawTurn = Buffer.from(recovery.prepared.rawTurnBase64, 'base64');
     if (recovery.prepared.capsule.taskId !== completion.taskId
       || recovery.prepared.capsule.workspaceId !== recovery.workspaceId
@@ -2468,7 +2512,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
     };
     assertCapsuleIntegrity(capsule as unknown as Record<string, unknown>);
     const trajectory = await syncSignedTaskTrajectory({
-      fabric, policy, workspace,
+      fabric, policy: recoveryPolicy, workspace,
       prepared: {
         capsule,
         rawTurn,
@@ -2480,7 +2524,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
     const cleanupVault = await LocalVault.open({
       root: resolve(dharmaHome(), 'vault'),
       masterKey: await loadOrCreateVaultMasterKey(),
-      rawLocalDays: rawLocalRetentionDays(policy),
+      rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     try { await cleanupVault.clearTaskCompletionRecovery(completion.taskId); }
     finally { cleanupVault.close(); }
@@ -2491,7 +2535,6 @@ async function finalizeRecoveredSignedTaskTrajectories(
 
 async function executeOneTask(
   fabric: AgentFabricClient,
-  policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
   leaseSeconds: number,
 ): Promise<Record<string, unknown>> {
   const polled = await fabric.pollTask(leaseSeconds);
@@ -2500,6 +2543,12 @@ async function executeOneTask(
   const task = taskRow.envelope;
   const workspace = (await registry()).find((item) => item.workspaceId === task.workspaceId);
   if (!workspace) throw new Error('Task workspace is not registered on this device.');
+  const taskPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
+    resolve(workspace.path, '.dharma', 'approved-policy.json'),
+    workspace.workspaceId,
+    fabric,
+  );
+  assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   return withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
@@ -2531,7 +2580,7 @@ async function executeOneTask(
   let receipt;
   try {
     receipt = await executeTask({
-      task, policy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
+      task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
     });
   } finally {
@@ -2547,19 +2596,24 @@ async function executeOneTask(
   const collectedAt = new Date().toISOString();
   const prepared = receipt.status === 'completed' && task.skillBundle
     ? prepareSignedTaskTrajectory({
-      policy, task, receipt, taskReceiptHash: `sha256:${'0'.repeat(64)}`, collectedAt,
+      policy: taskPolicy, task, receipt, taskReceiptHash: `sha256:${'0'.repeat(64)}`, collectedAt,
       workspace, device: config, activeSkill,
       activeSkillVerifiedAt,
     })
     : null;
-  if (prepared) await stageSignedTaskTrajectoryRecovery(task.taskId, workspace.workspaceId, policy, prepared);
+  if (prepared) await stageSignedTaskTrajectoryRecovery(task.taskId, workspace.workspaceId, taskPolicy, prepared);
   await fabric.postTaskEvent(task.taskId, receipt.status, {
     ...summary,
     ...(prepared ? { trajectoryCapsuleHash: prepared.capsule.capsuleHash } : {}),
   });
   let trajectory = null;
   if (receipt.status === 'completed' && task.skillBundle) {
-    const finalized = await finalizeRecoveredSignedTaskTrajectories(fabric, policy, task.taskId);
+    const finalized = await finalizeRecoveredSignedTaskTrajectories(
+      fabric,
+      taskPolicy,
+      workspace.workspaceId,
+      task.taskId,
+    );
     trajectory = finalized[0]?.trajectory || null;
     if (!trajectory) throw new Error('Task completion did not return a recoverable server receipt.');
   }
@@ -2568,10 +2622,21 @@ async function executeOneTask(
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
+  const policyPath = resolve(required(flags, 'policy'));
+  const requestedWorkspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined;
+  const selectedWorkspace = (await registry()).find((item) => (
+    resolve(item.path, '.dharma', 'approved-policy.json') === policyPath
+    && (!requestedWorkspaceId || item.workspaceId === requestedWorkspaceId)
+  ));
+  if (!selectedWorkspace) throw new Error('Task policy must be the canonical policy of one registered workspace.');
+  const policy = await loadVerifiedWorkspacePolicy(policyPath, selectedWorkspace.workspaceId);
   const fabric = await client();
-  const recoveredTaskTrajectories = await finalizeRecoveredSignedTaskTrajectories(fabric, policy);
-  const result = await executeOneTask(fabric, policy, Number(flags.get('lease-seconds') || 120));
+  const recoveredTaskTrajectories = await finalizeRecoveredSignedTaskTrajectories(
+    fabric,
+    policy,
+    selectedWorkspace.workspaceId,
+  );
+  const result = await executeOneTask(fabric, Number(flags.get('lease-seconds') || 120));
   return recoveredTaskTrajectories.length ? { ...result, recoveredTaskTrajectories } : result;
 }
 
@@ -2949,7 +3014,11 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
-    taskTrajectoriesRecovered += (await finalizeRecoveredSignedTaskTrajectories(fabric, policy)).length;
+    taskTrajectoriesRecovered += (await finalizeRecoveredSignedTaskTrajectories(
+      fabric,
+      policy,
+      canonicalWorkspace.workspaceId,
+    )).length;
     do {
       if (Date.now() >= nextPolicyRefreshAt) {
         try {
@@ -2973,7 +3042,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
         if (evidenceRequestId) evidenceResponsesCompleted += 1;
       }
-      const result = await executeOneTask(fabric, policy, leaseSeconds);
+      const result = await executeOneTask(fabric, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
       if (flags.has('once')) break;
       if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));

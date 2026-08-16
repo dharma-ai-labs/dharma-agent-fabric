@@ -152,21 +152,30 @@ async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: stri
 }
 
 async function readActiveBundlePointer(root: string): Promise<string | null> {
+  let bundleId: string;
   try {
-    const bundleId = (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim();
-    if (!bundleId) return null;
-    const manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as {
-      bundleId?: unknown;
-    };
-    if (manifest.bundleId !== bundleId) {
-      throw new Error('Active bundle pointer does not match the installed release manifest.');
-    }
-    return bundleId;
+    bundleId = (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim();
   }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
+  if (!bundleId) return null;
+  let manifest: { bundleId?: unknown };
+  try {
+    manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as {
+      bundleId?: unknown;
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('Active bundle manifest is missing for the installed bundle pointer.');
+    }
+    throw error;
+  }
+  if (manifest.bundleId !== bundleId) {
+    throw new Error('Active bundle pointer does not match the installed release manifest.');
+  }
+  return bundleId;
 }
 
 function verifyInstallReceipt(

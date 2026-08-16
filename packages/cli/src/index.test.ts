@@ -11,6 +11,8 @@ import {
   activateAgyPlugin,
   installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
+  assertRecoveredTaskWorkspacePolicy,
+  assertTaskWorkspacePolicy,
   assertTaskSkillPin,
   installNativeAgentFabricBootstrap,
   installRepositoryAgentFabricSkill,
@@ -1125,4 +1127,46 @@ test('task execution requires the signed bundle pin to match the active native b
   assert.throws(() => assertTaskSkillPin({ ...pin, bundleHash: 'invalid' }, 'bundle-1'), /hash is invalid/);
   assert.equal(taskSkillPinFailureCode(new Error('Task skill bundle does not match the active local bundle.')), 'skill_bundle_mismatch');
   assert.equal(taskSkillPinFailureCode(new Error('Task skill bundle hash is invalid.')), 'skill_bundle_hash_invalid');
+});
+
+test('recovered signed-task evidence is bound to its registered workspace policy', () => {
+  const workspace = { workspaceId: 'workspace-a', organizationId: 'org-a' };
+  assert.doesNotThrow(() => assertRecoveredTaskWorkspacePolicy({
+    recoveryWorkspaceId: 'workspace-a',
+    requestedWorkspaceId: 'workspace-a',
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }));
+  assert.throws(() => assertRecoveredTaskWorkspacePolicy({
+    recoveryWorkspaceId: 'workspace-a',
+    requestedWorkspaceId: 'workspace-b',
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }), /does not match the selected workspace/);
+  assert.throws(() => assertRecoveredTaskWorkspacePolicy({
+    recoveryWorkspaceId: 'workspace-a',
+    requestedWorkspaceId: 'workspace-a',
+    workspace,
+    policy: { organizationId: 'org-b', serverAuthorization: undefined },
+  }), /does not authorize its workspace/);
+});
+
+test('a signed task executes only under its own registered workspace policy', () => {
+  const task = { organizationId: 'org-a', workspaceId: 'workspace-a' } as const;
+  const workspace = { organizationId: 'org-a', workspaceId: 'workspace-a' };
+  assert.doesNotThrow(() => assertTaskWorkspacePolicy({
+    task,
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }));
+  assert.throws(() => assertTaskWorkspacePolicy({
+    task,
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: { workspaceId: 'workspace-b' } as never },
+  }), /does not match the signed task/);
+  assert.throws(() => assertTaskWorkspacePolicy({
+    task: { ...task, workspaceId: 'workspace-b' },
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }), /does not match the signed task/);
 });
