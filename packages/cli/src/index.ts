@@ -16,11 +16,11 @@ import {
   saveDeviceConfig, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.28';
+const VERSION = '0.1.29';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -1271,10 +1271,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
-  const activeSkillBundleId = await getActiveSkillBundleId(
-    nativeSkillDirectory(provider as ProviderId),
-    registered.workspaceId,
-  );
+  const activeSkill = await activeSkillAuthorization(provider as ProviderId, registered.workspaceId, device);
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
@@ -1294,7 +1291,9 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       const firstRevision = buildTrajectoryCapsule({
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
-        activeSkillBundleId,
+        activeSkillBundleId: activeSkill?.bundleId ?? null,
+        activeSkillBundleActivatedAt: activeSkill?.activatedAt ?? null,
+        activeSkillBundleExpiresAt: activeSkill?.expiresAt ?? null,
       });
       const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
@@ -1311,7 +1310,9 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
             organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
             session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
             revision: latestMetadata.revision + 1, previousRevisionHash: latestMetadata.capsuleHash,
-            activeSkillBundleId,
+            activeSkillBundleId: activeSkill?.bundleId ?? null,
+            activeSkillBundleActivatedAt: activeSkill?.activatedAt ?? null,
+            activeSkillBundleExpiresAt: activeSkill?.expiresAt ?? null,
           })
           : firstRevision;
       const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
@@ -1396,10 +1397,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     const registered = (await registry()).find((item) => item.path === workspace);
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
     const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
-    const activeSkillBundleId = await getActiveSkillBundleId(
-      nativeSkillDirectory(provider as ProviderId),
-      registered.workspaceId,
-    );
+    const activeSkill = await activeSkillAuthorization(provider as ProviderId, registered.workspaceId, device);
     const capsules = sessions.map((session) => {
       const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       return buildTrajectoryCapsule({
@@ -1411,7 +1409,9 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
         rawContentId: sha256(rawTurn),
         rawBytes: rawTurn.byteLength,
         rawKind: 'raw-provider-turn',
-        activeSkillBundleId,
+        activeSkillBundleId: activeSkill?.bundleId ?? null,
+        activeSkillBundleActivatedAt: activeSkill?.activatedAt ?? null,
+        activeSkillBundleExpiresAt: activeSkill?.expiresAt ?? null,
       });
     });
     automaticDisclosure = {
@@ -1730,6 +1730,27 @@ async function syncWorkspacePolicy(
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
   try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
   catch { return null; }
+}
+
+async function activeSkillAuthorization(provider: ProviderId, workspaceId: string, config: DeviceConfig) {
+  const root = nativeSkillDirectory(provider);
+  const pointer = resolve(root, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE');
+  if (!await pathExists(pointer)) return null;
+  return getActiveSkillBundleAuthorization({
+    nativeSkillDirectory: root,
+    workspaceId,
+    provider,
+    organizationId: config.organizationId,
+    deviceId: config.deviceId,
+    serverPublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 },
+      format: 'jwk',
+    }),
+    devicePublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: config.publicKeyEd25519 },
+      format: 'jwk',
+    }),
+  });
 }
 
 async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
@@ -2189,7 +2210,7 @@ async function executeOneTask(
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider), task.workspaceId);
+  const activeBundleId = (await activeSkillAuthorization(task.target.provider, task.workspaceId, config))?.bundleId ?? null;
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
   } catch (error) {
@@ -2352,6 +2373,10 @@ export async function verifyAgentFabricSkillInstallation(input: {
     const connection = JSON.parse(await readFile(connectionPath, 'utf8')) as { workspaceId?: unknown };
     if (typeof connection.workspaceId === 'string') workspaceId = connection.workspaceId;
   } catch {}
+  const config = await readDeviceConfig();
+  const activeBundleId = workspaceId && config
+    ? (await activeSkillAuthorization(input.provider, workspaceId, config))?.bundleId ?? null
+    : null;
   return {
     provider: input.provider,
     ready: repositoryInstalled && nativeInstalled,
@@ -2361,7 +2386,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     connectionPath,
     nativeSkillPath,
     workspaceId: workspaceId || null,
-    activeBundleId: workspaceId ? await getActiveSkillBundleId(nativeRoot, workspaceId) : null,
+    activeBundleId,
     activation: 'next_session',
     nextAction: repositoryInstalled && nativeInstalled
       ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
@@ -2442,10 +2467,12 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
   const destination = nativeSkillDirectory(provider);
   const fabric = await client();
+  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  const activeBundleId = (await activeSkillAuthorization(provider, workspaceId, config))?.bundleId ?? null;
   const response = await fabric.pollSkill({
     workspaceId,
     provider,
-    installedBundleId: await getActiveSkillBundleId(destination, workspaceId),
+    installedBundleId: activeBundleId,
   });
   const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
   if (!rollout) return { ok: true, rollout: null, changed: false };
@@ -2465,7 +2492,6 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     }
   }
   const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
-  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   verifySkillBundle(bundle, createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }));
   await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
   await rm(sourceRoot, { recursive: true, force: true });
@@ -2618,10 +2644,11 @@ export async function run(argv: string[]): Promise<Output> {
     if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
     const root = nativeSkillDirectory(providerValue as ProviderId);
     const workspaceId = required(flags, 'workspace-id');
+    const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     return {
       provider: providerValue,
       workspaceId,
-      activeBundleId: await getActiveSkillBundleId(root, workspaceId),
+      activeBundleId: (await activeSkillAuthorization(providerValue as ProviderId, workspaceId, config))?.bundleId ?? null,
       nativeSkillDirectory: root,
     };
   }

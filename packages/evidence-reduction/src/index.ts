@@ -430,11 +430,18 @@ export function buildTrajectoryCapsule(input: {
   revision?: number;
   previousRevisionHash?: string | null;
   activeSkillBundleId?: string | null;
+  activeSkillBundleActivatedAt?: string | null;
+  activeSkillBundleExpiresAt?: string | null;
 }): TrajectoryCapsule {
   assertPolicy(input.policy);
   if (input.activeSkillBundleId != null
     && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.activeSkillBundleId)) {
     throw new Error('Active skill bundle ID must be a UUID.');
+  }
+  const activatedAt = input.activeSkillBundleActivatedAt == null ? null : Date.parse(input.activeSkillBundleActivatedAt);
+  const expiresAt = input.activeSkillBundleExpiresAt == null ? null : Date.parse(input.activeSkillBundleExpiresAt);
+  if (input.activeSkillBundleId != null && (!Number.isFinite(activatedAt) || (expiresAt != null && !Number.isFinite(expiresAt)))) {
+    throw new Error('Active skill bundle requires a valid activation window.');
   }
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
@@ -480,6 +487,12 @@ export function buildTrajectoryCapsule(input: {
     const fingerprint = sha256(canonicalize({ kind: record.kind, payload }));
     if (seen.has(fingerprint)) continue;
     seen.add(fingerprint);
+    const occurredAt = record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt;
+    const occurredAtMs = Date.parse(occurredAt);
+    const bundleWasActive = input.activeSkillBundleId != null
+      && Number.isFinite(occurredAtMs)
+      && occurredAtMs >= activatedAt!
+      && (expiresAt == null || occurredAtMs < expiresAt);
     events.push({
       schema: 'dharma.agent-event/v1',
       eventId: deterministicUuid(`${trajectoryId}:${index}:${fingerprint}`),
@@ -489,7 +502,7 @@ export function buildTrajectoryCapsule(input: {
       provider: input.session.provider,
       sessionId: pseudonymousSessionId,
       sequence: events.length,
-      occurredAt: record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt,
+      occurredAt,
       kind: recordKind,
       coverage: input.session.coverage,
       contentRefs: [],
@@ -501,7 +514,7 @@ export function buildTrajectoryCapsule(input: {
           ? sha256(`${basename(record.sourcePath)}:${record.line}`)
           : null,
       },
-      skillBundleId: input.activeSkillBundleId ?? null,
+      skillBundleId: bundleWasActive ? input.activeSkillBundleId! : null,
       providerModel: null,
     });
   }

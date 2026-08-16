@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, installSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
@@ -30,6 +30,19 @@ async function signedBundle(source: string, bundleId: string, privateKey: Return
   };
   const bundleHash = calculateBundleHash(base);
   return { ...base, bundleHash, signature: signCanonicalObject({ ...base, bundleHash }, privateKey) };
+}
+
+async function activeBundle(
+  nativeSkillDirectory: string,
+  workspaceId: string,
+  serverPublicKey: ReturnType<typeof generateKeyPairSync>['publicKey'],
+  devicePublicKey: ReturnType<typeof generateKeyPairSync>['publicKey'],
+  deviceId: string,
+  provider: 'codex' | 'claude' | 'agy' = 'codex',
+) {
+  return getActiveSkillBundleAuthorization({
+    nativeSkillDirectory, workspaceId, provider, organizationId: 'org_test', deviceId, serverPublicKey, devicePublicKey,
+  });
 }
 
 test('verified skill activates and a failed canary restores the prior bundle', async () => {
@@ -100,17 +113,43 @@ test('active bundle identity must match the installed release manifest', async (
   const server = generateKeyPairSync('ed25519');
   const device = generateKeyPairSync('ed25519');
   const workspaceId = randomUUID();
+  const deviceId = randomUUID();
   const bundle = await signedBundle(source, randomUUID(), server.privateKey);
   await installSkillBundle({
     bundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
     serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
-    deviceId: randomUUID(), workspaceId, provider: 'codex',
+    deviceId, workspaceId, provider: 'codex',
   });
   const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
   await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${randomUUID()}\n`);
   await assert.rejects(
-    () => getActiveSkillBundleId(native, workspaceId),
+    () => activeBundle(native, workspaceId, server.publicKey, device.publicKey, deviceId),
     /does not match the installed release manifest/,
+  );
+});
+
+test('active bundle authorization rejects locally rewritten release metadata', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-forged-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Candidate provenance\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const workspaceId = randomUUID();
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey);
+  const deviceId = randomUUID();
+  await installSkillBundle({
+    bundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, workspaceId, provider: 'codex',
+  });
+  const active = resolve(native, '.dharma-managed', 'workspaces', workspaceId, 'active');
+  const authorization = JSON.parse(await readFile(resolve(active, 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+  await writeFile(resolve(active, 'AUTHORIZATION.json'), `${JSON.stringify({ ...authorization, version: 'forged' })}\n`);
+  await assert.rejects(
+    () => activeBundle(native, workspaceId, server.publicKey, device.publicKey, deviceId),
+    /signature is invalid|hash is invalid/,
   );
 });
 
@@ -174,8 +213,8 @@ test('two repository workspaces retain independent active bundles and native ski
     deviceId, workspaceId: workspaceB, provider: 'codex',
   });
 
-  assert.equal(await getActiveSkillBundleId(native, workspaceA), bundleA.bundleId);
-  assert.equal(await getActiveSkillBundleId(native, workspaceB), bundleB.bundleId);
+  assert.equal((await activeBundle(native, workspaceA, server.publicKey, device.publicKey, deviceId))?.bundleId, bundleA.bundleId);
+  assert.equal((await activeBundle(native, workspaceB, server.publicKey, device.publicKey, deviceId))?.bundleId, bundleB.bundleId);
   assert.match(await readFile(resolve(native, 'garment-boundary/SKILL.md'), 'utf8'), /Garment/);
   assert.match(await readFile(resolve(native, 'support-boundary/SKILL.md'), 'utf8'), /Support/);
 
@@ -187,8 +226,8 @@ test('two repository workspaces retain independent active bundles and native ski
     deviceId, workspaceId: workspaceA, provider: 'codex', smokeCommandId: 'smokeFail',
   });
   assert.equal(rollback.status, 'rolled_back');
-  assert.equal(await getActiveSkillBundleId(native, workspaceA), bundleA.bundleId);
-  assert.equal(await getActiveSkillBundleId(native, workspaceB), bundleB.bundleId);
+  assert.equal((await activeBundle(native, workspaceA, server.publicKey, device.publicKey, deviceId))?.bundleId, bundleA.bundleId);
+  assert.equal((await activeBundle(native, workspaceB, server.publicKey, device.publicKey, deviceId))?.bundleId, bundleB.bundleId);
   assert.match(await readFile(resolve(native, 'garment-boundary/SKILL.md'), 'utf8'), /Garment/);
   assert.match(await readFile(resolve(native, 'support-boundary/SKILL.md'), 'utf8'), /Support/);
 });

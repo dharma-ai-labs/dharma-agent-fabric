@@ -50,6 +50,12 @@ export interface InstallReceipt {
   signature: string;
 }
 
+export interface ActiveSkillBundleAuthorization {
+  bundleId: string;
+  activatedAt: string;
+  expiresAt: string | null;
+}
+
 function assertContained(root: string, candidate: string): string {
   const route = relative(resolve(root), resolve(candidate));
   if (route === '..' || route.startsWith('../') || route.startsWith('..\\') || isAbsolute(route)) {
@@ -109,7 +115,7 @@ async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: stri
   });
 }
 
-async function readActiveBundleId(root: string): Promise<string | null> {
+async function readActiveBundlePointer(root: string): Promise<string | null> {
   try {
     const bundleId = (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim();
     if (!bundleId) return null;
@@ -124,6 +130,28 @@ async function readActiveBundleId(root: string): Promise<string | null> {
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
+  }
+}
+
+function verifyInstallReceipt(
+  receipt: InstallReceipt,
+  devicePublicKey: KeyObject,
+  expected: { bundleId: string; organizationId: string; deviceId: string; workspaceId: string; provider: ProviderId },
+  now: Date,
+): void {
+  const { signature, ...signed } = receipt;
+  if (!verifyCanonicalObject(signed, signature, devicePublicKey)) throw new Error('Active bundle install receipt signature is invalid.');
+  const { receiptHash, ...hashInput } = signed;
+  if (receiptHash !== sha256(canonicalize(hashInput))) throw new Error('Active bundle install receipt hash is invalid.');
+  if (receipt.status !== 'active') throw new Error('Active bundle install receipt is not active.');
+  if (receipt.bundleId !== expected.bundleId || receipt.organizationId !== expected.organizationId
+    || receipt.deviceId !== expected.deviceId || receipt.workspaceId !== expected.workspaceId || receipt.provider !== expected.provider) {
+    throw new Error('Active bundle install receipt does not match the selected endpoint.');
+  }
+  const startedAt = Date.parse(receipt.startedAt);
+  const completedAt = Date.parse(receipt.completedAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || completedAt < startedAt || completedAt > now.getTime() + 5_000) {
+    throw new Error('Active bundle install receipt has an invalid activation window.');
   }
 }
 
@@ -225,12 +253,32 @@ async function activateNativeSkills(input: {
   }
 }
 
-export async function getActiveSkillBundleId(nativeSkillDirectory: string, workspaceId?: string) {
-  return readActiveBundleId(
-    workspaceId
-      ? workspaceManagedRoot(nativeSkillDirectory, workspaceId)
-      : resolve(nativeSkillDirectory, '.dharma-managed'),
-  );
+export async function getActiveSkillBundleAuthorization(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  provider: ProviderId;
+  organizationId: string;
+  deviceId: string;
+  serverPublicKey: KeyObject;
+  devicePublicKey: KeyObject;
+  now?: Date;
+}): Promise<ActiveSkillBundleAuthorization | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  const bundle = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+  const receipt = JSON.parse(await readFile(resolve(root, 'active', 'INSTALL_RECEIPT.json'), 'utf8')) as InstallReceipt;
+  const now = input.now ?? new Date();
+  if (bundle.bundleId !== bundleId) throw new Error('Active bundle pointer does not match the signed release authorization.');
+  verifySkillBundle(bundle, input.serverPublicKey, now);
+  verifyInstallReceipt(receipt, input.devicePublicKey, {
+    bundleId,
+    organizationId: input.organizationId,
+    deviceId: input.deviceId,
+    workspaceId: input.workspaceId,
+    provider: input.provider,
+  }, now);
+  return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
 }
 
 export async function installSkillBundle(input: {
@@ -261,7 +309,7 @@ export async function installSkillBundle(input: {
   const release = assertContained(releases, resolve(releases, input.bundle.bundleId));
   const active = resolve(managedRoot, 'active');
   const rollback = resolve(managedRoot, 'rollback');
-  const previousBundleId = await readActiveBundleId(managedRoot);
+  const previousBundleId = await readActiveBundlePointer(managedRoot);
   await mkdir(releases, { recursive: true, mode: 0o700 });
   await rm(release, { recursive: true, force: true });
   await mkdir(release, { recursive: true, mode: 0o700 });
@@ -280,6 +328,7 @@ export async function installSkillBundle(input: {
     `${JSON.stringify({ bundleId: input.bundle.bundleId, workspaceId: input.workspaceId, skillIds })}\n`,
     { mode: 0o600 },
   );
+  await writeFile(resolve(release, 'AUTHORIZATION.json'), `${JSON.stringify(input.bundle)}\n`, { mode: 0o600 });
   const previousRelease = previousBundleId ? resolve(releases, previousBundleId) : null;
   const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
 
@@ -343,7 +392,12 @@ export async function installSkillBundle(input: {
   };
   const receiptHash = sha256(canonicalize(receiptBase));
   const signature = signCanonicalObject({ ...receiptBase, receiptHash }, input.devicePrivateKey);
-  return { ...receiptBase, receiptHash, signature };
+  const receipt = { ...receiptBase, receiptHash, signature };
+  if (status === 'active') {
+    await writeFile(resolve(release, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+    await writeFile(resolve(active, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+  }
+  return receipt;
 }
 
 export { contentHash };
