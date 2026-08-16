@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import test from 'node:test';
 import {
   agyAdapter,
@@ -17,7 +17,7 @@ test('provider subprocess environment excludes cloud and model credentials', () 
     OPENAI_API_KEY: 'openai-secret', ANTHROPIC_API_KEY: 'anthropic-secret',
     GOOGLE_APPLICATION_CREDENTIALS: '/tmp/gcp-key.json', AWS_SECRET_ACCESS_KEY: 'aws-secret',
   });
-  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.PATH, ['/usr/bin', resolve('/home/customer', '.local', 'bin')].join(delimiter));
   assert.equal(env.HOME, '/home/customer');
   assert.equal(env.CODEX_HOME, '/home/customer/.codex');
   assert.equal(env.OPENAI_API_KEY, undefined);
@@ -25,6 +25,15 @@ test('provider subprocess environment excludes cloud and model credentials', () 
   assert.equal(env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
   assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(env.DHARMA_AGENT_FABRIC_TASK, '1');
+});
+
+test('provider subprocess environment adds the supported per-user CLI install directory once', () => {
+  const localBin = resolve('/home/customer', '.local', 'bin');
+  const env = providerProcessEnvironment({
+    HOME: '/home/customer',
+    PATH: ['/usr/bin', localBin].join(delimiter),
+  });
+  assert.deepEqual(env.PATH?.split(delimiter), ['/usr/bin', localBin]);
 });
 
 test('Codex discovery admits only sessions bound to the requested workspace', async () => {
