@@ -217,14 +217,24 @@ export async function getLegacySkillBundleIdForUpgrade(input: {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
     throw new Error('Legacy skill bundle identifier is invalid.');
   }
-  let authorization: { schema?: unknown; bundleId?: unknown };
+  let authorization: { schema?: unknown; bundleId?: unknown; workspaceId?: unknown; skillIds?: unknown };
+  let source: 'authorization' | 'legacy_manifest' = 'authorization';
   try {
     authorization = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as typeof authorization;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    source = 'legacy_manifest';
     authorization = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as typeof authorization;
   }
-  if (authorization.schema !== 'dharma.skill-bundle/v1' || authorization.bundleId !== bundleId) return null;
+  if (authorization.bundleId !== bundleId) return null;
+  if (source === 'authorization') {
+    if (authorization.schema !== 'dharma.skill-bundle/v1') return null;
+  } else if (authorization.schema !== undefined
+    || authorization.workspaceId !== input.workspaceId
+    || !Array.isArray(authorization.skillIds)
+    || !authorization.skillIds.every((skillId) => typeof skillId === 'string' && skillId.length > 0)) {
+    return null;
+  }
   return bundleId;
 }
 

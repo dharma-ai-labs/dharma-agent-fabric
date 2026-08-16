@@ -48,9 +48,10 @@ test('legacy v1 installation without authorization metadata remains upgradeable'
   await mkdir(active, { recursive: true });
   await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
   await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ bundleId, workspaceId, skillIds: ['dharma-boundary'] }));
-  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), null);
+  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), bundleId);
   assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), bundleId);
   await writeFile(resolve(active, 'BUNDLE.json'), JSON.stringify({ bundleId, workspaceId: 'another-workspace', skillIds: ['dharma-boundary'] }));
+  assert.equal(await getLegacySkillBundleIdForUpgrade({ nativeSkillDirectory: native, workspaceId }), null);
   await assert.rejects(
     getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }),
     /recovery metadata is invalid/,
