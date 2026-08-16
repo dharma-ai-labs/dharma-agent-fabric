@@ -20,7 +20,7 @@ import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type Ski
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.21';
+const VERSION = '0.1.22';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -256,19 +256,20 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   workspaceId: string,
   fabric: AgentFabricClient,
 ) {
-  if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
-  const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
-  if (!item) throw new Error('Content transmission workspace is not registered locally.');
-  const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
-  if (resolve(policyPath) !== canonicalPolicyPath) {
-    throw new Error('Content transmission requires the canonical registered workspace policy path.');
-  }
-  const current = await loadOrganizationPolicy(policyPath);
-  if (current.organizationId !== item.organizationId) {
-    throw new Error('Workspace policy organization does not match registration.');
-  }
-  await syncWorkspacePolicy(fabric, item, current.revision, true);
-  return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+  return withWorkspacePolicyRefreshLock(workspaceId, async () => {
+    const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
+    if (!item) throw new Error('Content transmission workspace is not registered locally.');
+    const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
+    if (resolve(policyPath) !== canonicalPolicyPath) {
+      throw new Error('Content transmission requires the canonical registered workspace policy path.');
+    }
+    const current = await loadOrganizationPolicy(policyPath);
+    if (current.organizationId !== item.organizationId) {
+      throw new Error('Workspace policy organization does not match registration.');
+    }
+    await syncWorkspacePolicy(fabric, item, current.revision, true);
+    return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+  });
 }
 
 export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
@@ -704,10 +705,23 @@ function workspaceAuthorizationStatePath(workspaceId: string) {
   return resolve(dharmaHome(), 'registry', 'workspace-authorizations', `${workspaceId}.json`);
 }
 
-async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
-  const release = await acquirePidLock(lockPath, 10_000, 'Timed out waiting for the workspace authorization lock.');
+async function withFileLock<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+  timeoutMessage = 'Timed out waiting for the workspace authorization lock.',
+): Promise<T> {
+  const release = await acquirePidLock(lockPath, 10_000, timeoutMessage);
   try { return await operation(); }
   finally { await release(); }
+}
+
+export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
+  if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
+  return withFileLock(
+    `${workspaceAuthorizationStatePath(workspaceId)}.refresh.lock`,
+    operation,
+    'Timed out waiting for the workspace policy refresh lock.',
+  );
 }
 
 async function assertWorkspaceAuthorizationCurrent(

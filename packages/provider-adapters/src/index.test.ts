@@ -297,7 +297,7 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
 });
 
-test('Agy task execution uses supported print, sandbox, timeout, and log arguments', async () => {
+test('Agy task execution creates an isolated project and uses supported plan-mode arguments', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-agy-task-'));
   let observed: Record<string, unknown> = {};
   const result = await executeProviderTask({
@@ -305,16 +305,44 @@ test('Agy task execution uses supported print, sandbox, timeout, and log argumen
     allowedCommandArgv: [], allowWrites: false,
     runner: async (input) => {
       observed = input;
-      return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('Summary'), stderr: Buffer.alloc(0) };
+      return {
+        exitCode: 0, signal: null, timedOut: false,
+        stdout: Buffer.from(JSON.stringify({ status: 'SUCCESS', response: 'Summary' })), stderr: Buffer.alloc(0),
+      };
     },
   });
   assert.equal(observed.command, 'agy');
   assert.equal(observed.stdin, '');
-  assert.ok((observed.argv as string[]).includes('--print'));
-  assert.ok((observed.argv as string[]).includes('--sandbox'));
-  assert.ok((observed.argv as string[]).includes('--log-file'));
-  assert.ok((observed.argv as string[]).includes('30s'));
+  const argv = observed.argv as string[];
+  assert.equal(argv[0], '--new-project');
+  assert.equal(argv[1], '--print');
+  assert.match(String(argv[2]), /Operate only inside the current repository/);
+  assert.match(String(argv[2]), /Summarize this repository/);
+  assert.deepEqual(argv.slice(3, 5), ['--output-format', 'json']);
+  assert.ok(argv.includes('--sandbox'));
+  assert.deepEqual(argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2), ['--mode', 'plan']);
+  assert.ok(argv.includes('--log-file'));
+  assert.ok(argv.includes('30s'));
+  assert.equal(argv.includes('--dangerously-skip-permissions'), false);
   assert.equal(result.exitCode, 0);
+});
+
+test('Agy accepts structured success despite noisy informational log prefixes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-noisy-success-'));
+  const result = await executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Read package metadata.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async (input) => {
+      const logFlag = input.argv.indexOf('--log-file');
+      await writeFile(String(input.argv[logFlag + 1]), 'ERROR: logging before google.Init: informational startup line; authentication required for optional subsystem\n');
+      return {
+        exitCode: 0, signal: null, timedOut: false,
+        stdout: Buffer.from(JSON.stringify({ status: 'SUCCESS', response: 'ok' })), stderr: Buffer.alloc(0),
+      };
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.stdout).status, 'SUCCESS');
 });
 
 test('Agy fails closed for writes, registered commands, and zero-exit authentication errors', async () => {
@@ -337,6 +365,28 @@ test('Agy fails closed for writes, registered commands, and zero-exit authentica
   });
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr, /authenticate this device/);
+
+  const denied = await executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Read the repository.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: Buffer.alloc(0), stderr: Buffer.from('No output produced because the request was auto-denied.'),
+    }),
+  });
+  assert.equal(denied.exitCode, 1);
+  assert.match(denied.stderr, /authenticate this device/);
+
+  const unstructured = await executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Read the repository.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: Buffer.from('Unrecognized provider response'), stderr: Buffer.alloc(0),
+    }),
+  });
+  assert.equal(unstructured.exitCode, 1);
+  assert.match(unstructured.stderr, /execution failed/);
 });
 
 test('Claude task execution pins a validated configured model', async () => {
