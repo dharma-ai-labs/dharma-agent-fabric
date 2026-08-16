@@ -240,6 +240,14 @@ test('organization commands require environment credentials and explicit confirm
     ]);
     assert.match(requests[4]!.url, /agent-fabric\/remediations\/target-2$/);
     assert.deepEqual(JSON.parse(String(requests[4]!.init?.body)), { trajectoryIds: heldOutTrajectoryIds, action: 'run_backtest' });
+    await run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'stage_evaluation',
+      '--json-body', '{"endpointId":"11111111-1111-4111-8111-111111111111"}', '--confirm',
+    ]);
+    assert.deepEqual(JSON.parse(String(requests[5]!.init?.body)), {
+      endpointId: '11111111-1111-4111-8111-111111111111', action: 'stage_evaluation',
+    });
   } finally {
     globalThis.fetch = originalFetch;
     if (originalToken === undefined) delete process.env.DHARMA_ORG_API_TOKEN;
@@ -752,6 +760,14 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
     redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['native_provider_payload'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: reduced.events.map((event) => ({ ...event, skillBundleId: '44444444-4444-4444-8444-444444444444' })),
+  }, base.policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: reduced.events.map((event) => ({ ...event, skillBundleId: 'forged-bundle' })),
+  }, base.policy), /unauthorized event descriptors/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced,
     events: [{

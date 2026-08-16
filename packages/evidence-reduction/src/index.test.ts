@@ -123,6 +123,31 @@ test('local analysis delivers failure and tool-discipline metadata without conte
   assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
 });
 
+test('reduced trajectory events retain only the active skill bundle UUID as provenance', () => {
+  const bundleId = '77777777-7777-4777-8777-777777777777';
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy, activeSkillBundleId: bundleId,
+    rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'codex', sessionId: 'session_bundle_bound', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-16T01:00:00.000Z', endedAt: '2026-08-16T01:00:01.000Z',
+      records: [{ native: { type: 'agent_message', text: 'private' }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-16T01:00:01.000Z', kind: 'agent_message' }],
+    },
+  });
+  assert.equal(capsule.events[0]?.skillBundleId, bundleId);
+  assert.equal(JSON.stringify(capsule).includes('private'), false);
+  assert.throws(() => buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy, activeSkillBundleId: 'not-a-bundle-id',
+    rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'codex', sessionId: 'session_bundle_invalid', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-16T01:00:00.000Z', endedAt: '2026-08-16T01:00:01.000Z', records: [],
+    },
+  }), /bundle ID must be a UUID/);
+});
+
 test('local analysis recognizes Claude-native terminal failure signals', () => {
   const capsule = buildTrajectoryCapsule({
     organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,

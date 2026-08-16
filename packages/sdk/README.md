@@ -14,16 +14,24 @@ const fabric = new AgentFabricClient({
   token: process.env.DHARMA_ORG_API_TOKEN!,
 });
 
-const heldOutTrajectoryIds = [/* 20 to 100 later non-source trajectory IDs */];
+const staged = await fabric.transitionRemediationTarget('<target-id>', {
+  action: 'stage_evaluation',
+  endpointId: '<active-local-endpoint-id>',
+}, { idempotencyKey: crypto.randomUUID() });
+
+// Install the returned evaluation authorization with `dharma skills sync`,
+// then collect 20 to 100 later non-source trajectories on that exact endpoint.
+const heldOutTrajectoryIds = [/* candidate-bound trajectory IDs */];
 await fabric.transitionRemediationTarget('<target-id>', {
   action: 'run_backtest',
   trajectoryIds: heldOutTrajectoryIds,
 }, { idempotencyKey: crypto.randomUUID() });
 ```
 
-`run_backtest` scores retained trajectories collected after the candidate was
-created and binds the result to that repository agent. It does not accept source
-evidence from the remediation analysis window.
+`stage_evaluation` is a short-lived, signed evaluation-only rollout, not release
+approval. `run_backtest` accepts only retained trajectories collected after the
+candidate bundle was installed on that exact endpoint. It rejects source,
+older, cross-endpoint, and differently pinned evidence.
 
 - [OpenAPI contract](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/openapi/agent-fabric.openapi.json)
 - [Managed runtime, BYOK, and billing](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/09-managed-runtime-byok-and-billing.md)

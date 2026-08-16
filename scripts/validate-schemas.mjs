@@ -27,4 +27,47 @@ for (const name of names) {
   }
 }
 
+const validateSkillBundle = ajv.getSchema('https://schemas.dharma-ai.io/skill-bundle/v1');
+const inlineSkillBundle = {
+  schema: 'dharma.skill-bundle/v1',
+  bundleId: '11111111-1111-4111-8111-111111111111',
+  organizationId: 'org_schema_test',
+  version: '1.0.0',
+  operation: 'install',
+  skills: [{
+    skillId: 'schema-test',
+    version: '1.0.0',
+    repository: 'https://github.com/dharma-ai-labs/schema-test.git',
+    commit: 'a'.repeat(40),
+    contentHash: `sha256:${'b'.repeat(64)}`,
+    path: 'skills/schema-test',
+    files: [{
+      path: 'SKILL.md',
+      contentBase64: 'IyBTY2hlbWEgdGVzdAo=',
+      sha256: `sha256:${'c'.repeat(64)}`,
+    }],
+  }],
+  riskClass: 'R3',
+  targetSelectors: { providers: ['codex'] },
+  activationPolicy: 'next_session',
+  rollbackBundleId: '22222222-2222-4222-8222-222222222222',
+  evaluationReceiptId: 'schema-test-evaluation',
+  bundleHash: `sha256:${'d'.repeat(64)}`,
+  createdAt: '2026-08-16T00:00:00.000Z',
+  expiresAt: '2026-08-17T00:00:00.000Z',
+  signature: 'schema-test-signature',
+};
+if (!validateSkillBundle?.(inlineSkillBundle)) {
+  throw new Error(`Signed inline skill bundle is invalid: ${ajv.errorsText(validateSkillBundle?.errors)}`);
+}
+if (validateSkillBundle({ ...inlineSkillBundle, approval: { approvedBy: 'user' } })) {
+  throw new Error('Skill bundle schema accepted undeclared approval metadata.');
+}
+if (validateSkillBundle({
+  ...inlineSkillBundle,
+  skills: [{ ...inlineSkillBundle.skills[0], files: [{ ...inlineSkillBundle.skills[0].files[0], path: '../SKILL.md' }] }],
+})) {
+  throw new Error('Skill bundle schema accepted a traversing inline file path.');
+}
+
 process.stdout.write(`${JSON.stringify({ ok: true, schemas: names.length })}\n`);

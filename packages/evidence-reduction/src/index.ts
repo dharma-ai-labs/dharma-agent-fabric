@@ -429,8 +429,13 @@ export function buildTrajectoryCapsule(input: {
   createdAt?: string;
   revision?: number;
   previousRevisionHash?: string | null;
+  activeSkillBundleId?: string | null;
 }): TrajectoryCapsule {
   assertPolicy(input.policy);
+  if (input.activeSkillBundleId != null
+    && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.activeSkillBundleId)) {
+    throw new Error('Active skill bundle ID must be a UUID.');
+  }
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
   };
@@ -496,7 +501,7 @@ export function buildTrajectoryCapsule(input: {
           ? sha256(`${basename(record.sourcePath)}:${record.line}`)
           : null,
       },
-      skillBundleId: null,
+      skillBundleId: input.activeSkillBundleId ?? null,
       providerModel: null,
     });
   }

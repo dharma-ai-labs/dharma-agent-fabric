@@ -397,7 +397,8 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
         || !Array.isArray(eventRecord.contentRefs) || eventRecord.contentRefs.length !== 0
         || source.nativeEventId !== null || source.localLocatorId !== null || source.sourceKind !== eventKind
         || record.nativeKind !== eventKind
-        || eventRecord.skillBundleId !== null || eventRecord.providerModel !== null) {
+        || (eventRecord.skillBundleId !== null && !uuid.test(String(eventRecord.skillBundleId)))
+        || eventRecord.providerModel !== null) {
         throw new Error('Reduced trajectory capsule contains unauthorized event descriptors.');
       }
     }
@@ -1122,12 +1123,12 @@ async function runOrganizationCommand(command: string | undefined, subcommand: s
     const targetId = required(flags, 'target-id');
     const body = await commandJsonBody(flags);
     const action = String(flags.get('action') || body.action || '');
-    if (!['run_backtest', 'link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
-      throw new Error('Remediation action must be run_backtest, link_backtest, approve, merge_pr, release, expand, or rollback.');
+    if (!['stage_evaluation', 'run_backtest', 'link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
+      throw new Error('Remediation action must be stage_evaluation, run_backtest, link_backtest, approve, merge_pr, release, expand, or rollback.');
     }
     return api.transitionRemediationTarget(targetId, {
       ...body,
-      action: action as 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
+      action: action as 'stage_evaluation' | 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
     });
   }
   if (command === 'skills' && subcommand === 'list') return api.listSkills();
@@ -1270,6 +1271,10 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+  const activeSkillBundleId = await getActiveSkillBundleId(
+    nativeSkillDirectory(provider as ProviderId),
+    registered.workspaceId,
+  );
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
@@ -1289,6 +1294,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       const firstRevision = buildTrajectoryCapsule({
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
+        activeSkillBundleId,
       });
       const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
@@ -1305,6 +1311,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
             organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
             session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
             revision: latestMetadata.revision + 1, previousRevisionHash: latestMetadata.capsuleHash,
+            activeSkillBundleId,
           })
           : firstRevision;
       const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
@@ -1389,6 +1396,10 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     const registered = (await registry()).find((item) => item.path === workspace);
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
     const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
+    const activeSkillBundleId = await getActiveSkillBundleId(
+      nativeSkillDirectory(provider as ProviderId),
+      registered.workspaceId,
+    );
     const capsules = sessions.map((session) => {
       const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       return buildTrajectoryCapsule({
@@ -1400,6 +1411,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
         rawContentId: sha256(rawTurn),
         rawBytes: rawTurn.byteLength,
         rawKind: 'raw-provider-turn',
+        activeSkillBundleId,
       });
     });
     automaticDisclosure = {
