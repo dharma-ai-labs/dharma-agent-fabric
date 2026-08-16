@@ -257,7 +257,6 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   fabric: AgentFabricClient,
 ) {
   return withWorkspacePolicyRefreshLock(workspaceId, async () => {
-    if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
     if (!item) throw new Error('Content transmission workspace is not registered locally.');
     const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
@@ -706,15 +705,23 @@ function workspaceAuthorizationStatePath(workspaceId: string) {
   return resolve(dharmaHome(), 'registry', 'workspace-authorizations', `${workspaceId}.json`);
 }
 
-async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
-  const release = await acquirePidLock(lockPath, 10_000, 'Timed out waiting for the workspace authorization lock.');
+async function withFileLock<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+  timeoutMessage = 'Timed out waiting for the workspace authorization lock.',
+): Promise<T> {
+  const release = await acquirePidLock(lockPath, 10_000, timeoutMessage);
   try { return await operation(); }
   finally { await release(); }
 }
 
 export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
   if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
-  return withFileLock(`${workspaceAuthorizationStatePath(workspaceId)}.refresh.lock`, operation);
+  return withFileLock(
+    `${workspaceAuthorizationStatePath(workspaceId)}.refresh.lock`,
+    operation,
+    'Timed out waiting for the workspace policy refresh lock.',
+  );
 }
 
 async function assertWorkspaceAuthorizationCurrent(

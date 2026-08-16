@@ -178,6 +178,8 @@ export async function executeProviderTask(input: {
     command = 'agy';
     temporaryDirectory = await mkdtemp(resolve(tmpdir(), 'dharma-agy-task-'));
     agyLogPath = resolve(temporaryDirectory, 'agy.log');
+    // Agy's sandbox and plan mode are the structural boundary. The prompt is
+    // defense in depth and must not be treated as delegated write authority.
     const guardedInstructions = [
       'Operate only inside the current repository. Use file-reading tools only. Do not modify files, run shell commands, use the network, or inspect parent/sibling directories.',
       input.instructions,
@@ -215,7 +217,7 @@ export async function executeProviderTask(input: {
       } catch {}
       if (/not logged into antigravity|auth(?:entication)? (?:timed out|required|failed)|please (?:log in|authenticate)|oauth.*(?:failed|expired)/i.test(userFacingDiagnostic)
         || /no output produced.*auto-denied/i.test(diagnostic)
-        || (structuredStatus !== null && structuredStatus !== 'SUCCESS')
+        || structuredStatus !== 'SUCCESS'
         || (result.exitCode === 0 && !stdout.trim())) {
         exitCode = 1;
         stderr = `${stderr}${stderr ? '\n' : ''}Agy authentication or execution failed. Run agy interactively to authenticate this device.`;

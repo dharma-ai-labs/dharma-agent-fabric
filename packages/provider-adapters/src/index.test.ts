@@ -305,7 +305,10 @@ test('Agy task execution creates an isolated project and uses supported plan-mod
     allowedCommandArgv: [], allowWrites: false,
     runner: async (input) => {
       observed = input;
-      return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('Summary'), stderr: Buffer.alloc(0) };
+      return {
+        exitCode: 0, signal: null, timedOut: false,
+        stdout: Buffer.from(JSON.stringify({ status: 'SUCCESS', response: 'Summary' })), stderr: Buffer.alloc(0),
+      };
     },
   });
   assert.equal(observed.command, 'agy');
@@ -373,6 +376,17 @@ test('Agy fails closed for writes, registered commands, and zero-exit authentica
   });
   assert.equal(denied.exitCode, 1);
   assert.match(denied.stderr, /authenticate this device/);
+
+  const unstructured = await executeProviderTask({
+    provider: 'agy', workspace: root, instructions: 'Read the repository.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: Buffer.from('Unrecognized provider response'), stderr: Buffer.alloc(0),
+    }),
+  });
+  assert.equal(unstructured.exitCode, 1);
+  assert.match(unstructured.stderr, /execution failed/);
 });
 
 test('Claude task execution pins a validated configured model', async () => {
