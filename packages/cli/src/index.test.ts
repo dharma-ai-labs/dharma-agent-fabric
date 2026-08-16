@@ -26,6 +26,7 @@ import {
   parseSelectedProviderIds,
   portalUrl,
   rawLocalRetentionDays,
+  recoverLegacySkillBundleIdAfterAuthorizationFailure,
   relayProcessState,
   releaseDailyContentUpload,
   reserveDailyContentUpload,
@@ -517,6 +518,39 @@ test('task execution and skill synchronization share one workspace-provider acti
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
   }
+});
+
+test('skill synchronization falls back only for legacy v1 authorization metadata', async () => {
+  const native = await mkdtemp(join(tmpdir(), 'dharma-skill-sync-legacy-only-'));
+  const workspaceId = 'workspace-legacy-only';
+  const bundleId = '11111111-1111-4111-8111-111111111111';
+  const managed = join(native, '.dharma-managed', 'workspaces', workspaceId);
+  const active = join(managed, 'active');
+  await mkdir(active, { recursive: true });
+  await writeFile(join(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
+  await writeFile(join(active, 'BUNDLE.json'), JSON.stringify({ bundleId, workspaceId, skillIds: [] }));
+  await writeFile(join(active, 'AUTHORIZATION.json'), JSON.stringify({
+    schema: 'dharma.skill-bundle/v2', bundleId,
+  }));
+  const verificationError = new Error('current bundle verification failed');
+
+  await assert.rejects(
+    recoverLegacySkillBundleIdAfterAuthorizationFailure({
+      nativeSkillDirectory: native,
+      workspaceId,
+      authorizationError: verificationError,
+    }),
+    verificationError,
+  );
+
+  await writeFile(join(active, 'AUTHORIZATION.json'), JSON.stringify({
+    schema: 'dharma.skill-bundle/v1', bundleId,
+  }));
+  assert.equal(await recoverLegacySkillBundleIdAfterAuthorizationFailure({
+    nativeSkillDirectory: native,
+    workspaceId,
+    authorizationError: verificationError,
+  }), bundleId);
 });
 
 test('repository onboarding refuses to overwrite an unmanaged skill', async () => {

@@ -17,7 +17,7 @@ import {
   saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleAuthorization, getInstalledSkillBundleIdForRecovery, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
@@ -2846,6 +2846,19 @@ export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoo
   return true;
 }
 
+export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  authorizationError: unknown;
+}): Promise<string> {
+  const legacyBundleId = await getLegacySkillBundleIdForUpgrade({
+    nativeSkillDirectory: input.nativeSkillDirectory,
+    workspaceId: input.workspaceId,
+  });
+  if (!legacyBundleId) throw input.authorizationError;
+  return legacyBundleId;
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
@@ -2864,12 +2877,11 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
     ))?.bundleId ?? null;
   } catch (error) {
-    const legacyBundleId = await getInstalledSkillBundleIdForRecovery({
+    activeBundleId = await recoverLegacySkillBundleIdAfterAuthorizationFailure({
       nativeSkillDirectory: destination,
       workspaceId,
+      authorizationError: error,
     });
-    if (!legacyBundleId) throw error;
-    activeBundleId = legacyBundleId;
   }
   const response = await fabric.pollSkill({
     workspaceId,
