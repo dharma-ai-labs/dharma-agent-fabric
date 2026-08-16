@@ -761,10 +761,10 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
     redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['native_provider_payload'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
-  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy({
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced,
     events: reduced.events.map((event) => ({ ...event, skillBundleId: '44444444-4444-4444-8444-444444444444' })),
-  }, base.policy));
+  }, base.policy), /unauthorized event descriptors/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced,
     events: reduced.events.map((event) => ({ ...event, skillBundleId: 'forged-bundle' })),

@@ -406,7 +406,7 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
         || !Array.isArray(eventRecord.contentRefs) || eventRecord.contentRefs.length !== 0
         || source.nativeEventId !== null || source.localLocatorId !== null || source.sourceKind !== eventKind
         || record.nativeKind !== eventKind
-        || (eventRecord.skillBundleId !== null && !uuid.test(String(eventRecord.skillBundleId)))
+        || eventRecord.skillBundleId !== null
         || eventRecord.providerModel !== null) {
         throw new Error('Reduced trajectory capsule contains unauthorized event descriptors.');
       }

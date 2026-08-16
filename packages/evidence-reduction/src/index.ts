@@ -514,7 +514,8 @@ export function buildTrajectoryCapsule(input: {
     seen.add(fingerprint);
     const occurredAt = record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt;
     const occurredAtMs = Date.parse(signedTaskCapture ? captureProvenance.collectedAt : occurredAt);
-    const bundleWasActive = input.activeSkillBundleId != null
+    const bundleWasActive = signedTaskCapture
+      && input.activeSkillBundleId != null
       && Number.isFinite(occurredAtMs)
       && occurredAtMs >= activatedAt!
       && (expiresAt == null || occurredAtMs < expiresAt);

@@ -373,7 +373,55 @@
       "type": "string",
       "format": "date-time"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "captureProvenance": {
+            "type": "object",
+            "properties": {
+              "sourceClass": { "const": "signed_task_execution" }
+            },
+            "required": ["sourceClass"]
+          }
+        },
+        "required": ["captureProvenance"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "taskId": { "type": "string", "format": "uuid" },
+          "captureProvenance": {
+            "type": "object",
+            "properties": {
+              "taskReceiptHash": { "type": "string", "pattern": "^sha256:[A-Fa-f0-9]{64}$" }
+            }
+          }
+        },
+        "required": ["taskId"]
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "taskId": { "type": "null" },
+          "captureProvenance": {
+            "type": "object",
+            "properties": {
+              "taskReceiptHash": { "type": "null" }
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "skillBundleId": { "type": "null" }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
-
-
