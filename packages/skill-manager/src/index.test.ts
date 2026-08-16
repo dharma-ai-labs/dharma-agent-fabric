@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
 
 const organizationAgentId = '11111111-1111-4111-8111-111111111111';
 
@@ -115,6 +115,35 @@ test('verified skill activates and a failed canary restores the prior bundle', a
   assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
   assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /evidence boundary/);
   assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), firstBundleId);
+});
+
+test('a server-rejected active receipt restores the prior local authorization', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-server-reject-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Prior release\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const prior = await signedBundle(source, randomUUID(), server.privateKey);
+  await installSkillBundle({
+    bundle: prior, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId,
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+  await writeFile(resolve(source, 'SKILL.md'), '# Unconfirmed release\n');
+  const unconfirmed = await signedBundle(source, randomUUID(), server.privateKey);
+  const receipt = await installSkillBundle({
+    bundle: unconfirmed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId,
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+  await rollbackUnconfirmedSkillBundle({ nativeSkillDirectory: native, workspaceId, receipt });
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), prior.bundleId);
+  assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /Prior release/);
 });
 
 test('R3 bundles cannot install without explicit organization approval', async () => {

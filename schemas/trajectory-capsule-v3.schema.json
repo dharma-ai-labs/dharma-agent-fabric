@@ -1,0 +1,552 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/trajectory-capsule/v3",
+  "title": "Dharma Trajectory Capsule v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "trajectoryId",
+    "revision",
+    "organizationId",
+    "deviceId",
+    "workspaceId",
+    "provider",
+    "sessionId",
+    "captureProvenance",
+    "timeRange",
+    "status",
+    "evidenceMode",
+    "coverage",
+    "events",
+    "contentIndex",
+    "redactionReceipt",
+    "localEvidenceAvailable",
+    "capsuleHash",
+    "createdAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.trajectory-capsule/v3"
+    },
+    "trajectoryId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "previousRevisionHash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "captureProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceClass",
+        "collectedAt",
+        "taskReceiptHash"
+      ],
+      "properties": {
+        "sourceClass": {
+          "type": "string",
+          "enum": [
+            "provider_discovery",
+            "explicit_import",
+            "signed_task_execution"
+          ]
+        },
+        "collectedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "taskReceiptHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+        }
+      }
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "completed",
+        "failed",
+        "cancelled",
+        "partial"
+      ]
+    },
+    "evidenceMode": {
+      "type": "string",
+      "enum": [
+        "structured",
+        "deep",
+        "reduced_full_session",
+        "incident_capture"
+      ]
+    },
+    "automaticDisclosureMode": {
+      "type": "string",
+      "enum": [
+        "metadata_only",
+        "local_analysis",
+        "customer_authorized_content"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "admittedSessions",
+        "excludedSessions",
+        "missingFields"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "observed",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "admittedSessions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excludedSessions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missingFields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "repoState": {
+      "type": "object"
+    },
+    "skillState": {
+      "type": "object"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.dharma-ai.io/agent-event/v1"
+      }
+    },
+    "contentIndex": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contentId",
+          "kind",
+          "bytes",
+          "uploaded",
+          "availableLocally"
+        ],
+        "properties": {
+          "contentId": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uploaded": {
+            "type": "boolean"
+          },
+          "availableLocally": {
+            "type": "boolean"
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "normalizedPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "validationResults": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
+    "localAnalysis": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "analyzer",
+        "recordCount",
+        "recordBytes",
+        "eventKinds",
+        "toolDiscipline",
+        "outcomeSignals",
+        "durationMs",
+        "semanticReviewRecommended",
+        "reasonCodes"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.local-trajectory-analysis/v1"
+        },
+        "analyzer": {
+          "const": "deterministic"
+        },
+        "recordCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recordBytes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "total",
+            "maximum"
+          ],
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maximum": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "eventKinds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "toolDiscipline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "calls",
+            "results",
+            "unmatchedCalls",
+            "orphanResults"
+          ],
+          "properties": {
+            "calls": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "results": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unmatchedCalls": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "orphanResults": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "outcomeSignals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "errorRecords",
+            "incomplete",
+            "coverage"
+          ],
+          "properties": {
+            "errorRecords": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "incomplete": {
+              "type": "boolean"
+            },
+            "coverage": {
+              "type": "string",
+              "enum": [
+                "observed",
+                "partial",
+                "unavailable"
+              ]
+            }
+          }
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "semanticReviewRecommended": {
+          "type": "boolean"
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "redactionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policyRevision",
+        "disclosureClass",
+        "disclosureMode",
+        "consentReceiptId",
+        "disclosedClasses",
+        "excludedClasses",
+        "classes",
+        "redactedValues",
+        "excludedPaths",
+        "inputBytes",
+        "outputBytes"
+      ],
+      "properties": {
+        "policyRevision": {
+          "type": "string"
+        },
+        "disclosureClass": {
+          "const": "automatic_capsule"
+        },
+        "disclosureMode": {
+          "type": "string",
+          "enum": [
+            "metadata_only",
+            "local_analysis",
+            "customer_authorized_content"
+          ]
+        },
+        "consentReceiptId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disclosedClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "excludedClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "redactedValues": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excludedPaths": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inputBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "localEvidenceAvailable": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contentId",
+          "kind",
+          "bytes"
+        ],
+        "properties": {
+          "contentId": {
+            "type": "string",
+            "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "capsuleHash": {
+      "type": "string",
+      "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "captureProvenance": {
+            "type": "object",
+            "properties": {
+              "sourceClass": {
+                "const": "signed_task_execution"
+              }
+            },
+            "required": [
+              "sourceClass"
+            ]
+          }
+        },
+        "required": [
+          "captureProvenance"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "captureProvenance": {
+            "type": "object",
+            "properties": {
+              "taskReceiptHash": {
+                "type": "string",
+                "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "required": [
+          "taskId"
+        ]
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "null"
+          },
+          "captureProvenance": {
+            "type": "object",
+            "properties": {
+              "taskReceiptHash": {
+                "type": "null"
+              }
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "skillBundleId": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

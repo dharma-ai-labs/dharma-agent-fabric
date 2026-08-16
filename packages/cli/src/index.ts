@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
@@ -17,7 +17,7 @@ import {
   saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
@@ -275,8 +275,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
 
 export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
   const capsuleHash = String(capsule.capsuleHash || '');
-  const { capsuleHash: _capsuleHash, ...unsigned } = capsule;
-  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || sha256(canonicalize(unsigned)) !== capsuleHash) {
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || trajectoryCapsuleHash(capsule as unknown as TrajectoryCapsule) !== capsuleHash) {
     throw new Error('Trajectory capsule integrity check failed.');
   }
 }
@@ -286,6 +285,7 @@ function trajectoryCapsuleSchemaId(capsule: unknown) {
     ? (capsule as { schema?: unknown }).schema : null;
   if (schema === 'dharma.trajectory-capsule/v1') return 'https://schemas.dharma-ai.io/trajectory-capsule/v1';
   if (schema === 'dharma.trajectory-capsule/v2') return 'https://schemas.dharma-ai.io/trajectory-capsule/v2';
+  if (schema === 'dharma.trajectory-capsule/v3') return 'https://schemas.dharma-ai.io/trajectory-capsule/v3';
   throw new Error('Trajectory capsule schema is unsupported.');
 }
 
@@ -2267,12 +2267,12 @@ export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, wor
   };
 }
 
-async function syncSignedTaskTrajectory(input: {
-  fabric: AgentFabricClient;
+function prepareSignedTaskTrajectory(input: {
   policy: OrganizationPolicy;
   task: TaskEnvelope;
   receipt: TaskReceipt;
   taskReceiptHash: string;
+  collectedAt: string;
   workspace: WorkspaceRecord;
   device: DeviceConfig;
   activeSkill: Awaited<ReturnType<typeof activeSkillAuthorization>>;
@@ -2295,13 +2295,23 @@ async function syncSignedTaskTrajectory(input: {
     taskId: input.task.taskId,
     captureProvenance: {
       sourceClass: 'signed_task_execution',
-      collectedAt: new Date().toISOString(),
+      collectedAt: input.collectedAt,
       taskReceiptHash: input.taskReceiptHash,
     },
     activeSkillBundleId: input.activeSkill.bundleId,
     activeSkillBundleActivatedAt: input.activeSkill.activatedAt,
     activeSkillBundleExpiresAt: input.activeSkill.expiresAt,
   });
+  return { capsule, rawTurn, rawContentId, session };
+}
+
+async function syncSignedTaskTrajectory(input: {
+  fabric: AgentFabricClient;
+  policy: OrganizationPolicy;
+  workspace: WorkspaceRecord;
+  prepared: ReturnType<typeof prepareSignedTaskTrajectory>;
+}) {
+  const { capsule, rawTurn, rawContentId, session } = input.prepared;
   const validation = await validateContract(
     resolve(import.meta.dirname, 'schemas'),
     trajectoryCapsuleSchemaId(capsule),
@@ -2391,15 +2401,31 @@ async function executeOneTask(
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),
     startedAt: receipt.startedAt, completedAt: receipt.completedAt,
   };
-  const completion = await fabric.postTaskEvent(task.taskId, receipt.status, summary);
+  const collectedAt = new Date().toISOString();
+  const prepared = receipt.status === 'completed' && task.skillBundle
+    ? prepareSignedTaskTrajectory({
+      policy, task, receipt, taskReceiptHash: `sha256:${'0'.repeat(64)}`, collectedAt,
+      workspace, device: config, activeSkill,
+    })
+    : null;
+  const completion = await fabric.postTaskEvent(task.taskId, receipt.status, {
+    ...summary,
+    ...(prepared ? { trajectoryCapsuleHash: prepared.capsule.capsuleHash } : {}),
+  });
   const taskReceiptHash = String((completion.receipt as Record<string, unknown> | undefined)?.hash || '');
   let trajectory = null;
   if (receipt.status === 'completed' && task.skillBundle) {
     if (!/^sha256:[a-f0-9]{64}$/.test(taskReceiptHash)) {
       throw new Error('Task completion did not return a valid server receipt hash.');
     }
+    const finalCapsule = {
+      ...prepared!.capsule,
+      captureProvenance: { ...prepared!.capsule.captureProvenance, taskReceiptHash },
+    };
+    assertCapsuleIntegrity(finalCapsule as unknown as Record<string, unknown>);
     trajectory = await syncSignedTaskTrajectory({
-      fabric, policy, task, receipt, taskReceiptHash, workspace, device: config, activeSkill,
+      fabric, policy, workspace,
+      prepared: { ...prepared!, capsule: finalCapsule },
     });
   }
   return { ok: true, taskId: task.taskId, receipt: summary, trajectory };
@@ -2690,6 +2716,16 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
       organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
     });
+    try {
+      await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
+    } catch (error) {
+      await rollbackUnconfirmedSkillBundle({
+        nativeSkillDirectory: destination,
+        workspaceId,
+        receipt,
+      });
+      throw error;
+    }
     if (receipt.status === 'active') {
       await saveActiveSkillAuthorizationAnchor({
         config,
@@ -2701,9 +2737,8 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         activatedAt: receipt.completedAt,
         expiresAt: bundle.expiresAt ?? null,
       });
+      if (provider === 'agy') await activateAgyPlugin();
     }
-    if (provider === 'agy' && receipt.status === 'active') await activateAgyPlugin();
-    await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
     return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };
   } finally {
     await rm(sourceRoot, { recursive: true, force: true });

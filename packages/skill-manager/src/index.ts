@@ -462,4 +462,41 @@ export async function installSkillBundle(input: {
   return receipt;
 }
 
+export async function rollbackUnconfirmedSkillBundle(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  receipt: InstallReceipt;
+}): Promise<void> {
+  if (input.receipt.status !== 'active') return;
+  const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  const activeBundleId = await readActiveBundlePointer(managedRoot);
+  if (activeBundleId !== input.receipt.bundleId) {
+    throw new Error('Refusing to roll back an installation that is no longer the active local bundle.');
+  }
+  const releases = resolve(managedRoot, 'releases');
+  const active = resolve(managedRoot, 'active');
+  const currentRelease = assertContained(releases, resolve(releases, input.receipt.bundleId));
+  const currentSkillIds = await releaseSkillIds(currentRelease);
+  const previousBundleId = input.receipt.previousBundleId;
+  const previousRelease = previousBundleId
+    ? assertContained(releases, resolve(releases, previousBundleId))
+    : null;
+  const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
+  await rm(active, { recursive: true, force: true });
+  if (previousRelease) await cp(previousRelease, active, { recursive: true, errorOnExist: true, force: false });
+  await activateNativeSkills({
+    nativeSkillDirectory: input.nativeSkillDirectory,
+    release: previousRelease || currentRelease,
+    bundleId: previousBundleId || input.receipt.bundleId,
+    workspaceId: input.workspaceId,
+    skillIds: previousSkillIds,
+    removeSkillIds: currentSkillIds,
+  });
+  if (previousBundleId) {
+    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
+  } else {
+    await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
+  }
+}
+
 export { contentHash };

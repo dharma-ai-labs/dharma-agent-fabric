@@ -48,7 +48,7 @@ export interface AgentEvent {
 }
 
 export interface TrajectoryCapsule {
-  schema: 'dharma.trajectory-capsule/v2';
+  schema: 'dharma.trajectory-capsule/v2' | 'dharma.trajectory-capsule/v3';
   trajectoryId: string;
   revision: number;
   previousRevisionHash: string | null;
@@ -101,6 +101,16 @@ export interface TrajectoryCapsule {
   localEvidenceAvailable: Array<{ contentId: string; kind: string; bytes: number }>;
   capsuleHash: string;
   createdAt: string;
+}
+
+export function trajectoryCapsuleHash(capsule: Omit<TrajectoryCapsule, 'capsuleHash'> | TrajectoryCapsule): string {
+  const { capsuleHash: ignoredHash, ...unsigned } = capsule as TrajectoryCapsule;
+  void ignoredHash;
+  if (unsigned.schema !== 'dharma.trajectory-capsule/v3') return sha256(canonicalize(unsigned));
+  return sha256(canonicalize({
+    ...unsigned,
+    captureProvenance: { ...unsigned.captureProvenance, taskReceiptHash: null },
+  }));
 }
 
 function deterministicUuid(value: string): string {
@@ -553,7 +563,7 @@ export function buildTrajectoryCapsule(input: {
     throw new Error('A later trajectory capsule revision requires the previous capsule hash.');
   }
   const base = {
-    schema: 'dharma.trajectory-capsule/v2' as const,
+    schema: signedTaskCapture ? 'dharma.trajectory-capsule/v3' as const : 'dharma.trajectory-capsule/v2' as const,
     trajectoryId,
     revision,
     previousRevisionHash: input.previousRevisionHash ?? null,
@@ -637,7 +647,7 @@ export function buildTrajectoryCapsule(input: {
   if (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes) {
     throw new Error('Trajectory capsule metadata cannot fit the organization maximumCapsuleBytes policy.');
   }
-  return { ...base, capsuleHash: sha256(canonicalize(base)) };
+  return { ...base, capsuleHash: trajectoryCapsuleHash(base as Omit<TrajectoryCapsule, 'capsuleHash'>) };
 }
 
 export { redactValue };

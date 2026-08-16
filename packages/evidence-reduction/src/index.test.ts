@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { buildTrajectoryCapsule } from './index.js';
+import { buildTrajectoryCapsule, trajectoryCapsuleHash } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: 'rev_1',
@@ -175,6 +175,13 @@ test('signed task evidence is attributed from collection time instead of editabl
   });
   assert.equal(capsule.events[0]?.skillBundleId, bundleId);
   assert.equal(capsule.events[1]?.skillBundleId, bundleId);
+  assert.equal(capsule.schema, 'dharma.trajectory-capsule/v3');
+  const rebound = {
+    ...capsule,
+    captureProvenance: { ...capsule.captureProvenance, taskReceiptHash: `sha256:${'b'.repeat(64)}` },
+  };
+  assert.equal(trajectoryCapsuleHash(rebound), capsule.capsuleHash);
+  assert.notEqual(trajectoryCapsuleHash({ ...rebound, provider: 'claude' }), capsule.capsuleHash);
 });
 
 test('provider discovery and explicit imports cannot claim an active skill bundle', () => {
