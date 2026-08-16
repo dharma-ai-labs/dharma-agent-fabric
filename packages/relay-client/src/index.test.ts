@@ -305,3 +305,82 @@ test('evidence poll and response remain device-signed organization routes', asyn
     '/api/v1/orgs/org_a/agent-fabric/evidence-requests/request-1/responses',
   ]);
 });
+
+test('relay acknowledgement settles once when close emits another socket event', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-close-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+
+  const originalWebSocket = globalThis.WebSocket;
+  let closeCalls = 0;
+  class ClosingSocket {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readyState = ClosingSocket.CONNECTING;
+    readonly #listeners = new Map<string, Array<(event: { code?: number; data?: string }) => void>>();
+
+    constructor(_url: string | URL) {
+      queueMicrotask(() => {
+        this.readyState = ClosingSocket.OPEN;
+        this.#emit('open', {});
+      });
+    }
+
+    addEventListener(type: string, listener: (event: { code?: number; data?: string }) => void) {
+      const listeners = this.#listeners.get(type) || [];
+      listeners.push(listener);
+      this.#listeners.set(type, listeners);
+    }
+
+    #emit(type: string, event: { code?: number; data?: string }) {
+      for (const listener of this.#listeners.get(type) || []) listener(event);
+    }
+
+    send(serialized: string) {
+      const request = JSON.parse(serialized) as { requestId: string };
+      queueMicrotask(() => this.#emit('message', {
+        data: JSON.stringify({ requestId: request.requestId, status: 201, body: JSON.stringify({ ok: true }) }),
+      }));
+    }
+
+    close(_code?: number) {
+      closeCalls += 1;
+      if (closeCalls > 1) throw new RangeError('recursive WebSocket close');
+      this.readyState = ClosingSocket.CLOSING;
+      this.#emit('error', {});
+      this.readyState = ClosingSocket.CLOSED;
+      this.#emit('close', { code: 1000 });
+    }
+  }
+
+  Object.defineProperty(globalThis, 'WebSocket', {
+    configurable: true,
+    value: ClosingSocket,
+    writable: true,
+  });
+  try {
+    const client = await AgentFabricClient.open({
+      configPath,
+      statePath: resolve(root, 'state.json'),
+      store,
+    });
+    const result = await client.openSession();
+    assert.equal(result.ok, true);
+    assert.equal(closeCalls, 1);
+  } finally {
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      value: originalWebSocket,
+      writable: true,
+    });
+  }
+});
