@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -21,7 +21,7 @@ import { getActiveSkillBundleAuthorization, installSkillBundle, verifySkillBundl
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.30';
+const VERSION = '0.2.0';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -1282,9 +1282,12 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
-  const activeSkill = await activeSkillAuthorization(
-    provider as ProviderId, registered.workspaceId, String(registered.repositoryAgentId || ''), device,
-  );
+  const captureProvenance = (collectedAt: string) => ({
+    sourceClass: (typeof root === 'string' ? 'explicit_import' : 'provider_discovery') as
+      'explicit_import' | 'provider_discovery',
+    collectedAt,
+    taskReceiptHash: null,
+  });
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
@@ -1304,9 +1307,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       const firstRevision = buildTrajectoryCapsule({
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
-        activeSkillBundleId: activeSkill?.bundleId ?? null,
-        activeSkillBundleActivatedAt: activeSkill?.activatedAt ?? null,
-        activeSkillBundleExpiresAt: activeSkill?.expiresAt ?? null,
+        captureProvenance: captureProvenance(selected.endedAt),
       });
       const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
@@ -1323,9 +1324,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
             organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
             session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
             revision: latestMetadata.revision + 1, previousRevisionHash: latestMetadata.capsuleHash,
-            activeSkillBundleId: activeSkill?.bundleId ?? null,
-            activeSkillBundleActivatedAt: activeSkill?.activatedAt ?? null,
-            activeSkillBundleExpiresAt: activeSkill?.expiresAt ?? null,
+            captureProvenance: captureProvenance(selected.endedAt),
           })
           : firstRevision;
       const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
@@ -1410,9 +1409,12 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     const registered = (await registry()).find((item) => item.path === workspace);
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
     const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
-    const activeSkill = await activeSkillAuthorization(
-      provider as ProviderId, registered.workspaceId, String(registered.repositoryAgentId || ''), device,
-    );
+    const captureProvenance = (collectedAt: string) => ({
+      sourceClass: (typeof root === 'string' ? 'explicit_import' : 'provider_discovery') as
+        'explicit_import' | 'provider_discovery',
+      collectedAt,
+      taskReceiptHash: null,
+    });
     const capsules = sessions.map((session) => {
       const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       return buildTrajectoryCapsule({
@@ -1424,9 +1426,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
         rawContentId: sha256(rawTurn),
         rawBytes: rawTurn.byteLength,
         rawKind: 'raw-provider-turn',
-        activeSkillBundleId: activeSkill?.bundleId ?? null,
-        activeSkillBundleActivatedAt: activeSkill?.activatedAt ?? null,
-        activeSkillBundleExpiresAt: activeSkill?.expiresAt ?? null,
+        captureProvenance: captureProvenance(session.endedAt),
       });
     });
     automaticDisclosure = {
@@ -2228,6 +2228,108 @@ async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Prom
   return processEvidenceRequest(fabric, policy, workspaceId);
 }
 
+export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, workspace: string): ProviderSession {
+  return {
+    provider: task.target.provider,
+    sessionId: `dharma-task-${task.taskId}`,
+    sourcePath: 'dharma-task-receipt',
+    workspace,
+    coverage: 'observed',
+    startedAt: receipt.startedAt,
+    endedAt: receipt.completedAt,
+    records: receipt.commandResults.map((result, index) => ({
+      native: {
+        taskId: task.taskId,
+        commandId: result.commandId,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        stdoutSha256: result.stdoutSha256,
+        stderrSha256: result.stderrSha256,
+      },
+      sourcePath: 'dharma-task-receipt',
+      line: index + 1,
+      workspace,
+      timestamp: receipt.completedAt,
+      kind: result.commandId.startsWith('provider.') ? 'agent_message' : 'validation',
+      coverage: 'observed',
+    })),
+  };
+}
+
+async function syncSignedTaskTrajectory(input: {
+  fabric: AgentFabricClient;
+  policy: OrganizationPolicy;
+  task: TaskEnvelope;
+  receipt: TaskReceipt;
+  taskReceiptHash: string;
+  workspace: WorkspaceRecord;
+  device: DeviceConfig;
+  activeSkill: Awaited<ReturnType<typeof activeSkillAuthorization>>;
+}) {
+  if (!input.activeSkill || input.task.skillBundle?.bundleId !== input.activeSkill.bundleId) {
+    throw new Error('Signed task trajectory requires the active task-pinned skill bundle.');
+  }
+  const session = taskReceiptSession(input.task, input.receipt, input.workspace.path);
+  const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
+  const rawContentId = sha256(rawTurn);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: input.device.organizationId,
+    deviceId: input.device.deviceId,
+    workspaceId: input.workspace.workspaceId,
+    session,
+    policy: input.policy,
+    rawContentId,
+    rawBytes: rawTurn.byteLength,
+    rawKind: 'raw-provider-turn',
+    taskId: input.task.taskId,
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: new Date().toISOString(),
+      taskReceiptHash: input.taskReceiptHash,
+    },
+    activeSkillBundleId: input.activeSkill.bundleId,
+    activeSkillBundleActivatedAt: input.activeSkill.activatedAt,
+    activeSkillBundleExpiresAt: input.activeSkill.expiresAt,
+  });
+  const validation = await validateContract(
+    resolve(import.meta.dirname, 'schemas'),
+    'https://schemas.dharma-ai.io/trajectory-capsule/v1',
+    capsule,
+  );
+  if (!validation.ok) throw new Error(`Signed task capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(input.policy),
+  });
+  try {
+    const latest = vault.getLatestCapsuleMetadata(capsule.trajectoryId);
+    if (!latest) {
+      await vault.commitCapture({
+        raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
+        capsule: {
+          plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
+          revision: capsule.revision, capsuleHash: capsule.capsuleHash,
+        },
+        session: {
+          sessionId: session.sessionId, provider: session.provider, workspaceId: input.workspace.workspaceId,
+          sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt,
+        },
+      });
+    } else if (latest.capsuleHash !== capsule.capsuleHash) {
+      throw new Error('Signed task evidence already exists with different immutable content.');
+    }
+    await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, input.policy);
+    return input.fabric.syncTrajectory(capsule);
+  } finally {
+    vault.close();
+  }
+}
+
 async function executeOneTask(
   fabric: AgentFabricClient,
   policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
@@ -2242,9 +2344,10 @@ async function executeOneTask(
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  const activeBundleId = (await activeSkillAuthorization(
+  const activeSkill = await activeSkillAuthorization(
     task.target.provider, task.workspaceId, String(workspace.repositoryAgentId || ''), config,
-  ))?.bundleId ?? null;
+  );
+  const activeBundleId = activeSkill?.bundleId ?? null;
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
   } catch (error) {
@@ -2280,8 +2383,18 @@ async function executeOneTask(
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),
     startedAt: receipt.startedAt, completedAt: receipt.completedAt,
   };
-  await fabric.postTaskEvent(task.taskId, receipt.status, summary);
-  return { ok: true, taskId: task.taskId, receipt: summary };
+  const completion = await fabric.postTaskEvent(task.taskId, receipt.status, summary);
+  const taskReceiptHash = String((completion.receipt as Record<string, unknown> | undefined)?.hash || '');
+  let trajectory = null;
+  if (receipt.status === 'completed' && task.skillBundle) {
+    if (!/^sha256:[a-f0-9]{64}$/.test(taskReceiptHash)) {
+      throw new Error('Task completion did not return a valid server receipt hash.');
+    }
+    trajectory = await syncSignedTaskTrajectory({
+      fabric, policy, task, receipt, taskReceiptHash, workspace, device: config, activeSkill,
+    });
+  }
+  return { ok: true, taskId: task.taskId, receipt: summary, trajectory };
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {

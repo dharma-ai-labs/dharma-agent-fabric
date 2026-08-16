@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.dharma-ai.io/skill-bundle/v1",
+  "$id": "https://schemas.dharma-ai.io/skill-bundle/v2",
   "title": "Signed Organization Skill Bundle",
   "type": "object",
   "additionalProperties": false,
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "dharma.skill-bundle/v1"
+      "const": "dharma.skill-bundle/v2"
     },
     "bundleId": {
       "type": "string",

@@ -6,7 +6,7 @@ import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type 
 import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 
 export interface SkillBundle {
-  schema: 'dharma.skill-bundle/v1';
+  schema: 'dharma.skill-bundle/v2';
   bundleId: string;
   organizationId: string;
   version: string;

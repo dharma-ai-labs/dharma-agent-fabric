@@ -30,6 +30,7 @@ import {
   run,
   sourceRepositoryFingerprint,
   taskResponsePreview,
+  taskReceiptSession,
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
   withWorkspacePolicyRefreshLock,
@@ -1038,6 +1039,36 @@ test('task response preview exposes bounded Agy success output', () => {
   assert.match(preview?.text || '', /Agy answer/);
   assert.equal(preview?.text.includes('secret-secret-secret'), false);
   assert.ok((preview?.redactedValues || 0) >= 1);
+});
+
+test('signed task receipt becomes a deterministic provider session for candidate evidence', () => {
+  const task = {
+    schema: 'dharma.task/v1' as const,
+    taskId: '11111111-1111-4111-8111-111111111111', organizationId: 'org_test', workspaceId: 'workspace_test',
+    taskType: 'evaluation_retest' as const,
+    target: { deviceId: '22222222-2222-4222-8222-222222222222', provider: 'codex' as const },
+    skillBundle: { bundleId: '77777777-7777-4777-8777-777777777777', bundleHash: `sha256:${'a'.repeat(64)}` },
+    instructions: 'Evaluate the held-out case.', requiredSkills: [],
+    authority: { readPaths: ['.'], writePaths: [], commands: [{ commandId: 'provider.codex' }], network: 'deny', git: 'read_only' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 60, leaseSeconds: 120, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] },
+    budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: '2026-08-16T01:00:00.000Z', expiresAt: '2026-08-16T01:05:00.000Z', nonce: 'nonce', signature: null,
+  };
+  const receipt = {
+    taskId: task.taskId, status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/test',
+    startedAt: '2026-08-16T01:00:01.000Z', completedAt: '2026-08-16T01:00:02.000Z',
+    commandResults: [{
+      commandId: 'provider.codex', exitCode: 0, signal: null, timedOut: false,
+      stdout: 'bounded result', stderr: '',
+      stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+  const session = taskReceiptSession(task, receipt, '/workspace');
+  assert.equal(session.sessionId, `dharma-task-${task.taskId}`);
+  assert.equal(session.endedAt, receipt.completedAt);
+  assert.equal(session.records[0]?.native.taskId, task.taskId);
+  assert.equal(session.records[0]?.sourcePath, 'dharma-task-receipt');
 });
 
 test('task execution requires the signed bundle pin to match the active native bundle', () => {

@@ -26,7 +26,7 @@ await writeFile(resolve(sourceSkill, 'SKILL.md'), '# Evidence boundary\nRefuse u
 const server = generateKeyPairSync('ed25519');
 const bundleId = randomUUID();
 const bundleBase = {
-  schema: 'dharma.skill-bundle/v1',
+  schema: 'dharma.skill-bundle/v2',
   bundleId,
   organizationId: 'org_rollout_load_proof',
   version: '1.0.0',

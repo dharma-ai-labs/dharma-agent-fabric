@@ -130,6 +130,8 @@ test('reduced trajectory events retain only the active skill bundle UUID as prov
     policy, activeSkillBundleId: bundleId,
     activeSkillBundleActivatedAt: '2026-08-16T00:59:59.000Z',
     activeSkillBundleExpiresAt: '2026-08-17T00:00:00.000Z',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:01.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
     rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
     session: {
       provider: 'codex', sessionId: 'session_bundle_bound', sourcePath: '/private/session.jsonl', workspace: '/repo',
@@ -142,6 +144,8 @@ test('reduced trajectory events retain only the active skill bundle UUID as prov
   assert.throws(() => buildTrajectoryCapsule({
     organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
     policy, activeSkillBundleId: 'not-a-bundle-id',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:01.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
     rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
     session: {
       provider: 'codex', sessionId: 'session_bundle_invalid', sourcePath: '/private/session.jsonl', workspace: '/repo',
@@ -150,13 +154,15 @@ test('reduced trajectory events retain only the active skill bundle UUID as prov
   }), /bundle ID must be a UUID/);
 });
 
-test('events before bundle activation are never relabeled during historical capture', () => {
+test('signed task evidence is attributed from collection time instead of editable provider timestamps', () => {
   const bundleId = '77777777-7777-4777-8777-777777777777';
   const capsule = buildTrajectoryCapsule({
     organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
     activeSkillBundleId: bundleId,
     activeSkillBundleActivatedAt: '2026-08-16T01:00:01.500Z',
     activeSkillBundleExpiresAt: '2026-08-16T01:00:03.000Z',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:02.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
     rawContentId: `sha256:${'9'.repeat(64)}`, rawBytes: 100,
     session: {
       provider: 'codex', sessionId: 'session_bundle_window', sourcePath: '/private/session.jsonl', workspace: '/repo',
@@ -167,8 +173,31 @@ test('events before bundle activation are never relabeled during historical capt
       ],
     },
   });
-  assert.equal(capsule.events[0]?.skillBundleId, null);
+  assert.equal(capsule.events[0]?.skillBundleId, bundleId);
   assert.equal(capsule.events[1]?.skillBundleId, bundleId);
+});
+
+test('provider discovery and explicit imports cannot claim an active skill bundle', () => {
+  const session = {
+    provider: 'codex' as const,
+    sessionId: 'session_untrusted_attribution',
+    sourcePath: '/private/session.jsonl',
+    workspace: '/repo',
+    coverage: 'observed' as const,
+    startedAt: '2026-08-16T01:00:00.000Z',
+    endedAt: '2026-08-16T01:00:01.000Z',
+    records: [],
+  };
+  for (const sourceClass of ['provider_discovery', 'explicit_import'] as const) {
+    assert.throws(() => buildTrajectoryCapsule({
+      organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
+      activeSkillBundleId: '77777777-7777-4777-8777-777777777777',
+      activeSkillBundleActivatedAt: '2026-08-16T00:59:59.000Z',
+      activeSkillBundleExpiresAt: '2026-08-17T00:00:00.000Z',
+      captureProvenance: { sourceClass, collectedAt: session.endedAt, taskReceiptHash: null },
+      rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 100, session,
+    }), /only for a signed task execution capsule/);
+  }
 });
 
 test('local analysis recognizes Claude-native terminal failure signals', () => {

@@ -58,6 +58,11 @@ export interface TrajectoryCapsule {
   provider: string;
   sessionId: string;
   taskId: string | null;
+  captureProvenance: {
+    sourceClass: 'provider_discovery' | 'explicit_import' | 'signed_task_execution';
+    collectedAt: string;
+    taskReceiptHash: string | null;
+  };
   timeRange: { start: string; end: string };
   status: 'completed' | 'partial';
   evidenceMode: OrganizationPolicy['evidence']['defaultMode'];
@@ -432,8 +437,28 @@ export function buildTrajectoryCapsule(input: {
   activeSkillBundleId?: string | null;
   activeSkillBundleActivatedAt?: string | null;
   activeSkillBundleExpiresAt?: string | null;
+  taskId?: string | null;
+  captureProvenance?: TrajectoryCapsule['captureProvenance'];
 }): TrajectoryCapsule {
   assertPolicy(input.policy);
+  const captureProvenance = input.captureProvenance ?? {
+    sourceClass: 'provider_discovery' as const,
+    collectedAt: input.createdAt ?? input.session.endedAt,
+    taskReceiptHash: null,
+  };
+  if (!Number.isFinite(Date.parse(captureProvenance.collectedAt))) {
+    throw new Error('Capture provenance requires a valid collection timestamp.');
+  }
+  const signedTaskCapture = captureProvenance.sourceClass === 'signed_task_execution';
+  if (signedTaskCapture !== Boolean(input.taskId)
+    || (signedTaskCapture && !/^[0-9a-f-]{36}$/i.test(input.taskId || ''))
+    || (signedTaskCapture && !/^sha256:[a-f0-9]{64}$/i.test(captureProvenance.taskReceiptHash || ''))
+    || (!signedTaskCapture && captureProvenance.taskReceiptHash !== null)) {
+    throw new Error('Signed task provenance requires one task ID and server task receipt hash.');
+  }
+  if (input.activeSkillBundleId != null && !signedTaskCapture) {
+    throw new Error('Skill attribution is allowed only for a signed task execution capsule.');
+  }
   if (input.activeSkillBundleId != null
     && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.activeSkillBundleId)) {
     throw new Error('Active skill bundle ID must be a UUID.');
@@ -488,7 +513,7 @@ export function buildTrajectoryCapsule(input: {
     if (seen.has(fingerprint)) continue;
     seen.add(fingerprint);
     const occurredAt = record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt;
-    const occurredAtMs = Date.parse(occurredAt);
+    const occurredAtMs = Date.parse(signedTaskCapture ? captureProvenance.collectedAt : occurredAt);
     const bundleWasActive = input.activeSkillBundleId != null
       && Number.isFinite(occurredAtMs)
       && occurredAtMs >= activatedAt!
@@ -536,7 +561,8 @@ export function buildTrajectoryCapsule(input: {
     workspaceId: input.workspaceId,
     provider: input.session.provider,
     sessionId: pseudonymousSessionId,
-    taskId: null,
+    taskId: input.taskId ?? null,
+    captureProvenance,
     timeRange: { start: input.session.startedAt, end: input.session.endedAt },
     status: input.session.coverage === 'observed' ? 'completed' as const : 'partial' as const,
     evidenceMode: input.policy.evidence.defaultMode,

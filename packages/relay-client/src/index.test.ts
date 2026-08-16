@@ -69,6 +69,79 @@ test('secure enrollment anchor rejects mutable device configuration substitution
   );
 });
 
+test('legacy production enrollment is anchored only after signed server identity confirmation', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-anchor-'));
+  const hqUrl = 'https://www.dharma-ai.io';
+  const organizationId = 'org_a';
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  const relayUrl = 'wss://relay.dharma-ai.io';
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl, organizationId,
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Legacy', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl, enrolledAt: new Date().toISOString(),
+  });
+  let confirmations = 0;
+  const fetcher = async (_url: string | URL | Request, init?: RequestInit) => {
+    confirmations += 1;
+    assert.ok(new Headers(init?.headers).get('x-dharma-signature'));
+    return new Response(JSON.stringify({
+      ok: true, organizationId, relayUrl,
+      serverPublicKeyEd25519: identity.publicKeyEd25519,
+    }), { status: 201 });
+  };
+  await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  assert.equal(confirmations, 1);
+  await AgentFabricClient.open({
+    configPath, statePath, store,
+    fetcher: async () => { throw new Error('anchored enrollment must not call the server'); },
+  });
+});
+
+test('legacy enrollment fails closed when the server identity does not match', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-mismatch-'));
+  const hqUrl = 'https://www.dharma-ai.io';
+  const organizationId = 'org_a';
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl, organizationId,
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Legacy', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.dharma-ai.io', enrolledAt: new Date().toISOString(),
+  });
+  await assert.rejects(AgentFabricClient.open({
+    configPath, statePath: resolve(root, 'state.json'), store,
+    fetcher: async () => new Response(JSON.stringify({
+      ok: true, organizationId, relayUrl: 'wss://relay.dharma-ai.io',
+      serverPublicKeyEd25519: generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x,
+    }), { status: 201 }),
+  }), /did not match the enrolled server identity/);
+});
+
+test('legacy enrollment on a custom origin requires explicit re-login', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-custom-origin-'));
+  const hqUrl = 'https://hq.example';
+  const organizationId = 'org_a';
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl, organizationId,
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Legacy', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await assert.rejects(AgentFabricClient.open({
+    configPath, statePath: resolve(root, 'state.json'), store,
+    fetcher: async () => { throw new Error('custom origin must not be contacted'); },
+  }), /non-production origin must be confirmed by running dharma login again/);
+});
+
 test('enrollment sends only the public device key and an idempotency key', async () => {
   const pair = generateKeyPairSync('ed25519');
   const jwk = pair.publicKey.export({ format: 'jwk' });

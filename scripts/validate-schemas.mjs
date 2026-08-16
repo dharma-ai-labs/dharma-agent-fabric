@@ -27,9 +27,9 @@ for (const name of names) {
   }
 }
 
-const validateSkillBundle = ajv.getSchema('https://schemas.dharma-ai.io/skill-bundle/v1');
+const validateSkillBundle = ajv.getSchema('https://schemas.dharma-ai.io/skill-bundle/v2');
 const inlineSkillBundle = {
-  schema: 'dharma.skill-bundle/v1',
+  schema: 'dharma.skill-bundle/v2',
   bundleId: '11111111-1111-4111-8111-111111111111',
   organizationId: 'org_schema_test',
   version: '1.0.0',

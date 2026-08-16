@@ -26,7 +26,7 @@ const policy: OrganizationPolicy = {
 async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'], skillId = 'dharma-boundary'): Promise<SkillBundle> {
   const skill = { skillId, version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
   const base = {
-    schema: 'dharma.skill-bundle/v1' as const, bundleId, organizationId: 'org_test', version: '1.0.0', operation: 'install' as const, skills: [skill],
+    schema: 'dharma.skill-bundle/v2' as const, bundleId, organizationId: 'org_test', version: '1.0.0', operation: 'install' as const, skills: [skill],
     riskClass: 'R2' as const,
     targetSelectors: { organizationAgentIds: [organizationAgentId], deviceIds: [], workspaceIds: [], providers: ['codex'] as Array<'codex'> },
     activationPolicy: 'next_session' as const,
@@ -230,7 +230,7 @@ test('signed clear baseline removes managed skills and preserves unmanaged provi
   await installSkillBundle({ bundle: installed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId, organizationAgentId, workspaceId, provider: 'codex' });
 
   const clearBase = {
-    schema: 'dharma.skill-bundle/v1' as const, bundleId: randomUUID(), organizationId: 'org_test', version: '0.0.0',
+    schema: 'dharma.skill-bundle/v2' as const, bundleId: randomUUID(), organizationId: 'org_test', version: '0.0.0',
     operation: 'clear' as const, skills: [], riskClass: 'R0' as const,
     targetSelectors: { organizationAgentIds: [organizationAgentId], deviceIds: [], workspaceIds: [], providers: ['codex'] as Array<'codex'> },
     activationPolicy: 'immediate_safe_reload' as const, rollbackBundleId: null, evaluationReceiptId: 'baseline:no-managed-skills',
