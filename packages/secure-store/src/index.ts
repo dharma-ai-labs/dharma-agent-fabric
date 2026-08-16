@@ -8,20 +8,65 @@ export interface SecureSecretStore {
   delete(account: string): Promise<void>;
 }
 
-interface ProcessResult { code: number | null; stdout: string; stderr: string }
+interface ProcessResult { code: number | null; stdout: string; stderr: string; timedOut?: boolean }
 
-function run(command: string, argv: string[], input?: string): Promise<ProcessResult> {
+function run(command: string, argv: string[], input?: string, timeoutMs = 10_000): Promise<ProcessResult> {
   return new Promise((accept, reject) => {
     const child = spawn(command, argv, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let settled = false;
+    const finish = (result: ProcessResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      accept(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish({
+        code: null,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: `Secure-store command timed out after ${timeoutMs} ms.`,
+        timedOut: true,
+      });
+    }, timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    child.once('error', reject);
-    child.once('close', (code) => accept({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') }));
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code) => finish({
+      code,
+      stdout: Buffer.concat(stdout).toString('utf8'),
+      stderr: Buffer.concat(stderr).toString('utf8'),
+    }));
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
+}
+
+function isTransientWindowsInteropFailure(result: ProcessResult) {
+  return result.timedOut === true
+    || /UtilAcceptVsock|accept4 failed 110|ECONNRESET|resource temporarily unavailable/i.test(result.stderr);
+}
+
+async function withTransientWindowsRetry(
+  operation: () => Promise<ProcessResult>,
+  options: { attempts?: number; delayMs?: number } = {},
+) {
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const delayMs = Math.max(0, options.delayMs ?? 200);
+  let result: ProcessResult | null = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    result = await operation();
+    if (!isTransientWindowsInteropFailure(result) || attempt === attempts) return result;
+    await new Promise((accept) => setTimeout(accept, delayMs * attempt));
+  }
+  return result!;
 }
 
 function assertAccount(account: string): void {
@@ -34,7 +79,9 @@ const windowsWrite = `${windowsPreamble}$value=[Console]::In.ReadToEnd(); try {$
 const windowsDelete = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($credential)} catch {exit 3}`;
 
 function windowsStore(command = process.platform === 'win32' ? 'powershell.exe' : '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'): SecureSecretStore {
-  const invoke = (script: string, account: string, secret?: string) => run(command, ['-NoProfile', '-NonInteractive', '-Command', `& { ${script} }`, account], secret);
+  const invoke = (script: string, account: string, secret?: string) => withTransientWindowsRetry(
+    () => run(command, ['-NoProfile', '-NonInteractive', '-Command', `& { ${script} }`, account], secret, 5_000),
+  );
   return {
     backend: 'windows-credential-manager',
     async get(account) {
@@ -116,4 +163,11 @@ export async function createSystemSecureStore(): Promise<SecureSecretStore> {
   throw new Error(`No supported secure secret store for ${process.platform}.`);
 }
 
-export const secureStoreInternals = { windowsStore, linuxStore, macosStore };
+export const secureStoreInternals = {
+  run,
+  isTransientWindowsInteropFailure,
+  withTransientWindowsRetry,
+  windowsStore,
+  linuxStore,
+  macosStore,
+};
