@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { delimiter, isAbsolute, relative, resolve } from 'node:path';
 import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 
 export interface SourceRecord {
@@ -68,6 +68,12 @@ export function providerProcessEnvironment(source: NodeJS.ProcessEnv = process.e
   for (const name of allowed) {
     if (typeof source[name] === 'string') env[name] = source[name];
   }
+  const pathName = typeof env.PATH === 'string' ? 'PATH' : typeof env.Path === 'string' ? 'Path' : 'PATH';
+  const home = source.HOME || source.USERPROFILE || homedir();
+  const localBin = resolve(home, '.local', 'bin');
+  const pathEntries = (env[pathName] || '').split(delimiter).filter(Boolean);
+  if (!pathEntries.includes(localBin)) pathEntries.push(localBin);
+  env[pathName] = pathEntries.join(delimiter);
   env.NO_COLOR = '1';
   env.DHARMA_AGENT_FABRIC_TASK = '1';
   return env;
