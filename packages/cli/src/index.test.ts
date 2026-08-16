@@ -32,6 +32,7 @@ import {
   taskResponsePreview,
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
+  withWorkspacePolicyRefreshLock,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -456,6 +457,30 @@ test('repository onboarding skill records scoped API metadata without local path
     policyRevision: 'policy-v2',
   });
   assert.match(await readFile(join(workspace, result.connectionPath), 'utf8'), /policy-v2/);
+});
+
+test('workspace policy refreshes serialize before requesting a new signed authorization', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-policy-refresh-lock-'));
+  process.env.DHARMA_HOME = home;
+  const events: string[] = [];
+  try {
+    const first = withWorkspacePolicyRefreshLock('workspace-concurrent', async () => {
+      events.push('first-start');
+      await new Promise((accept) => setTimeout(accept, 40));
+      events.push('first-end');
+    });
+    await new Promise((accept) => setTimeout(accept, 5));
+    const second = withWorkspacePolicyRefreshLock('workspace-concurrent', async () => {
+      events.push('second-start');
+      events.push('second-end');
+    });
+    await Promise.all([first, second]);
+    assert.deepEqual(events, ['first-start', 'first-end', 'second-start', 'second-end']);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
 });
 
 test('repository onboarding refuses to overwrite an unmanaged skill', async () => {

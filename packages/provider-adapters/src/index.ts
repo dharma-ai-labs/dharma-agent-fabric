@@ -178,12 +178,18 @@ export async function executeProviderTask(input: {
     command = 'agy';
     temporaryDirectory = await mkdtemp(resolve(tmpdir(), 'dharma-agy-task-'));
     agyLogPath = resolve(temporaryDirectory, 'agy.log');
+    const guardedInstructions = [
+      'Operate only inside the current repository. Use file-reading tools only. Do not modify files, run shell commands, use the network, or inspect parent/sibling directories.',
+      input.instructions,
+    ].join('\n\n');
     argv = [
-      '--print',
+      '--new-project',
+      '--print', guardedInstructions,
+      '--output-format', 'json',
       '--sandbox',
+      '--mode', 'plan',
       '--log-file', agyLogPath,
       '--print-timeout', `${Math.min(Math.max(input.timeoutSeconds, 1), 3_600)}s`,
-      input.instructions,
     ];
     stdin = '';
   }
@@ -199,8 +205,18 @@ export async function executeProviderTask(input: {
     if (input.provider === 'agy') {
       let log = '';
       try { log = await readFile(agyLogPath!, 'utf8'); } catch {}
-      const diagnostic = `${result.stdout.toString('utf8')}\n${stderr}\n${log}`;
-      if (/not logged into antigravity|auth(?:entication)? (?:timed out|required|failed)|please (?:log in|authenticate)|oauth.*(?:failed|expired)|error:/i.test(diagnostic)) {
+      const stdout = result.stdout.toString('utf8');
+      const diagnostic = `${stdout}\n${stderr}\n${log}`;
+      const userFacingDiagnostic = `${stdout}\n${stderr}`;
+      let structuredStatus: string | null = null;
+      try {
+        const parsed = JSON.parse(stdout) as { status?: unknown };
+        if (typeof parsed.status === 'string') structuredStatus = parsed.status.toUpperCase();
+      } catch {}
+      if (/not logged into antigravity|auth(?:entication)? (?:timed out|required|failed)|please (?:log in|authenticate)|oauth.*(?:failed|expired)/i.test(userFacingDiagnostic)
+        || /no output produced.*auto-denied/i.test(diagnostic)
+        || (structuredStatus !== null && structuredStatus !== 'SUCCESS')
+        || (result.exitCode === 0 && !stdout.trim())) {
         exitCode = 1;
         stderr = `${stderr}${stderr ? '\n' : ''}Agy authentication or execution failed. Run agy interactively to authenticate this device.`;
       }
