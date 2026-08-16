@@ -413,15 +413,33 @@ export class LocalVault {
       select blob_content_id from task_completion_recovery where task_id = ?
     `).get(taskId) as { blob_content_id: string } | undefined;
     if (!record) return;
-    this.#database.prepare('delete from task_completion_recovery where task_id = ?').run(taskId);
-    const retained = this.#database.prepare(`
-      select 1 from task_completion_recovery where blob_content_id = ? limit 1
-    `).get(record.blob_content_id);
-    if (retained) return;
-    this.#database.prepare(`
-      delete from blobs where content_id = ? and kind = 'task-completion-recovery'
-    `).run(record.blob_content_id);
-    await rm(this.#blobPath(record.blob_content_id), { force: true });
+    let deletedBlob = false;
+    this.#database.exec('begin immediate');
+    try {
+      this.#database.prepare('delete from task_completion_recovery where task_id = ?').run(taskId);
+      const retained = this.#database.prepare(`
+        select 1 where exists (
+          select 1 from task_completion_recovery where blob_content_id = ?
+        ) or exists (
+          select 1 from capsules where blob_content_id = ?
+        ) or exists (
+          select 1 from capsule_sync_queue where blob_content_id = ?
+        ) or exists (
+          select 1 from capsule_content_refs where content_id = ? and available_locally = 1
+        )
+      `).get(record.blob_content_id, record.blob_content_id, record.blob_content_id, record.blob_content_id);
+      if (!retained) {
+        const deleted = this.#database.prepare(`
+          delete from blobs where content_id = ? and kind = 'task-completion-recovery'
+        `).run(record.blob_content_id);
+        deletedBlob = deleted.changes === 1;
+      }
+      this.#database.exec('commit');
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      throw error;
+    }
+    if (deletedBlob) await rm(this.#blobPath(record.blob_content_id), { force: true });
   }
 
   listSessions(): unknown[] {

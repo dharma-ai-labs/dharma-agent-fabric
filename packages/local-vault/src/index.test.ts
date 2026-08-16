@@ -101,6 +101,21 @@ test('vault durably stages encrypted task completion evidence until acknowledgem
   resumed.close();
 });
 
+test('recovery cleanup preserves a deduplicated blob owned by another vault record', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-task-dedup-'));
+  const taskId = '21fce5b5-cbfa-4c84-92d7-34ea41a54c32';
+  const plaintext = Buffer.from(JSON.stringify({ shared: 'provider evidence' }));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const providerContentId = await vault.putBlob(plaintext, 'provider-session');
+  assert.equal(await vault.stageTaskCompletionRecovery(taskId, plaintext), providerContentId);
+
+  await vault.clearTaskCompletionRecovery(taskId);
+
+  assert.equal(await vault.getTaskCompletionRecovery(taskId), null);
+  assert.deepEqual(await vault.getBlob(providerContentId), plaintext);
+  vault.close();
+});
+
 test('failed capture commit rolls back session metadata and removes newly written blobs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-capture-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
