@@ -122,7 +122,36 @@
       ]
     },
     "targetSelectors": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "organizationAgentIds",
+        "deviceIds",
+        "workspaceIds",
+        "providers"
+      ],
+      "properties": {
+        "organizationAgentIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "format": "uuid" }
+        },
+        "deviceIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "format": "uuid" }
+        },
+        "workspaceIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "format": "uuid" }
+        },
+        "providers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["codex", "claude", "agy"] }
+        }
+      }
     },
     "activationPolicy": {
       "type": "string",

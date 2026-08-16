@@ -21,7 +21,12 @@ export interface SkillBundle {
     files?: Array<{ path: string; contentBase64: string; sha256: string }>;
   }>;
   riskClass: 'R0' | 'R1' | 'R2' | 'R3' | 'R4';
-  targetSelectors: Record<string, unknown>;
+  targetSelectors: {
+    organizationAgentIds: string[];
+    deviceIds: string[];
+    workspaceIds: string[];
+    providers: ProviderId[];
+  };
   activationPolicy: 'next_task' | 'next_session' | 'host_restart' | 'immediate_safe_reload';
   rollbackBundleId: string | null;
   evaluationReceiptId: string;
@@ -97,6 +102,34 @@ export function verifySkillBundle(bundle: SkillBundle, serverPublicKey: KeyObjec
   if (!verifyCanonicalObject(unsigned, signature, serverPublicKey)) throw new Error('Skill bundle signature is invalid.');
   const { bundleHash, ...hashInput } = unsigned;
   if (bundleHash !== calculateBundleHash(hashInput)) throw new Error('Skill bundle hash is invalid.');
+  const selectors = bundle.targetSelectors;
+  if (!selectors || typeof selectors !== 'object'
+    || !Array.isArray(selectors.organizationAgentIds) || !Array.isArray(selectors.deviceIds)
+    || !Array.isArray(selectors.workspaceIds) || !Array.isArray(selectors.providers)
+    || selectors.organizationAgentIds.some((value) => typeof value !== 'string' || !value)
+    || selectors.deviceIds.some((value) => typeof value !== 'string' || !value)
+    || selectors.workspaceIds.some((value) => typeof value !== 'string' || !value)
+    || selectors.providers.some((value) => !['codex', 'claude', 'agy'].includes(value))) {
+    throw new Error('Skill bundle target selectors are invalid.');
+  }
+}
+
+function assertTargetSelector(selector: string[], value: string, label: string): void {
+  if (selector.length > 0 && !selector.includes(value)) {
+    throw new Error(`Skill bundle is not authorized for this ${label}.`);
+  }
+}
+
+function assertBundleTargetsEndpoint(bundle: SkillBundle, endpoint: {
+  organizationAgentId: string;
+  deviceId: string;
+  workspaceId: string;
+  provider: ProviderId;
+}): void {
+  assertTargetSelector(bundle.targetSelectors.organizationAgentIds, endpoint.organizationAgentId, 'repository agent');
+  assertTargetSelector(bundle.targetSelectors.deviceIds, endpoint.deviceId, 'device');
+  assertTargetSelector(bundle.targetSelectors.workspaceIds, endpoint.workspaceId, 'workspace');
+  assertTargetSelector(bundle.targetSelectors.providers, endpoint.provider, 'provider');
 }
 
 async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: string): Promise<{ status: 'pass' | 'fail'; details: string | null }> {
@@ -258,9 +291,11 @@ export async function getActiveSkillBundleAuthorization(input: {
   workspaceId: string;
   provider: ProviderId;
   organizationId: string;
+  organizationAgentId: string;
   deviceId: string;
   serverPublicKey: KeyObject;
   devicePublicKey: KeyObject;
+  expectedReceiptHash: string;
   now?: Date;
 }): Promise<ActiveSkillBundleAuthorization | null> {
   const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
@@ -271,6 +306,7 @@ export async function getActiveSkillBundleAuthorization(input: {
   const now = input.now ?? new Date();
   if (bundle.bundleId !== bundleId) throw new Error('Active bundle pointer does not match the signed release authorization.');
   verifySkillBundle(bundle, input.serverPublicKey, now);
+  assertBundleTargetsEndpoint(bundle, input);
   verifyInstallReceipt(receipt, input.devicePublicKey, {
     bundleId,
     organizationId: input.organizationId,
@@ -278,6 +314,9 @@ export async function getActiveSkillBundleAuthorization(input: {
     workspaceId: input.workspaceId,
     provider: input.provider,
   }, now);
+  if (receipt.receiptHash !== input.expectedReceiptHash) {
+    throw new Error('Active bundle receipt is not the current protected authorization.');
+  }
   return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
 }
 
@@ -289,6 +328,7 @@ export async function installSkillBundle(input: {
   serverPublicKey: KeyObject;
   devicePrivateKey: KeyObject;
   deviceId: string;
+  organizationAgentId: string;
   workspaceId: string;
   provider: ProviderId;
   smokeCommandId?: string;
@@ -297,6 +337,7 @@ export async function installSkillBundle(input: {
   const startedAt = new Date().toISOString();
   verifySkillBundle(input.bundle, input.serverPublicKey);
   if (input.bundle.organizationId !== input.policy.organizationId) throw new Error('Bundle organization does not match policy.');
+  assertBundleTargetsEndpoint(input.bundle, input);
   if (input.bundle.operation === 'clear' && input.bundle.skills.length !== 0) throw new Error('Clear bundles cannot contain skills.');
   if (input.bundle.operation === 'install' && input.bundle.skills.length === 0) throw new Error('Install bundles must contain at least one skill.');
   if ((input.bundle.riskClass === 'R3' || input.bundle.riskClass === 'R4') && !input.organizationApprovalId) {

@@ -40,7 +40,7 @@ const bundleBase = {
     path: 'skill',
   }],
   riskClass: 'R2',
-  targetSelectors: { providers: ['codex', 'claude'] },
+  targetSelectors: { organizationAgentIds: [], deviceIds: [], workspaceIds: [], providers: ['codex', 'claude'] },
   activationPolicy: 'next_session',
   rollbackBundleId: null,
   evaluationReceiptId: 'eval:rollout-load-proof',

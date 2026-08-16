@@ -77,6 +77,146 @@ function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId
   return `evidence-quota-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
 }
 
+function enrollmentAnchorAccountFor(hqUrl: string, organizationId: string) {
+  return `device-enrollment-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+function activeSkillAnchorAccountFor(
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>,
+  workspaceId: string,
+  provider: ProviderId,
+) {
+  return `active-skill-${sha256([
+    normalizeHqUrl(config.hqUrl), config.organizationId, config.deviceId, workspaceId, provider,
+  ].join(':')).slice(0, 32)}`;
+}
+
+export interface DeviceEnrollmentAnchor {
+  schema: 'dharma.device-enrollment-anchor/v1';
+  hqUrl: string;
+  organizationId: string;
+  deviceId: string;
+  devicePublicKeyEd25519: string;
+  serverPublicKeyEd25519: string;
+  enrolledAt: string;
+}
+
+export interface ActiveSkillAuthorizationAnchor {
+  schema: 'dharma.active-skill-authorization-anchor/v1';
+  organizationId: string;
+  deviceId: string;
+  organizationAgentId: string;
+  workspaceId: string;
+  provider: ProviderId;
+  bundleId: string;
+  receiptHash: string;
+  activatedAt: string;
+  expiresAt: string | null;
+}
+
+export async function saveDeviceEnrollmentAnchor(input: {
+  config: DeviceConfig;
+  store?: SecureSecretStore;
+}): Promise<DeviceEnrollmentAnchor> {
+  const store = input.store ?? await createSystemSecureStore();
+  const anchor: DeviceEnrollmentAnchor = {
+    schema: 'dharma.device-enrollment-anchor/v1',
+    hqUrl: normalizeHqUrl(input.config.hqUrl),
+    organizationId: input.config.organizationId,
+    deviceId: input.config.deviceId,
+    devicePublicKeyEd25519: input.config.publicKeyEd25519,
+    serverPublicKeyEd25519: input.config.serverPublicKeyEd25519,
+    enrolledAt: input.config.enrolledAt,
+  };
+  const serialized = JSON.stringify(anchor);
+  const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId);
+  await store.put(account, serialized);
+  if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
+  return anchor;
+}
+
+export async function loadDeviceEnrollmentAnchor(input: {
+  config: DeviceConfig;
+  store?: SecureSecretStore;
+}): Promise<DeviceEnrollmentAnchor> {
+  const store = input.store ?? await createSystemSecureStore();
+  const account = enrollmentAnchorAccountFor(input.config.hqUrl, input.config.organizationId);
+  const serialized = await store.get(account);
+  if (!serialized) throw new Error('Device enrollment is not anchored in secure storage. Run dharma login again.');
+  const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
+  if (anchor.schema !== 'dharma.device-enrollment-anchor/v1'
+    || anchor.hqUrl !== normalizeHqUrl(input.config.hqUrl)
+    || anchor.organizationId !== input.config.organizationId
+    || anchor.deviceId !== input.config.deviceId
+    || anchor.devicePublicKeyEd25519 !== input.config.publicKeyEd25519
+    || anchor.serverPublicKeyEd25519 !== input.config.serverPublicKeyEd25519
+    || !Number.isFinite(Date.parse(anchor.enrolledAt))) {
+    throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
+  }
+  return anchor;
+}
+
+export async function saveActiveSkillAuthorizationAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  workspaceId: string;
+  organizationAgentId: string;
+  provider: ProviderId;
+  bundleId: string;
+  receiptHash: string;
+  activatedAt: string;
+  expiresAt: string | null;
+  store?: SecureSecretStore;
+}): Promise<ActiveSkillAuthorizationAnchor> {
+  if (!/^[0-9a-f-]{36}$/i.test(input.organizationAgentId)
+    || !/^[0-9a-f-]{36}$/i.test(input.bundleId) || !/^sha256:[a-f0-9]{64}$/i.test(input.receiptHash)
+    || !Number.isFinite(Date.parse(input.activatedAt))
+    || (input.expiresAt !== null && !Number.isFinite(Date.parse(input.expiresAt)))) {
+    throw new Error('Active skill authorization anchor is invalid.');
+  }
+  const store = input.store ?? await createSystemSecureStore();
+  const anchor: ActiveSkillAuthorizationAnchor = {
+    schema: 'dharma.active-skill-authorization-anchor/v1',
+    organizationId: input.config.organizationId,
+    deviceId: input.config.deviceId,
+    organizationAgentId: input.organizationAgentId,
+    workspaceId: input.workspaceId,
+    provider: input.provider,
+    bundleId: input.bundleId,
+    receiptHash: input.receiptHash,
+    activatedAt: input.activatedAt,
+    expiresAt: input.expiresAt,
+  };
+  const serialized = JSON.stringify(anchor);
+  const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  await store.put(account, serialized);
+  if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the active skill anchor write.');
+  return anchor;
+}
+
+export async function loadActiveSkillAuthorizationAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  workspaceId: string;
+  organizationAgentId: string;
+  provider: ProviderId;
+  store?: SecureSecretStore;
+}): Promise<ActiveSkillAuthorizationAnchor | null> {
+  const store = input.store ?? await createSystemSecureStore();
+  const serialized = await store.get(activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider));
+  if (!serialized) return null;
+  const anchor = JSON.parse(serialized) as ActiveSkillAuthorizationAnchor;
+  if (anchor.schema !== 'dharma.active-skill-authorization-anchor/v1'
+    || anchor.organizationId !== input.config.organizationId || anchor.deviceId !== input.config.deviceId
+    || anchor.organizationAgentId !== input.organizationAgentId
+    || !/^[0-9a-f-]{36}$/i.test(anchor.organizationAgentId)
+    || anchor.workspaceId !== input.workspaceId || anchor.provider !== input.provider
+    || !/^[0-9a-f-]{36}$/i.test(anchor.bundleId) || !/^sha256:[a-f0-9]{64}$/i.test(anchor.receiptHash)
+    || !Number.isFinite(Date.parse(anchor.activatedAt))
+    || (anchor.expiresAt !== null && !Number.isFinite(Date.parse(anchor.expiresAt)))) {
+    throw new Error('Protected active skill authorization anchor is corrupt.');
+  }
+  return anchor;
+}
+
 export interface EvidenceQuotaAnchor {
   schema: 'dharma.evidence-quota-anchor/v1';
   day: string;
@@ -221,6 +361,7 @@ export class AgentFabricClient {
   static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch }) {
     const config = await loadDeviceConfig(input.configPath);
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId, store: input.store });
+    await loadDeviceEnrollmentAnchor({ config, store: input.store });
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
     let state: ProtocolState = { schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null };
     try { state = JSON.parse(await readFile(input.statePath, 'utf8')) as ProtocolState; } catch {}

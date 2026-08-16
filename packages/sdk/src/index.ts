@@ -94,13 +94,21 @@ export interface AgentFabricAnalysisScope {
 
 export type AgentFabricRemediationAction = 'stage_evaluation' | 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback';
 
-export interface AgentFabricRemediationActionInput {
-  action: AgentFabricRemediationAction;
-  endpointId?: string;
-  trajectoryIds?: string[];
-  campaignId?: string;
-  establishAutoUpdatePolicy?: boolean;
-}
+export type AgentFabricRemediationActionInput =
+  | {
+    action: 'stage_evaluation';
+    endpointId: string;
+    trajectoryIds?: never;
+    campaignId?: never;
+    establishAutoUpdatePolicy?: never;
+  }
+  | {
+    action: Exclude<AgentFabricRemediationAction, 'stage_evaluation'>;
+    endpointId?: never;
+    trajectoryIds?: string[];
+    campaignId?: string;
+    establishAutoUpdatePolicy?: boolean;
+  };
 
 export interface AgentFabricErrorEnvelope {
   ok: false;

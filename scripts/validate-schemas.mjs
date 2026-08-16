@@ -48,7 +48,7 @@ const inlineSkillBundle = {
     }],
   }],
   riskClass: 'R3',
-  targetSelectors: { providers: ['codex'] },
+  targetSelectors: { organizationAgentIds: [], deviceIds: [], workspaceIds: [], providers: ['codex'] },
   activationPolicy: 'next_session',
   rollbackBundleId: '22222222-2222-4222-8222-222222222222',
   evaluationReceiptId: 'schema-test-evaluation',

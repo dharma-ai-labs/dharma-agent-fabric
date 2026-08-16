@@ -11,6 +11,7 @@ import {
   normalizeHqUrl,
   normalizeRelayUrl,
   saveDeviceConfig,
+  saveDeviceEnrollmentAnchor,
 } from './index.js';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
@@ -22,6 +23,11 @@ function memoryStore(): SecureSecretStore {
     async put(account, value) { values.set(account, value); },
     async delete(account) { values.delete(account); },
   };
+}
+
+async function anchorConfig(configPath: string, store: SecureSecretStore) {
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  await saveDeviceEnrollmentAnchor({ config, store });
 }
 
 test('HQ and relay origins fail closed for deceptive hosts, credentials, and plaintext non-loopback transport', () => {
@@ -40,6 +46,27 @@ test('device identity remains stable in the OS secret store', async () => {
   const second = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
   assert.equal(first.publicKeyEd25519, second.publicKeyEd25519);
   assert.ok(first.privateJwk.d);
+});
+
+test('secure enrollment anchor rejects mutable device configuration substitution', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-enrollment-anchor-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const substituted = JSON.parse(await readFile(configPath, 'utf8'));
+  substituted.serverPublicKeyEd25519 = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x;
+  await writeFile(configPath, JSON.stringify(substituted));
+  await assert.rejects(
+    AgentFabricClient.open({ configPath, statePath: resolve(root, 'state.json'), store }),
+    /does not match the secure enrollment anchor/,
+  );
 });
 
 test('enrollment sends only the public device key and an idempotency key', async () => {
@@ -68,6 +95,7 @@ test('repository-agent connection uses the signed organization relay route', asy
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const calls: Array<{ path: string; body: Record<string, unknown>; signed: boolean }> = [];
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -102,6 +130,7 @@ test('signed outbox retries the exact message after an unknown network outcome',
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const messageIds: string[] = [];
   const timestamps: string[] = [];
   let failAfterAccept = false;
@@ -148,6 +177,7 @@ test('content-bearing trajectory outbox is discarded before a new session can re
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const paths: string[] = [];
   let failTrajectory = true;
   const fetcher = async (url: string | URL | Request) => {
@@ -183,6 +213,7 @@ test('a later operation cannot implicitly replay an ambiguous content request', 
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const calls: Array<{ path: string; body: string; sequence: number }> = [];
   let failTrajectory = true;
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
@@ -219,6 +250,7 @@ test('an ambiguous evidence response is neither persisted nor implicitly replaye
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const paths: string[] = [];
   let failResponse = true;
   const fetcher = async (url: string | URL | Request) => {
@@ -256,6 +288,7 @@ test('deterministic client rejection advances the outbox instead of blocking the
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const sequences: number[] = [];
   let rejectNext = false;
   const fetcher = async (_url: string | URL | Request, init?: RequestInit) => {
@@ -291,6 +324,7 @@ test('evidence poll and response remain device-signed organization routes', asyn
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
   const paths: string[] = [];
   const fetcher = async (url: string | URL | Request) => {
     paths.push(new URL(String(url)).pathname);
@@ -317,6 +351,7 @@ test('relay acknowledgement settles once when close emits another socket event',
     publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
+  await anchorConfig(configPath, store);
 
   const originalWebSocket = globalThis.WebSocket;
   let closeCalls = 0;
