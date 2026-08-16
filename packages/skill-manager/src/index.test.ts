@@ -18,6 +18,7 @@ const policy: OrganizationPolicy = {
     allowedCommands: {
       smokePass: { argv: [process.execPath, '-e', 'process.exit(0)'], timeoutSeconds: 5 },
       smokeFail: { argv: [process.execPath, '-e', 'process.exit(9)'], timeoutSeconds: 5 },
+      smokeSlow: { argv: [process.execPath, '-e', 'setTimeout(() => process.exit(0), 700)'], timeoutSeconds: 5 },
     },
   },
   skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
@@ -91,14 +92,20 @@ test('legacy v1 bundle cannot authorize installation or task execution', async (
   );
 });
 
-async function signedBundle(source: string, bundleId: string, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'], skillId = 'dharma-boundary'): Promise<SkillBundle> {
+async function signedBundle(
+  source: string,
+  bundleId: string,
+  privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'],
+  skillId = 'dharma-boundary',
+  expiresAt: string | null = null,
+): Promise<SkillBundle> {
   const skill = { skillId, version: '1.0.0', repository: 'https://github.com/customer/agent-control.git', commit: 'abc123', contentHash: await contentHash(source), path: 'skill' };
   const base = {
     schema: 'dharma.skill-bundle/v2' as const, bundleId, organizationId: 'org_test', version: '1.0.0', operation: 'install' as const, skills: [skill],
     riskClass: 'R2' as const,
     targetSelectors: { organizationAgentIds: [organizationAgentId], deviceIds: [], workspaceIds: [], providers: ['codex'] as Array<'codex'> },
     activationPolicy: 'next_session' as const,
-    rollbackBundleId: null, evaluationReceiptId: 'eval-1', createdAt: new Date().toISOString(), expiresAt: null,
+    rollbackBundleId: null, evaluationReceiptId: 'eval-1', createdAt: new Date().toISOString(), expiresAt,
   };
   const bundleHash = calculateBundleHash(base);
   return { ...base, bundleHash, signature: signCanonicalObject({ ...base, bundleHash }, privateKey) };
@@ -224,6 +231,44 @@ test('signed bundles fail closed on malformed or expired authorization windows',
       /expiry is invalid|has expired/,
     );
   }
+});
+
+test('a bundle that expires during smoke validation is not activated', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-expiry-race-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Short-lived candidate\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const workspaceId = randomUUID();
+  const bundle = await signedBundle(
+    source,
+    randomUUID(),
+    server.privateKey,
+    'dharma-boundary',
+    new Date(Date.now() + 500).toISOString(),
+  );
+  const receipt = await installSkillBundle({
+    bundle,
+    sourceDirectory: resolve(root, 'source'),
+    nativeSkillDirectory: native,
+    policy,
+    serverPublicKey: server.publicKey,
+    devicePrivateKey: device.privateKey,
+    deviceId: randomUUID(),
+    organizationAgentId,
+    workspaceId,
+    provider: 'codex',
+    smokeCommandId: 'smokeSlow',
+  });
+
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.checks.find((check) => check.name === 'authorization:activation-window')?.status, 'fail');
+  await assert.rejects(
+    readFile(resolve(native, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE')),
+    /ENOENT/,
+  );
 });
 
 test('active bundle identity must match the installed release manifest', async () => {

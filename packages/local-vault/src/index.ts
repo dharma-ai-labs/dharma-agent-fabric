@@ -4,6 +4,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'nod
 import { basename, dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
+import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 const BLOB_VERSION = 1;
@@ -536,7 +537,7 @@ export class LocalVault {
             createdAt,
           } as Record<string, unknown>;
           delete nextBase.capsuleHash;
-          const revised = { ...nextBase, capsuleHash: sha256(canonicalize(nextBase)) };
+          const revised = { ...nextBase, capsuleHash: trajectoryCapsuleHash(nextBase as never) };
           const capsuleBlob = await this.#putBlob(Buffer.from(JSON.stringify(revised)), 'trajectory-capsule');
           if (capsuleBlob.created) createdCapsuleIds.add(capsuleBlob.contentId);
           this.recordCapsule(row.trajectory_id, row.revision + 1, revised.capsuleHash, capsuleBlob.contentId);

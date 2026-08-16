@@ -508,6 +508,7 @@ export class AgentFabricClient {
   async #sendPending(): Promise<Record<string, unknown>> {
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');
+    this.#assertRecoveredTaskCompletionCapacity(pending);
     const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
     if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
       const timestamp = new Date().toISOString();
@@ -597,6 +598,19 @@ export class AgentFabricClient {
       ...current,
       { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() },
     ];
+  }
+
+  #assertRecoveredTaskCompletionCapacity(pending: PendingRequest): void {
+    const route = pending.pathname.match(/\/agent-fabric\/tasks\/([^/]+)\/events$/);
+    if (!route) return;
+    let request: Record<string, unknown>;
+    try { request = JSON.parse(pending.body) as Record<string, unknown>; } catch { return; }
+    if (request.eventType !== 'completed') return;
+    const taskId = decodeURIComponent(route[1]!);
+    const current = this.#state.recoveredTaskCompletions || [];
+    if (!current.some((item) => item.taskId === taskId) && current.length >= 1_000) {
+      throw new Error('Recovered task completion queue is full; acknowledge stored completions before sending another completion.');
+    }
   }
 
   #sendViaRelay(pending: PendingRequest): Promise<{ status: number; body: string }> {

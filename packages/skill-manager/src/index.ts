@@ -451,24 +451,41 @@ export async function installSkillBundle(input: {
     removeSkillIds: previousSkillIds,
   });
   let status: InstallReceipt['status'] = 'active';
+  const restorePreviousBundle = async (): Promise<InstallReceipt['status']> => {
+    await rm(active, { recursive: true, force: true });
+    let restored: InstallReceipt['status'] = 'failed';
+    try { await rename(rollback, active); restored = 'rolled_back'; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await activateNativeSkills({
+      nativeSkillDirectory: input.nativeSkillDirectory,
+      release: previousRelease || release,
+      bundleId: previousBundleId || input.bundle.bundleId,
+      workspaceId: input.workspaceId,
+      skillIds: previousBundleId ? previousSkillIds : [],
+      removeSkillIds: skillIds,
+    });
+    return restored;
+  };
   if (input.smokeCommandId) {
     const check = await runSmoke(input.smokeCommandId, input.policy, active);
     checks.push({ name: `smoke:${input.smokeCommandId}`, ...check });
     if (check.status === 'fail') {
-      await rm(active, { recursive: true, force: true });
-      try { await rename(rollback, active); status = 'rolled_back'; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        status = 'failed';
-      }
-      await activateNativeSkills({
-        nativeSkillDirectory: input.nativeSkillDirectory,
-        release: previousRelease || release,
-        bundleId: previousBundleId || input.bundle.bundleId,
-        workspaceId: input.workspaceId,
-        skillIds: previousBundleId ? previousSkillIds : [],
-        removeSkillIds: skillIds,
+      status = await restorePreviousBundle();
+    }
+  }
+  if (status === 'active') {
+    try {
+      verifySkillBundle(input.bundle, input.serverPublicKey);
+      checks.push({ name: 'authorization:activation-window', status: 'pass', details: input.bundle.expiresAt || 'no-expiry' });
+    } catch (error) {
+      checks.push({
+        name: 'authorization:activation-window',
+        status: 'fail',
+        details: error instanceof Error ? error.message : String(error),
       });
+      status = await restorePreviousBundle();
     }
   }
   if (status === 'active') {

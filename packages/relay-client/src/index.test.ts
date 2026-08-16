@@ -339,6 +339,47 @@ test('accepted task completion replay preserves the server receipt until the CLI
   assert.deepEqual(final.listRecoveredTaskCompletions(), []);
 });
 
+test('a full recovered completion queue stops before sending another completion', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-capacity-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  const taskId = 'd93ce685-113c-45f7-8ba0-334cc7b917f4';
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  await writeFile(statePath, JSON.stringify({
+    schema: 'dharma.protocol-state/v1',
+    sessionId: null,
+    nextSequence: 1,
+    pending: null,
+    recoveredTaskCompletions: Array.from({ length: 1_000 }, (_, index) => ({
+      taskId: `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
+      trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}`,
+      receiptHash: `sha256:${'b'.repeat(64)}`,
+      recoveredAt: '2026-08-16T00:00:00.000Z',
+    })),
+  }));
+  let networkCalls = 0;
+  const fetcher = async () => {
+    networkCalls += 1;
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  assert.equal(networkCalls, 1);
+  await assert.rejects(
+    client.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash: `sha256:${'c'.repeat(64)}` }),
+    /queue is full/,
+  );
+  assert.equal(networkCalls, 1);
+});
+
 test('a later operation cannot implicitly replay an ambiguous content request', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-retry-'));

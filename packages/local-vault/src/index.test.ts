@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
+import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey } from './index.js';
 
 test('vault encrypts content and verifies it on read', async () => {
@@ -140,12 +141,18 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
   const rawContentId = await vault.putBlob(Buffer.from('expired raw provider evidence'), 'raw-provider-turn');
   const capsuleBase = {
+    schema: 'dharma.trajectory-capsule/v3',
     trajectoryId: 'trajectory-retention', revision: 1, previousRevisionHash: null,
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: '2026-01-01T00:00:00.000Z',
+      taskReceiptHash: `sha256:${'a'.repeat(64)}`,
+    },
     contentIndex: [{ contentId: rawContentId, kind: 'raw-provider-turn', bytes: 29, uploaded: false, availableLocally: true }],
     localEvidenceAvailable: [{ contentId: rawContentId, kind: 'raw-provider-turn', bytes: 29 }],
     createdAt: '2026-01-01T00:00:00.000Z',
   };
-  const capsule = { ...capsuleBase, capsuleHash: sha256(canonicalize(capsuleBase)) };
+  const capsule = { ...capsuleBase, capsuleHash: trajectoryCapsuleHash(capsuleBase as never) };
   const capsuleContentId = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
   vault.recordCapsule('trajectory-retention', 1, capsule.capsuleHash, capsuleContentId);
 
@@ -162,6 +169,7 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   assert.equal(latest.previousRevisionHash, capsule.capsuleHash);
   assert.deepEqual(latest.localEvidenceAvailable, []);
   assert.equal((latest.contentIndex as Array<{ availableLocally: boolean }>)[0]?.availableLocally, false);
+  assert.equal(latest.capsuleHash, trajectoryCapsuleHash(latest as never));
   const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>();
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.trajectoryId, 'trajectory-retention');
