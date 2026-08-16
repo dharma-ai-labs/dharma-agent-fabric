@@ -82,7 +82,11 @@ export function calculateBundleHash(bundle: Omit<SkillBundle, 'signature' | 'bun
 }
 
 export function verifySkillBundle(bundle: SkillBundle, serverPublicKey: KeyObject, now = new Date()): void {
-  if (bundle.expiresAt && Date.parse(bundle.expiresAt) <= now.getTime()) throw new Error('Skill bundle has expired.');
+  if (bundle.expiresAt) {
+    const expiresAt = Date.parse(bundle.expiresAt);
+    if (!Number.isFinite(expiresAt)) throw new Error('Skill bundle expiry is invalid.');
+    if (expiresAt <= now.getTime()) throw new Error('Skill bundle has expired.');
+  }
   const { signature, ...unsigned } = bundle;
   if (!verifyCanonicalObject(unsigned, signature, serverPublicKey)) throw new Error('Skill bundle signature is invalid.');
   const { bundleHash, ...hashInput } = unsigned;
@@ -106,7 +110,17 @@ async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: stri
 }
 
 async function readActiveBundleId(root: string): Promise<string | null> {
-  try { return (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim() || null; }
+  try {
+    const bundleId = (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim();
+    if (!bundleId) return null;
+    const manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as {
+      bundleId?: unknown;
+    };
+    if (manifest.bundleId !== bundleId) {
+      throw new Error('Active bundle pointer does not match the installed release manifest.');
+    }
+    return bundleId;
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;

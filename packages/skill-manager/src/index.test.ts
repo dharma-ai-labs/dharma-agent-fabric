@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, getActiveSkillBundleId, installSkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
@@ -71,6 +71,47 @@ test('R3 bundles cannot install without explicit organization approval', async (
   const bundleHash = calculateBundleHash(unsigned);
   const signed = { ...unsigned, bundleHash, signature: signCanonicalObject({ ...unsigned, bundleHash }, server.privateKey) };
   await assert.rejects(() => installSkillBundle({ bundle: signed, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: resolve(root, 'native'), policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: randomUUID(), workspaceId: randomUUID(), provider: 'codex' }), /require organization approval/);
+});
+
+test('signed bundles fail closed on malformed or expired authorization windows', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-expiry-'));
+  const source = resolve(root, 'source', 'skill');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Expiring candidate\n');
+  const server = generateKeyPairSync('ed25519');
+  const current = await signedBundle(source, randomUUID(), server.privateKey);
+  for (const expiresAt of ['not-a-date', '2026-08-16T11:59:59.000Z']) {
+    const { signature: _signature, bundleHash: _bundleHash, ...unsigned } = { ...current, expiresAt };
+    const bundleHash = calculateBundleHash(unsigned);
+    const bundle = { ...unsigned, bundleHash, signature: signCanonicalObject({ ...unsigned, bundleHash }, server.privateKey) };
+    assert.throws(
+      () => verifySkillBundle(bundle, server.publicKey, new Date('2026-08-16T12:00:00.000Z')),
+      /expiry is invalid|has expired/,
+    );
+  }
+});
+
+test('active bundle identity must match the installed release manifest', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-pointer-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Candidate provenance\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const workspaceId = randomUUID();
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey);
+  await installSkillBundle({
+    bundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId: randomUUID(), workspaceId, provider: 'codex',
+  });
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  await writeFile(resolve(managed, 'ACTIVE_BUNDLE'), `${randomUUID()}\n`);
+  await assert.rejects(
+    () => getActiveSkillBundleId(native, workspaceId),
+    /does not match the installed release manifest/,
+  );
 });
 
 test('signed clear baseline removes managed skills and preserves unmanaged provider skills', async () => {
