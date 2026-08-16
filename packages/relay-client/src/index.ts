@@ -31,6 +31,23 @@ interface ProtocolState {
   sessionId: string | null;
   nextSequence: number;
   pending: PendingRequest | null;
+  recoveredTaskCompletions?: RecoveredTaskCompletion[];
+}
+
+export interface RecoveredTaskCompletion {
+  taskId: string;
+  trajectoryCapsuleHash: string;
+  receiptHash: string;
+  recoveredAt: string;
+}
+
+function isRecoveredTaskCompletion(value: unknown): value is RecoveredTaskCompletion {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return /^[0-9a-f-]{36}$/i.test(String(item.taskId || ''))
+    && /^sha256:[a-f0-9]{64}$/.test(String(item.trajectoryCapsuleHash || ''))
+    && /^sha256:[a-f0-9]{64}$/.test(String(item.receiptHash || ''))
+    && Number.isFinite(Date.parse(String(item.recoveredAt || '')));
 }
 
 export interface EnrollmentResult {
@@ -380,8 +397,14 @@ export class AgentFabricClient {
       if (!(error instanceof Error) || !error.message.includes('not anchored in secure storage')) throw error;
       throw new Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.');
     }
-    let state: ProtocolState = { schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null };
+    let state: ProtocolState = {
+      schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+      recoveredTaskCompletions: [],
+    };
     try { state = JSON.parse(await readFile(input.statePath, 'utf8')) as ProtocolState; } catch {}
+    state.recoveredTaskCompletions = Array.isArray(state.recoveredTaskCompletions)
+      ? state.recoveredTaskCompletions.filter(isRecoveredTaskCompletion)
+      : [];
     return new AgentFabricClient({ config, privateJwk: identity.privateJwk, statePath: input.statePath, state, fetcher: input.fetcher });
   }
 
@@ -395,7 +418,10 @@ export class AgentFabricClient {
     } else if (this.#state.pending) {
       await this.#sendPending();
     }
-    this.#state = { schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null };
+    this.#state = {
+      schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
+      recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
+    };
     await this.#persist();
     return this.signedPost('/agent-fabric/sessions', {
       connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion,
@@ -412,6 +438,21 @@ export class AgentFabricClient {
   pollTask(leaseSeconds = 120) { return this.signedPost('/agent-fabric/tasks/poll', { leaseSeconds }); }
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });
+  }
+  listRecoveredTaskCompletions(): RecoveredTaskCompletion[] {
+    return (this.#state.recoveredTaskCompletions || []).map((item) => ({ ...item }));
+  }
+  acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
+    const operation = this.#serial.then(async () => {
+      const current = this.#state.recoveredTaskCompletions || [];
+      const matching = current.find((item) => item.taskId === taskId);
+      if (!matching) return;
+      if (matching.receiptHash !== receiptHash) throw new Error('Recovered task completion receipt does not match.');
+      this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
+      await this.#persist();
+    });
+    this.#serial = operation.catch(() => undefined);
+    return operation;
   }
   pollSkill(body: { workspaceId: string; provider: ProviderId; installedBundleId: string | null }) {
     return this.signedPost('/agent-fabric/skills/poll', body);
@@ -519,10 +560,43 @@ export class AgentFabricClient {
       }
       throw new Error(errorMessage(body, status));
     }
+    this.#recordRecoveredTaskCompletion(pending, body);
     this.#state.nextSequence += 1;
     this.#state.pending = null;
     await this.#persist();
     return body;
+  }
+
+  #recordRecoveredTaskCompletion(pending: PendingRequest, response: Record<string, unknown>): void {
+    const route = pending.pathname.match(/\/agent-fabric\/tasks\/([^/]+)\/events$/);
+    if (!route) return;
+    let request: Record<string, unknown>;
+    try { request = JSON.parse(pending.body) as Record<string, unknown>; } catch { return; }
+    const payload = request.payload && typeof request.payload === 'object' && !Array.isArray(request.payload)
+      ? request.payload as Record<string, unknown>
+      : null;
+    const receipt = response.receipt && typeof response.receipt === 'object' && !Array.isArray(response.receipt)
+      ? response.receipt as Record<string, unknown>
+      : null;
+    const taskId = decodeURIComponent(route[1]!);
+    const trajectoryCapsuleHash = String(payload?.trajectoryCapsuleHash || '');
+    const receiptHash = String(receipt?.hash || '');
+    if (request.eventType !== 'completed' || !/^[0-9a-f-]{36}$/i.test(taskId)
+      || !/^sha256:[a-f0-9]{64}$/.test(trajectoryCapsuleHash)
+      || !/^sha256:[a-f0-9]{64}$/.test(receiptHash)) return;
+    const current = this.#state.recoveredTaskCompletions || [];
+    const existing = current.find((item) => item.taskId === taskId);
+    if (existing) {
+      if (existing.receiptHash !== receiptHash || existing.trajectoryCapsuleHash !== trajectoryCapsuleHash) {
+        throw new Error('Recovered task completion conflicts with its durable receipt.');
+      }
+      return;
+    }
+    if (current.length >= 1_000) throw new Error('Recovered task completion queue is full.');
+    this.#state.recoveredTaskCompletions = [
+      ...current,
+      { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() },
+    ];
   }
 
   #sendViaRelay(pending: PendingRequest): Promise<{ status: number; body: string }> {

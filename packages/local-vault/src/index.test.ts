@@ -71,6 +71,35 @@ test('vault resolves the latest capsule and records idempotent disclosure receip
   vault.close();
 });
 
+test('vault durably stages encrypted task completion evidence until acknowledgement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-task-recovery-'));
+  const key = randomBytes(32);
+  const taskId = 'd93ce685-113c-45f7-8ba0-334cc7b917f4';
+  const plaintext = Buffer.from(JSON.stringify({ taskId, privateOutput: 'accepted but interrupted' }));
+  const vault = await LocalVault.open({ root, masterKey: key });
+  const contentId = await vault.stageTaskCompletionRecovery(taskId, plaintext);
+  assert.equal(await vault.stageTaskCompletionRecovery(taskId, plaintext), contentId);
+  await assert.rejects(
+    vault.stageTaskCompletionRecovery(taskId, Buffer.from('changed retry')),
+    /payload changed/,
+  );
+  assert.deepEqual(await vault.getTaskCompletionRecovery(taskId), {
+    taskId, privateOutput: 'accepted but interrupted',
+  });
+  const digest = contentId.slice('sha256:'.length);
+  assert.equal((await readFile(join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`))).includes(plaintext), false);
+  vault.close();
+
+  const resumed = await LocalVault.open({ root, masterKey: key });
+  assert.deepEqual(await resumed.getTaskCompletionRecovery(taskId), {
+    taskId, privateOutput: 'accepted but interrupted',
+  });
+  await resumed.clearTaskCompletionRecovery(taskId);
+  assert.equal(await resumed.getTaskCompletionRecovery(taskId), null);
+  await assert.rejects(readFile(join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`)), /ENOENT/);
+  resumed.close();
+});
+
 test('failed capture commit rolls back session metadata and removes newly written blobs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-capture-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });

@@ -289,6 +289,56 @@ test('content-bearing trajectory outbox is discarded before a new session can re
   assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
 });
 
+test('accepted task completion replay preserves the server receipt until the CLI acknowledges it', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-retry-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  const taskId = 'd93ce685-113c-45f7-8ba0-334cc7b917f4';
+  const trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`;
+  const receiptHash = `sha256:${'b'.repeat(64)}`;
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  let interruptCompletion = true;
+  let completionCalls = 0;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname.endsWith(`/agent-fabric/tasks/${taskId}/events`)) {
+      completionCalls += 1;
+      if (interruptCompletion) {
+        interruptCompletion = false;
+        throw new Error('connection lost after task completion commit');
+      }
+      return new Response(JSON.stringify({ ok: true, receipt: { hash: receiptHash } }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(client.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }), /connection lost/);
+  assert.deepEqual(client.listRecoveredTaskCompletions(), []);
+
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.openSession();
+  assert.equal(completionCalls, 2);
+  assert.deepEqual(resumed.listRecoveredTaskCompletions().map(({ recoveredAt, ...item }) => item), [{
+    taskId, trajectoryCapsuleHash, receiptHash,
+  }]);
+
+  const restarted = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  assert.equal(restarted.listRecoveredTaskCompletions().length, 1);
+  await restarted.acknowledgeRecoveredTaskCompletion(taskId, receiptHash);
+  assert.deepEqual(restarted.listRecoveredTaskCompletions(), []);
+  const final = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  assert.deepEqual(final.listRecoveredTaskCompletions(), []);
+});
+
 test('a later operation cannot implicitly replay an ambiguous content request', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-retry-'));

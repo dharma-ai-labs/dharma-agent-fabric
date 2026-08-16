@@ -98,6 +98,11 @@ export class LocalVault {
         available_locally integer not null,
         primary key (trajectory_id, revision, content_id)
       );
+      create table if not exists task_completion_recovery (
+        task_id text primary key,
+        blob_content_id text not null,
+        created_at text not null
+      );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -360,6 +365,62 @@ export class LocalVault {
         receipt_hash = excluded.receipt_hash,
         bytes_uploaded = excluded.bytes_uploaded
     `).run(disclosureId, receiptHash, bytesUploaded, new Date().toISOString());
+  }
+
+  async stageTaskCompletionRecovery(taskId: string, plaintext: Uint8Array): Promise<string> {
+    if (!/^[0-9a-f-]{36}$/i.test(taskId) || plaintext.byteLength < 1) {
+      throw new Error('Task completion recovery payload is invalid.');
+    }
+    const existing = this.#database.prepare(`
+      select blob_content_id from task_completion_recovery where task_id = ?
+    `).get(taskId) as { blob_content_id: string } | undefined;
+    if (existing) {
+      const expected = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
+      if (existing.blob_content_id !== expected) {
+        throw new Error('Task completion recovery payload changed after it was staged.');
+      }
+      return existing.blob_content_id;
+    }
+    const blob = await this.#putBlob(plaintext, 'task-completion-recovery');
+    try {
+      this.#database.prepare(`
+        insert into task_completion_recovery(task_id, blob_content_id, created_at)
+        values (?, ?, ?)
+      `).run(taskId, blob.contentId, new Date().toISOString());
+      return blob.contentId;
+    } catch (error) {
+      if (blob.created) {
+        await rm(this.#blobPath(blob.contentId), { force: true });
+        this.#database.prepare('delete from blobs where content_id = ?').run(blob.contentId);
+      }
+      throw error;
+    }
+  }
+
+  async getTaskCompletionRecovery<T = Record<string, unknown>>(taskId: string): Promise<T | null> {
+    if (!/^[0-9a-f-]{36}$/i.test(taskId)) throw new Error('Task completion recovery identity is invalid.');
+    const record = this.#database.prepare(`
+      select blob_content_id from task_completion_recovery where task_id = ?
+    `).get(taskId) as { blob_content_id: string } | undefined;
+    if (!record) return null;
+    return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
+  }
+
+  async clearTaskCompletionRecovery(taskId: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(taskId)) throw new Error('Task completion recovery identity is invalid.');
+    const record = this.#database.prepare(`
+      select blob_content_id from task_completion_recovery where task_id = ?
+    `).get(taskId) as { blob_content_id: string } | undefined;
+    if (!record) return;
+    this.#database.prepare('delete from task_completion_recovery where task_id = ?').run(taskId);
+    const retained = this.#database.prepare(`
+      select 1 from task_completion_recovery where blob_content_id = ? limit 1
+    `).get(record.blob_content_id);
+    if (retained) return;
+    this.#database.prepare(`
+      delete from blobs where content_id = ? and kind = 'task-completion-recovery'
+    `).run(record.blob_content_id);
+    await rm(this.#blobPath(record.blob_content_id), { force: true });
   }
 
   listSessions(): unknown[] {
