@@ -20,7 +20,7 @@ import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type Ski
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.26';
+const VERSION = '0.1.27';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -957,6 +957,7 @@ function responseTextFromEvent(value: unknown): string | null {
     : {};
   if (item.type === 'agent_message' && typeof item.text === 'string') return item.text;
   if (event.type === 'result' && typeof event.result === 'string') return event.result;
+  if (event.status === 'SUCCESS' && typeof event.response === 'string') return event.response;
   const message = event.message && typeof event.message === 'object' && !Array.isArray(event.message)
     ? event.message as Record<string, unknown>
     : {};
