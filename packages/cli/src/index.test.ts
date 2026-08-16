@@ -34,6 +34,7 @@ import {
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
   withWorkspacePolicyRefreshLock,
+  withWorkspaceSkillActivationLock,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -486,6 +487,30 @@ test('workspace policy refreshes serialize before requesting a new signed author
     });
     await Promise.all([first, second]);
     assert.deepEqual(events, ['first-start', 'first-end', 'second-start', 'second-end']);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('task execution and skill synchronization share one workspace-provider activation lock', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-skill-activation-lock-'));
+  process.env.DHARMA_HOME = home;
+  const events: string[] = [];
+  try {
+    const task = withWorkspaceSkillActivationLock('workspace-concurrent', 'codex', async () => {
+      events.push('task-start');
+      await new Promise((accept) => setTimeout(accept, 40));
+      events.push('task-end');
+    });
+    await new Promise((accept) => setTimeout(accept, 5));
+    const sync = withWorkspaceSkillActivationLock('workspace-concurrent', 'codex', async () => {
+      events.push('sync-start');
+      events.push('sync-end');
+    });
+    await Promise.all([task, sync]);
+    assert.deepEqual(events, ['task-start', 'task-end', 'sync-start', 'sync-end']);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;

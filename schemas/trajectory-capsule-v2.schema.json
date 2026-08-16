@@ -76,7 +76,7 @@
       "properties": {
         "sourceClass": {
           "type": "string",
-          "enum": ["provider_discovery", "explicit_import", "signed_task_execution"]
+          "enum": ["provider_discovery", "explicit_import"]
         },
         "collectedAt": { "type": "string", "format": "date-time" },
         "taskReceiptHash": {

@@ -750,6 +750,22 @@ export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, ope
   );
 }
 
+export async function withWorkspaceSkillActivationLock<T>(
+  workspaceId: string,
+  provider: ProviderId,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!workspaceId || !['codex', 'claude', 'agy'].includes(provider)) {
+    throw new Error('Skill activation lock requires a registered workspace and supported provider.');
+  }
+  const key = createHash('sha256').update(`${workspaceId}:${provider}`).digest('hex');
+  return withFileLock(
+    resolve(dharmaHome(), 'registry', 'skill-activation-locks', `${key}.lock`),
+    operation,
+    'Timed out waiting for the workspace skill activation lock.',
+  );
+}
+
 async function assertWorkspaceAuthorizationCurrent(
   workspaceId: string,
   authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
@@ -2381,6 +2397,7 @@ async function executeOneTask(
   const workspace = (await registry()).find((item) => item.workspaceId === task.workspaceId);
   if (!workspace) throw new Error('Task workspace is not registered on this device.');
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  return withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
   const activeSkill = await activeSkillAuthorization(
@@ -2452,6 +2469,7 @@ async function executeOneTask(
     });
   }
   return { ok: true, taskId: task.taskId, receipt: summary, trajectory };
+  });
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {
@@ -2670,6 +2688,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const providerValue = required(flags, 'provider');
   if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
   const provider = providerValue as ProviderId;
+  return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
   const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
   if (!workspace) throw new Error('Skill workspace is not registered locally.');
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
@@ -2801,6 +2820,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   } finally {
     await rm(sourceRoot, { recursive: true, force: true });
   }
+  });
 }
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
