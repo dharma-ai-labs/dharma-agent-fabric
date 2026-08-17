@@ -18,10 +18,16 @@ import {
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
 import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
-import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
+import {
+  executeTask,
+  FileTaskReceiptStore,
+  providerInstructionsForTask,
+  type TaskEnvelope,
+  type TaskReceipt,
+} from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -2338,6 +2344,20 @@ async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Prom
 }
 
 export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, workspace: string): ProviderSession {
+  const instructionRecord = {
+    native: {
+      taskId: task.taskId,
+      type: 'user_message',
+      role: 'user',
+      content: providerInstructionsForTask(task),
+    },
+    sourcePath: 'dharma-task-receipt',
+    line: 1,
+    workspace,
+    timestamp: receipt.startedAt,
+    kind: 'user_message',
+    coverage: 'observed' as const,
+  };
   return {
     provider: task.target.provider,
     sessionId: `dharma-task-${task.taskId}`,
@@ -2346,25 +2366,28 @@ export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, wor
     coverage: 'observed',
     startedAt: receipt.startedAt,
     endedAt: receipt.completedAt,
-    records: receipt.commandResults.map((result, index) => ({
-      native: {
-        taskId: task.taskId,
-        commandId: result.commandId,
-        exitCode: result.exitCode,
-        signal: result.signal,
-        timedOut: result.timedOut,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        stdoutSha256: result.stdoutSha256,
-        stderrSha256: result.stderrSha256,
-      },
-      sourcePath: 'dharma-task-receipt',
-      line: index + 1,
-      workspace,
-      timestamp: receipt.completedAt,
-      kind: result.commandId.startsWith('provider.') ? 'agent_message' : 'validation',
-      coverage: 'observed',
-    })),
+    records: [
+      instructionRecord,
+      ...receipt.commandResults.map((result, index) => ({
+        native: {
+          taskId: task.taskId,
+          commandId: result.commandId,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          stdoutSha256: result.stdoutSha256,
+          stderrSha256: result.stderrSha256,
+        },
+        sourcePath: 'dharma-task-receipt',
+        line: index + 2,
+        workspace,
+        timestamp: receipt.completedAt,
+        kind: result.commandId.startsWith('provider.') ? 'agent_message' : 'validation',
+        coverage: 'observed' as const,
+      })),
+    ],
   };
 }
 
