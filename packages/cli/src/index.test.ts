@@ -602,7 +602,7 @@ test('skill synchronization falls back only for legacy v1 authorization metadata
     nativeSkillDirectory: native,
     workspaceId,
     authorizationError: verificationError,
-  }), null);
+  }), bundleId);
 });
 
 test('repository onboarding refuses to overwrite an unmanaged skill', async () => {
