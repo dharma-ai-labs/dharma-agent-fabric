@@ -6,10 +6,12 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import {
   AgentFabricClient,
+  AgentFabricRequestError,
   beginEnrollment,
   deleteActiveSkillAuthorizationAnchor,
   loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity,
+  isDefinitiveAgentFabricRejection,
   normalizeHqUrl,
   normalizeRelayUrl,
   saveDeviceConfig,
@@ -484,12 +486,46 @@ test('deterministic client rejection advances the outbox instead of blocking the
   const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await client.openSession();
   rejectNext = true;
-  await assert.rejects(client.registerWorkspace({ workspaceId: 'oversized' }), /trajectory_capsule_too_large/);
+  await assert.rejects(client.registerWorkspace({ workspaceId: 'oversized' }), (error) => {
+    assert.ok(error instanceof AgentFabricRequestError);
+    assert.equal(error.status, 413);
+    assert.equal(isDefinitiveAgentFabricRejection(error), true);
+    return true;
+  });
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(state.pending, null);
   assert.equal(state.nextSequence, 3);
   await client.registerWorkspace({ workspaceId: 'bounded' });
   assert.deepEqual(sequences, [1, 2, 3]);
+});
+
+test('retryable server rejection is an ambiguous delivery outcome', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-retryable-rejection-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  let retryable = false;
+  const fetcher = async () => new Response(JSON.stringify({
+    ok: false, error: { code: 'upstream_unavailable', message: 'Try again.' },
+  }), { status: retryable ? 503 : 201 });
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  retryable = true;
+  await assert.rejects(client.registerWorkspace({ workspaceId: 'retryable' }), (error) => {
+    assert.ok(error instanceof AgentFabricRequestError);
+    assert.equal(error.status, 503);
+    assert.equal(isDefinitiveAgentFabricRejection(error), false);
+    return true;
+  });
+  assert.notEqual(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
 });
 
 test('evidence poll and response remain device-signed organization routes', async () => {

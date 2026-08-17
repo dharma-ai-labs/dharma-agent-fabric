@@ -14,7 +14,7 @@ import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type Provide
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
-  saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
+  isDefinitiveAgentFabricRejection, saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
 import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
@@ -2352,6 +2352,7 @@ async function syncSignedTaskTrajectory(input: {
     capsule,
   );
   if (!validation.ok) throw new Error(`Signed task capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
+  assertCapsuleAuthorizedByCurrentPolicy(capsule as unknown as Record<string, unknown>, input.policy);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
@@ -2359,8 +2360,8 @@ async function syncSignedTaskTrajectory(input: {
     rawLocalDays: rawLocalRetentionDays(input.policy),
   });
   try {
-    const latest = vault.getLatestCapsuleMetadata(capsule.trajectoryId);
-    if (!latest) {
+    const existing = vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+    if (!existing) {
       await vault.commitCapture({
         raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
         capsule: {
@@ -2372,7 +2373,7 @@ async function syncSignedTaskTrajectory(input: {
           sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt,
         },
       });
-    } else if (latest.capsuleHash !== capsule.capsuleHash) {
+    } else if (existing.capsuleHash !== capsule.capsuleHash) {
       throw new Error('Signed task evidence already exists with different immutable content.');
     }
     vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
@@ -2948,22 +2949,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider });
       }
     };
-    try {
-      if (receipt.status === 'active') {
-        await saveActiveSkillAuthorizationAnchor({
-          config,
-          workspaceId,
-          organizationAgentId: String(workspace.repositoryAgentId || ''),
-          provider,
-          bundleId: receipt.bundleId,
-          receiptHash: receipt.receiptHash,
-          activatedAt: receipt.completedAt,
-          expiresAt: bundle.expiresAt ?? null,
-        });
-        if (provider === 'agy') await activateAgyPlugin();
-      }
-      await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
-    } catch (error) {
+    const recoverLocalInstallation = async (error: unknown): Promise<never> => {
       const recoveryErrors: unknown[] = [];
       try {
         await rollbackUnconfirmedSkillBundle({
@@ -2982,6 +2968,29 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       if (recoveryErrors.length) {
         throw new AggregateError([error, ...recoveryErrors], 'Skill installation failed and local recovery was incomplete.');
       }
+      throw error;
+    };
+    try {
+      if (receipt.status === 'active') {
+        await saveActiveSkillAuthorizationAnchor({
+          config,
+          workspaceId,
+          organizationAgentId: String(workspace.repositoryAgentId || ''),
+          provider,
+          bundleId: receipt.bundleId,
+          receiptHash: receipt.receiptHash,
+          activatedAt: receipt.completedAt,
+          expiresAt: bundle.expiresAt ?? null,
+        });
+        if (provider === 'agy') await activateAgyPlugin();
+      }
+    } catch (error) {
+      await recoverLocalInstallation(error);
+    }
+    try {
+      await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
+    } catch (error) {
+      if (isDefinitiveAgentFabricRejection(error)) await recoverLocalInstallation(error);
       throw error;
     }
     return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };

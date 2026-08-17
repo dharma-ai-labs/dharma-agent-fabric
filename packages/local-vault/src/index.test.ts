@@ -214,6 +214,8 @@ test('vault returns only the requested immutable capsule revision', async () => 
   assert.deepEqual(await vault.getCapsule('trajectory-versioned', 1), {
     trajectoryId: 'trajectory-versioned', revision: 1,
   });
+  assert.equal(vault.getCapsuleMetadata('trajectory-versioned', 1)?.capsuleHash, `sha256:${'1'.repeat(64)}`);
+  assert.equal(vault.getCapsuleMetadata('trajectory-versioned', 3), null);
   await assert.rejects(() => vault.getCapsule('trajectory-versioned', 3), /not available in the local vault/);
   await assert.rejects(() => vault.getCapsule('trajectory-versioned', 0), /positive integer/);
   vault.close();

@@ -244,6 +244,25 @@ export class LocalVault {
     } : null;
   }
 
+  getCapsuleMetadata(trajectoryId: string, revision: number): {
+    revision: number;
+    capsuleHash: string;
+    blobContentId: string;
+  } | null {
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('Trajectory capsule revision must be a positive integer.');
+    }
+    const record = this.#database.prepare(`
+      select revision, capsule_hash, blob_content_id
+      from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { revision: number; capsule_hash: string; blob_content_id: string } | undefined;
+    return record ? {
+      revision: record.revision,
+      capsuleHash: record.capsule_hash,
+      blobContentId: record.blob_content_id,
+    } : null;
+  }
+
   async commitCapture(input: VaultCaptureInput): Promise<{ rawContentId: string; capsuleContentId: string }> {
     const created = new Set<string>();
     this.#database.exec('begin immediate');

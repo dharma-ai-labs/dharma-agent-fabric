@@ -305,6 +305,22 @@ function errorMessage(body: unknown, status: number) {
   return `Dharma HQ request failed with HTTP ${status}.`;
 }
 
+export class AgentFabricRequestError extends Error {
+  readonly status: number;
+  readonly definitive: boolean;
+
+  constructor(body: unknown, status: number, definitive: boolean) {
+    super(errorMessage(body, status));
+    this.name = 'AgentFabricRequestError';
+    this.status = status;
+    this.definitive = definitive;
+  }
+}
+
+export function isDefinitiveAgentFabricRejection(error: unknown): boolean {
+  return error instanceof AgentFabricRequestError && error.definitive;
+}
+
 export async function loadOrCreateDeviceIdentity(input: {
   hqUrl: string;
   organizationId: string;
@@ -554,12 +570,13 @@ export class AgentFabricClient {
       // delivery outcome. Retaining it would permanently block the device
       // outbox. Retryable timeout and throttling responses keep the exact
       // signed request, as do upstream failures whose commit state is unknown.
-      if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+      const definitive = status >= 400 && status < 500 && status !== 408 && status !== 429;
+      if (definitive) {
         this.#state.nextSequence += 1;
         this.#state.pending = null;
         await this.#persist();
       }
-      throw new Error(errorMessage(body, status));
+      throw new AgentFabricRequestError(body, status, definitive);
     }
     this.#recordRecoveredTaskCompletion(pending, body);
     this.#state.nextSequence += 1;
