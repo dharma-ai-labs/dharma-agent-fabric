@@ -29,6 +29,7 @@ import {
   portalUrl,
   rawLocalRetentionDays,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
+  installedBundleIdForSkillPollAfterAuthorizationFailure,
   recoveredTaskPolicyWasSuperseded,
   relayProcessState,
   releaseDailyContentUpload,
@@ -597,6 +598,11 @@ test('skill synchronization falls back only for legacy v1 authorization metadata
     workspaceId,
     authorizationError: verificationError,
   }), bundleId);
+  assert.equal(await installedBundleIdForSkillPollAfterAuthorizationFailure({
+    nativeSkillDirectory: native,
+    workspaceId,
+    authorizationError: verificationError,
+  }), null);
 });
 
 test('repository onboarding refuses to overwrite an unmanaged skill', async () => {

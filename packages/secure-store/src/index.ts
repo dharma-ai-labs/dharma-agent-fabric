@@ -78,9 +78,29 @@ const windowsRead = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma 
 const windowsWrite = `${windowsPreamble}$value=[Console]::In.ReadToEnd(); try {$old=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($old)} catch {}; $credential=[Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime]::new("Dharma Agent Fabric",$args[0],$value); $vault.Add($credential)`;
 const windowsDelete = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($credential)} catch {exit 3}`;
 
-function windowsStore(command = process.platform === 'win32' ? 'powershell.exe' : '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'): SecureSecretStore {
+interface WindowsCommandSpec { command: string; prefixArgs: string[] }
+
+function windowsCommandSpec(platform = process.platform): WindowsCommandSpec {
+  if (platform === 'win32') return { command: 'powershell.exe', prefixArgs: [] };
+  return {
+    command: '/init',
+    prefixArgs: ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'],
+  };
+}
+
+function windowsStore(command?: string): SecureSecretStore {
+  const commandSpec = command
+    ? { command, prefixArgs: [] }
+    : windowsCommandSpec();
   const invoke = (script: string, account: string, secret?: string) => withTransientWindowsRetry(
-    () => run(command, ['-NoProfile', '-NonInteractive', '-Command', `& { ${script} }`, account], secret, 5_000),
+    () => run(commandSpec.command, [
+      ...commandSpec.prefixArgs,
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `& { ${script} }`,
+      account,
+    ], secret, 5_000),
   );
   return {
     backend: 'windows-credential-manager',
@@ -165,6 +185,7 @@ export async function createSystemSecureStore(): Promise<SecureSecretStore> {
 
 export const secureStoreInternals = {
   run,
+  windowsCommandSpec,
   isTransientWindowsInteropFailure,
   withTransientWindowsRetry,
   windowsStore,

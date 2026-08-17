@@ -21,7 +21,7 @@ import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationFo
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -3002,6 +3002,15 @@ export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input:
   return legacyBundleId;
 }
 
+export async function installedBundleIdForSkillPollAfterAuthorizationFailure(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  authorizationError: unknown;
+}): Promise<null> {
+  await recoverLegacySkillBundleIdAfterAuthorizationFailure(input);
+  return null;
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
@@ -3025,7 +3034,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
       ))?.bundleId ?? null;
     } else {
-      activeBundleId = await recoverLegacySkillBundleIdAfterAuthorizationFailure({
+      activeBundleId = await installedBundleIdForSkillPollAfterAuthorizationFailure({
         nativeSkillDirectory: destination,
         workspaceId,
         authorizationError: error,
