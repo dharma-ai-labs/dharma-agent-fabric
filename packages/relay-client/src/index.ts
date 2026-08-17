@@ -508,7 +508,7 @@ export class AgentFabricClient {
       sequence, sessionId: this.#state.sessionId, timestamp,
     }), 'utf8');
     const signature = sign(null, signingPayload, { key: this.#privateJwk, format: 'jwk' }).toString('base64url');
-    this.#state.pending = {
+    const pending: PendingRequest = {
       method: 'POST', pathname, body: serialized,
       headers: {
         'content-type': 'application/json', 'x-dharma-device-id': this.config.deviceId,
@@ -517,6 +517,8 @@ export class AgentFabricClient {
         'x-dharma-sequence': String(sequence), 'x-dharma-signature': signature,
       },
     };
+    this.#assertRecoveredTaskCompletionCapacity(pending);
+    this.#state.pending = pending;
     await this.#persist();
     return this.#sendPending();
   }
@@ -524,7 +526,14 @@ export class AgentFabricClient {
   async #sendPending(): Promise<Record<string, unknown>> {
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');
-    this.#assertRecoveredTaskCompletionCapacity(pending);
+    try {
+      this.#assertRecoveredTaskCompletionCapacity(pending);
+    } catch (error) {
+      this.#state.nextSequence += 1;
+      this.#state.pending = null;
+      await this.#persist();
+      throw error;
+    }
     const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
     if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
       const timestamp = new Date().toISOString();

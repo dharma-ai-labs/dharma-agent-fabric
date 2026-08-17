@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getInstalledSkillBundleIdForRecovery, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
+import { calculateBundleHash, contentHash, getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getInstalledSkillBundleIdForRecovery, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from './index.js';
 
 const organizationAgentId = '11111111-1111-4111-8111-111111111111';
 
@@ -71,6 +71,46 @@ test('expired v2 installation remains identifiable only for a replacement poll',
     schema: 'dharma.skill-bundle/v2', bundleId, expiresAt: '2026-08-16T00:00:00.000Z',
   }));
   assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), bundleId);
+});
+
+test('expired replacement polling verifies the signed bundle, endpoint, and protected receipt', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-expired-authorization-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Expired candidate\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const expiresAt = new Date(Date.now() + 30_000).toISOString();
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey, 'dharma-boundary', expiresAt);
+  const receipt = await installSkillBundle({
+    bundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId,
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+  await assert.rejects(
+    getActiveSkillBundleAuthorization({
+      nativeSkillDirectory: native, workspaceId, provider: 'codex', organizationId: 'org_test',
+      organizationAgentId, deviceId, serverPublicKey: server.publicKey, devicePublicKey: device.publicKey,
+      expectedReceiptHash: receipt.receiptHash, now: new Date(Date.parse(expiresAt) + 1),
+    }),
+    /has expired/,
+  );
+  assert.equal((await getExpiredSkillBundleAuthorizationForReplacement({
+    nativeSkillDirectory: native, workspaceId, provider: 'codex', organizationId: 'org_test',
+    organizationAgentId, deviceId, serverPublicKey: server.publicKey, devicePublicKey: device.publicKey,
+    expectedReceiptHash: receipt.receiptHash, now: new Date(Date.parse(expiresAt) + 1),
+  }))?.bundleId, bundle.bundleId);
+  await assert.rejects(
+    getExpiredSkillBundleAuthorizationForReplacement({
+      nativeSkillDirectory: native, workspaceId, provider: 'codex', organizationId: 'org_test',
+      organizationAgentId, deviceId, serverPublicKey: server.publicKey, devicePublicKey: device.publicKey,
+      expectedReceiptHash: `sha256:${'0'.repeat(64)}`, now: new Date(Date.parse(expiresAt) + 1),
+    }),
+    /not the current protected authorization/,
+  );
 });
 
 test('legacy v1 bundle cannot authorize installation or task execution', async () => {

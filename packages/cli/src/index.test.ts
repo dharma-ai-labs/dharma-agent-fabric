@@ -27,6 +27,7 @@ import {
   portalUrl,
   rawLocalRetentionDays,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
+  recoveredTaskPolicyWasSuperseded,
   relayProcessState,
   releaseDailyContentUpload,
   reserveDailyContentUpload,
@@ -795,6 +796,12 @@ test('queued content must match the current signed consent and policy revision',
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(current, policy));
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({ ...current, redactionReceipt: { disclosureMode: 'customer_authorized_content', policyRevision: 'content-v1', consentReceiptId: 'consent-old' } }, policy), /no longer authorized/);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy(current, { ...policy, evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } } }), /invalid|no longer authorized/);
+});
+
+test('recovered task evidence distinguishes a superseded policy from the current revision', () => {
+  const capsule = { redactionReceipt: { policyRevision: 'policy-v1' } } as never;
+  assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v2' }), true);
+  assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v1' }), false);
 });
 
 test('reduced capsules cannot disguise provider content as local analysis', async () => {

@@ -375,11 +375,17 @@ test('a full recovered completion queue stops before sending another completion'
   const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await client.openSession();
   assert.equal(networkCalls, 1);
+  const stateBefore = JSON.parse(await readFile(statePath, 'utf8'));
   await assert.rejects(
     client.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash: `sha256:${'c'.repeat(64)}` }),
     /queue is full/,
   );
   assert.equal(networkCalls, 1);
+  const durableState = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(durableState.pending, null);
+  assert.equal(durableState.nextSequence, stateBefore.nextSequence);
+  await assert.doesNotReject(client.signedPost('/agent-fabric/tasks/poll', { leaseSeconds: 30 }));
+  assert.equal(networkCalls, 2);
 });
 
 test('a later operation cannot implicitly replay an ambiguous content request', async () => {

@@ -270,6 +270,44 @@ export async function getInstalledSkillBundleIdForRecovery(input: {
   return bundleId;
 }
 
+export async function getExpiredSkillBundleAuthorizationForReplacement(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  provider: ProviderId;
+  organizationId: string;
+  organizationAgentId: string;
+  deviceId: string;
+  serverPublicKey: KeyObject;
+  devicePublicKey: KeyObject;
+  expectedReceiptHash: string;
+  now?: Date;
+}): Promise<ActiveSkillBundleAuthorization | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  const bundle = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+  const receipt = JSON.parse(await readFile(resolve(root, 'active', 'INSTALL_RECEIPT.json'), 'utf8')) as InstallReceipt;
+  const now = input.now ?? new Date();
+  const expiresAt = Date.parse(String(bundle.expiresAt || ''));
+  if (!Number.isFinite(expiresAt) || expiresAt > now.getTime()) {
+    throw new Error('Installed skill bundle is not an expired replacement candidate.');
+  }
+  if (bundle.bundleId !== bundleId) throw new Error('Active bundle pointer does not match the signed release authorization.');
+  verifySkillBundle(bundle, input.serverPublicKey, new Date(expiresAt - 1));
+  assertBundleTargetsEndpoint(bundle, input);
+  verifyInstallReceipt(receipt, input.devicePublicKey, {
+    bundleId,
+    organizationId: input.organizationId,
+    deviceId: input.deviceId,
+    workspaceId: input.workspaceId,
+    provider: input.provider,
+  }, now);
+  if (receipt.receiptHash !== input.expectedReceiptHash) {
+    throw new Error('Active bundle receipt is not the current protected authorization.');
+  }
+  return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
+}
+
 async function pathExists(path: string) {
   try { await lstat(path); return true; }
   catch (error) {

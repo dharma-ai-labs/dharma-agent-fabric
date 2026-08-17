@@ -17,7 +17,7 @@ import {
   isDefinitiveAgentFabricRejection, saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleAuthorization, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
@@ -1825,6 +1825,42 @@ async function activeSkillAuthorization(
   });
 }
 
+async function expiredSkillAuthorizationForReplacement(
+  provider: ProviderId,
+  workspaceId: string,
+  organizationAgentId: string,
+  config: DeviceConfig,
+) {
+  const root = nativeSkillDirectory(provider);
+  if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
+  const [identity, enrollment, active] = await Promise.all([
+    loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId }),
+    loadDeviceEnrollmentAnchor({ config }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+  ]);
+  if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
+  if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
+    throw new Error('Active skill device identity does not match secure enrollment state.');
+  }
+  return getExpiredSkillBundleAuthorizationForReplacement({
+    nativeSkillDirectory: root,
+    workspaceId,
+    provider,
+    organizationId: config.organizationId,
+    organizationAgentId,
+    deviceId: config.deviceId,
+    serverPublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 },
+      format: 'jwk',
+    }),
+    devicePublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 },
+      format: 'jwk',
+    }),
+    expectedReceiptHash: active.receiptHash,
+  });
+}
+
 async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
   const policy = await loadOrganizationPolicy(path);
   if (policy.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') return policy;
@@ -2413,6 +2449,13 @@ export function assertRecoveredTaskWorkspacePolicy(input: {
   }
 }
 
+export function recoveredTaskPolicyWasSuperseded(
+  capsule: Pick<TrajectoryCapsule, 'redactionReceipt'>,
+  currentPolicy: Pick<OrganizationPolicy, 'revision'>,
+): boolean {
+  return capsule.redactionReceipt?.policyRevision !== currentPolicy.revision;
+}
+
 export function assertTaskWorkspacePolicy(input: {
   task: Pick<TaskEnvelope, 'organizationId' | 'workspaceId'>;
   workspace: { workspaceId: string; organizationId: string };
@@ -2507,6 +2550,51 @@ async function finalizeRecoveredSignedTaskTrajectories(
       },
     };
     assertCapsuleIntegrity(capsule as unknown as Record<string, unknown>);
+    if (recoveredTaskPolicyWasSuperseded(capsule, recoveryPolicy)) {
+      const supersededVault = await LocalVault.open({
+        root: resolve(dharmaHome(), 'vault'),
+        masterKey: await loadOrCreateVaultMasterKey(),
+        rawLocalDays: rawLocalRetentionDays(vaultPolicy),
+      });
+      try {
+        const existing = supersededVault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+        if (!existing) {
+          await supersededVault.commitCapture({
+            raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: recovery.prepared.rawContentId },
+            capsule: {
+              plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
+              revision: capsule.revision, capsuleHash: capsule.capsuleHash,
+            },
+            session: {
+              sessionId: recovery.prepared.session.sessionId,
+              provider: recovery.prepared.session.provider,
+              workspaceId: recovery.workspaceId,
+              sourceLocator: recovery.prepared.session.sourcePath,
+              status: recovery.prepared.session.coverage,
+              observedAt: recovery.prepared.session.endedAt,
+            },
+          });
+        } else if (existing.capsuleHash !== capsule.capsuleHash) {
+          throw new Error('Recovered task evidence already exists with different immutable content.');
+        }
+        supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
+        await supersededVault.clearTaskCompletionRecovery(completion.taskId);
+      } finally {
+        supersededVault.close();
+      }
+      await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
+      finalized.push({
+        taskId: completion.taskId,
+        trajectory: {
+          ok: false,
+          status: 'withheld',
+          reason: 'policy_revision_superseded',
+          trajectoryId: capsule.trajectoryId,
+          revision: capsule.revision,
+        },
+      });
+      continue;
+    }
     const trajectory = await syncSignedTaskTrajectory({
       fabric, policy: recoveryPolicy, workspace,
       prepared: {
@@ -2871,11 +2959,17 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
     ))?.bundleId ?? null;
   } catch (error) {
-    activeBundleId = await recoverLegacySkillBundleIdAfterAuthorizationFailure({
-      nativeSkillDirectory: destination,
-      workspaceId,
-      authorizationError: error,
-    });
+    if (error instanceof Error && error.message === 'Skill bundle has expired.') {
+      activeBundleId = (await expiredSkillAuthorizationForReplacement(
+        provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
+      ))?.bundleId ?? null;
+    } else {
+      activeBundleId = await recoverLegacySkillBundleIdAfterAuthorizationFailure({
+        nativeSkillDirectory: destination,
+        workspaceId,
+        authorizationError: error,
+      });
+    }
   }
   const response = await fabric.pollSkill({
     workspaceId,
