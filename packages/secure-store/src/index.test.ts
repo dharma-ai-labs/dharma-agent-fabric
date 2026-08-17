@@ -13,6 +13,17 @@ test('platform backends identify their security boundary', () => {
   assert.equal(secureStoreInternals.macosStore().backend, 'macos-keychain');
 });
 
+test('WSL launches Windows Credential Manager through the interop bridge', () => {
+  assert.deepEqual(secureStoreInternals.windowsCommandSpec('linux'), {
+    command: '/init',
+    prefixArgs: ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'],
+  });
+  assert.deepEqual(secureStoreInternals.windowsCommandSpec('win32'), {
+    command: 'powershell.exe',
+    prefixArgs: [],
+  });
+});
+
 test('secure-store bounds a stalled subprocess', async () => {
   const result = await secureStoreInternals.run(
     process.execPath,

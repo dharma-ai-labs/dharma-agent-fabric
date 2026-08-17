@@ -3002,6 +3002,15 @@ export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input:
   return legacyBundleId;
 }
 
+export async function installedBundleIdForSkillPollAfterAuthorizationFailure(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  authorizationError: unknown;
+}): Promise<null> {
+  await recoverLegacySkillBundleIdAfterAuthorizationFailure(input);
+  return null;
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
@@ -3025,7 +3034,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
       ))?.bundleId ?? null;
     } else {
-      activeBundleId = await recoverLegacySkillBundleIdAfterAuthorizationFailure({
+      activeBundleId = await installedBundleIdForSkillPollAfterAuthorizationFailure({
         nativeSkillDirectory: destination,
         workspaceId,
         authorizationError: error,
