@@ -1204,7 +1204,65 @@ test('signed task receipt becomes a deterministic provider session for candidate
   assert.equal(session.sessionId, `dharma-task-${task.taskId}`);
   assert.equal(session.endedAt, receipt.completedAt);
   assert.equal(session.records[0]?.native.taskId, task.taskId);
+  assert.equal(session.records[0]?.kind, 'user_message');
+  assert.equal(session.records[0]?.native.type, 'user_message');
+  assert.equal(session.records[0]?.native.role, 'user');
+  assert.equal(session.records[0]?.native.content, task.instructions);
+  assert.equal(session.records[0]?.timestamp, receipt.startedAt);
   assert.equal(session.records[0]?.sourcePath, 'dharma-task-receipt');
+  assert.equal(session.records[1]?.kind, 'agent_message');
+  assert.equal(session.records[1]?.native.stdout, 'bounded result');
+  assert.equal(JSON.stringify(session.records[0]?.native).includes('/workspace'), false);
+  assert.equal(JSON.stringify(session.records[0]?.native).includes('/private/worktree'), false);
+});
+
+test('signed A2A task evidence records the same structured instructions sent to the provider', () => {
+  const task = {
+    schema: 'dharma.task/v1' as const,
+    taskId: '11111111-1111-4111-8111-111111111112', organizationId: 'org_test', workspaceId: 'workspace_test',
+    taskType: 'a2a_handoff' as const,
+    target: { deviceId: '22222222-2222-4222-8222-222222222222', provider: 'agy' as const },
+    skillBundle: { bundleId: '77777777-7777-4777-8777-777777777777', bundleHash: `sha256:${'a'.repeat(64)}` },
+    source: { taskId: '00000000-0000-4000-8000-000000000001', endpointId: 'source-endpoint' },
+    stateEnvelope: {
+      intent: 'Resolve a bounded implementation question.',
+      evidence_used: ['trace:example'],
+      known_state: { finding: 'The failing check is isolated.' },
+      unknown_or_missing_state: ['Deployment authority is not granted.'],
+      allowed_next_actions: ['inspect'],
+      blocked_actions: ['deploy'],
+      decision_authority: 'read_only',
+      tool_results: [],
+    },
+    evidenceReferences: [{
+      trajectoryId: '33333333-3333-4333-8333-333333333333',
+      revision: 1,
+      capsuleHash: `sha256:${'b'.repeat(64)}`,
+    }],
+    instructions: 'Inspect the signed handoff and return a bounded recommendation.', requiredSkills: [],
+    authority: { readPaths: ['.'], writePaths: [], commands: [{ commandId: 'provider.agy' }], network: 'deny', git: 'read_only' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 60, leaseSeconds: 120, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] },
+    budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: '2026-08-16T01:00:00.000Z', expiresAt: '2026-08-16T01:05:00.000Z', nonce: 'nonce', signature: null,
+  };
+  const receipt = {
+    taskId: task.taskId, status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/test',
+    startedAt: '2026-08-16T01:00:01.000Z', completedAt: '2026-08-16T01:00:02.000Z',
+    commandResults: [{
+      commandId: 'provider.agy', exitCode: 0, signal: null, timedOut: false,
+      stdout: 'bounded result', stderr: '',
+      stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+  const session = taskReceiptSession(task, receipt, '/workspace');
+  const content = String(session.records[0]?.native.content);
+  assert.match(content, /^Inspect the signed handoff/);
+  assert.match(content, /<dharma_a2a_context>/);
+  assert.match(content, /Deployment authority is not granted/);
+  assert.match(content, /"blocked_actions": \[\n      "deploy"/);
+  assert.equal(content.includes('/workspace'), false);
+  assert.equal(content.includes('/private/worktree'), false);
 });
 
 test('task execution requires the signed bundle pin to match the active native bundle', () => {
