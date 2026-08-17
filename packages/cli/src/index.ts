@@ -167,6 +167,24 @@ function evidenceLedgerForPolicyActivation(value: unknown, day: string): Evidenc
   return newEvidenceUploadLedger(day);
 }
 
+export async function pathExistsOrThrow(
+  path: string,
+  check: (path: string) => Promise<unknown> = access,
+) {
+  try {
+    await check(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export async function canonicalFilesystemPath(path: string, platform = process.platform) {
+  const canonical = await realpath(path);
+  return platform === 'win32' ? canonical.toLowerCase() : canonical;
+}
+
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
 }
@@ -261,7 +279,11 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
     if (!item) throw new Error('Content transmission workspace is not registered locally.');
     const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
-    if (resolve(policyPath) !== canonicalPolicyPath) {
+    const [providedIdentity, registeredIdentity] = await Promise.all([
+      canonicalFilesystemPath(resolve(policyPath)),
+      canonicalFilesystemPath(canonicalPolicyPath),
+    ]);
+    if (providedIdentity !== registeredIdentity) {
       throw new Error('Content transmission requires the canonical registered workspace policy path.');
     }
     const current = await loadOrganizationPolicy(policyPath);
@@ -1795,7 +1817,7 @@ async function activeSkillAuthorization(
 ) {
   const root = nativeSkillDirectory(provider);
   const pointer = resolve(root, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE');
-  if (!await pathExists(pointer)) return null;
+  if (!await pathExistsOrThrow(pointer)) return null;
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
     loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId }),

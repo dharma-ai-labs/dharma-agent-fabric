@@ -607,10 +607,15 @@ export class AgentFabricClient {
       : null;
     const taskId = decodeURIComponent(route[1]!);
     const trajectoryCapsuleHash = String(payload?.trajectoryCapsuleHash || '');
+    if (request.eventType !== 'completed') return;
     const receiptHash = String(receipt?.hash || '');
-    if (request.eventType !== 'completed' || !/^[0-9a-f-]{36}$/i.test(taskId)
-      || !/^sha256:[a-f0-9]{64}$/.test(trajectoryCapsuleHash)
-      || !/^sha256:[a-f0-9]{64}$/.test(receiptHash)) return;
+    if (!/^[0-9a-f-]{36}$/i.test(taskId)
+      || !/^sha256:[a-f0-9]{64}$/.test(trajectoryCapsuleHash)) {
+      throw new Error('Task completion request is missing its durable evidence identity.');
+    }
+    if (!/^sha256:[a-f0-9]{64}$/.test(receiptHash)) {
+      throw new Error('Task completion acknowledgement is missing a valid durable receipt.');
+    }
     const current = this.#state.recoveredTaskCompletions || [];
     const existing = current.find((item) => item.taskId === taskId);
     if (existing) {

@@ -341,6 +341,50 @@ test('accepted task completion replay preserves the server receipt until the CLI
   assert.deepEqual(final.listRecoveredTaskCompletions(), []);
 });
 
+test('a malformed successful task acknowledgement remains pending until a durable receipt arrives', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-receipt-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  const taskId = 'd93ce685-113c-45f7-8ba0-334cc7b917f4';
+  const trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`;
+  const receiptHash = `sha256:${'b'.repeat(64)}`;
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  let validReceipt = false;
+  let completionCalls = 0;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname.endsWith(`/agent-fabric/tasks/${taskId}/events`)) {
+      completionCalls += 1;
+      return new Response(JSON.stringify(validReceipt
+        ? { ok: true, receipt: { hash: receiptHash } }
+        : { ok: true }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(
+    client.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }),
+    /missing a valid durable receipt/,
+  );
+  const pending = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.match(pending.pending.pathname, new RegExp(`${taskId}/events$`));
+  validReceipt = true;
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.openSession();
+  assert.equal(completionCalls, 2);
+  assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+  assert.equal(resumed.listRecoveredTaskCompletions()[0]?.receiptHash, receiptHash);
+});
+
 test('a full recovered completion queue stops before sending another completion', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-capacity-'));

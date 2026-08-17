@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  canonicalFilesystemPath,
   installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
   assertRecoveredTaskWorkspacePolicy,
@@ -24,6 +25,7 @@ import {
   normalizeGitRemoteIdentity,
   parseCliOptions,
   parseSelectedProviderIds,
+  pathExistsOrThrow,
   portalUrl,
   rawLocalRetentionDays,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
@@ -60,6 +62,27 @@ test('uses the production B2B portal and keeps hq-url as a compatibility alias',
     ['hq-url', 'https://legacy.example'],
     ['portal-url', 'https://www.dharma-ai.io'],
   ])), 'https://www.dharma-ai.io');
+});
+
+test('fail-closed existence checks distinguish absence from unreadable state', async () => {
+  assert.equal(await pathExistsOrThrow('/missing', async () => {
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+  }), false);
+  await assert.rejects(pathExistsOrThrow('/unreadable', async () => {
+    throw Object.assign(new Error('denied'), { code: 'EACCES' });
+  }), /denied/);
+});
+
+test('canonical filesystem identities resolve links and normalize Windows case', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fabric-canonical-path-'));
+  const target = join(root, 'approved-policy.json');
+  const alias = join(root, 'policy-link.json');
+  await writeFile(target, '{}');
+  if (process.platform !== 'win32') {
+    await symlink(target, alias);
+    assert.equal(await canonicalFilesystemPath(alias), await canonicalFilesystemPath(target));
+  }
+  assert.equal(await canonicalFilesystemPath(target, 'win32'), (await realpath(target)).toLowerCase());
 });
 
 function memorySecureStore(): SecureSecretStore {
