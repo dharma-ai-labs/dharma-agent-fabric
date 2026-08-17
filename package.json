@@ -24,7 +24,7 @@
     "vendor:verify": "node scripts/verify-better-harness.mjs",
     "smoke:secure-store": "node scripts/smoke-secure-store.mjs",
     "test": "npm run schema:validate && npm run build && npm run test:unit",
-    "test:unit": "npm run test --workspaces --if-present",
+    "test:unit": "node scripts/run-workspace-tests.mjs",
     "pack:verify": "node scripts/verify-package.mjs",
     "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
     "openapi:verify": "node scripts/verify-agent-fabric-openapi.mjs",

@@ -26,7 +26,7 @@ await writeFile(resolve(sourceSkill, 'SKILL.md'), '# Evidence boundary\nRefuse u
 const server = generateKeyPairSync('ed25519');
 const bundleId = randomUUID();
 const bundleBase = {
-  schema: 'dharma.skill-bundle/v1',
+  schema: 'dharma.skill-bundle/v2',
   bundleId,
   organizationId: 'org_rollout_load_proof',
   version: '1.0.0',
@@ -40,7 +40,7 @@ const bundleBase = {
     path: 'skill',
   }],
   riskClass: 'R2',
-  targetSelectors: { providers: ['codex', 'claude'] },
+  targetSelectors: { organizationAgentIds: [], deviceIds: [], workspaceIds: [], providers: ['codex', 'claude'] },
   activationPolicy: 'next_session',
   rollbackBundleId: null,
   evaluationReceiptId: 'eval:rollout-load-proof',

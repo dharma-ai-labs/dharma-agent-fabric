@@ -8,19 +8,20 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
-  saveDeviceConfig, type DeviceConfig, type SecureSecretStore,
+  deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
+  isDefinitiveAgentFabricRejection, saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleId, installSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.1.27';
+const VERSION = '0.2.0';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -166,6 +167,25 @@ function evidenceLedgerForPolicyActivation(value: unknown, day: string): Evidenc
   return newEvidenceUploadLedger(day);
 }
 
+export async function pathExistsOrThrow(
+  path: string,
+  check: (path: string) => Promise<unknown> = access,
+) {
+  try {
+    await check(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export async function canonicalFilesystemPath(path: string) {
+  return realpath(path);
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
 }
@@ -260,7 +280,11 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
     if (!item) throw new Error('Content transmission workspace is not registered locally.');
     const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
-    if (resolve(policyPath) !== canonicalPolicyPath) {
+    const [providedIdentity, registeredIdentity] = await Promise.all([
+      canonicalFilesystemPath(resolve(policyPath)),
+      canonicalFilesystemPath(canonicalPolicyPath),
+    ]);
+    if (providedIdentity !== registeredIdentity) {
       throw new Error('Content transmission requires the canonical registered workspace policy path.');
     }
     const current = await loadOrganizationPolicy(policyPath);
@@ -274,10 +298,18 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
 
 export function assertCapsuleIntegrity(capsule: Record<string, unknown>) {
   const capsuleHash = String(capsule.capsuleHash || '');
-  const { capsuleHash: _capsuleHash, ...unsigned } = capsule;
-  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || sha256(canonicalize(unsigned)) !== capsuleHash) {
+  if (!/^sha256:[a-f0-9]{64}$/.test(capsuleHash) || trajectoryCapsuleHash(capsule as unknown as TrajectoryCapsule) !== capsuleHash) {
     throw new Error('Trajectory capsule integrity check failed.');
   }
+}
+
+function trajectoryCapsuleSchemaId(capsule: unknown) {
+  const schema = capsule && typeof capsule === 'object' && !Array.isArray(capsule)
+    ? (capsule as { schema?: unknown }).schema : null;
+  if (schema === 'dharma.trajectory-capsule/v1') return 'https://schemas.dharma-ai.io/trajectory-capsule/v1';
+  if (schema === 'dharma.trajectory-capsule/v2') return 'https://schemas.dharma-ai.io/trajectory-capsule/v2';
+  if (schema === 'dharma.trajectory-capsule/v3') return 'https://schemas.dharma-ai.io/trajectory-capsule/v3';
+  throw new Error('Trajectory capsule schema is unsupported.');
 }
 
 export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, unknown>, policy: OrganizationPolicy) {
@@ -295,6 +327,10 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
   const events = Array.isArray(capsule.events) ? capsule.events : [];
   if (mode !== 'customer_authorized_content') {
     const provider = String(capsule.provider || '');
+    const capsuleSchema = String(capsule.schema || '');
+    const captureProvenance = capsule.captureProvenance && typeof capsule.captureProvenance === 'object'
+      && !Array.isArray(capsule.captureProvenance)
+      ? capsule.captureProvenance as Record<string, unknown> : {};
     const fixedEventKinds = new Set([
       'user_message', 'agent_message', 'tool_call', 'tool_result', 'command', 'file_read', 'file_write',
       'git', 'validation', 'permission', 'subagent', 'error', 'retry', 'session_state', 'metadata', 'collapsed_output',
@@ -321,9 +357,21 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     const coverage = capsule.coverage && typeof capsule.coverage === 'object' && !Array.isArray(capsule.coverage)
       ? capsule.coverage as Record<string, unknown> : {};
     const missingFields = Array.isArray(coverage.missingFields) ? coverage.missingFields : null;
+    const signedTaskCapture = capsuleSchema === 'dharma.trajectory-capsule/v3'
+      && captureProvenance.sourceClass === 'signed_task_execution';
+    const signedTaskBundleIds = [...new Set(events.map((event) => (
+      event && typeof event === 'object' && !Array.isArray(event)
+        ? String((event as Record<string, unknown>).skillBundleId || '') : ''
+    )).filter(Boolean))];
     if (!['codex', 'claude', 'agy'].includes(provider)
       || !digest.test(String(capsule.sessionId || ''))
-      || capsule.taskId !== null
+      || (signedTaskCapture
+        ? !uuid.test(String(capsule.taskId || ''))
+          || !digest.test(String(captureProvenance.taskReceiptHash || ''))
+          || !Number.isFinite(Date.parse(String(captureProvenance.collectedAt || '')))
+          || signedTaskBundleIds.length !== 1
+          || !uuid.test(signedTaskBundleIds[0] || '')
+        : capsule.taskId !== null || capsuleSchema === 'dharma.trajectory-capsule/v3')
       || !uuid.test(String(capsule.deviceId || ''))
       || capsule.redactionReceipt === null
       || receipt.policyRevision !== policy.revision
@@ -397,7 +445,8 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
         || !Array.isArray(eventRecord.contentRefs) || eventRecord.contentRefs.length !== 0
         || source.nativeEventId !== null || source.localLocatorId !== null || source.sourceKind !== eventKind
         || record.nativeKind !== eventKind
-        || eventRecord.skillBundleId !== null || eventRecord.providerModel !== null) {
+        || eventRecord.skillBundleId !== (signedTaskCapture ? signedTaskBundleIds[0] : null)
+        || eventRecord.providerModel !== null) {
         throw new Error('Reduced trajectory capsule contains unauthorized event descriptors.');
       }
     }
@@ -721,6 +770,22 @@ export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, ope
     `${workspaceAuthorizationStatePath(workspaceId)}.refresh.lock`,
     operation,
     'Timed out waiting for the workspace policy refresh lock.',
+  );
+}
+
+export async function withWorkspaceSkillActivationLock<T>(
+  workspaceId: string,
+  provider: ProviderId,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!workspaceId || !['codex', 'claude', 'agy'].includes(provider)) {
+    throw new Error('Skill activation lock requires a registered workspace and supported provider.');
+  }
+  const key = createHash('sha256').update(`${workspaceId}:${provider}`).digest('hex');
+  return withFileLock(
+    resolve(dharmaHome(), 'registry', 'skill-activation-locks', `${key}.lock`),
+    operation,
+    'Timed out waiting for the workspace skill activation lock.',
   );
 }
 
@@ -1118,16 +1183,35 @@ async function runOrganizationCommand(command: string | undefined, subcommand: s
   if (command === 'failures' && subcommand === 'list') return api.listFailures();
   if (command === 'remediations' && subcommand === 'list') return api.listRemediations();
   if (command === 'remediations' && subcommand === 'act') {
-    requireExplicitConfirmation(flags, 'Changing a repository remediation release');
     const targetId = required(flags, 'target-id');
     const body = await commandJsonBody(flags);
     const action = String(flags.get('action') || body.action || '');
-    if (!['run_backtest', 'link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
-      throw new Error('Remediation action must be run_backtest, link_backtest, approve, merge_pr, release, expand, or rollback.');
+    if (!['stage_evaluation', 'run_backtest', 'link_backtest', 'approve', 'merge_pr', 'release', 'expand', 'rollback'].includes(action)) {
+      throw new Error('Remediation action must be stage_evaluation, run_backtest, link_backtest, approve, merge_pr, release, expand, or rollback.');
     }
+    if (action === 'stage_evaluation') {
+      const endpointId = String(flags.get('endpoint-id') || body.endpointId || '');
+      if (!UUID_PATTERN.test(endpointId)) throw new Error('stage_evaluation requires --endpoint-id with an exact endpoint UUID.');
+      if (flags.get('dry-run') === true) {
+        return {
+          ok: true,
+          planned: true,
+          serverMutation: false,
+          targetId,
+          transition: { action, endpointId },
+        };
+      }
+      requireExplicitConfirmation(flags, 'Staging a repository remediation evaluation');
+      return api.transitionRemediationTarget(targetId, { action, endpointId });
+    }
+    requireExplicitConfirmation(flags, 'Changing a repository remediation release');
     return api.transitionRemediationTarget(targetId, {
-      ...body,
       action: action as 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
+      ...(Array.isArray(body.trajectoryIds) ? { trajectoryIds: body.trajectoryIds.map(String) } : {}),
+      ...(typeof body.campaignId === 'string' ? { campaignId: body.campaignId } : {}),
+      ...(typeof body.establishAutoUpdatePolicy === 'boolean'
+        ? { establishAutoUpdatePolicy: body.establishAutoUpdatePolicy }
+        : {}),
     });
   }
   if (command === 'skills' && subcommand === 'list') return api.listSkills();
@@ -1226,6 +1310,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         serverPublicKeyEd25519: result.serverPublicKeyEd25519, relayUrl: result.relayUrl, enrolledAt: new Date().toISOString(),
       };
       await saveDeviceConfig(configPath(), config);
+      await saveDeviceEnrollmentAnchor({ config });
       await rm(pendingEnrollmentPath(), { force: true });
       return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
     }
@@ -1270,6 +1355,12 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const registered = (await registry()).find((item) => item.path === workspace);
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+  const captureProvenance = (collectedAt: string) => ({
+    sourceClass: (typeof root === 'string' ? 'explicit_import' : 'provider_discovery') as
+      'explicit_import' | 'provider_discovery',
+    collectedAt,
+    taskReceiptHash: null,
+  });
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync') ? await client() : null;
@@ -1289,6 +1380,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       const firstRevision = buildTrajectoryCapsule({
         organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
+        captureProvenance: captureProvenance(selected.endedAt),
       });
       const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
@@ -1305,9 +1397,10 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
             organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
             session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
             revision: latestMetadata.revision + 1, previousRevisionHash: latestMetadata.capsuleHash,
+            captureProvenance: captureProvenance(selected.endedAt),
           })
           : firstRevision;
-      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
       if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
       if (!latestCapsule || latestCapsule.capsuleHash !== capsule.capsuleHash) {
         await vault.commitCapture({
@@ -1389,6 +1482,12 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
     const registered = (await registry()).find((item) => item.path === workspace);
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
     const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
+    const captureProvenance = (collectedAt: string) => ({
+      sourceClass: (typeof root === 'string' ? 'explicit_import' : 'provider_discovery') as
+        'explicit_import' | 'provider_discovery',
+      collectedAt,
+      taskReceiptHash: null,
+    });
     const capsules = sessions.map((session) => {
       const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
       return buildTrajectoryCapsule({
@@ -1400,6 +1499,7 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
         rawContentId: sha256(rawTurn),
         rawBytes: rawTurn.byteLength,
         rawKind: 'raw-provider-turn',
+        captureProvenance: captureProvenance(session.endedAt),
       });
     });
     automaticDisclosure = {
@@ -1720,6 +1820,80 @@ async function readDeviceConfig(): Promise<DeviceConfig | null> {
   catch { return null; }
 }
 
+async function activeSkillAuthorization(
+  provider: ProviderId,
+  workspaceId: string,
+  organizationAgentId: string,
+  config: DeviceConfig,
+) {
+  const root = nativeSkillDirectory(provider);
+  const pointer = resolve(root, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE');
+  if (!await pathExistsOrThrow(pointer)) return null;
+  if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
+  const [identity, enrollment, active] = await Promise.all([
+    loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId }),
+    loadDeviceEnrollmentAnchor({ config }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+  ]);
+  if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
+  if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
+    throw new Error('Active skill device identity does not match secure enrollment state.');
+  }
+  return getActiveSkillBundleAuthorization({
+    nativeSkillDirectory: root,
+    workspaceId,
+    provider,
+    organizationId: config.organizationId,
+    organizationAgentId,
+    deviceId: config.deviceId,
+    serverPublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 },
+      format: 'jwk',
+    }),
+    devicePublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 },
+      format: 'jwk',
+    }),
+    expectedReceiptHash: active.receiptHash,
+  });
+}
+
+async function expiredSkillAuthorizationForReplacement(
+  provider: ProviderId,
+  workspaceId: string,
+  organizationAgentId: string,
+  config: DeviceConfig,
+) {
+  const root = nativeSkillDirectory(provider);
+  if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
+  const [identity, enrollment, active] = await Promise.all([
+    loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId }),
+    loadDeviceEnrollmentAnchor({ config }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+  ]);
+  if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
+  if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
+    throw new Error('Active skill device identity does not match secure enrollment state.');
+  }
+  return getExpiredSkillBundleAuthorizationForReplacement({
+    nativeSkillDirectory: root,
+    workspaceId,
+    provider,
+    organizationId: config.organizationId,
+    organizationAgentId,
+    deviceId: config.deviceId,
+    serverPublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 },
+      format: 'jwk',
+    }),
+    devicePublicKey: createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 },
+      format: 'jwk',
+    }),
+    expectedReceiptHash: active.receiptHash,
+  });
+}
+
 async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
   const policy = await loadOrganizationPolicy(path);
   if (policy.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') return policy;
@@ -1943,7 +2117,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
 async function evidenceSync(flags: Map<string, string | boolean>): Promise<Output> {
   const capsule = JSON.parse(await readFile(resolve(required(flags, 'file')), 'utf8')) as Record<string, unknown>;
   const workspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : String(capsule.workspaceId || '');
-  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), 'https://schemas.dharma-ai.io/trajectory-capsule/v1', capsule);
+  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
   if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
   assertCapsuleIntegrity(capsule);
   const trajectoryId = String(capsule.trajectoryId || '');
@@ -2163,9 +2337,327 @@ async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Prom
   return processEvidenceRequest(fabric, policy, workspaceId);
 }
 
+export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, workspace: string): ProviderSession {
+  return {
+    provider: task.target.provider,
+    sessionId: `dharma-task-${task.taskId}`,
+    sourcePath: 'dharma-task-receipt',
+    workspace,
+    coverage: 'observed',
+    startedAt: receipt.startedAt,
+    endedAt: receipt.completedAt,
+    records: receipt.commandResults.map((result, index) => ({
+      native: {
+        taskId: task.taskId,
+        commandId: result.commandId,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        stdoutSha256: result.stdoutSha256,
+        stderrSha256: result.stderrSha256,
+      },
+      sourcePath: 'dharma-task-receipt',
+      line: index + 1,
+      workspace,
+      timestamp: receipt.completedAt,
+      kind: result.commandId.startsWith('provider.') ? 'agent_message' : 'validation',
+      coverage: 'observed',
+    })),
+  };
+}
+
+function prepareSignedTaskTrajectory(input: {
+  policy: OrganizationPolicy;
+  task: TaskEnvelope;
+  receipt: TaskReceipt;
+  taskReceiptHash: string;
+  collectedAt: string;
+  workspace: WorkspaceRecord;
+  device: DeviceConfig;
+  activeSkill: Awaited<ReturnType<typeof activeSkillAuthorization>>;
+  activeSkillVerifiedAt: string;
+}) {
+  if (!input.activeSkill || input.task.skillBundle?.bundleId !== input.activeSkill.bundleId) {
+    throw new Error('Signed task trajectory requires the active task-pinned skill bundle.');
+  }
+  const session = taskReceiptSession(input.task, input.receipt, input.workspace.path);
+  const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
+  const rawContentId = sha256(rawTurn);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: input.device.organizationId,
+    deviceId: input.device.deviceId,
+    workspaceId: input.workspace.workspaceId,
+    session,
+    policy: input.policy,
+    rawContentId,
+    rawBytes: rawTurn.byteLength,
+    rawKind: 'raw-provider-turn',
+    taskId: input.task.taskId,
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: input.collectedAt,
+      taskReceiptHash: input.taskReceiptHash,
+    },
+    activeSkillBundleId: input.activeSkill.bundleId,
+    activeSkillBundleActivatedAt: input.activeSkill.activatedAt,
+    activeSkillBundleExpiresAt: input.activeSkill.expiresAt,
+    activeSkillBundleVerifiedAt: input.activeSkillVerifiedAt,
+  });
+  return { capsule, rawTurn, rawContentId, session };
+}
+
+async function syncSignedTaskTrajectory(input: {
+  fabric: AgentFabricClient;
+  policy: OrganizationPolicy;
+  workspace: WorkspaceRecord;
+  prepared: ReturnType<typeof prepareSignedTaskTrajectory>;
+}) {
+  const { capsule, rawTurn, rawContentId, session } = input.prepared;
+  const validation = await validateContract(
+    resolve(import.meta.dirname, 'schemas'),
+    trajectoryCapsuleSchemaId(capsule),
+    capsule,
+  );
+  if (!validation.ok) throw new Error(`Signed task capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
+  assertCapsuleAuthorizedByCurrentPolicy(capsule as unknown as Record<string, unknown>, input.policy);
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(input.policy),
+  });
+  try {
+    const existing = vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+    if (!existing) {
+      await vault.commitCapture({
+        raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
+        capsule: {
+          plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
+          revision: capsule.revision, capsuleHash: capsule.capsuleHash,
+        },
+        session: {
+          sessionId: session.sessionId, provider: session.provider, workspaceId: input.workspace.workspaceId,
+          sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt,
+        },
+      });
+    } else if (existing.capsuleHash !== capsule.capsuleHash) {
+      throw new Error('Signed task evidence already exists with different immutable content.');
+    }
+    vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+    await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, input.policy);
+    const synced = await input.fabric.syncTrajectory(capsule);
+    vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+    return synced;
+  } finally {
+    vault.close();
+  }
+}
+
+type SignedTaskTrajectoryRecovery = {
+  schema: 'dharma.signed-task-trajectory-recovery/v1';
+  taskId: string;
+  workspaceId: string;
+  prepared: {
+    capsule: TrajectoryCapsule;
+    rawTurnBase64: string;
+    rawContentId: string;
+    session: ProviderSession;
+  };
+};
+
+export function assertRecoveredTaskWorkspacePolicy(input: {
+  recoveryWorkspaceId: string;
+  workspace: { workspaceId: string; organizationId: string };
+  policy: Pick<OrganizationPolicy, 'organizationId' | 'serverAuthorization'>;
+}): void {
+  if (input.workspace.workspaceId !== input.recoveryWorkspaceId) {
+    throw new Error('Recovered task completion does not match its registered workspace.');
+  }
+  if (input.policy.organizationId !== input.workspace.organizationId
+    || (input.policy.serverAuthorization
+      && input.policy.serverAuthorization.workspaceId !== input.workspace.workspaceId)) {
+    throw new Error('Recovered task completion policy does not authorize its workspace.');
+  }
+}
+
+export function recoveredTaskPolicyWasSuperseded(
+  capsule: Pick<TrajectoryCapsule, 'redactionReceipt'>,
+  currentPolicy: Pick<OrganizationPolicy, 'revision'>,
+): boolean {
+  return capsule.redactionReceipt?.policyRevision !== currentPolicy.revision;
+}
+
+export function assertTaskWorkspacePolicy(input: {
+  task: Pick<TaskEnvelope, 'organizationId' | 'workspaceId'>;
+  workspace: { workspaceId: string; organizationId: string };
+  policy: Pick<OrganizationPolicy, 'organizationId' | 'serverAuthorization'>;
+}): void {
+  if (input.task.workspaceId !== input.workspace.workspaceId
+    || input.task.organizationId !== input.workspace.organizationId
+    || input.policy.organizationId !== input.workspace.organizationId
+    || (input.policy.serverAuthorization
+      && input.policy.serverAuthorization.workspaceId !== input.workspace.workspaceId)) {
+    throw new Error('Task workspace policy does not match the signed task and local registration.');
+  }
+}
+
+async function stageSignedTaskTrajectoryRecovery(
+  taskId: string,
+  workspaceId: string,
+  policy: OrganizationPolicy,
+  prepared: ReturnType<typeof prepareSignedTaskTrajectory>,
+): Promise<void> {
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(policy),
+  });
+  try {
+    const recovery: SignedTaskTrajectoryRecovery = {
+      schema: 'dharma.signed-task-trajectory-recovery/v1', taskId, workspaceId,
+      prepared: {
+        capsule: prepared.capsule,
+        rawTurnBase64: prepared.rawTurn.toString('base64'),
+        rawContentId: prepared.rawContentId,
+        session: prepared.session,
+      },
+    };
+    await vault.stageTaskCompletionRecovery(taskId, Buffer.from(JSON.stringify(recovery)));
+  } finally {
+    vault.close();
+  }
+}
+
+async function finalizeRecoveredSignedTaskTrajectories(
+  fabric: AgentFabricClient,
+  vaultPolicy: OrganizationPolicy,
+  onlyTaskId?: string,
+): Promise<Array<{ taskId: string; trajectory: Record<string, unknown> }>> {
+  const completions = fabric.listRecoveredTaskCompletions()
+    .filter((item) => !onlyTaskId || item.taskId === onlyTaskId);
+  const finalized: Array<{ taskId: string; trajectory: Record<string, unknown> }> = [];
+  for (const completion of completions) {
+    const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+    const vault = await LocalVault.open({
+      root: resolve(dharmaHome(), 'vault'),
+      masterKey: await loadOrCreateVaultMasterKey(),
+      rawLocalDays: rawLocalRetentionDays(vaultPolicy),
+    });
+    let recovery: SignedTaskTrajectoryRecovery | null;
+    try {
+      recovery = await vault.getTaskCompletionRecovery<SignedTaskTrajectoryRecovery>(completion.taskId);
+    } finally {
+      vault.close();
+    }
+    if (!recovery || recovery.schema !== 'dharma.signed-task-trajectory-recovery/v1'
+      || recovery.taskId !== completion.taskId) {
+      throw new Error(`Recovered task completion ${completion.taskId} is missing its encrypted local evidence.`);
+    }
+    const workspace = (await registry()).find((item) => item.workspaceId === recovery.workspaceId);
+    if (!workspace) throw new Error(`Recovered task completion ${completion.taskId} has no registered workspace.`);
+    const recoveryPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
+      resolve(workspace.path, '.dharma', 'approved-policy.json'),
+      recovery.workspaceId,
+      fabric,
+    );
+    assertRecoveredTaskWorkspacePolicy({
+      recoveryWorkspaceId: recovery.workspaceId,
+      workspace,
+      policy: recoveryPolicy,
+    });
+    const rawTurn = Buffer.from(recovery.prepared.rawTurnBase64, 'base64');
+    if (recovery.prepared.capsule.taskId !== completion.taskId
+      || recovery.prepared.capsule.workspaceId !== recovery.workspaceId
+      || recovery.prepared.capsule.capsuleHash !== completion.trajectoryCapsuleHash
+      || sha256(rawTurn) !== recovery.prepared.rawContentId) {
+      throw new Error(`Recovered task completion ${completion.taskId} does not match its trajectory capsule.`);
+    }
+    const capsule = {
+      ...recovery.prepared.capsule,
+      captureProvenance: {
+        ...recovery.prepared.capsule.captureProvenance,
+        taskReceiptHash: completion.receiptHash,
+      },
+    };
+    assertCapsuleIntegrity(capsule as unknown as Record<string, unknown>);
+    if (recoveredTaskPolicyWasSuperseded(capsule, recoveryPolicy)) {
+      const supersededVault = await LocalVault.open({
+        root: resolve(dharmaHome(), 'vault'),
+        masterKey: await loadOrCreateVaultMasterKey(),
+        rawLocalDays: rawLocalRetentionDays(vaultPolicy),
+      });
+      try {
+        const existing = supersededVault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+        if (!existing) {
+          await supersededVault.commitCapture({
+            raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: recovery.prepared.rawContentId },
+            capsule: {
+              plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
+              revision: capsule.revision, capsuleHash: capsule.capsuleHash,
+            },
+            session: {
+              sessionId: recovery.prepared.session.sessionId,
+              provider: recovery.prepared.session.provider,
+              workspaceId: recovery.workspaceId,
+              sourceLocator: recovery.prepared.session.sourcePath,
+              status: recovery.prepared.session.coverage,
+              observedAt: recovery.prepared.session.endedAt,
+            },
+          });
+        } else if (existing.capsuleHash !== capsule.capsuleHash) {
+          throw new Error('Recovered task evidence already exists with different immutable content.');
+        }
+        supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
+      } finally {
+        supersededVault.close();
+      }
+      await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
+      const acknowledgedVault = await LocalVault.open({
+        root: resolve(dharmaHome(), 'vault'),
+        masterKey: await loadOrCreateVaultMasterKey(),
+        rawLocalDays: rawLocalRetentionDays(vaultPolicy),
+      });
+      try { await acknowledgedVault.clearTaskCompletionRecovery(completion.taskId); }
+      finally { acknowledgedVault.close(); }
+      finalized.push({
+        taskId: completion.taskId,
+        trajectory: {
+          ok: false,
+          status: 'withheld',
+          reason: 'policy_revision_superseded',
+          trajectoryId: capsule.trajectoryId,
+          revision: capsule.revision,
+        },
+      });
+      continue;
+    }
+    const trajectory = await syncSignedTaskTrajectory({
+      fabric, policy: recoveryPolicy, workspace,
+      prepared: {
+        capsule,
+        rawTurn,
+        rawContentId: recovery.prepared.rawContentId,
+        session: recovery.prepared.session,
+      },
+    });
+    await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
+    const cleanupVault = await LocalVault.open({
+      root: resolve(dharmaHome(), 'vault'),
+      masterKey: await loadOrCreateVaultMasterKey(),
+      rawLocalDays: rawLocalRetentionDays(vaultPolicy),
+    });
+    try { await cleanupVault.clearTaskCompletionRecovery(completion.taskId); }
+    finally { cleanupVault.close(); }
+    finalized.push({ taskId: completion.taskId, trajectory });
+  }
+  return finalized;
+}
+
 async function executeOneTask(
   fabric: AgentFabricClient,
-  policy: Awaited<ReturnType<typeof loadOrganizationPolicy>>,
   leaseSeconds: number,
 ): Promise<Record<string, unknown>> {
   const polled = await fabric.pollTask(leaseSeconds);
@@ -2174,10 +2666,28 @@ async function executeOneTask(
   const task = taskRow.envelope;
   const workspace = (await registry()).find((item) => item.workspaceId === task.workspaceId);
   if (!workspace) throw new Error('Task workspace is not registered on this device.');
+  const taskPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
+    resolve(workspace.path, '.dharma', 'approved-policy.json'),
+    workspace.workspaceId,
+    fabric,
+  );
+  assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  const waitingHeartbeats: Promise<unknown>[] = [];
+  const waitingHeartbeat = setInterval(() => {
+    waitingHeartbeats.push(fabric.postTaskEvent(task.taskId, 'lease_extended', {
+      taskId: task.taskId,
+      phase: 'waiting_for_skill_activation_lock',
+    }).catch(() => undefined));
+  }, Math.max(5_000, Math.floor(leaseSeconds * 500)));
+  try {
+  return await withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  const activeBundleId = await getActiveSkillBundleId(nativeSkillDirectory(task.target.provider), task.workspaceId);
+  const activeSkill = await activeSkillAuthorization(
+    task.target.provider, task.workspaceId, String(workspace.repositoryAgentId || ''), config,
+  );
+  const activeBundleId = activeSkill?.bundleId ?? null;
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
   } catch (error) {
@@ -2200,7 +2710,7 @@ async function executeOneTask(
   let receipt;
   try {
     receipt = await executeTask({
-      task, policy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
+      task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
     });
   } finally {
@@ -2213,13 +2723,64 @@ async function executeOneTask(
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),
     startedAt: receipt.startedAt, completedAt: receipt.completedAt,
   };
-  await fabric.postTaskEvent(task.taskId, receipt.status, summary);
-  return { ok: true, taskId: task.taskId, receipt: summary };
+  const collectedAt = receipt.completedAt;
+  const prepared = receipt.status === 'completed' && task.skillBundle
+    ? prepareSignedTaskTrajectory({
+      policy: taskPolicy, task, receipt, taskReceiptHash: `sha256:${'0'.repeat(64)}`, collectedAt,
+      workspace, device: config, activeSkill,
+      // The receipt is durable and retry-idempotent. Its start time is after
+      // the first successful local bundle verification, so it is also the
+      // stable verification timestamp for a recovered trajectory.
+      activeSkillVerifiedAt: receipt.startedAt,
+    })
+    : null;
+  if (prepared) await stageSignedTaskTrajectoryRecovery(task.taskId, workspace.workspaceId, taskPolicy, prepared);
+  await fabric.postTaskEvent(task.taskId, receipt.status, {
+    ...summary,
+    ...(prepared ? { trajectoryCapsuleHash: prepared.capsule.capsuleHash } : {}),
+  });
+  let trajectory = null;
+  if (receipt.status === 'completed' && task.skillBundle) {
+    const finalized = await finalizeRecoveredSignedTaskTrajectories(
+      fabric,
+      taskPolicy,
+      task.taskId,
+    );
+    trajectory = finalized[0]?.trajectory || null;
+    if (!trajectory) throw new Error('Task completion did not return a recoverable server receipt.');
+  }
+  return { ok: true, taskId: task.taskId, receipt: summary, trajectory };
+  });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Timed out waiting for the workspace skill activation lock.') {
+      await fabric.postTaskEvent(task.taskId, 'failed', {
+        phase: 'coordination',
+        code: 'skill_activation_lock_timeout',
+      }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    clearInterval(waitingHeartbeat);
+    await Promise.allSettled(waitingHeartbeats);
+  }
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {
-  const policy = await loadVerifiedWorkspacePolicy(required(flags, 'policy'), typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined);
-  return executeOneTask(await client(), policy, Number(flags.get('lease-seconds') || 120));
+  const policyPath = resolve(required(flags, 'policy'));
+  const requestedWorkspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined;
+  const selectedWorkspace = (await registry()).find((item) => (
+    resolve(item.path, '.dharma', 'approved-policy.json') === policyPath
+    && (!requestedWorkspaceId || item.workspaceId === requestedWorkspaceId)
+  ));
+  if (!selectedWorkspace) throw new Error('Task policy must be the canonical policy of one registered workspace.');
+  const policy = await loadVerifiedWorkspacePolicy(policyPath, selectedWorkspace.workspaceId);
+  const fabric = await client();
+  const recoveredTaskTrajectories = await finalizeRecoveredSignedTaskTrajectories(
+    fabric,
+    policy,
+  );
+  const result = await executeOneTask(fabric, Number(flags.get('lease-seconds') || 120));
+  return recoveredTaskTrajectories.length ? { ...result, recoveredTaskTrajectories } : result;
 }
 
 export function nativeSkillDirectory(
@@ -2336,10 +2897,18 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
   const nativeInstalled = await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath);
   let workspaceId: string | undefined;
+  let organizationAgentId: string | undefined;
   try {
     const connection = JSON.parse(await readFile(connectionPath, 'utf8')) as { workspaceId?: unknown };
-    if (typeof connection.workspaceId === 'string') workspaceId = connection.workspaceId;
+    if (typeof connection.workspaceId === 'string') {
+      workspaceId = connection.workspaceId;
+      organizationAgentId = (await registry()).find((item) => item.workspaceId === workspaceId)?.repositoryAgentId || undefined;
+    }
   } catch {}
+  const config = await readDeviceConfig();
+  const activeBundleId = workspaceId && organizationAgentId && config
+    ? (await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config))?.bundleId ?? null
+    : null;
   return {
     provider: input.provider,
     ready: repositoryInstalled && nativeInstalled,
@@ -2349,7 +2918,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     connectionPath,
     nativeSkillPath,
     workspaceId: workspaceId || null,
-    activeBundleId: workspaceId ? await getActiveSkillBundleId(nativeRoot, workspaceId) : null,
+    activeBundleId,
     activation: 'next_session',
     nextAction: repositoryInstalled && nativeInstalled
       ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
@@ -2420,20 +2989,53 @@ export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoo
   return true;
 }
 
+export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  authorizationError: unknown;
+}): Promise<string> {
+  const legacyBundleId = await getLegacySkillBundleIdForUpgrade({
+    nativeSkillDirectory: input.nativeSkillDirectory,
+    workspaceId: input.workspaceId,
+  });
+  if (!legacyBundleId) throw input.authorizationError;
+  return legacyBundleId;
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
   if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
   const provider = providerValue as ProviderId;
+  return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
   const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
   if (!workspace) throw new Error('Skill workspace is not registered locally.');
   const policy = await loadOrganizationPolicy(required(flags, 'policy'));
   const destination = nativeSkillDirectory(provider);
   const fabric = await client();
+  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  let activeBundleId: string | null;
+  try {
+    activeBundleId = (await activeSkillAuthorization(
+      provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
+    ))?.bundleId ?? null;
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Skill bundle has expired.') {
+      activeBundleId = (await expiredSkillAuthorizationForReplacement(
+        provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
+      ))?.bundleId ?? null;
+    } else {
+      activeBundleId = await recoverLegacySkillBundleIdAfterAuthorizationFailure({
+        nativeSkillDirectory: destination,
+        workspaceId,
+        authorizationError: error,
+      });
+    }
+  }
   const response = await fabric.pollSkill({
     workspaceId,
     provider,
-    installedBundleId: await getActiveSkillBundleId(destination, workspaceId),
+    installedBundleId: activeBundleId,
   });
   const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
   if (!rollout) return { ok: true, rollout: null, changed: false };
@@ -2453,7 +3055,6 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     }
   }
   const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
-  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   verifySkillBundle(bundle, createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }));
   await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
   await rm(sourceRoot, { recursive: true, force: true });
@@ -2466,6 +3067,12 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
   }
   try {
+    const previousAnchor = await loadActiveSkillAuthorizationAnchor({
+      config,
+      workspaceId,
+      organizationAgentId: String(workspace.repositoryAgentId || ''),
+      provider,
+    });
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
     const receipt = await installSkillBundle({
       bundle,
@@ -2475,17 +3082,77 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
       devicePrivateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }),
       deviceId: config.deviceId,
+      organizationAgentId: String(workspace.repositoryAgentId || ''),
       workspaceId,
       provider,
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
       organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
     });
-    if (provider === 'agy' && receipt.status === 'active') await activateAgyPlugin();
-    await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
+    const restoreAnchor = async () => {
+      if (previousAnchor) {
+        await saveActiveSkillAuthorizationAnchor({
+          config,
+          workspaceId,
+          organizationAgentId: previousAnchor.organizationAgentId,
+          provider,
+          bundleId: previousAnchor.bundleId,
+          receiptHash: previousAnchor.receiptHash,
+          activatedAt: previousAnchor.activatedAt,
+          expiresAt: previousAnchor.expiresAt,
+        });
+      } else {
+        await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider });
+      }
+    };
+    const recoverLocalInstallation = async (error: unknown): Promise<never> => {
+      const recoveryErrors: unknown[] = [];
+      try {
+        await rollbackUnconfirmedSkillBundle({
+          nativeSkillDirectory: destination,
+          workspaceId,
+          receipt,
+        });
+      } catch (rollbackError) {
+        recoveryErrors.push(rollbackError);
+      }
+      try {
+        await restoreAnchor();
+      } catch (anchorError) {
+        recoveryErrors.push(anchorError);
+      }
+      if (recoveryErrors.length) {
+        throw new AggregateError([error, ...recoveryErrors], 'Skill installation failed and local recovery was incomplete.');
+      }
+      throw error;
+    };
+    try {
+      if (receipt.status === 'active') {
+        await saveActiveSkillAuthorizationAnchor({
+          config,
+          workspaceId,
+          organizationAgentId: String(workspace.repositoryAgentId || ''),
+          provider,
+          bundleId: receipt.bundleId,
+          receiptHash: receipt.receiptHash,
+          activatedAt: receipt.completedAt,
+          expiresAt: bundle.expiresAt ?? null,
+        });
+        if (provider === 'agy') await activateAgyPlugin();
+      }
+    } catch (error) {
+      await recoverLocalInstallation(error);
+    }
+    try {
+      await fabric.postInstallReceipt(bundle.bundleId, rollout.id, receipt);
+    } catch (error) {
+      if (isDefinitiveAgentFabricRejection(error)) await recoverLocalInstallation(error);
+      throw error;
+    }
     return { ok: true, rolloutId: rollout.id, bundleId: bundle.bundleId, status: receipt.status, changed: true };
   } finally {
     await rm(sourceRoot, { recursive: true, force: true });
   }
+  });
 }
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
@@ -2504,10 +3171,22 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
+  let taskTrajectoriesRecovered = 0;
   let evidenceResponsesCompleted = 0;
+  let trajectorySyncsCompleted = 0;
   let nextPolicyRefreshAt = 0;
   let evidencePolicyFresh = false;
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({
+    root: resolve(dharmaHome(), 'vault'),
+    masterKey: await loadOrCreateVaultMasterKey(),
+    rawLocalDays: rawLocalRetentionDays(policy),
+  });
   try {
+    taskTrajectoriesRecovered += (await finalizeRecoveredSignedTaskTrajectories(
+      fabric,
+      policy,
+    )).length;
     do {
       if (Date.now() >= nextPolicyRefreshAt) {
         try {
@@ -2521,21 +3200,31 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh) {
+        trajectorySyncsCompleted += await syncPendingRetentionCapsules(
+          vault,
+          fabric,
+          policy,
+          canonicalWorkspace.workspaceId,
+        );
         const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
         evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
         if (evidenceRequestId) evidenceResponsesCompleted += 1;
       }
-      const result = await executeOneTask(fabric, policy, leaseSeconds);
+      const result = await executeOneTask(fabric, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
       if (flags.has('once')) break;
       if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
+    vault.close();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     await rm(pidPath, { force: true });
   }
-  return { ok: true, stopped: true, tasksCompleted, evidenceResponsesCompleted };
+  return {
+    ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
+    evidenceResponsesCompleted, trajectorySyncsCompleted,
+  };
 }
 
 export async function run(argv: string[]): Promise<Output> {
@@ -2606,10 +3295,15 @@ export async function run(argv: string[]): Promise<Output> {
     if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
     const root = nativeSkillDirectory(providerValue as ProviderId);
     const workspaceId = required(flags, 'workspace-id');
+    const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+    const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
+    if (!workspace) throw new Error('Skill workspace is not registered locally.');
     return {
       provider: providerValue,
       workspaceId,
-      activeBundleId: await getActiveSkillBundleId(root, workspaceId),
+      activeBundleId: (await activeSkillAuthorization(
+        providerValue as ProviderId, workspaceId, String(workspace.repositoryAgentId || ''), config,
+      ))?.bundleId ?? null,
       nativeSkillDirectory: root,
     };
   }

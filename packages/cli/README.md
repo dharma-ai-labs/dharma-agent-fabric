@@ -53,11 +53,30 @@ Local metadata analysis is operational triage, not semantic Cognitive Integrity
 evaluation. Nuanced scoring and remediation require approved, redacted evidence;
 missing evidence must produce `insufficient_evidence`.
 
-After a candidate pull request exists and 20 later non-source trajectories have
-been captured, an authorized operator can run the same held-out gate exposed in
-the portal:
+After a candidate pull request exists, an organization admin first authorizes
+the candidate on one exact local endpoint. This is an evaluation-only canary,
+not release approval:
 
 ```bash
+dharma remediations act \
+  --organization-id <organization-id> \
+  --target-id <repository-remediation-target-id> \
+  --action stage_evaluation \
+  --json-body '{"endpointId":"<local-endpoint-id>"}' \
+  --confirm
+```
+
+Run `dharma skills sync` with the returned evaluation authorization ID, then
+collect 20 later non-source trajectories on that endpoint. The held-out gate
+rejects trajectories that do not carry the installed candidate bundle ID:
+
+```bash
+dharma skills sync \
+  --workspace-id <workspace-id> \
+  --provider <codex|claude|agy> \
+  --policy .dharma/approved-policy.json \
+  --approval-id <evaluation-authorization-id>
+
 dharma remediations act \
   --organization-id <organization-id> \
   --target-id <repository-remediation-target-id> \

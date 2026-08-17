@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
+import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey } from './index.js';
 
 test('vault encrypts content and verifies it on read', async () => {
@@ -71,6 +72,50 @@ test('vault resolves the latest capsule and records idempotent disclosure receip
   vault.close();
 });
 
+test('vault durably stages encrypted task completion evidence until acknowledgement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-task-recovery-'));
+  const key = randomBytes(32);
+  const taskId = 'd93ce685-113c-45f7-8ba0-334cc7b917f4';
+  const plaintext = Buffer.from(JSON.stringify({ taskId, privateOutput: 'accepted but interrupted' }));
+  const vault = await LocalVault.open({ root, masterKey: key });
+  const contentId = await vault.stageTaskCompletionRecovery(taskId, plaintext);
+  assert.equal(await vault.stageTaskCompletionRecovery(taskId, plaintext), contentId);
+  await assert.rejects(
+    vault.stageTaskCompletionRecovery(taskId, Buffer.from('changed retry')),
+    /payload changed/,
+  );
+  assert.deepEqual(await vault.getTaskCompletionRecovery(taskId), {
+    taskId, privateOutput: 'accepted but interrupted',
+  });
+  const digest = contentId.slice('sha256:'.length);
+  assert.equal((await readFile(join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`))).includes(plaintext), false);
+  vault.close();
+
+  const resumed = await LocalVault.open({ root, masterKey: key });
+  assert.deepEqual(await resumed.getTaskCompletionRecovery(taskId), {
+    taskId, privateOutput: 'accepted but interrupted',
+  });
+  await resumed.clearTaskCompletionRecovery(taskId);
+  assert.equal(await resumed.getTaskCompletionRecovery(taskId), null);
+  await assert.rejects(readFile(join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`)), /ENOENT/);
+  resumed.close();
+});
+
+test('recovery cleanup preserves a deduplicated blob owned by another vault record', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-task-dedup-'));
+  const taskId = '21fce5b5-cbfa-4c84-92d7-34ea41a54c32';
+  const plaintext = Buffer.from(JSON.stringify({ shared: 'provider evidence' }));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const providerContentId = await vault.putBlob(plaintext, 'provider-session');
+  assert.equal(await vault.stageTaskCompletionRecovery(taskId, plaintext), providerContentId);
+
+  await vault.clearTaskCompletionRecovery(taskId);
+
+  assert.equal(await vault.getTaskCompletionRecovery(taskId), null);
+  assert.deepEqual(await vault.getBlob(providerContentId), plaintext);
+  vault.close();
+});
+
 test('failed capture commit rolls back session metadata and removes newly written blobs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-capture-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
@@ -111,12 +156,18 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
   const rawContentId = await vault.putBlob(Buffer.from('expired raw provider evidence'), 'raw-provider-turn');
   const capsuleBase = {
+    schema: 'dharma.trajectory-capsule/v3',
     trajectoryId: 'trajectory-retention', revision: 1, previousRevisionHash: null,
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: '2026-01-01T00:00:00.000Z',
+      taskReceiptHash: `sha256:${'a'.repeat(64)}`,
+    },
     contentIndex: [{ contentId: rawContentId, kind: 'raw-provider-turn', bytes: 29, uploaded: false, availableLocally: true }],
     localEvidenceAvailable: [{ contentId: rawContentId, kind: 'raw-provider-turn', bytes: 29 }],
     createdAt: '2026-01-01T00:00:00.000Z',
   };
-  const capsule = { ...capsuleBase, capsuleHash: sha256(canonicalize(capsuleBase)) };
+  const capsule = { ...capsuleBase, capsuleHash: trajectoryCapsuleHash(capsuleBase as never) };
   const capsuleContentId = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
   vault.recordCapsule('trajectory-retention', 1, capsule.capsuleHash, capsuleContentId);
 
@@ -133,6 +184,7 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   assert.equal(latest.previousRevisionHash, capsule.capsuleHash);
   assert.deepEqual(latest.localEvidenceAvailable, []);
   assert.equal((latest.contentIndex as Array<{ availableLocally: boolean }>)[0]?.availableLocally, false);
+  assert.equal(latest.capsuleHash, trajectoryCapsuleHash(latest as never));
   const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>();
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.trajectoryId, 'trajectory-retention');
@@ -162,8 +214,29 @@ test('vault returns only the requested immutable capsule revision', async () => 
   assert.deepEqual(await vault.getCapsule('trajectory-versioned', 1), {
     trajectoryId: 'trajectory-versioned', revision: 1,
   });
+  assert.equal(vault.getCapsuleMetadata('trajectory-versioned', 1)?.capsuleHash, `sha256:${'1'.repeat(64)}`);
+  assert.equal(vault.getCapsuleMetadata('trajectory-versioned', 3), null);
   await assert.rejects(() => vault.getCapsule('trajectory-versioned', 3), /not available in the local vault/);
   await assert.rejects(() => vault.getCapsule('trajectory-versioned', 0), /positive integer/);
+  vault.close();
+});
+
+test('vault durably queues and acknowledges an explicit capsule sync', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-sync-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const capsule = { trajectoryId: 'trajectory-sync', revision: 1 };
+  const blobContentId = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
+  vault.recordCapsule('trajectory-sync', 1, `sha256:${'a'.repeat(64)}`, blobContentId);
+  vault.queueCapsuleSync('trajectory-sync', 1);
+  vault.queueCapsuleSync('trajectory-sync', 1);
+  assert.deepEqual(await vault.listPendingCapsuleSyncs(), [{
+    trajectoryId: 'trajectory-sync',
+    revision: 1,
+    capsule,
+  }]);
+  vault.markCapsuleSynced('trajectory-sync', 1);
+  assert.deepEqual(await vault.listPendingCapsuleSyncs(), []);
+  assert.throws(() => vault.queueCapsuleSync('missing', 1), /not available/);
   vault.close();
 });
 

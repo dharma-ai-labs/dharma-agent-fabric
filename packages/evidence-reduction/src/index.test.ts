@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { buildTrajectoryCapsule } from './index.js';
+import { buildTrajectoryCapsule, trajectoryCapsuleHash } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: 'rev_1',
@@ -121,6 +121,92 @@ test('local analysis delivers failure and tool-discipline metadata without conte
   assert.equal(capsule.localAnalysis?.durationMs, 2_000);
   assert.deepEqual(capsule.localAnalysis?.reasonCodes, ['runtime_failure_signal', 'tool_call_without_result', 'partial_evidence']);
   assert.equal(capsule.localAnalysis?.semanticReviewRecommended, true);
+});
+
+test('reduced trajectory events retain only the active skill bundle UUID as provenance', () => {
+  const bundleId = '77777777-7777-4777-8777-777777777777';
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy, activeSkillBundleId: bundleId,
+    activeSkillBundleActivatedAt: '2026-08-16T00:59:59.000Z',
+    activeSkillBundleExpiresAt: '2026-08-17T00:00:00.000Z',
+    activeSkillBundleVerifiedAt: '2026-08-16T01:00:00.000Z',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:01.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
+    rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'codex', sessionId: 'session_bundle_bound', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-16T01:00:00.000Z', endedAt: '2026-08-16T01:00:01.000Z',
+      records: [{ native: { type: 'agent_message', text: 'private' }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-16T01:00:01.000Z', kind: 'agent_message' }],
+    },
+  });
+  assert.equal(capsule.events[0]?.skillBundleId, bundleId);
+  assert.equal(JSON.stringify(capsule).includes('private'), false);
+  assert.throws(() => buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy, activeSkillBundleId: 'not-a-bundle-id',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:01.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
+    rawContentId: `sha256:${'8'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'codex', sessionId: 'session_bundle_invalid', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-16T01:00:00.000Z', endedAt: '2026-08-16T01:00:01.000Z', records: [],
+    },
+  }), /bundle ID must be a UUID/);
+});
+
+test('signed task evidence remains pinned when an authorized task finishes after bundle expiry', () => {
+  const bundleId = '77777777-7777-4777-8777-777777777777';
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
+    activeSkillBundleId: bundleId,
+    activeSkillBundleActivatedAt: '2026-08-16T01:00:01.500Z',
+    activeSkillBundleExpiresAt: '2026-08-16T01:00:03.000Z',
+    activeSkillBundleVerifiedAt: '2026-08-16T01:00:02.000Z',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    captureProvenance: { sourceClass: 'signed_task_execution', collectedAt: '2026-08-16T01:00:05.000Z', taskReceiptHash: `sha256:${'a'.repeat(64)}` },
+    rawContentId: `sha256:${'9'.repeat(64)}`, rawBytes: 100,
+    session: {
+      provider: 'codex', sessionId: 'session_bundle_window', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-16T01:00:02.000Z', endedAt: '2026-08-16T01:00:05.000Z',
+      records: [
+        { native: { type: 'agent_message', text: 'before' }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-16T01:00:02.500Z', kind: 'agent_message' },
+        { native: { type: 'agent_message', text: 'after' }, sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-16T01:00:05.000Z', kind: 'agent_message' },
+      ],
+    },
+  });
+  assert.equal(capsule.events[0]?.skillBundleId, bundleId);
+  assert.equal(capsule.events[1]?.skillBundleId, bundleId);
+  assert.equal(capsule.schema, 'dharma.trajectory-capsule/v3');
+  const rebound = {
+    ...capsule,
+    captureProvenance: { ...capsule.captureProvenance, taskReceiptHash: `sha256:${'b'.repeat(64)}` },
+  };
+  assert.equal(trajectoryCapsuleHash(rebound), capsule.capsuleHash);
+  assert.notEqual(trajectoryCapsuleHash({ ...rebound, provider: 'claude' }), capsule.capsuleHash);
+});
+
+test('provider discovery and explicit imports cannot claim an active skill bundle', () => {
+  const session = {
+    provider: 'codex' as const,
+    sessionId: 'session_untrusted_attribution',
+    sourcePath: '/private/session.jsonl',
+    workspace: '/repo',
+    coverage: 'observed' as const,
+    startedAt: '2026-08-16T01:00:00.000Z',
+    endedAt: '2026-08-16T01:00:01.000Z',
+    records: [],
+  };
+  for (const sourceClass of ['provider_discovery', 'explicit_import'] as const) {
+    assert.throws(() => buildTrajectoryCapsule({
+      organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
+      activeSkillBundleId: '77777777-7777-4777-8777-777777777777',
+      activeSkillBundleActivatedAt: '2026-08-16T00:59:59.000Z',
+      activeSkillBundleExpiresAt: '2026-08-17T00:00:00.000Z',
+      captureProvenance: { sourceClass, collectedAt: session.endedAt, taskReceiptHash: null },
+      rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 100, session,
+    }), /only for a signed task execution capsule/);
+  }
 });
 
 test('local analysis recognizes Claude-native terminal failure signals', () => {

@@ -6,7 +6,7 @@ import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type 
 import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 
 export interface SkillBundle {
-  schema: 'dharma.skill-bundle/v1';
+  schema: 'dharma.skill-bundle/v2';
   bundleId: string;
   organizationId: string;
   version: string;
@@ -21,7 +21,12 @@ export interface SkillBundle {
     files?: Array<{ path: string; contentBase64: string; sha256: string }>;
   }>;
   riskClass: 'R0' | 'R1' | 'R2' | 'R3' | 'R4';
-  targetSelectors: Record<string, unknown>;
+  targetSelectors: {
+    organizationAgentIds: string[];
+    deviceIds: string[];
+    workspaceIds: string[];
+    providers: ProviderId[];
+  };
   activationPolicy: 'next_task' | 'next_session' | 'host_restart' | 'immediate_safe_reload';
   rollbackBundleId: string | null;
   evaluationReceiptId: string;
@@ -48,6 +53,12 @@ export interface InstallReceipt {
   rollbackReceiptId: string | null;
   receiptHash: string;
   signature: string;
+}
+
+export interface ActiveSkillBundleAuthorization {
+  bundleId: string;
+  activatedAt: string;
+  expiresAt: string | null;
 }
 
 function assertContained(root: string, candidate: string): string {
@@ -82,11 +93,46 @@ export function calculateBundleHash(bundle: Omit<SkillBundle, 'signature' | 'bun
 }
 
 export function verifySkillBundle(bundle: SkillBundle, serverPublicKey: KeyObject, now = new Date()): void {
-  if (bundle.expiresAt && Date.parse(bundle.expiresAt) <= now.getTime()) throw new Error('Skill bundle has expired.');
+  if (bundle.schema !== 'dharma.skill-bundle/v2') {
+    throw new Error('Skill bundle schema is not authorized for installation or task execution.');
+  }
+  if (bundle.expiresAt) {
+    const expiresAt = Date.parse(bundle.expiresAt);
+    if (!Number.isFinite(expiresAt)) throw new Error('Skill bundle expiry is invalid.');
+    if (expiresAt <= now.getTime()) throw new Error('Skill bundle has expired.');
+  }
   const { signature, ...unsigned } = bundle;
   if (!verifyCanonicalObject(unsigned, signature, serverPublicKey)) throw new Error('Skill bundle signature is invalid.');
   const { bundleHash, ...hashInput } = unsigned;
   if (bundleHash !== calculateBundleHash(hashInput)) throw new Error('Skill bundle hash is invalid.');
+  const selectors = bundle.targetSelectors;
+  if (!selectors || typeof selectors !== 'object'
+    || !Array.isArray(selectors.organizationAgentIds) || !Array.isArray(selectors.deviceIds)
+    || !Array.isArray(selectors.workspaceIds) || !Array.isArray(selectors.providers)
+    || selectors.organizationAgentIds.some((value) => typeof value !== 'string' || !value)
+    || selectors.deviceIds.some((value) => typeof value !== 'string' || !value)
+    || selectors.workspaceIds.some((value) => typeof value !== 'string' || !value)
+    || selectors.providers.some((value) => !['codex', 'claude', 'agy'].includes(value))) {
+    throw new Error('Skill bundle target selectors are invalid.');
+  }
+}
+
+function assertTargetSelector(selector: string[], value: string, label: string): void {
+  if (selector.length > 0 && !selector.includes(value)) {
+    throw new Error(`Skill bundle is not authorized for this ${label}.`);
+  }
+}
+
+function assertBundleTargetsEndpoint(bundle: SkillBundle, endpoint: {
+  organizationAgentId: string;
+  deviceId: string;
+  workspaceId: string;
+  provider: ProviderId;
+}): void {
+  assertTargetSelector(bundle.targetSelectors.organizationAgentIds, endpoint.organizationAgentId, 'repository agent');
+  assertTargetSelector(bundle.targetSelectors.deviceIds, endpoint.deviceId, 'device');
+  assertTargetSelector(bundle.targetSelectors.workspaceIds, endpoint.workspaceId, 'workspace');
+  assertTargetSelector(bundle.targetSelectors.providers, endpoint.provider, 'provider');
 }
 
 async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: string): Promise<{ status: 'pass' | 'fail'; details: string | null }> {
@@ -105,11 +151,52 @@ async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: stri
   });
 }
 
-async function readActiveBundleId(root: string): Promise<string | null> {
-  try { return (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim() || null; }
+async function readActiveBundlePointer(root: string): Promise<string | null> {
+  let bundleId: string;
+  try {
+    bundleId = (await readFile(resolve(root, 'ACTIVE_BUNDLE'), 'utf8')).trim();
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
+  }
+  if (!bundleId) return null;
+  let manifest: { bundleId?: unknown };
+  try {
+    manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as {
+      bundleId?: unknown;
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('Active bundle manifest is missing for the installed bundle pointer.');
+    }
+    throw error;
+  }
+  if (manifest.bundleId !== bundleId) {
+    throw new Error('Active bundle pointer does not match the installed release manifest.');
+  }
+  return bundleId;
+}
+
+function verifyInstallReceipt(
+  receipt: InstallReceipt,
+  devicePublicKey: KeyObject,
+  expected: { bundleId: string; organizationId: string; deviceId: string; workspaceId: string; provider: ProviderId },
+  now: Date,
+): void {
+  const { signature, ...signed } = receipt;
+  if (!verifyCanonicalObject(signed, signature, devicePublicKey)) throw new Error('Active bundle install receipt signature is invalid.');
+  const { receiptHash, ...hashInput } = signed;
+  if (receiptHash !== sha256(canonicalize(hashInput))) throw new Error('Active bundle install receipt hash is invalid.');
+  if (receipt.status !== 'active') throw new Error('Active bundle install receipt is not active.');
+  if (receipt.bundleId !== expected.bundleId || receipt.organizationId !== expected.organizationId
+    || receipt.deviceId !== expected.deviceId || receipt.workspaceId !== expected.workspaceId || receipt.provider !== expected.provider) {
+    throw new Error('Active bundle install receipt does not match the selected endpoint.');
+  }
+  const startedAt = Date.parse(receipt.startedAt);
+  const completedAt = Date.parse(receipt.completedAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || completedAt < startedAt || completedAt > now.getTime() + 5_000) {
+    throw new Error('Active bundle install receipt has an invalid activation window.');
   }
 }
 
@@ -118,6 +205,110 @@ function workspaceManagedRoot(nativeSkillDirectory: string, workspaceId: string)
     throw new Error('Workspace ID is invalid for managed skill state.');
   }
   return resolve(nativeSkillDirectory, '.dharma-managed', 'workspaces', workspaceId);
+}
+
+export async function getLegacySkillBundleIdForUpgrade(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+}): Promise<string | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
+    throw new Error('Legacy skill bundle identifier is invalid.');
+  }
+  let authorization: { schema?: unknown; bundleId?: unknown; workspaceId?: unknown; skillIds?: unknown };
+  let source: 'authorization' | 'legacy_manifest' = 'authorization';
+  try {
+    authorization = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as typeof authorization;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    source = 'legacy_manifest';
+    authorization = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as typeof authorization;
+  }
+  if (authorization.bundleId !== bundleId) return null;
+  if (source === 'authorization') {
+    if (authorization.schema !== 'dharma.skill-bundle/v1') return null;
+  } else if (authorization.schema !== undefined
+    || authorization.workspaceId !== input.workspaceId
+    || !Array.isArray(authorization.skillIds)
+    || !authorization.skillIds.every((skillId) => typeof skillId === 'string' && skillId.length > 0)) {
+    return null;
+  }
+  return bundleId;
+}
+
+export async function getInstalledSkillBundleIdForRecovery(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+}): Promise<string | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
+    throw new Error('Installed skill bundle identifier is invalid.');
+  }
+  let manifest: { schema?: unknown; bundleId?: unknown; workspaceId?: unknown; skillIds?: unknown };
+  let source: 'authorization' | 'legacy-manifest' = 'authorization';
+  try {
+    manifest = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as typeof manifest;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    source = 'legacy-manifest';
+    manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as typeof manifest;
+  }
+  const authorizedManifest = source === 'authorization'
+    && ['dharma.skill-bundle/v1', 'dharma.skill-bundle/v2'].includes(String(manifest.schema));
+  const legacyInstallManifest = source === 'legacy-manifest'
+    && manifest.schema === undefined
+    && manifest.workspaceId === input.workspaceId
+    && Array.isArray(manifest.skillIds)
+    && manifest.skillIds.every((skillId) => typeof skillId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillId));
+  if ((!authorizedManifest && !legacyInstallManifest) || manifest.bundleId !== bundleId) {
+    throw new Error('Installed skill recovery metadata is invalid.');
+  }
+  return bundleId;
+}
+
+export async function getExpiredSkillBundleAuthorizationForReplacement(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  provider: ProviderId;
+  organizationId: string;
+  organizationAgentId: string;
+  deviceId: string;
+  serverPublicKey: KeyObject;
+  devicePublicKey: KeyObject;
+  expectedReceiptHash: string;
+  now?: Date;
+}): Promise<ActiveSkillBundleAuthorization | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  const bundle = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+  const receipt = JSON.parse(await readFile(resolve(root, 'active', 'INSTALL_RECEIPT.json'), 'utf8')) as InstallReceipt;
+  const now = input.now ?? new Date();
+  const expiresAt = Date.parse(String(bundle.expiresAt || ''));
+  if (!Number.isFinite(expiresAt) || expiresAt > now.getTime()) {
+    throw new Error('Installed skill bundle is not an expired replacement candidate.');
+  }
+  if (bundle.bundleId !== bundleId) throw new Error('Active bundle pointer does not match the signed release authorization.');
+  verifySkillBundle(bundle, input.serverPublicKey, new Date(expiresAt - 1));
+  assertBundleTargetsEndpoint(bundle, input);
+  verifyInstallReceipt(receipt, input.devicePublicKey, {
+    bundleId,
+    organizationId: input.organizationId,
+    deviceId: input.deviceId,
+    workspaceId: input.workspaceId,
+    provider: input.provider,
+  }, now);
+  if (receipt.receiptHash !== input.expectedReceiptHash) {
+    throw new Error('Active bundle receipt is not the current protected authorization.');
+  }
+  return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
 }
 
 async function pathExists(path: string) {
@@ -211,12 +402,110 @@ async function activateNativeSkills(input: {
   }
 }
 
-export async function getActiveSkillBundleId(nativeSkillDirectory: string, workspaceId?: string) {
-  return readActiveBundleId(
-    workspaceId
-      ? workspaceManagedRoot(nativeSkillDirectory, workspaceId)
-      : resolve(nativeSkillDirectory, '.dharma-managed'),
-  );
+interface RollbackRecoveryManifest {
+  schema: 'dharma.skill-rollback-recovery/v1';
+  workspaceId: string;
+  currentBundleId: string;
+  currentSkillIds: string[];
+}
+
+async function nativeSkillIdsOwnedByWorkspace(nativeSkillDirectory: string, workspaceId: string): Promise<string[]> {
+  let entries;
+  try { entries = await readdir(nativeSkillDirectory, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const owned: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.name)) continue;
+    try {
+      const marker = JSON.parse(await readFile(resolve(nativeSkillDirectory, entry.name, '.dharma-agent-fabric.json'), 'utf8')) as { workspaceId?: unknown };
+      if (marker.workspaceId === workspaceId) owned.push(entry.name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return owned;
+}
+
+async function recoverInterruptedSkillRollbacks(nativeSkillDirectory: string, workspaceId: string): Promise<void> {
+  const managedRoot = workspaceManagedRoot(nativeSkillDirectory, workspaceId);
+  let entries;
+  try { entries = await readdir(managedRoot, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name.startsWith('.rollback-'))) {
+    const transactionRoot = assertContained(managedRoot, resolve(managedRoot, entry.name));
+    const manifest = JSON.parse(await readFile(resolve(transactionRoot, 'ROLLBACK_RECOVERY.json'), 'utf8')) as RollbackRecoveryManifest;
+    if (manifest.schema !== 'dharma.skill-rollback-recovery/v1'
+      || manifest.workspaceId !== workspaceId
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(manifest.currentBundleId)
+      || !Array.isArray(manifest.currentSkillIds)
+      || manifest.currentSkillIds.some((skillId) => typeof skillId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillId))) {
+      throw new Error('Interrupted skill rollback recovery metadata is invalid.');
+    }
+    const releases = resolve(managedRoot, 'releases');
+    const currentRelease = assertContained(releases, resolve(releases, manifest.currentBundleId));
+    const active = resolve(managedRoot, 'active');
+    const backupActive = resolve(transactionRoot, 'backup-active');
+    if (await pathExists(backupActive)) {
+      await rm(active, { recursive: true, force: true });
+      await rename(backupActive, active);
+    } else if (!await pathExists(active)) {
+      await cp(currentRelease, active, { recursive: true, errorOnExist: true, force: false });
+    }
+    await activateNativeSkills({
+      nativeSkillDirectory,
+      release: currentRelease,
+      bundleId: manifest.currentBundleId,
+      workspaceId,
+      skillIds: manifest.currentSkillIds,
+      removeSkillIds: await nativeSkillIdsOwnedByWorkspace(nativeSkillDirectory, workspaceId),
+    });
+    const pointerTemp = resolve(transactionRoot, 'ACTIVE_BUNDLE.recovery');
+    await writeFile(pointerTemp, `${manifest.currentBundleId}\n`, { mode: 0o600 });
+    await rename(pointerTemp, resolve(managedRoot, 'ACTIVE_BUNDLE'));
+    await rm(transactionRoot, { recursive: true, force: true });
+  }
+}
+
+export async function getActiveSkillBundleAuthorization(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  provider: ProviderId;
+  organizationId: string;
+  organizationAgentId: string;
+  deviceId: string;
+  serverPublicKey: KeyObject;
+  devicePublicKey: KeyObject;
+  expectedReceiptHash: string;
+  now?: Date;
+}): Promise<ActiveSkillBundleAuthorization | null> {
+  const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
+  const bundleId = await readActiveBundlePointer(root);
+  if (!bundleId) return null;
+  const bundle = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+  const receipt = JSON.parse(await readFile(resolve(root, 'active', 'INSTALL_RECEIPT.json'), 'utf8')) as InstallReceipt;
+  const now = input.now ?? new Date();
+  if (bundle.bundleId !== bundleId) throw new Error('Active bundle pointer does not match the signed release authorization.');
+  verifySkillBundle(bundle, input.serverPublicKey, now);
+  assertBundleTargetsEndpoint(bundle, input);
+  verifyInstallReceipt(receipt, input.devicePublicKey, {
+    bundleId,
+    organizationId: input.organizationId,
+    deviceId: input.deviceId,
+    workspaceId: input.workspaceId,
+    provider: input.provider,
+  }, now);
+  if (receipt.receiptHash !== input.expectedReceiptHash) {
+    throw new Error('Active bundle receipt is not the current protected authorization.');
+  }
+  return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
 }
 
 export async function installSkillBundle(input: {
@@ -227,6 +516,7 @@ export async function installSkillBundle(input: {
   serverPublicKey: KeyObject;
   devicePrivateKey: KeyObject;
   deviceId: string;
+  organizationAgentId: string;
   workspaceId: string;
   provider: ProviderId;
   smokeCommandId?: string;
@@ -235,6 +525,7 @@ export async function installSkillBundle(input: {
   const startedAt = new Date().toISOString();
   verifySkillBundle(input.bundle, input.serverPublicKey);
   if (input.bundle.organizationId !== input.policy.organizationId) throw new Error('Bundle organization does not match policy.');
+  assertBundleTargetsEndpoint(input.bundle, input);
   if (input.bundle.operation === 'clear' && input.bundle.skills.length !== 0) throw new Error('Clear bundles cannot contain skills.');
   if (input.bundle.operation === 'install' && input.bundle.skills.length === 0) throw new Error('Install bundles must contain at least one skill.');
   if ((input.bundle.riskClass === 'R3' || input.bundle.riskClass === 'R4') && !input.organizationApprovalId) {
@@ -243,11 +534,12 @@ export async function installSkillBundle(input: {
   if (!input.policy.skills.automaticInstall) throw new Error('Automatic skill installation is disabled by policy.');
 
   const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const releases = resolve(managedRoot, 'releases');
   const release = assertContained(releases, resolve(releases, input.bundle.bundleId));
   const active = resolve(managedRoot, 'active');
   const rollback = resolve(managedRoot, 'rollback');
-  const previousBundleId = await readActiveBundleId(managedRoot);
+  const previousBundleId = await readActiveBundlePointer(managedRoot);
   await mkdir(releases, { recursive: true, mode: 0o700 });
   await rm(release, { recursive: true, force: true });
   await mkdir(release, { recursive: true, mode: 0o700 });
@@ -266,6 +558,7 @@ export async function installSkillBundle(input: {
     `${JSON.stringify({ bundleId: input.bundle.bundleId, workspaceId: input.workspaceId, skillIds })}\n`,
     { mode: 0o600 },
   );
+  await writeFile(resolve(release, 'AUTHORIZATION.json'), `${JSON.stringify(input.bundle)}\n`, { mode: 0o600 });
   const previousRelease = previousBundleId ? resolve(releases, previousBundleId) : null;
   const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
 
@@ -282,35 +575,43 @@ export async function installSkillBundle(input: {
     removeSkillIds: previousSkillIds,
   });
   let status: InstallReceipt['status'] = 'active';
+  const restorePreviousBundle = async (): Promise<InstallReceipt['status']> => {
+    await rm(active, { recursive: true, force: true });
+    let restored: InstallReceipt['status'] = 'failed';
+    try { await rename(rollback, active); restored = 'rolled_back'; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await activateNativeSkills({
+      nativeSkillDirectory: input.nativeSkillDirectory,
+      release: previousRelease || release,
+      bundleId: previousBundleId || input.bundle.bundleId,
+      workspaceId: input.workspaceId,
+      skillIds: previousBundleId ? previousSkillIds : [],
+      removeSkillIds: skillIds,
+    });
+    return restored;
+  };
   if (input.smokeCommandId) {
     const check = await runSmoke(input.smokeCommandId, input.policy, active);
     checks.push({ name: `smoke:${input.smokeCommandId}`, ...check });
     if (check.status === 'fail') {
-      await rm(active, { recursive: true, force: true });
-      try { await rename(rollback, active); status = 'rolled_back'; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        status = 'failed';
-      }
-      await activateNativeSkills({
-        nativeSkillDirectory: input.nativeSkillDirectory,
-        release: previousRelease || release,
-        bundleId: previousBundleId || input.bundle.bundleId,
-        workspaceId: input.workspaceId,
-        skillIds: previousBundleId ? previousSkillIds : [],
-        removeSkillIds: skillIds,
-      });
+      status = await restorePreviousBundle();
     }
   }
   if (status === 'active') {
-    await rm(rollback, { recursive: true, force: true });
-    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${input.bundle.bundleId}\n`, { mode: 0o600 });
-  } else if (previousBundleId) {
-    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
-  } else {
-    await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
+    try {
+      verifySkillBundle(input.bundle, input.serverPublicKey);
+      checks.push({ name: 'authorization:activation-window', status: 'pass', details: input.bundle.expiresAt || 'no-expiry' });
+    } catch (error) {
+      checks.push({
+        name: 'authorization:activation-window',
+        status: 'fail',
+        details: error instanceof Error ? error.message : String(error),
+      });
+      status = await restorePreviousBundle();
+    }
   }
-
   const receiptBase = {
     schema: 'dharma.install-receipt/v1' as const,
     installationId: randomUUID(),
@@ -329,7 +630,128 @@ export async function installSkillBundle(input: {
   };
   const receiptHash = sha256(canonicalize(receiptBase));
   const signature = signCanonicalObject({ ...receiptBase, receiptHash }, input.devicePrivateKey);
-  return { ...receiptBase, receiptHash, signature };
+  const receipt = { ...receiptBase, receiptHash, signature };
+  if (status === 'active') {
+    try {
+      await writeFile(resolve(release, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+      await writeFile(resolve(active, 'INSTALL_RECEIPT.json'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+      await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${input.bundle.bundleId}\n`, { mode: 0o600 });
+    } catch (error) {
+      const recoveryErrors: unknown[] = [];
+      try { await restorePreviousBundle(); }
+      catch (recoveryError) { recoveryErrors.push(recoveryError); }
+      try {
+        if (previousBundleId) {
+          await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
+        } else {
+          await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
+        }
+      } catch (recoveryError) {
+        recoveryErrors.push(recoveryError);
+      }
+      if (recoveryErrors.length) {
+        throw new AggregateError([error, ...recoveryErrors], 'Skill receipt persistence failed and local recovery was incomplete.');
+      }
+      throw error;
+    }
+  } else if (previousBundleId) {
+    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
+  } else {
+    await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
+  }
+  return receipt;
+}
+
+export async function rollbackUnconfirmedSkillBundle(input: {
+  nativeSkillDirectory: string;
+  workspaceId: string;
+  receipt: InstallReceipt;
+}): Promise<void> {
+  if (input.receipt.status !== 'active') return;
+  const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
+  const activeBundleId = await readActiveBundlePointer(managedRoot);
+  if (activeBundleId !== input.receipt.bundleId) {
+    throw new Error('Refusing to roll back an installation that is no longer the active local bundle.');
+  }
+  const releases = resolve(managedRoot, 'releases');
+  const active = resolve(managedRoot, 'active');
+  const currentRelease = assertContained(releases, resolve(releases, input.receipt.bundleId));
+  const currentSkillIds = await releaseSkillIds(currentRelease);
+  const previousBundleId = input.receipt.previousBundleId;
+  const previousRelease = previousBundleId
+    ? assertContained(releases, resolve(releases, previousBundleId))
+    : null;
+  const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
+  const transactionRoot = assertContained(managedRoot, resolve(managedRoot, `.rollback-${randomUUID()}`));
+  const stagedActive = resolve(transactionRoot, 'staged-active');
+  const backupActive = resolve(transactionRoot, 'backup-active');
+  const pointer = resolve(managedRoot, 'ACTIVE_BUNDLE');
+  const pointerTemp = resolve(transactionRoot, 'ACTIVE_BUNDLE.next');
+  let nativeChanged = false;
+  let activeMoved = false;
+  let stagedMoved = false;
+  let preserveRecovery = false;
+  await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
+  await writeFile(resolve(transactionRoot, 'ROLLBACK_RECOVERY.json'), `${JSON.stringify({
+    schema: 'dharma.skill-rollback-recovery/v1',
+    workspaceId: input.workspaceId,
+    currentBundleId: input.receipt.bundleId,
+    currentSkillIds,
+  } satisfies RollbackRecoveryManifest)}\n`, { mode: 0o600 });
+  if (previousRelease) {
+    await cp(previousRelease, stagedActive, { recursive: true, errorOnExist: true, force: false });
+  }
+  try {
+    await activateNativeSkills({
+      nativeSkillDirectory: input.nativeSkillDirectory,
+      release: previousRelease || currentRelease,
+      bundleId: previousBundleId || input.receipt.bundleId,
+      workspaceId: input.workspaceId,
+      skillIds: previousSkillIds,
+      removeSkillIds: currentSkillIds,
+    });
+    nativeChanged = true;
+    await rename(active, backupActive);
+    activeMoved = true;
+    if (previousRelease) {
+      await rename(stagedActive, active);
+      stagedMoved = true;
+      await writeFile(pointerTemp, `${previousBundleId}\n`, { mode: 0o600 });
+      await rename(pointerTemp, pointer);
+    } else {
+      await rm(pointer, { force: true });
+    }
+  } catch (error) {
+    const recoveryErrors: unknown[] = [];
+    if (activeMoved) {
+      try {
+        if (stagedMoved) await rm(active, { recursive: true, force: true });
+        await rename(backupActive, active);
+      } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    }
+    if (nativeChanged) {
+      try {
+        await activateNativeSkills({
+          nativeSkillDirectory: input.nativeSkillDirectory,
+          release: currentRelease,
+          bundleId: input.receipt.bundleId,
+          workspaceId: input.workspaceId,
+          skillIds: currentSkillIds,
+          removeSkillIds: previousSkillIds,
+        });
+      } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    }
+    try { await writeFile(pointer, `${input.receipt.bundleId}\n`, { mode: 0o600 }); }
+    catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    if (recoveryErrors.length) {
+      preserveRecovery = true;
+      throw new AggregateError([error, ...recoveryErrors], 'Skill rollback failed and the active installation could not be fully restored.');
+    }
+    throw error;
+  } finally {
+    if (!preserveRecovery) await rm(transactionRoot, { recursive: true, force: true });
+  }
 }
 
 export { contentHash };

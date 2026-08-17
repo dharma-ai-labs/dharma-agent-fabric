@@ -140,6 +140,9 @@ test('SDK exposes repository agents, instructions, and scoped analysis through H
     trajectoryTarget: 100,
     scope: { mode: 'agents', organizationAgentIds: ['11111111-1111-4111-8111-111111111111'] },
   }, { idempotencyKey: 'analysis-1' });
+  await client.transitionRemediationTarget('11111111-1111-4111-8111-111111111111', {
+    action: 'stage_evaluation', endpointId: '44444444-4444-4444-8444-444444444444',
+  }, { idempotencyKey: 'remediation-stage-1' });
   await client.transitionRemediationTarget('22222222-2222-4222-8222-222222222222', {
     action: 'approve', establishAutoUpdatePolicy: true,
   }, { idempotencyKey: 'remediation-approve-1' });
@@ -152,6 +155,7 @@ test('SDK exposes repository agents, instructions, and scoped analysis through H
     '/api/v1/orgs/org_northstar/agent-fabric/repository-agents',
     '/api/v1/orgs/org_northstar/agent-fabric/repository-agents',
     '/api/v1/orgs/org_northstar/agent-fabric/evals',
+    '/api/v1/orgs/org_northstar/agent-fabric/remediations/11111111-1111-4111-8111-111111111111',
     '/api/v1/orgs/org_northstar/agent-fabric/remediations/22222222-2222-4222-8222-222222222222',
     '/api/v1/orgs/org_northstar/agent-fabric/remediations/33333333-3333-4333-8333-333333333333',
   ]);
@@ -160,8 +164,9 @@ test('SDK exposes repository agents, instructions, and scoped analysis through H
     mode: 'agents',
     organizationAgentIds: ['11111111-1111-4111-8111-111111111111'],
   });
-  assert.deepEqual(JSON.parse(await requests[4]!.text()), { action: 'approve', establishAutoUpdatePolicy: true });
-  assert.deepEqual(JSON.parse(await requests[5]!.text()), { action: 'run_backtest', trajectoryIds: heldOutTrajectoryIds });
+  assert.deepEqual(JSON.parse(await requests[4]!.text()), { action: 'stage_evaluation', endpointId: '44444444-4444-4444-8444-444444444444' });
+  assert.deepEqual(JSON.parse(await requests[5]!.text()), { action: 'approve', establishAutoUpdatePolicy: true });
+  assert.deepEqual(JSON.parse(await requests[6]!.text()), { action: 'run_backtest', trajectoryIds: heldOutTrajectoryIds });
   assert.equal(requests.every((request) => !request.url.includes('run.app')), true);
 });
 

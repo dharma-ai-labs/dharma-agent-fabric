@@ -31,6 +31,50 @@ interface ProtocolState {
   sessionId: string | null;
   nextSequence: number;
   pending: PendingRequest | null;
+  recoveredTaskCompletions?: RecoveredTaskCompletion[];
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export interface RecoveredTaskCompletion {
+  taskId: string;
+  trajectoryCapsuleHash: string;
+  receiptHash: string;
+  recoveredAt: string;
+}
+
+function isRecoveredTaskCompletion(value: unknown): value is RecoveredTaskCompletion {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return UUID_PATTERN.test(String(item.taskId || ''))
+    && /^sha256:[a-f0-9]{64}$/.test(String(item.trajectoryCapsuleHash || ''))
+    && /^sha256:[a-f0-9]{64}$/.test(String(item.receiptHash || ''))
+    && Number.isFinite(Date.parse(String(item.recoveredAt || '')));
+}
+
+function assertProtocolState(value: unknown): asserts value is ProtocolState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay protocol state is invalid.');
+  const state = value as Record<string, unknown>;
+  const recovered = state.recoveredTaskCompletions;
+  const pending = state.pending as Record<string, unknown> | null;
+  const pendingValid = pending === null || (
+    typeof pending === 'object' && !Array.isArray(pending)
+    && pending.method === 'POST'
+    && typeof pending.pathname === 'string' && pending.pathname.startsWith('/')
+    && typeof pending.body === 'string'
+    && pending.headers !== null && typeof pending.headers === 'object' && !Array.isArray(pending.headers)
+    && Object.entries(pending.headers as Record<string, unknown>)
+      .every(([name, header]) => name.length > 0 && typeof header === 'string')
+  );
+  if (state.schema !== 'dharma.protocol-state/v1'
+    || !(state.sessionId === null || typeof state.sessionId === 'string')
+    || !Number.isSafeInteger(state.nextSequence) || Number(state.nextSequence) < 1
+    || !pendingValid
+    || (recovered !== undefined && (!Array.isArray(recovered)
+      || recovered.length > 1_000
+      || recovered.some((item) => !isRecoveredTaskCompletion(item))))) {
+    throw new Error('Relay protocol state is invalid.');
+  }
 }
 
 export interface EnrollmentResult {
@@ -75,6 +119,158 @@ function accountFor(hqUrl: string, organizationId: string) {
 
 function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId: string) {
   return `evidence-quota-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
+}
+
+function enrollmentAnchorAccountFor(hqUrl: string, organizationId: string) {
+  return `device-enrollment-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+function activeSkillAnchorAccountFor(
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>,
+  workspaceId: string,
+  provider: ProviderId,
+) {
+  return `active-skill-${sha256([
+    normalizeHqUrl(config.hqUrl), config.organizationId, config.deviceId, workspaceId, provider,
+  ].join(':')).slice(0, 32)}`;
+}
+
+export interface DeviceEnrollmentAnchor {
+  schema: 'dharma.device-enrollment-anchor/v1';
+  hqUrl: string;
+  organizationId: string;
+  deviceId: string;
+  devicePublicKeyEd25519: string;
+  serverPublicKeyEd25519: string;
+  enrolledAt: string;
+}
+
+export interface ActiveSkillAuthorizationAnchor {
+  schema: 'dharma.active-skill-authorization-anchor/v1';
+  organizationId: string;
+  deviceId: string;
+  organizationAgentId: string;
+  workspaceId: string;
+  provider: ProviderId;
+  bundleId: string;
+  receiptHash: string;
+  activatedAt: string;
+  expiresAt: string | null;
+}
+
+export async function saveDeviceEnrollmentAnchor(input: {
+  config: DeviceConfig;
+  store?: SecureSecretStore;
+}): Promise<DeviceEnrollmentAnchor> {
+  const store = input.store ?? await createSystemSecureStore();
+  const anchor: DeviceEnrollmentAnchor = {
+    schema: 'dharma.device-enrollment-anchor/v1',
+    hqUrl: normalizeHqUrl(input.config.hqUrl),
+    organizationId: input.config.organizationId,
+    deviceId: input.config.deviceId,
+    devicePublicKeyEd25519: input.config.publicKeyEd25519,
+    serverPublicKeyEd25519: input.config.serverPublicKeyEd25519,
+    enrolledAt: input.config.enrolledAt,
+  };
+  const serialized = JSON.stringify(anchor);
+  const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId);
+  await store.put(account, serialized);
+  if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
+  return anchor;
+}
+
+export async function loadDeviceEnrollmentAnchor(input: {
+  config: DeviceConfig;
+  store?: SecureSecretStore;
+}): Promise<DeviceEnrollmentAnchor> {
+  const store = input.store ?? await createSystemSecureStore();
+  const account = enrollmentAnchorAccountFor(input.config.hqUrl, input.config.organizationId);
+  const serialized = await store.get(account);
+  if (!serialized) throw new Error('Device enrollment is not anchored in secure storage. Run dharma login again.');
+  const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
+  if (anchor.schema !== 'dharma.device-enrollment-anchor/v1'
+    || anchor.hqUrl !== normalizeHqUrl(input.config.hqUrl)
+    || anchor.organizationId !== input.config.organizationId
+    || anchor.deviceId !== input.config.deviceId
+    || anchor.devicePublicKeyEd25519 !== input.config.publicKeyEd25519
+    || anchor.serverPublicKeyEd25519 !== input.config.serverPublicKeyEd25519
+    || !Number.isFinite(Date.parse(anchor.enrolledAt))) {
+    throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
+  }
+  return anchor;
+}
+
+export async function saveActiveSkillAuthorizationAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  workspaceId: string;
+  organizationAgentId: string;
+  provider: ProviderId;
+  bundleId: string;
+  receiptHash: string;
+  activatedAt: string;
+  expiresAt: string | null;
+  store?: SecureSecretStore;
+}): Promise<ActiveSkillAuthorizationAnchor> {
+  if (!/^[0-9a-f-]{36}$/i.test(input.organizationAgentId)
+    || !/^[0-9a-f-]{36}$/i.test(input.bundleId) || !/^sha256:[a-f0-9]{64}$/i.test(input.receiptHash)
+    || !Number.isFinite(Date.parse(input.activatedAt))
+    || (input.expiresAt !== null && !Number.isFinite(Date.parse(input.expiresAt)))) {
+    throw new Error('Active skill authorization anchor is invalid.');
+  }
+  const store = input.store ?? await createSystemSecureStore();
+  const anchor: ActiveSkillAuthorizationAnchor = {
+    schema: 'dharma.active-skill-authorization-anchor/v1',
+    organizationId: input.config.organizationId,
+    deviceId: input.config.deviceId,
+    organizationAgentId: input.organizationAgentId,
+    workspaceId: input.workspaceId,
+    provider: input.provider,
+    bundleId: input.bundleId,
+    receiptHash: input.receiptHash,
+    activatedAt: input.activatedAt,
+    expiresAt: input.expiresAt,
+  };
+  const serialized = JSON.stringify(anchor);
+  const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  await store.put(account, serialized);
+  if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the active skill anchor write.');
+  return anchor;
+}
+
+export async function loadActiveSkillAuthorizationAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  workspaceId: string;
+  organizationAgentId: string;
+  provider: ProviderId;
+  store?: SecureSecretStore;
+}): Promise<ActiveSkillAuthorizationAnchor | null> {
+  const store = input.store ?? await createSystemSecureStore();
+  const serialized = await store.get(activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider));
+  if (!serialized) return null;
+  const anchor = JSON.parse(serialized) as ActiveSkillAuthorizationAnchor;
+  if (anchor.schema !== 'dharma.active-skill-authorization-anchor/v1'
+    || anchor.organizationId !== input.config.organizationId || anchor.deviceId !== input.config.deviceId
+    || anchor.organizationAgentId !== input.organizationAgentId
+    || !/^[0-9a-f-]{36}$/i.test(anchor.organizationAgentId)
+    || anchor.workspaceId !== input.workspaceId || anchor.provider !== input.provider
+    || !/^[0-9a-f-]{36}$/i.test(anchor.bundleId) || !/^sha256:[a-f0-9]{64}$/i.test(anchor.receiptHash)
+    || !Number.isFinite(Date.parse(anchor.activatedAt))
+    || (anchor.expiresAt !== null && !Number.isFinite(Date.parse(anchor.expiresAt)))) {
+    throw new Error('Protected active skill authorization anchor is corrupt.');
+  }
+  return anchor;
+}
+
+export async function deleteActiveSkillAuthorizationAnchor(input: {
+  config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
+  workspaceId: string;
+  provider: ProviderId;
+  store?: SecureSecretStore;
+}): Promise<void> {
+  const store = input.store ?? await createSystemSecureStore();
+  const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  await store.delete(account);
+  if (await store.get(account) !== null) throw new Error('Secure store did not confirm the active skill anchor deletion.');
 }
 
 export interface EvidenceQuotaAnchor {
@@ -134,6 +330,22 @@ function errorMessage(body: unknown, status: number) {
     if (record.error?.message) return `${record.error.code || 'request_failed'}: ${record.error.message}`;
   }
   return `Dharma HQ request failed with HTTP ${status}.`;
+}
+
+export class AgentFabricRequestError extends Error {
+  readonly status: number;
+  readonly definitive: boolean;
+
+  constructor(body: unknown, status: number, definitive: boolean) {
+    super(errorMessage(body, status));
+    this.name = 'AgentFabricRequestError';
+    this.status = status;
+    this.definitive = definitive;
+  }
+}
+
+export function isDefinitiveAgentFabricRejection(error: unknown): boolean {
+  return error instanceof AgentFabricRequestError && error.definitive;
 }
 
 export async function loadOrCreateDeviceIdentity(input: {
@@ -222,8 +434,26 @@ export class AgentFabricClient {
     const config = await loadDeviceConfig(input.configPath);
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId, store: input.store });
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
-    let state: ProtocolState = { schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null };
-    try { state = JSON.parse(await readFile(input.statePath, 'utf8')) as ProtocolState; } catch {}
+    try {
+      await loadDeviceEnrollmentAnchor({ config, store: input.store });
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('not anchored in secure storage')) throw error;
+      throw new Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.');
+    }
+    let state: ProtocolState = {
+      schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+      recoveredTaskCompletions: [],
+    };
+    try {
+      const parsed = JSON.parse(await readFile(input.statePath, 'utf8')) as unknown;
+      assertProtocolState(parsed);
+      state = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.', { cause: error });
+      }
+    }
+    state.recoveredTaskCompletions ??= [];
     return new AgentFabricClient({ config, privateJwk: identity.privateJwk, statePath: input.statePath, state, fetcher: input.fetcher });
   }
 
@@ -237,7 +467,10 @@ export class AgentFabricClient {
     } else if (this.#state.pending) {
       await this.#sendPending();
     }
-    this.#state = { schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null };
+    this.#state = {
+      schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
+      recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
+    };
     await this.#persist();
     return this.signedPost('/agent-fabric/sessions', {
       connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion,
@@ -254,6 +487,21 @@ export class AgentFabricClient {
   pollTask(leaseSeconds = 120) { return this.signedPost('/agent-fabric/tasks/poll', { leaseSeconds }); }
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });
+  }
+  listRecoveredTaskCompletions(): RecoveredTaskCompletion[] {
+    return (this.#state.recoveredTaskCompletions || []).map((item) => ({ ...item }));
+  }
+  acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
+    const operation = this.#serial.then(async () => {
+      const current = this.#state.recoveredTaskCompletions || [];
+      const matching = current.find((item) => item.taskId === taskId);
+      if (!matching) return;
+      if (matching.receiptHash !== receiptHash) throw new Error('Recovered task completion receipt does not match.');
+      this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
+      await this.#persist();
+    });
+    this.#serial = operation.catch(() => undefined);
+    return operation;
   }
   pollSkill(body: { workspaceId: string; provider: ProviderId; installedBundleId: string | null }) {
     return this.signedPost('/agent-fabric/skills/poll', body);
@@ -293,7 +541,7 @@ export class AgentFabricClient {
       sequence, sessionId: this.#state.sessionId, timestamp,
     }), 'utf8');
     const signature = sign(null, signingPayload, { key: this.#privateJwk, format: 'jwk' }).toString('base64url');
-    this.#state.pending = {
+    const pending: PendingRequest = {
       method: 'POST', pathname, body: serialized,
       headers: {
         'content-type': 'application/json', 'x-dharma-device-id': this.config.deviceId,
@@ -302,6 +550,8 @@ export class AgentFabricClient {
         'x-dharma-sequence': String(sequence), 'x-dharma-signature': signature,
       },
     };
+    this.#assertRecoveredTaskCompletionCapacity(pending);
+    this.#state.pending = pending;
     await this.#persist();
     return this.#sendPending();
   }
@@ -309,6 +559,14 @@ export class AgentFabricClient {
   async #sendPending(): Promise<Record<string, unknown>> {
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');
+    try {
+      this.#assertRecoveredTaskCompletionCapacity(pending);
+    } catch (error) {
+      this.#state.nextSequence += 1;
+      this.#state.pending = null;
+      await this.#persist();
+      throw error;
+    }
     const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
     if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
       const timestamp = new Date().toISOString();
@@ -354,17 +612,69 @@ export class AgentFabricClient {
       // delivery outcome. Retaining it would permanently block the device
       // outbox. Retryable timeout and throttling responses keep the exact
       // signed request, as do upstream failures whose commit state is unknown.
-      if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+      const definitive = status >= 400 && status < 500 && status !== 408 && status !== 429;
+      if (definitive) {
         this.#state.nextSequence += 1;
         this.#state.pending = null;
         await this.#persist();
       }
-      throw new Error(errorMessage(body, status));
+      throw new AgentFabricRequestError(body, status, definitive);
     }
+    this.#recordRecoveredTaskCompletion(pending, body);
     this.#state.nextSequence += 1;
     this.#state.pending = null;
     await this.#persist();
     return body;
+  }
+
+  #recordRecoveredTaskCompletion(pending: PendingRequest, response: Record<string, unknown>): void {
+    const route = pending.pathname.match(/\/agent-fabric\/tasks\/([^/]+)\/events$/);
+    if (!route) return;
+    let request: Record<string, unknown>;
+    try { request = JSON.parse(pending.body) as Record<string, unknown>; } catch { return; }
+    const payload = request.payload && typeof request.payload === 'object' && !Array.isArray(request.payload)
+      ? request.payload as Record<string, unknown>
+      : null;
+    const receipt = response.receipt && typeof response.receipt === 'object' && !Array.isArray(response.receipt)
+      ? response.receipt as Record<string, unknown>
+      : null;
+    const taskId = decodeURIComponent(route[1]!);
+    const trajectoryCapsuleHash = String(payload?.trajectoryCapsuleHash || '');
+    if (request.eventType !== 'completed') return;
+    const receiptHash = String(receipt?.hash || '');
+    if (!/^[0-9a-f-]{36}$/i.test(taskId)
+      || !/^sha256:[a-f0-9]{64}$/.test(trajectoryCapsuleHash)) {
+      throw new Error('Task completion request is missing its durable evidence identity.');
+    }
+    if (!/^sha256:[a-f0-9]{64}$/.test(receiptHash)) {
+      throw new Error('Task completion acknowledgement is missing a valid durable receipt.');
+    }
+    const current = this.#state.recoveredTaskCompletions || [];
+    const existing = current.find((item) => item.taskId === taskId);
+    if (existing) {
+      if (existing.receiptHash !== receiptHash || existing.trajectoryCapsuleHash !== trajectoryCapsuleHash) {
+        throw new Error('Recovered task completion conflicts with its durable receipt.');
+      }
+      return;
+    }
+    if (current.length >= 1_000) throw new Error('Recovered task completion queue is full.');
+    this.#state.recoveredTaskCompletions = [
+      ...current,
+      { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() },
+    ];
+  }
+
+  #assertRecoveredTaskCompletionCapacity(pending: PendingRequest): void {
+    const route = pending.pathname.match(/\/agent-fabric\/tasks\/([^/]+)\/events$/);
+    if (!route) return;
+    let request: Record<string, unknown>;
+    try { request = JSON.parse(pending.body) as Record<string, unknown>; } catch { return; }
+    if (request.eventType !== 'completed') return;
+    const taskId = decodeURIComponent(route[1]!);
+    const current = this.#state.recoveredTaskCompletions || [];
+    if (!current.some((item) => item.taskId === taskId) && current.length >= 1_000) {
+      throw new Error('Recovered task completion queue is full; acknowledge stored completions before sending another completion.');
+    }
   }
 
   #sendViaRelay(pending: PendingRequest): Promise<{ status: number; body: string }> {

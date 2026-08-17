@@ -4,6 +4,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'nod
 import { basename, dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
+import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 const BLOB_VERSION = 1;
@@ -97,6 +98,11 @@ export class LocalVault {
         content_id text not null,
         available_locally integer not null,
         primary key (trajectory_id, revision, content_id)
+      );
+      create table if not exists task_completion_recovery (
+        task_id text primary key,
+        blob_content_id text not null,
+        created_at text not null
       );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
@@ -238,6 +244,25 @@ export class LocalVault {
     } : null;
   }
 
+  getCapsuleMetadata(trajectoryId: string, revision: number): {
+    revision: number;
+    capsuleHash: string;
+    blobContentId: string;
+  } | null {
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('Trajectory capsule revision must be a positive integer.');
+    }
+    const record = this.#database.prepare(`
+      select revision, capsule_hash, blob_content_id
+      from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { revision: number; capsule_hash: string; blob_content_id: string } | undefined;
+    return record ? {
+      revision: record.revision,
+      capsuleHash: record.capsule_hash,
+      blobContentId: record.blob_content_id,
+    } : null;
+  }
+
   async commitCapture(input: VaultCaptureInput): Promise<{ rawContentId: string; capsuleContentId: string }> {
     const created = new Set<string>();
     this.#database.exec('begin immediate');
@@ -309,6 +334,21 @@ export class LocalVault {
     })));
   }
 
+  queueCapsuleSync(trajectoryId: string, revision: number): void {
+    if (!trajectoryId || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('Pending capsule sync identity is invalid.');
+    }
+    const capsule = this.#database.prepare(`
+      select blob_content_id from capsules where trajectory_id = ? and revision = ?
+    `).get(trajectoryId, revision) as { blob_content_id: string } | undefined;
+    if (!capsule) throw new Error('Pending capsule sync is not available in the local vault.');
+    this.#database.prepare(`
+      insert into capsule_sync_queue(trajectory_id, revision, blob_content_id, created_at)
+      values (?, ?, ?, ?)
+      on conflict(trajectory_id, revision) do nothing
+    `).run(trajectoryId, revision, capsule.blob_content_id, new Date().toISOString());
+  }
+
   markCapsuleSynced(trajectoryId: string, revision: number): void {
     this.#database.prepare(`
       delete from capsule_sync_queue where trajectory_id = ? and revision = ?
@@ -345,6 +385,80 @@ export class LocalVault {
         receipt_hash = excluded.receipt_hash,
         bytes_uploaded = excluded.bytes_uploaded
     `).run(disclosureId, receiptHash, bytesUploaded, new Date().toISOString());
+  }
+
+  async stageTaskCompletionRecovery(taskId: string, plaintext: Uint8Array): Promise<string> {
+    if (!/^[0-9a-f-]{36}$/i.test(taskId) || plaintext.byteLength < 1) {
+      throw new Error('Task completion recovery payload is invalid.');
+    }
+    const existing = this.#database.prepare(`
+      select blob_content_id from task_completion_recovery where task_id = ?
+    `).get(taskId) as { blob_content_id: string } | undefined;
+    if (existing) {
+      const expected = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
+      if (existing.blob_content_id !== expected) {
+        throw new Error('Task completion recovery payload changed after it was staged.');
+      }
+      return existing.blob_content_id;
+    }
+    const blob = await this.#putBlob(plaintext, 'task-completion-recovery');
+    try {
+      this.#database.prepare(`
+        insert into task_completion_recovery(task_id, blob_content_id, created_at)
+        values (?, ?, ?)
+      `).run(taskId, blob.contentId, new Date().toISOString());
+      return blob.contentId;
+    } catch (error) {
+      if (blob.created) {
+        await rm(this.#blobPath(blob.contentId), { force: true });
+        this.#database.prepare('delete from blobs where content_id = ?').run(blob.contentId);
+      }
+      throw error;
+    }
+  }
+
+  async getTaskCompletionRecovery<T = Record<string, unknown>>(taskId: string): Promise<T | null> {
+    if (!/^[0-9a-f-]{36}$/i.test(taskId)) throw new Error('Task completion recovery identity is invalid.');
+    const record = this.#database.prepare(`
+      select blob_content_id from task_completion_recovery where task_id = ?
+    `).get(taskId) as { blob_content_id: string } | undefined;
+    if (!record) return null;
+    return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
+  }
+
+  async clearTaskCompletionRecovery(taskId: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(taskId)) throw new Error('Task completion recovery identity is invalid.');
+    const record = this.#database.prepare(`
+      select blob_content_id from task_completion_recovery where task_id = ?
+    `).get(taskId) as { blob_content_id: string } | undefined;
+    if (!record) return;
+    let deletedBlob = false;
+    this.#database.exec('begin immediate');
+    try {
+      this.#database.prepare('delete from task_completion_recovery where task_id = ?').run(taskId);
+      const retained = this.#database.prepare(`
+        select 1 where exists (
+          select 1 from task_completion_recovery where blob_content_id = ?
+        ) or exists (
+          select 1 from capsules where blob_content_id = ?
+        ) or exists (
+          select 1 from capsule_sync_queue where blob_content_id = ?
+        ) or exists (
+          select 1 from capsule_content_refs where content_id = ? and available_locally = 1
+        )
+      `).get(record.blob_content_id, record.blob_content_id, record.blob_content_id, record.blob_content_id);
+      if (!retained) {
+        const deleted = this.#database.prepare(`
+          delete from blobs where content_id = ? and kind = 'task-completion-recovery'
+        `).run(record.blob_content_id);
+        deletedBlob = deleted.changes === 1;
+      }
+      this.#database.exec('commit');
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      throw error;
+    }
+    if (deletedBlob) await rm(this.#blobPath(record.blob_content_id), { force: true });
   }
 
   listSessions(): unknown[] {
@@ -460,7 +574,7 @@ export class LocalVault {
             createdAt,
           } as Record<string, unknown>;
           delete nextBase.capsuleHash;
-          const revised = { ...nextBase, capsuleHash: sha256(canonicalize(nextBase)) };
+          const revised = { ...nextBase, capsuleHash: trajectoryCapsuleHash(nextBase as never) };
           const capsuleBlob = await this.#putBlob(Buffer.from(JSON.stringify(revised)), 'trajectory-capsule');
           if (capsuleBlob.created) createdCapsuleIds.add(capsuleBlob.contentId);
           this.recordCapsule(row.trajectory_id, row.revision + 1, revised.capsuleHash, capsuleBlob.contentId);

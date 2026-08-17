@@ -9,8 +9,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  canonicalFilesystemPath,
   installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
+  assertRecoveredTaskWorkspacePolicy,
+  assertTaskWorkspacePolicy,
   assertTaskSkillPin,
   installNativeAgentFabricBootstrap,
   installRepositoryAgentFabricSkill,
@@ -22,17 +25,22 @@ import {
   normalizeGitRemoteIdentity,
   parseCliOptions,
   parseSelectedProviderIds,
+  pathExistsOrThrow,
   portalUrl,
   rawLocalRetentionDays,
+  recoverLegacySkillBundleIdAfterAuthorizationFailure,
+  recoveredTaskPolicyWasSuperseded,
   relayProcessState,
   releaseDailyContentUpload,
   reserveDailyContentUpload,
   run,
   sourceRepositoryFingerprint,
   taskResponsePreview,
+  taskReceiptSession,
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
   withWorkspacePolicyRefreshLock,
+  withWorkspaceSkillActivationLock,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -54,6 +62,27 @@ test('uses the production B2B portal and keeps hq-url as a compatibility alias',
     ['hq-url', 'https://legacy.example'],
     ['portal-url', 'https://www.dharma-ai.io'],
   ])), 'https://www.dharma-ai.io');
+});
+
+test('fail-closed existence checks distinguish absence from unreadable state', async () => {
+  assert.equal(await pathExistsOrThrow('/missing', async () => {
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+  }), false);
+  await assert.rejects(pathExistsOrThrow('/unreadable', async () => {
+    throw Object.assign(new Error('denied'), { code: 'EACCES' });
+  }), /denied/);
+});
+
+test('canonical filesystem identities resolve links without rewriting filesystem case', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fabric-canonical-path-'));
+  const target = join(root, 'approved-policy.json');
+  const alias = join(root, 'policy-link.json');
+  await writeFile(target, '{}');
+  if (process.platform !== 'win32') {
+    await symlink(target, alias);
+    assert.equal(await canonicalFilesystemPath(alias), await canonicalFilesystemPath(target));
+  }
+  assert.equal(await canonicalFilesystemPath(target), await realpath(target));
 });
 
 function memorySecureStore(): SecureSecretStore {
@@ -240,6 +269,36 @@ test('organization commands require environment credentials and explicit confirm
     ]);
     assert.match(requests[4]!.url, /agent-fabric\/remediations\/target-2$/);
     assert.deepEqual(JSON.parse(String(requests[4]!.init?.body)), { trajectoryIds: heldOutTrajectoryIds, action: 'run_backtest' });
+    await run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'stage_evaluation',
+      '--json-body', '{"endpointId":"11111111-1111-4111-8111-111111111111"}', '--confirm',
+    ]);
+    assert.deepEqual(JSON.parse(String(requests[5]!.init?.body)), {
+      endpointId: '11111111-1111-4111-8111-111111111111', action: 'stage_evaluation',
+    });
+    const requestCountBeforeDryRun = requests.length;
+    const dryRun = await run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'stage_evaluation',
+      '--endpoint-id', '11111111-1111-4111-8111-111111111111', '--dry-run',
+    ]);
+    assert.deepEqual(dryRun, {
+      ok: true,
+      planned: true,
+      serverMutation: false,
+      targetId: 'target-2',
+      transition: {
+        action: 'stage_evaluation',
+        endpointId: '11111111-1111-4111-8111-111111111111',
+      },
+    });
+    assert.equal(requests.length, requestCountBeforeDryRun);
+    await assert.rejects(() => run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'stage_evaluation',
+      '--endpoint-id', '11111111-1111-1111-1111-11111111111-', '--dry-run',
+    ]), /exact endpoint UUID/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalToken === undefined) delete process.env.DHARMA_ORG_API_TOKEN;
@@ -481,6 +540,63 @@ test('workspace policy refreshes serialize before requesting a new signed author
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
   }
+});
+
+test('task execution and skill synchronization share one workspace-provider activation lock', async () => {
+  const previous = process.env.DHARMA_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dharma-skill-activation-lock-'));
+  process.env.DHARMA_HOME = home;
+  const events: string[] = [];
+  try {
+    const task = withWorkspaceSkillActivationLock('workspace-concurrent', 'codex', async () => {
+      events.push('task-start');
+      await new Promise((accept) => setTimeout(accept, 40));
+      events.push('task-end');
+    });
+    await new Promise((accept) => setTimeout(accept, 5));
+    const sync = withWorkspaceSkillActivationLock('workspace-concurrent', 'codex', async () => {
+      events.push('sync-start');
+      events.push('sync-end');
+    });
+    await Promise.all([task, sync]);
+    assert.deepEqual(events, ['task-start', 'task-end', 'sync-start', 'sync-end']);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('skill synchronization falls back only for legacy v1 authorization metadata', async () => {
+  const native = await mkdtemp(join(tmpdir(), 'dharma-skill-sync-legacy-only-'));
+  const workspaceId = 'workspace-legacy-only';
+  const bundleId = '11111111-1111-4111-8111-111111111111';
+  const managed = join(native, '.dharma-managed', 'workspaces', workspaceId);
+  const active = join(managed, 'active');
+  await mkdir(active, { recursive: true });
+  await writeFile(join(managed, 'ACTIVE_BUNDLE'), `${bundleId}\n`);
+  await writeFile(join(active, 'BUNDLE.json'), JSON.stringify({ bundleId, workspaceId, skillIds: [] }));
+  await writeFile(join(active, 'AUTHORIZATION.json'), JSON.stringify({
+    schema: 'dharma.skill-bundle/v2', bundleId,
+  }));
+  const verificationError = new Error('current bundle verification failed');
+
+  await assert.rejects(
+    recoverLegacySkillBundleIdAfterAuthorizationFailure({
+      nativeSkillDirectory: native,
+      workspaceId,
+      authorizationError: verificationError,
+    }),
+    verificationError,
+  );
+
+  await writeFile(join(active, 'AUTHORIZATION.json'), JSON.stringify({
+    schema: 'dharma.skill-bundle/v1', bundleId,
+  }));
+  assert.equal(await recoverLegacySkillBundleIdAfterAuthorizationFailure({
+    nativeSkillDirectory: native,
+    workspaceId,
+    authorizationError: verificationError,
+  }), bundleId);
 });
 
 test('repository onboarding refuses to overwrite an unmanaged skill', async () => {
@@ -727,6 +843,12 @@ test('queued content must match the current signed consent and policy revision',
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy(current, { ...policy, evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } } }), /invalid|no longer authorized/);
 });
 
+test('recovered task evidence distinguishes a superseded policy from the current revision', () => {
+  const capsule = { redactionReceipt: { policyRevision: 'policy-v1' } } as never;
+  assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v2' }), true);
+  assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v1' }), false);
+});
+
 test('reduced capsules cannot disguise provider content as local analysis', async () => {
   const base = await materializeWorkspacePolicy({ workspace: await mkdtemp(join(tmpdir(), 'dharma-reduced-boundary-')), organizationId: 'org_northstar', revision: 'local' });
   const reduced = {
@@ -752,6 +874,31 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
     redactionReceipt: { disclosureMode: 'local_analysis', policyRevision: base.policy.revision, consentReceiptId: null, disclosedClasses: ['local_deterministic_analysis'], excludedClasses: ['native_provider_payload'], classes: [] },
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(reduced, base.policy));
+  const signedTaskBundleId = '44444444-4444-4444-8444-444444444444';
+  const signedTask = {
+    ...reduced,
+    schema: 'dharma.trajectory-capsule/v3',
+    taskId: '55555555-5555-4555-8555-555555555555',
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: '2026-08-12T00:00:01.000Z',
+      taskReceiptHash: `sha256:${'b'.repeat(64)}`,
+    },
+    events: reduced.events.map((event) => ({ ...event, skillBundleId: signedTaskBundleId })),
+  };
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(signedTask, base.policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...signedTask,
+    captureProvenance: { ...signedTask.captureProvenance, taskReceiptHash: null },
+  }, base.policy), /unauthorized identity or policy metadata/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: reduced.events.map((event) => ({ ...event, skillBundleId: '44444444-4444-4444-8444-444444444444' })),
+  }, base.policy), /unauthorized event descriptors/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    events: reduced.events.map((event) => ({ ...event, skillBundleId: 'forged-bundle' })),
+  }, base.policy), /unauthorized event descriptors/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced,
     events: [{
@@ -1024,6 +1171,36 @@ test('task response preview exposes bounded Agy success output', () => {
   assert.ok((preview?.redactedValues || 0) >= 1);
 });
 
+test('signed task receipt becomes a deterministic provider session for candidate evidence', () => {
+  const task = {
+    schema: 'dharma.task/v1' as const,
+    taskId: '11111111-1111-4111-8111-111111111111', organizationId: 'org_test', workspaceId: 'workspace_test',
+    taskType: 'evaluation_retest' as const,
+    target: { deviceId: '22222222-2222-4222-8222-222222222222', provider: 'codex' as const },
+    skillBundle: { bundleId: '77777777-7777-4777-8777-777777777777', bundleHash: `sha256:${'a'.repeat(64)}` },
+    instructions: 'Evaluate the held-out case.', requiredSkills: [],
+    authority: { readPaths: ['.'], writePaths: [], commands: [{ commandId: 'provider.codex' }], network: 'deny', git: 'read_only' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 60, leaseSeconds: 120, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] },
+    budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: '2026-08-16T01:00:00.000Z', expiresAt: '2026-08-16T01:05:00.000Z', nonce: 'nonce', signature: null,
+  };
+  const receipt = {
+    taskId: task.taskId, status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/test',
+    startedAt: '2026-08-16T01:00:01.000Z', completedAt: '2026-08-16T01:00:02.000Z',
+    commandResults: [{
+      commandId: 'provider.codex', exitCode: 0, signal: null, timedOut: false,
+      stdout: 'bounded result', stderr: '',
+      stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+  const session = taskReceiptSession(task, receipt, '/workspace');
+  assert.equal(session.sessionId, `dharma-task-${task.taskId}`);
+  assert.equal(session.endedAt, receipt.completedAt);
+  assert.equal(session.records[0]?.native.taskId, task.taskId);
+  assert.equal(session.records[0]?.sourcePath, 'dharma-task-receipt');
+});
+
 test('task execution requires the signed bundle pin to match the active native bundle', () => {
   const pin = { bundleId: 'bundle-1', bundleHash: `sha256:${'a'.repeat(64)}` };
   assert.doesNotThrow(() => assertTaskSkillPin(pin, 'bundle-1'));
@@ -1036,4 +1213,43 @@ test('task execution requires the signed bundle pin to match the active native b
   assert.throws(() => assertTaskSkillPin({ ...pin, bundleHash: 'invalid' }, 'bundle-1'), /hash is invalid/);
   assert.equal(taskSkillPinFailureCode(new Error('Task skill bundle does not match the active local bundle.')), 'skill_bundle_mismatch');
   assert.equal(taskSkillPinFailureCode(new Error('Task skill bundle hash is invalid.')), 'skill_bundle_hash_invalid');
+});
+
+test('recovered signed-task evidence is bound to its registered workspace policy', () => {
+  const workspace = { workspaceId: 'workspace-a', organizationId: 'org-a' };
+  assert.doesNotThrow(() => assertRecoveredTaskWorkspacePolicy({
+    recoveryWorkspaceId: 'workspace-a',
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }));
+  assert.throws(() => assertRecoveredTaskWorkspacePolicy({
+    recoveryWorkspaceId: 'workspace-b',
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }), /does not match its registered workspace/);
+  assert.throws(() => assertRecoveredTaskWorkspacePolicy({
+    recoveryWorkspaceId: 'workspace-a',
+    workspace,
+    policy: { organizationId: 'org-b', serverAuthorization: undefined },
+  }), /does not authorize its workspace/);
+});
+
+test('a signed task executes only under its own registered workspace policy', () => {
+  const task = { organizationId: 'org-a', workspaceId: 'workspace-a' } as const;
+  const workspace = { organizationId: 'org-a', workspaceId: 'workspace-a' };
+  assert.doesNotThrow(() => assertTaskWorkspacePolicy({
+    task,
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }));
+  assert.throws(() => assertTaskWorkspacePolicy({
+    task,
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: { workspaceId: 'workspace-b' } as never },
+  }), /does not match the signed task/);
+  assert.throws(() => assertTaskWorkspacePolicy({
+    task: { ...task, workspaceId: 'workspace-b' },
+    workspace,
+    policy: { organizationId: 'org-a', serverAuthorization: undefined },
+  }), /does not match the signed task/);
 });

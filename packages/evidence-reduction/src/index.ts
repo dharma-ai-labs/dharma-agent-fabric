@@ -48,7 +48,7 @@ export interface AgentEvent {
 }
 
 export interface TrajectoryCapsule {
-  schema: 'dharma.trajectory-capsule/v1';
+  schema: 'dharma.trajectory-capsule/v2' | 'dharma.trajectory-capsule/v3';
   trajectoryId: string;
   revision: number;
   previousRevisionHash: string | null;
@@ -58,6 +58,11 @@ export interface TrajectoryCapsule {
   provider: string;
   sessionId: string;
   taskId: string | null;
+  captureProvenance: {
+    sourceClass: 'provider_discovery' | 'explicit_import' | 'signed_task_execution';
+    collectedAt: string;
+    taskReceiptHash: string | null;
+  };
   timeRange: { start: string; end: string };
   status: 'completed' | 'partial';
   evidenceMode: OrganizationPolicy['evidence']['defaultMode'];
@@ -96,6 +101,16 @@ export interface TrajectoryCapsule {
   localEvidenceAvailable: Array<{ contentId: string; kind: string; bytes: number }>;
   capsuleHash: string;
   createdAt: string;
+}
+
+export function trajectoryCapsuleHash(capsule: Omit<TrajectoryCapsule, 'capsuleHash'> | TrajectoryCapsule): string {
+  const { capsuleHash: ignoredHash, ...unsigned } = capsule as TrajectoryCapsule;
+  void ignoredHash;
+  if (unsigned.schema !== 'dharma.trajectory-capsule/v3') return sha256(canonicalize(unsigned));
+  return sha256(canonicalize({
+    ...unsigned,
+    captureProvenance: { ...unsigned.captureProvenance, taskReceiptHash: null },
+  }));
 }
 
 function deterministicUuid(value: string): string {
@@ -429,8 +444,46 @@ export function buildTrajectoryCapsule(input: {
   createdAt?: string;
   revision?: number;
   previousRevisionHash?: string | null;
+  activeSkillBundleId?: string | null;
+  activeSkillBundleActivatedAt?: string | null;
+  activeSkillBundleExpiresAt?: string | null;
+  activeSkillBundleVerifiedAt?: string | null;
+  taskId?: string | null;
+  captureProvenance?: TrajectoryCapsule['captureProvenance'];
 }): TrajectoryCapsule {
   assertPolicy(input.policy);
+  const captureProvenance = input.captureProvenance ?? {
+    sourceClass: 'provider_discovery' as const,
+    collectedAt: input.createdAt ?? input.session.endedAt,
+    taskReceiptHash: null,
+  };
+  if (!Number.isFinite(Date.parse(captureProvenance.collectedAt))) {
+    throw new Error('Capture provenance requires a valid collection timestamp.');
+  }
+  const signedTaskCapture = captureProvenance.sourceClass === 'signed_task_execution';
+  if (signedTaskCapture !== Boolean(input.taskId)
+    || (signedTaskCapture && !/^[0-9a-f-]{36}$/i.test(input.taskId || ''))
+    || (signedTaskCapture && !/^sha256:[a-f0-9]{64}$/i.test(captureProvenance.taskReceiptHash || ''))
+    || (!signedTaskCapture && captureProvenance.taskReceiptHash !== null)) {
+    throw new Error('Signed task provenance requires one task ID and server task receipt hash.');
+  }
+  if (input.activeSkillBundleId != null && !signedTaskCapture) {
+    throw new Error('Skill attribution is allowed only for a signed task execution capsule.');
+  }
+  if (input.activeSkillBundleId != null
+    && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.activeSkillBundleId)) {
+    throw new Error('Active skill bundle ID must be a UUID.');
+  }
+  const activatedAt = input.activeSkillBundleActivatedAt == null ? null : Date.parse(input.activeSkillBundleActivatedAt);
+  const expiresAt = input.activeSkillBundleExpiresAt == null ? null : Date.parse(input.activeSkillBundleExpiresAt);
+  const verifiedAt = input.activeSkillBundleVerifiedAt == null ? null : Date.parse(input.activeSkillBundleVerifiedAt);
+  if (input.activeSkillBundleId != null && (!Number.isFinite(activatedAt) || (expiresAt != null && !Number.isFinite(expiresAt)))) {
+    throw new Error('Active skill bundle requires a valid activation window.');
+  }
+  if (input.activeSkillBundleId != null && (!Number.isFinite(verifiedAt)
+    || verifiedAt! < activatedAt! || (expiresAt != null && verifiedAt! >= expiresAt))) {
+    throw new Error('Active skill bundle must be verified inside its authorization window before task execution.');
+  }
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
   };
@@ -475,6 +528,10 @@ export function buildTrajectoryCapsule(input: {
     const fingerprint = sha256(canonicalize({ kind: record.kind, payload }));
     if (seen.has(fingerprint)) continue;
     seen.add(fingerprint);
+    const occurredAt = record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt;
+    const bundleWasActive = signedTaskCapture
+      && input.activeSkillBundleId != null
+      && verifiedAt != null;
     events.push({
       schema: 'dharma.agent-event/v1',
       eventId: deterministicUuid(`${trajectoryId}:${index}:${fingerprint}`),
@@ -484,7 +541,7 @@ export function buildTrajectoryCapsule(input: {
       provider: input.session.provider,
       sessionId: pseudonymousSessionId,
       sequence: events.length,
-      occurredAt: record.timestamp ? new Date(record.timestamp).toISOString() : input.session.startedAt,
+      occurredAt,
       kind: recordKind,
       coverage: input.session.coverage,
       contentRefs: [],
@@ -496,7 +553,7 @@ export function buildTrajectoryCapsule(input: {
           ? sha256(`${basename(record.sourcePath)}:${record.line}`)
           : null,
       },
-      skillBundleId: null,
+      skillBundleId: bundleWasActive ? input.activeSkillBundleId! : null,
       providerModel: null,
     });
   }
@@ -509,7 +566,7 @@ export function buildTrajectoryCapsule(input: {
     throw new Error('A later trajectory capsule revision requires the previous capsule hash.');
   }
   const base = {
-    schema: 'dharma.trajectory-capsule/v1' as const,
+    schema: signedTaskCapture ? 'dharma.trajectory-capsule/v3' as const : 'dharma.trajectory-capsule/v2' as const,
     trajectoryId,
     revision,
     previousRevisionHash: input.previousRevisionHash ?? null,
@@ -518,7 +575,8 @@ export function buildTrajectoryCapsule(input: {
     workspaceId: input.workspaceId,
     provider: input.session.provider,
     sessionId: pseudonymousSessionId,
-    taskId: null,
+    taskId: input.taskId ?? null,
+    captureProvenance,
     timeRange: { start: input.session.startedAt, end: input.session.endedAt },
     status: input.session.coverage === 'observed' ? 'completed' as const : 'partial' as const,
     evidenceMode: input.policy.evidence.defaultMode,
@@ -592,7 +650,7 @@ export function buildTrajectoryCapsule(input: {
   if (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes) {
     throw new Error('Trajectory capsule metadata cannot fit the organization maximumCapsuleBytes policy.');
   }
-  return { ...base, capsuleHash: sha256(canonicalize(base)) };
+  return { ...base, capsuleHash: trajectoryCapsuleHash(base as Omit<TrajectoryCapsule, 'capsuleHash'>) };
 }
 
 export { redactValue };
