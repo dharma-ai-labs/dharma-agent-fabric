@@ -180,10 +180,11 @@ export async function pathExistsOrThrow(
   }
 }
 
-export async function canonicalFilesystemPath(path: string, platform = process.platform) {
-  const canonical = await realpath(path);
-  return platform === 'win32' ? canonical.toLowerCase() : canonical;
+export async function canonicalFilesystemPath(path: string) {
+  return realpath(path);
 }
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 async function pathExists(path: string) {
   try { await access(path); return true; } catch { return false; }
@@ -1182,7 +1183,6 @@ async function runOrganizationCommand(command: string | undefined, subcommand: s
   if (command === 'failures' && subcommand === 'list') return api.listFailures();
   if (command === 'remediations' && subcommand === 'list') return api.listRemediations();
   if (command === 'remediations' && subcommand === 'act') {
-    requireExplicitConfirmation(flags, 'Changing a repository remediation release');
     const targetId = required(flags, 'target-id');
     const body = await commandJsonBody(flags);
     const action = String(flags.get('action') || body.action || '');
@@ -1191,9 +1191,20 @@ async function runOrganizationCommand(command: string | undefined, subcommand: s
     }
     if (action === 'stage_evaluation') {
       const endpointId = String(flags.get('endpoint-id') || body.endpointId || '');
-      if (!/^[0-9a-f-]{36}$/i.test(endpointId)) throw new Error('stage_evaluation requires --endpoint-id with an exact endpoint UUID.');
+      if (!UUID_PATTERN.test(endpointId)) throw new Error('stage_evaluation requires --endpoint-id with an exact endpoint UUID.');
+      if (flags.get('dry-run') === true) {
+        return {
+          ok: true,
+          planned: true,
+          serverMutation: false,
+          targetId,
+          transition: { action, endpointId },
+        };
+      }
+      requireExplicitConfirmation(flags, 'Staging a repository remediation evaluation');
       return api.transitionRemediationTarget(targetId, { action, endpointId });
     }
+    requireExplicitConfirmation(flags, 'Changing a repository remediation release');
     return api.transitionRemediationTarget(targetId, {
       action: action as 'run_backtest' | 'link_backtest' | 'approve' | 'merge_pr' | 'release' | 'expand' | 'rollback',
       ...(Array.isArray(body.trajectoryIds) ? { trajectoryIds: body.trajectoryIds.map(String) } : {}),
@@ -2600,11 +2611,17 @@ async function finalizeRecoveredSignedTaskTrajectories(
           throw new Error('Recovered task evidence already exists with different immutable content.');
         }
         supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
-        await supersededVault.clearTaskCompletionRecovery(completion.taskId);
       } finally {
         supersededVault.close();
       }
       await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
+      const acknowledgedVault = await LocalVault.open({
+        root: resolve(dharmaHome(), 'vault'),
+        masterKey: await loadOrCreateVaultMasterKey(),
+        rawLocalDays: rawLocalRetentionDays(vaultPolicy),
+      });
+      try { await acknowledgedVault.clearTaskCompletionRecovery(completion.taskId); }
+      finally { acknowledgedVault.close(); }
       finalized.push({
         taskId: completion.taskId,
         trajectory: {
@@ -2656,13 +2673,20 @@ async function executeOneTask(
   );
   assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-  return withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
+  const waitingHeartbeats: Promise<unknown>[] = [];
+  const waitingHeartbeat = setInterval(() => {
+    waitingHeartbeats.push(fabric.postTaskEvent(task.taskId, 'lease_extended', {
+      taskId: task.taskId,
+      phase: 'waiting_for_skill_activation_lock',
+    }).catch(() => undefined));
+  }, Math.max(5_000, Math.floor(leaseSeconds * 500)));
+  try {
+  return await withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
   const activeSkill = await activeSkillAuthorization(
     task.target.provider, task.workspaceId, String(workspace.repositoryAgentId || ''), config,
   );
-  const activeSkillVerifiedAt = new Date().toISOString();
   const activeBundleId = activeSkill?.bundleId ?? null;
   try {
     assertTaskSkillPin(task.skillBundle, activeBundleId);
@@ -2699,12 +2723,15 @@ async function executeOneTask(
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),
     startedAt: receipt.startedAt, completedAt: receipt.completedAt,
   };
-  const collectedAt = new Date().toISOString();
+  const collectedAt = receipt.completedAt;
   const prepared = receipt.status === 'completed' && task.skillBundle
     ? prepareSignedTaskTrajectory({
       policy: taskPolicy, task, receipt, taskReceiptHash: `sha256:${'0'.repeat(64)}`, collectedAt,
       workspace, device: config, activeSkill,
-      activeSkillVerifiedAt,
+      // The receipt is durable and retry-idempotent. Its start time is after
+      // the first successful local bundle verification, so it is also the
+      // stable verification timestamp for a recovered trajectory.
+      activeSkillVerifiedAt: receipt.startedAt,
     })
     : null;
   if (prepared) await stageSignedTaskTrajectoryRecovery(task.taskId, workspace.workspaceId, taskPolicy, prepared);
@@ -2724,6 +2751,18 @@ async function executeOneTask(
   }
   return { ok: true, taskId: task.taskId, receipt: summary, trajectory };
   });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Timed out waiting for the workspace skill activation lock.') {
+      await fabric.postTaskEvent(task.taskId, 'failed', {
+        phase: 'coordination',
+        code: 'skill_activation_lock_timeout',
+      }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    clearInterval(waitingHeartbeat);
+    await Promise.allSettled(waitingHeartbeats);
+  }
 }
 
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {

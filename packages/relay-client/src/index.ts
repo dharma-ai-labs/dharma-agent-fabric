@@ -34,6 +34,8 @@ interface ProtocolState {
   recoveredTaskCompletions?: RecoveredTaskCompletion[];
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export interface RecoveredTaskCompletion {
   taskId: string;
   trajectoryCapsuleHash: string;
@@ -44,10 +46,35 @@ export interface RecoveredTaskCompletion {
 function isRecoveredTaskCompletion(value: unknown): value is RecoveredTaskCompletion {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return /^[0-9a-f-]{36}$/i.test(String(item.taskId || ''))
+  return UUID_PATTERN.test(String(item.taskId || ''))
     && /^sha256:[a-f0-9]{64}$/.test(String(item.trajectoryCapsuleHash || ''))
     && /^sha256:[a-f0-9]{64}$/.test(String(item.receiptHash || ''))
     && Number.isFinite(Date.parse(String(item.recoveredAt || '')));
+}
+
+function assertProtocolState(value: unknown): asserts value is ProtocolState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay protocol state is invalid.');
+  const state = value as Record<string, unknown>;
+  const recovered = state.recoveredTaskCompletions;
+  const pending = state.pending as Record<string, unknown> | null;
+  const pendingValid = pending === null || (
+    typeof pending === 'object' && !Array.isArray(pending)
+    && pending.method === 'POST'
+    && typeof pending.pathname === 'string' && pending.pathname.startsWith('/')
+    && typeof pending.body === 'string'
+    && pending.headers !== null && typeof pending.headers === 'object' && !Array.isArray(pending.headers)
+    && Object.entries(pending.headers as Record<string, unknown>)
+      .every(([name, header]) => name.length > 0 && typeof header === 'string')
+  );
+  if (state.schema !== 'dharma.protocol-state/v1'
+    || !(state.sessionId === null || typeof state.sessionId === 'string')
+    || !Number.isSafeInteger(state.nextSequence) || Number(state.nextSequence) < 1
+    || !pendingValid
+    || (recovered !== undefined && (!Array.isArray(recovered)
+      || recovered.length > 1_000
+      || recovered.some((item) => !isRecoveredTaskCompletion(item))))) {
+    throw new Error('Relay protocol state is invalid.');
+  }
 }
 
 export interface EnrollmentResult {
@@ -417,10 +444,16 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       recoveredTaskCompletions: [],
     };
-    try { state = JSON.parse(await readFile(input.statePath, 'utf8')) as ProtocolState; } catch {}
-    state.recoveredTaskCompletions = Array.isArray(state.recoveredTaskCompletions)
-      ? state.recoveredTaskCompletions.filter(isRecoveredTaskCompletion)
-      : [];
+    try {
+      const parsed = JSON.parse(await readFile(input.statePath, 'utf8')) as unknown;
+      assertProtocolState(parsed);
+      state = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.', { cause: error });
+      }
+    }
+    state.recoveredTaskCompletions ??= [];
     return new AgentFabricClient({ config, privateJwk: identity.privateJwk, statePath: input.statePath, state, fetcher: input.fetcher });
   }
 

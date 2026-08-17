@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -224,7 +224,42 @@ test('a server-rejected active receipt restores the prior local authorization', 
   await rollbackUnconfirmedSkillBundle({ nativeSkillDirectory: native, workspaceId, receipt });
   const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
   assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), prior.bundleId);
+  assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /Prior release/);
   assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /Prior release/);
+  assert.deepEqual((await readdir(managed)).filter((name) => name.startsWith('.rollback-')), []);
+});
+
+test('the next authorization read recovers a rollback interrupted between filesystem swaps', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-interrupted-rollback-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Durable active release\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const workspaceId = randomUUID();
+  const activeBundle = await signedBundle(source, randomUUID(), server.privateKey);
+  await installSkillBundle({
+    bundle: activeBundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: randomUUID(),
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  const transaction = resolve(managed, '.rollback-interrupted-test');
+  await mkdir(transaction, { recursive: true });
+  await writeFile(resolve(transaction, 'ROLLBACK_RECOVERY.json'), JSON.stringify({
+    schema: 'dharma.skill-rollback-recovery/v1',
+    workspaceId,
+    currentBundleId: activeBundle.bundleId,
+    currentSkillIds: ['dharma-boundary'],
+  }));
+  await rename(resolve(managed, 'active'), resolve(transaction, 'backup-active'));
+  await writeFile(resolve(native, 'dharma-boundary/SKILL.md'), '# Partially rolled back native state\n');
+
+  assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), activeBundle.bundleId);
+  assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /Durable active release/);
+  assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /Durable active release/);
+  assert.deepEqual((await readdir(managed)).filter((name) => name.startsWith('.rollback-')), []);
 });
 
 test('receipt persistence failure restores the prior bundle before publishing activation', async () => {

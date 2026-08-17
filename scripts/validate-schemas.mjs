@@ -69,5 +69,19 @@ if (validateSkillBundle({
 })) {
   throw new Error('Skill bundle schema accepted a traversing inline file path.');
 }
+for (const path of ['./SKILL.md', 'nested//SKILL.md', 'nested/./SKILL.md', 'nested/../SKILL.md']) {
+  if (validateSkillBundle({
+    ...inlineSkillBundle,
+    skills: [{ ...inlineSkillBundle.skills[0], files: [{ ...inlineSkillBundle.skills[0].files[0], path }] }],
+  })) {
+    throw new Error(`Skill bundle schema accepted a non-canonical inline file path: ${path}`);
+  }
+}
+if (!validateSkillBundle({
+  ...inlineSkillBundle,
+  skills: [{ ...inlineSkillBundle.skills[0], path: 'skills/schema-test/nested' }],
+})) {
+  throw new Error(`Skill bundle schema rejected a canonical nested skill path: ${ajv.errorsText(validateSkillBundle?.errors)}`);
+}
 
 process.stdout.write(`${JSON.stringify({ ok: true, schemas: names.length })}\n`);

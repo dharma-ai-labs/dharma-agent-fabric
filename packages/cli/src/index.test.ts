@@ -73,7 +73,7 @@ test('fail-closed existence checks distinguish absence from unreadable state', a
   }), /denied/);
 });
 
-test('canonical filesystem identities resolve links and normalize Windows case', async () => {
+test('canonical filesystem identities resolve links without rewriting filesystem case', async () => {
   const root = await mkdtemp(join(tmpdir(), 'fabric-canonical-path-'));
   const target = join(root, 'approved-policy.json');
   const alias = join(root, 'policy-link.json');
@@ -82,7 +82,7 @@ test('canonical filesystem identities resolve links and normalize Windows case',
     await symlink(target, alias);
     assert.equal(await canonicalFilesystemPath(alias), await canonicalFilesystemPath(target));
   }
-  assert.equal(await canonicalFilesystemPath(target, 'win32'), (await realpath(target)).toLowerCase());
+  assert.equal(await canonicalFilesystemPath(target), await realpath(target));
 });
 
 function memorySecureStore(): SecureSecretStore {
@@ -277,6 +277,28 @@ test('organization commands require environment credentials and explicit confirm
     assert.deepEqual(JSON.parse(String(requests[5]!.init?.body)), {
       endpointId: '11111111-1111-4111-8111-111111111111', action: 'stage_evaluation',
     });
+    const requestCountBeforeDryRun = requests.length;
+    const dryRun = await run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'stage_evaluation',
+      '--endpoint-id', '11111111-1111-4111-8111-111111111111', '--dry-run',
+    ]);
+    assert.deepEqual(dryRun, {
+      ok: true,
+      planned: true,
+      serverMutation: false,
+      targetId: 'target-2',
+      transition: {
+        action: 'stage_evaluation',
+        endpointId: '11111111-1111-4111-8111-111111111111',
+      },
+    });
+    assert.equal(requests.length, requestCountBeforeDryRun);
+    await assert.rejects(() => run([
+      'remediations', 'act', '--organization-id', 'org_northstar', '--hq-url', 'https://hq.example.com',
+      '--target-id', 'target-2', '--action', 'stage_evaluation',
+      '--endpoint-id', '11111111-1111-1111-1111-11111111111-', '--dry-run',
+    ]), /exact endpoint UUID/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalToken === undefined) delete process.env.DHARMA_ORG_API_TOKEN;

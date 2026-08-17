@@ -432,6 +432,36 @@ test('a full recovered completion queue stops before sending another completion'
   assert.equal(networkCalls, 2);
 });
 
+test('corrupt recovered completion state is preserved and fails closed', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-corrupt-recovery-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const corruptState = {
+    schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+    recoveredTaskCompletions: [{
+      taskId: 'not-a-uuid',
+      trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}`,
+      receiptHash: `sha256:${'b'.repeat(64)}`,
+      recoveredAt: '2026-08-16T00:00:00.000Z',
+    }],
+  };
+  await writeFile(statePath, JSON.stringify(corruptState));
+  await assert.rejects(
+    AgentFabricClient.open({ configPath, statePath, store, fetcher: async () => new Response('{}') }),
+    /protocol state is invalid/,
+  );
+  assert.deepEqual(JSON.parse(await readFile(statePath, 'utf8')), corruptState);
+});
+
 test('a later operation cannot implicitly replay an ambiguous content request', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-retry-'));

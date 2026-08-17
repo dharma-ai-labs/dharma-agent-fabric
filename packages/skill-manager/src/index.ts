@@ -212,6 +212,7 @@ export async function getLegacySkillBundleIdForUpgrade(input: {
   workspaceId: string;
 }): Promise<string | null> {
   const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const bundleId = await readActiveBundlePointer(root);
   if (!bundleId) return null;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
@@ -243,6 +244,7 @@ export async function getInstalledSkillBundleIdForRecovery(input: {
   workspaceId: string;
 }): Promise<string | null> {
   const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const bundleId = await readActiveBundlePointer(root);
   if (!bundleId) return null;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(bundleId)) {
@@ -283,6 +285,7 @@ export async function getExpiredSkillBundleAuthorizationForReplacement(input: {
   now?: Date;
 }): Promise<ActiveSkillBundleAuthorization | null> {
   const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const bundleId = await readActiveBundlePointer(root);
   if (!bundleId) return null;
   const bundle = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
@@ -399,6 +402,77 @@ async function activateNativeSkills(input: {
   }
 }
 
+interface RollbackRecoveryManifest {
+  schema: 'dharma.skill-rollback-recovery/v1';
+  workspaceId: string;
+  currentBundleId: string;
+  currentSkillIds: string[];
+}
+
+async function nativeSkillIdsOwnedByWorkspace(nativeSkillDirectory: string, workspaceId: string): Promise<string[]> {
+  let entries;
+  try { entries = await readdir(nativeSkillDirectory, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const owned: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.name)) continue;
+    try {
+      const marker = JSON.parse(await readFile(resolve(nativeSkillDirectory, entry.name, '.dharma-agent-fabric.json'), 'utf8')) as { workspaceId?: unknown };
+      if (marker.workspaceId === workspaceId) owned.push(entry.name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return owned;
+}
+
+async function recoverInterruptedSkillRollbacks(nativeSkillDirectory: string, workspaceId: string): Promise<void> {
+  const managedRoot = workspaceManagedRoot(nativeSkillDirectory, workspaceId);
+  let entries;
+  try { entries = await readdir(managedRoot, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name.startsWith('.rollback-'))) {
+    const transactionRoot = assertContained(managedRoot, resolve(managedRoot, entry.name));
+    const manifest = JSON.parse(await readFile(resolve(transactionRoot, 'ROLLBACK_RECOVERY.json'), 'utf8')) as RollbackRecoveryManifest;
+    if (manifest.schema !== 'dharma.skill-rollback-recovery/v1'
+      || manifest.workspaceId !== workspaceId
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(manifest.currentBundleId)
+      || !Array.isArray(manifest.currentSkillIds)
+      || manifest.currentSkillIds.some((skillId) => typeof skillId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillId))) {
+      throw new Error('Interrupted skill rollback recovery metadata is invalid.');
+    }
+    const releases = resolve(managedRoot, 'releases');
+    const currentRelease = assertContained(releases, resolve(releases, manifest.currentBundleId));
+    const active = resolve(managedRoot, 'active');
+    const backupActive = resolve(transactionRoot, 'backup-active');
+    if (await pathExists(backupActive)) {
+      await rm(active, { recursive: true, force: true });
+      await rename(backupActive, active);
+    } else if (!await pathExists(active)) {
+      await cp(currentRelease, active, { recursive: true, errorOnExist: true, force: false });
+    }
+    await activateNativeSkills({
+      nativeSkillDirectory,
+      release: currentRelease,
+      bundleId: manifest.currentBundleId,
+      workspaceId,
+      skillIds: manifest.currentSkillIds,
+      removeSkillIds: await nativeSkillIdsOwnedByWorkspace(nativeSkillDirectory, workspaceId),
+    });
+    const pointerTemp = resolve(transactionRoot, 'ACTIVE_BUNDLE.recovery');
+    await writeFile(pointerTemp, `${manifest.currentBundleId}\n`, { mode: 0o600 });
+    await rename(pointerTemp, resolve(managedRoot, 'ACTIVE_BUNDLE'));
+    await rm(transactionRoot, { recursive: true, force: true });
+  }
+}
+
 export async function getActiveSkillBundleAuthorization(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
@@ -412,6 +486,7 @@ export async function getActiveSkillBundleAuthorization(input: {
   now?: Date;
 }): Promise<ActiveSkillBundleAuthorization | null> {
   const root = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const bundleId = await readActiveBundlePointer(root);
   if (!bundleId) return null;
   const bundle = JSON.parse(await readFile(resolve(root, 'active', 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
@@ -459,6 +534,7 @@ export async function installSkillBundle(input: {
   if (!input.policy.skills.automaticInstall) throw new Error('Automatic skill installation is disabled by policy.');
 
   const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const releases = resolve(managedRoot, 'releases');
   const release = assertContained(releases, resolve(releases, input.bundle.bundleId));
   const active = resolve(managedRoot, 'active');
@@ -593,6 +669,7 @@ export async function rollbackUnconfirmedSkillBundle(input: {
 }): Promise<void> {
   if (input.receipt.status !== 'active') return;
   const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
+  await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
   const activeBundleId = await readActiveBundlePointer(managedRoot);
   if (activeBundleId !== input.receipt.bundleId) {
     throw new Error('Refusing to roll back an installation that is no longer the active local bundle.');
@@ -606,20 +683,74 @@ export async function rollbackUnconfirmedSkillBundle(input: {
     ? assertContained(releases, resolve(releases, previousBundleId))
     : null;
   const previousSkillIds = previousRelease ? await releaseSkillIds(previousRelease) : [];
-  await rm(active, { recursive: true, force: true });
-  if (previousRelease) await cp(previousRelease, active, { recursive: true, errorOnExist: true, force: false });
-  await activateNativeSkills({
-    nativeSkillDirectory: input.nativeSkillDirectory,
-    release: previousRelease || currentRelease,
-    bundleId: previousBundleId || input.receipt.bundleId,
+  const transactionRoot = assertContained(managedRoot, resolve(managedRoot, `.rollback-${randomUUID()}`));
+  const stagedActive = resolve(transactionRoot, 'staged-active');
+  const backupActive = resolve(transactionRoot, 'backup-active');
+  const pointer = resolve(managedRoot, 'ACTIVE_BUNDLE');
+  const pointerTemp = resolve(transactionRoot, 'ACTIVE_BUNDLE.next');
+  let nativeChanged = false;
+  let activeMoved = false;
+  let stagedMoved = false;
+  let preserveRecovery = false;
+  await mkdir(transactionRoot, { recursive: true, mode: 0o700 });
+  await writeFile(resolve(transactionRoot, 'ROLLBACK_RECOVERY.json'), `${JSON.stringify({
+    schema: 'dharma.skill-rollback-recovery/v1',
     workspaceId: input.workspaceId,
-    skillIds: previousSkillIds,
-    removeSkillIds: currentSkillIds,
-  });
-  if (previousBundleId) {
-    await writeFile(resolve(managedRoot, 'ACTIVE_BUNDLE'), `${previousBundleId}\n`, { mode: 0o600 });
-  } else {
-    await rm(resolve(managedRoot, 'ACTIVE_BUNDLE'), { force: true });
+    currentBundleId: input.receipt.bundleId,
+    currentSkillIds,
+  } satisfies RollbackRecoveryManifest)}\n`, { mode: 0o600 });
+  if (previousRelease) {
+    await cp(previousRelease, stagedActive, { recursive: true, errorOnExist: true, force: false });
+  }
+  try {
+    await activateNativeSkills({
+      nativeSkillDirectory: input.nativeSkillDirectory,
+      release: previousRelease || currentRelease,
+      bundleId: previousBundleId || input.receipt.bundleId,
+      workspaceId: input.workspaceId,
+      skillIds: previousSkillIds,
+      removeSkillIds: currentSkillIds,
+    });
+    nativeChanged = true;
+    await rename(active, backupActive);
+    activeMoved = true;
+    if (previousRelease) {
+      await rename(stagedActive, active);
+      stagedMoved = true;
+      await writeFile(pointerTemp, `${previousBundleId}\n`, { mode: 0o600 });
+      await rename(pointerTemp, pointer);
+    } else {
+      await rm(pointer, { force: true });
+    }
+  } catch (error) {
+    const recoveryErrors: unknown[] = [];
+    if (activeMoved) {
+      try {
+        if (stagedMoved) await rm(active, { recursive: true, force: true });
+        await rename(backupActive, active);
+      } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    }
+    if (nativeChanged) {
+      try {
+        await activateNativeSkills({
+          nativeSkillDirectory: input.nativeSkillDirectory,
+          release: currentRelease,
+          bundleId: input.receipt.bundleId,
+          workspaceId: input.workspaceId,
+          skillIds: currentSkillIds,
+          removeSkillIds: previousSkillIds,
+        });
+      } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    }
+    try { await writeFile(pointer, `${input.receipt.bundleId}\n`, { mode: 0o600 }); }
+    catch (recoveryError) { recoveryErrors.push(recoveryError); }
+    if (recoveryErrors.length) {
+      preserveRecovery = true;
+      throw new AggregateError([error, ...recoveryErrors], 'Skill rollback failed and the active installation could not be fully restored.');
+    }
+    throw error;
+  } finally {
+    if (!preserveRecovery) await rm(transactionRoot, { recursive: true, force: true });
   }
 }
 
