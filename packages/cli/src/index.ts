@@ -21,7 +21,7 @@ import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationFo
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope, type TaskReceipt } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -3006,9 +3006,8 @@ export async function installedBundleIdForSkillPollAfterAuthorizationFailure(inp
   nativeSkillDirectory: string;
   workspaceId: string;
   authorizationError: unknown;
-}): Promise<null> {
-  await recoverLegacySkillBundleIdAfterAuthorizationFailure(input);
-  return null;
+}): Promise<string> {
+  return recoverLegacySkillBundleIdAfterAuthorizationFailure(input);
 }
 
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
@@ -3024,6 +3023,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const fabric = await client();
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   let activeBundleId: string | null;
+  let legacyBaselineMigrationRequested = false;
   try {
     activeBundleId = (await activeSkillAuthorization(
       provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
@@ -3039,12 +3039,14 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         workspaceId,
         authorizationError: error,
       });
+      legacyBaselineMigrationRequested = true;
     }
   }
   const response = await fabric.pollSkill({
     workspaceId,
     provider,
     installedBundleId: activeBundleId,
+    legacyBaselineMigrationRequested,
   });
   const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
   if (!rollout) return { ok: true, rollout: null, changed: false };

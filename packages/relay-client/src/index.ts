@@ -503,7 +503,12 @@ export class AgentFabricClient {
     this.#serial = operation.catch(() => undefined);
     return operation;
   }
-  pollSkill(body: { workspaceId: string; provider: ProviderId; installedBundleId: string | null }) {
+  pollSkill(body: {
+    workspaceId: string;
+    provider: ProviderId;
+    installedBundleId: string | null;
+    legacyBaselineMigrationRequested?: boolean;
+  }) {
     return this.signedPost('/agent-fabric/skills/poll', body);
   }
   postInstallReceipt(bundleId: string, rolloutId: string, receipt: unknown) {
