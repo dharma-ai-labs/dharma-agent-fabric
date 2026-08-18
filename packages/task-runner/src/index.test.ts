@@ -20,6 +20,7 @@ import {
   FileActionExecutionJournal,
   FileTaskReceiptStore,
   providerInstructionsForTask,
+  verifyTaskEnvelope,
   type TaskEnvelope,
 } from './index.js';
 
@@ -110,6 +111,32 @@ test('task signature tampering is rejected before worktree creation', async () =
     workspace: tmpdir(), relayStateDirectory: tmpdir(), serverPublicKey: publicKey,
     receiptStore: new FileTaskReceiptStore(resolve(tmpdir(), randomUUID())),
   }), /signature is invalid/);
+});
+
+test('task signatures resolve an explicit rotating server key version', () => {
+  const legacy = generateKeyPairSync('ed25519');
+  const rotated = generateKeyPairSync('ed25519');
+  const signerKeyVersion = 'projects/test/locations/global/keyRings/test/cryptoKeys/tasks/cryptoKeyVersions/2';
+  const unsigned = {
+    schema: 'dharma.task/v1' as const,
+    taskId: randomUUID(), organizationId: 'org', workspaceId: 'workspace', taskType: 'external_request' as const,
+    target: { deviceId: 'device', provider: 'codex' as const }, skillBundle: null,
+    instructions: 'Inspect the repository.', requiredSkills: [],
+    authority: { readPaths: ['.'], writePaths: [], commands: [], network: 'deny', git: 'task_branch' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] },
+    budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    nonce: randomUUID(), signerKeyVersion,
+  };
+  const task = { ...unsigned, signature: signCanonicalObject(unsigned, rotated.privateKey) } as TaskEnvelope;
+  assert.doesNotThrow(() => verifyTaskEnvelope(
+    task,
+    legacy.publicKey,
+    new Date(),
+    (version) => version === signerKeyVersion ? rotated.publicKey : null,
+  ));
+  assert.throws(() => verifyTaskEnvelope(task, legacy.publicKey, new Date(), () => null), /key version is unavailable/);
 });
 
 test('task authority cannot exceed the local policy', () => {
@@ -214,6 +241,19 @@ test('A2A task instructions carry bounded signed state and evidence context', ()
   assert.match(instructions, /read-only proposal/);
   assert.match(instructions, /dharma_a2a_context/);
   assert.ok(instructions.length < 20_000);
+  const canonical = canonicalTaskActionForTask({
+    ...task,
+    schema: 'dharma.task/v1', taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace',
+    target: { deviceId: 'device', endpointId: randomUUID(), provider: 'codex' }, skillBundle: null,
+    requiredSkills: [],
+    authority: { readPaths: ['.'], writePaths: [], commands: [], network: 'deny', git: 'task_branch' },
+    execution: { isolation: 'git_worktree', timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] }, budget: { mode: 'byok_local', maximumDharmaCostCents: 0 },
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: randomUUID(),
+  }, randomUUID());
+  assert.deepEqual(canonical.source, task.source);
+  assert.deepEqual(canonical.stateEnvelope, task.stateEnvelope);
+  assert.deepEqual(canonical.evidenceReferences, task.evidenceReferences);
 });
 
 test('non-A2A task instructions remain unchanged', () => {
@@ -380,7 +420,8 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
     ...networkUnsigned,
     signature: signCanonicalObject(networkUnsigned, taskKeys.privateKey),
   } as TaskEnvelope;
-  const networkResult = await executeTask({
+  let networkExecutions = 0;
+  await assert.rejects(executeTask({
     task: networkTask,
     policy: networkPolicy,
     workspace,
@@ -388,15 +429,63 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
     serverPublicKey: taskKeys.publicKey,
     receiptStore: new FileTaskReceiptStore(resolve(root, 'network-receipts')),
     actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
+    providerExecutor: async () => {
+      networkExecutions += 1;
+      return {
+        provider: 'codex', exitCode: 0, signal: null, timedOut: false,
+        stdout: 'provider said it sent the request', stderr: '',
+        stdoutSha256: `sha256:${'2'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+      };
+    },
+  }), /registered external-effect receipt verifier/);
+  assert.equal(networkExecutions, 0);
+
+  const effectScript = [
+    'const receipt = {',
+    'schema: "dharma.external-effect-receipt/v1",',
+    'actionDigest: process.env.DHARMA_ACTION_DIGEST,',
+    'externalIdempotencyKey: process.env.DHARMA_EXTERNAL_IDEMPOTENCY_KEY,',
+    'status: "committed", providerReference: "remote-change-42",',
+    `proofDigest: "sha256:${'d'.repeat(64)}", observedAt: new Date().toISOString() };`,
+    'process.stdout.write(JSON.stringify(receipt));',
+  ].join('');
+  const receiptPolicy = {
+    ...networkPolicy,
+    tasks: {
+      ...networkPolicy.tasks,
+      allowedCommands: {
+        ...networkPolicy.tasks.allowedCommands,
+        effect_receipt: { argv: [process.execPath, '-e', effectScript], timeoutSeconds: 5 },
+      },
+    },
+  };
+  const receiptBase = {
+    ...networkBase,
+    taskId: randomUUID(), target: { ...networkBase.target, endpointId: randomUUID() },
+    authority: { ...networkBase.authority, commands: [...networkBase.authority.commands, { commandId: 'effect_receipt' }] },
+    acceptance: {
+      commands: [...networkBase.acceptance.commands, { commandId: 'effect_receipt' }],
+      requiredArtifacts: [], externalEffectReceiptCommandId: 'effect_receipt',
+    },
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: randomUUID(),
+  };
+  const receiptDecision = embedDecision(receiptBase, 'release', decisionKeys.privateKey, new Date());
+  const receiptUnsigned = { ...receiptBase, actionDecision: receiptDecision };
+  const receiptTask = { ...receiptUnsigned, signature: signCanonicalObject(receiptUnsigned, taskKeys.privateKey) } as TaskEnvelope;
+  const effectResult = await executeTask({
+    task: receiptTask, policy: receiptPolicy, workspace,
+    relayStateDirectory: resolve(root, 'effect-state'), serverPublicKey: taskKeys.publicKey,
+    receiptStore: new FileTaskReceiptStore(resolve(root, 'effect-receipts')),
+    actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
     providerExecutor: async () => ({
       provider: 'codex', exitCode: 0, signal: null, timedOut: false,
-      stdout: 'provider said it sent the request', stderr: '',
-      stdoutSha256: `sha256:${'2'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+      stdout: 'provider requested the remote change', stderr: '',
+      stdoutSha256: `sha256:${'3'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
     }),
   });
-  assert.equal(networkResult.status, 'failed');
-  assert.equal(networkResult.actionAcknowledgement?.disposition, 'unknown');
-  assert.match(networkResult.commandResults.at(-1)?.stderr || '', /cannot prove an external network effect/);
+  assert.equal(effectResult.status, 'completed');
+  assert.equal(effectResult.actionAcknowledgement?.disposition, 'executed');
+  assert.equal(effectResult.externalEffectReceipt?.providerReference, 'remote-change-42');
 });
 
 test('one-use receipt replay guard rejects a second consumption atomically', async () => {
@@ -457,6 +546,13 @@ test('durable stores reject malformed or decision-conflicting receipts', async (
   await mkdir(resolve(root, 'receipts'), { recursive: true });
   await writeFile(resolve(root, 'receipts', `${taskId}.json`), JSON.stringify({ taskId, status: 'completed' }));
   await assert.rejects(receiptStore.get(taskId), /Task receipt is invalid/);
+
+  await writeFile(resolve(root, 'receipts', `${taskId}.json`), JSON.stringify({
+    taskId, status: 'completed', worktree: '/tmp/dharma-worktree', branch: `dharma/task/${taskId}`,
+    commandResults: [], startedAt: new Date(Date.now() - 1_000).toISOString(), completedAt: new Date().toISOString(),
+    externalEffectReceipt: { schema: 'dharma.external-effect-receipt/v1', status: 'committed' },
+  }));
+  await assert.rejects(receiptStore.get(taskId), /External-effect receipt is invalid/);
 
   const journalRoot = resolve(root, 'journal');
   await mkdir(journalRoot, { recursive: true });

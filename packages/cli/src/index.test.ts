@@ -1332,14 +1332,19 @@ test('signed A2A task evidence records the same structured instructions sent to 
 
 test('task execution requires the signed bundle pin to match the active native bundle', () => {
   const pin = { bundleId: 'bundle-1', bundleHash: `sha256:${'a'.repeat(64)}` };
-  assert.doesNotThrow(() => assertTaskSkillPin(pin, 'bundle-1'));
+  const active = { bundleId: 'bundle-1', bundleHash: pin.bundleHash };
+  assert.doesNotThrow(() => assertTaskSkillPin(pin, active));
   assert.doesNotThrow(() => assertTaskSkillPin(null, null));
   assert.throws(
-    () => assertTaskSkillPin(pin, 'bundle-2'),
+    () => assertTaskSkillPin(pin, { ...active, bundleId: 'bundle-2' }),
     /does not match the active local bundle \(task=bundle-1, local=bundle-2\)/,
   );
-  assert.throws(() => assertTaskSkillPin(undefined as never, 'bundle-1'), /missing its signed/);
-  assert.throws(() => assertTaskSkillPin({ ...pin, bundleHash: 'invalid' }, 'bundle-1'), /hash is invalid/);
+  assert.throws(() => assertTaskSkillPin(undefined as never, active), /missing its signed/);
+  assert.throws(() => assertTaskSkillPin({ ...pin, bundleHash: 'invalid' }, active), /hash is invalid/);
+  assert.throws(
+    () => assertTaskSkillPin(pin, { ...active, bundleHash: `sha256:${'b'.repeat(64)}` }),
+    /hash does not match the active local bundle/,
+  );
   assert.equal(taskSkillPinFailureCode(new Error('Task skill bundle does not match the active local bundle.')), 'skill_bundle_mismatch');
   assert.equal(taskSkillPinFailureCode(new Error('Task skill bundle hash is invalid.')), 'skill_bundle_hash_invalid');
 });

@@ -1072,16 +1072,19 @@ export function taskResponsePreview(receipt: TaskReceipt) {
 
 export function assertTaskSkillPin(
   pinned: TaskEnvelope['skillBundle'],
-  activeBundleId: string | null,
+  active: { bundleId: string; bundleHash: string } | null,
 ): void {
   if (pinned === undefined) throw new Error('Task is missing its signed skill bundle pin.');
-  if ((pinned?.bundleId || null) !== activeBundleId) {
+  if ((pinned?.bundleId || null) !== (active?.bundleId || null)) {
     throw new Error(
-      `Task skill bundle does not match the active local bundle (task=${pinned?.bundleId || 'none'}, local=${activeBundleId || 'none'}).`,
+      `Task skill bundle does not match the active local bundle (task=${pinned?.bundleId || 'none'}, local=${active?.bundleId || 'none'}).`,
     );
   }
   if (pinned && !/^sha256:[a-f0-9]{64}$/.test(pinned.bundleHash)) {
     throw new Error('Task skill bundle hash is invalid.');
+  }
+  if (pinned && pinned.bundleHash !== active?.bundleHash) {
+    throw new Error('Task skill bundle hash does not match the active local bundle.');
   }
 }
 
@@ -2817,12 +2820,15 @@ async function executeOneTask(
   return await withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
+  const serverPublicKeyResolver = config.serverSigningKeyset
+    ? createActionDecisionPublicKeyResolver(config.serverSigningKeyset)
+    : undefined;
   const activeSkill = await activeSkillAuthorization(
     task.target.provider, task.workspaceId, String(workspace.repositoryAgentId || ''), config,
   );
   const activeBundleId = activeSkill?.bundleId ?? null;
   try {
-    assertTaskSkillPin(task.skillBundle, activeBundleId);
+    assertTaskSkillPin(task.skillBundle, activeSkill);
   } catch (error) {
     await fabric.postTaskEvent(task.taskId, 'failed', {
       phase: 'preflight',
@@ -2844,6 +2850,7 @@ async function executeOneTask(
   try {
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
+      ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
         actionDecisions: {

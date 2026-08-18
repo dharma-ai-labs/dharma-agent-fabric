@@ -57,6 +57,7 @@ export interface InstallReceipt {
 
 export interface ActiveSkillBundleAuthorization {
   bundleId: string;
+  bundleHash: string;
   activatedAt: string;
   expiresAt: string | null;
 }
@@ -308,7 +309,12 @@ export async function getExpiredSkillBundleAuthorizationForReplacement(input: {
   if (receipt.receiptHash !== input.expectedReceiptHash) {
     throw new Error('Active bundle receipt is not the current protected authorization.');
   }
-  return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
+  return {
+    bundleId,
+    bundleHash: bundle.bundleHash,
+    activatedAt: receipt.completedAt,
+    expiresAt: bundle.expiresAt ?? null,
+  };
 }
 
 async function pathExists(path: string) {
@@ -505,7 +511,12 @@ export async function getActiveSkillBundleAuthorization(input: {
   if (receipt.receiptHash !== input.expectedReceiptHash) {
     throw new Error('Active bundle receipt is not the current protected authorization.');
   }
-  return { bundleId, activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null };
+  return {
+    bundleId,
+    bundleHash: bundle.bundleHash,
+    activatedAt: receipt.completedAt,
+    expiresAt: bundle.expiresAt ?? null,
+  };
 }
 
 export async function installSkillBundle(input: {

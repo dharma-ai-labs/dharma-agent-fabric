@@ -504,3 +504,34 @@ test('provider runner completes on a terminal JSON result without a trailing new
   assert.equal(result.signal, null);
   assert.equal(result.timedOut, false);
 });
+
+test('provider runner timeout terminates descendant processes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-tree-'));
+  const childScript = 'setInterval(()=>{},1000)';
+  const parentScript = [
+    'const {spawn}=require("node:child_process");',
+    `const child=spawn(process.execPath,["-e",${JSON.stringify(childScript)}],{stdio:"ignore"});`,
+    'process.stdout.write(String(child.pid));',
+    'setInterval(()=>{},1000);',
+  ].join('');
+  const result = await defaultProcessRunner({
+    command: process.execPath,
+    argv: ['-e', parentScript],
+    cwd: root,
+    stdin: '',
+    timeoutMs: 150,
+  });
+  assert.equal(result.timedOut, true);
+  const descendantPid = Number(result.stdout.toString('utf8'));
+  assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
+  let alive = true;
+  for (let attempt = 0; attempt < 20 && alive; attempt += 1) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    try { process.kill(descendantPid, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') alive = false;
+      else throw error;
+    }
+  }
+  assert.equal(alive, false, `descendant process ${descendantPid} survived timeout containment`);
+});

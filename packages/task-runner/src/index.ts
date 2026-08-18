@@ -55,12 +55,27 @@ export interface TaskEnvelope {
     allowlistedDomains?: string[];
   };
   execution: { isolation: 'git_worktree'; timeoutSeconds: number; leaseSeconds: number; maximumConcurrentAgents: number };
-  acceptance: { commands: Array<{ commandId: string }>; requiredArtifacts: string[] };
+  acceptance: {
+    commands: Array<{ commandId: string }>;
+    requiredArtifacts: string[];
+    externalEffectReceiptCommandId?: string;
+  };
   budget: { mode: 'byok_local' | 'byok_cloud' | 'dharma_managed'; maximumDharmaCostCents: number; maximumProviderCostCents?: number | null };
   createdAt: string;
   expiresAt: string;
   nonce: string;
+  signerKeyVersion?: string;
   signature?: string | null;
+}
+
+export interface ExternalEffectReceipt {
+  schema: 'dharma.external-effect-receipt/v1';
+  actionDigest: string;
+  externalIdempotencyKey: string;
+  status: 'committed';
+  providerReference: string;
+  proofDigest: string;
+  observedAt: string;
 }
 
 export interface CommandResult {
@@ -81,6 +96,7 @@ export interface TaskReceipt {
   branch: string;
   commandResults: CommandResult[];
   actionAcknowledgement?: ActionDecisionAcknowledgement;
+  externalEffectReceipt?: ExternalEffectReceipt;
   startedAt: string;
   completedAt: string;
 }
@@ -154,19 +170,36 @@ function assertContained(root: string, candidate: string): string {
   return absolute;
 }
 
+function terminateProcessTree(child: ReturnType<typeof spawn>, force: boolean) {
+  if (!child.pid) return;
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', ...(force ? ['/f'] : [])], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    killer.unref();
+    child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    return;
+  }
+  try { process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM'); }
+  catch { child.kill(force ? 'SIGKILL' : 'SIGTERM'); }
+}
+
 async function runProcess(command: string, argv: string[], options: {
   cwd: string;
   timeoutMs: number;
   signal?: AbortSignal;
   maximumOutputBytes?: number;
+  environment?: Record<string, string>;
 }): Promise<Omit<CommandResult, 'commandId'>> {
   return new Promise((accept, reject) => {
     const child = spawn(command, argv, {
       cwd: options.cwd,
-      env: { ...process.env, DHARMA_TASK_WORKTREE: options.cwd },
+      env: { ...process.env, DHARMA_TASK_WORKTREE: options.cwd, ...(options.environment || {}) },
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
     const outputLimit = options.maximumOutputBytes ?? 1_000_000;
     const stdout: Buffer[] = [];
@@ -182,12 +215,18 @@ async function runProcess(command: string, argv: string[], options: {
     };
     child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk, 'stdout'));
     child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk, 'stderr'));
-    const cancel = () => child.kill('SIGTERM');
+    let escalation: NodeJS.Timeout | undefined;
+    const cancel = () => {
+      terminateProcessTree(child, false);
+      escalation = setTimeout(() => terminateProcessTree(child, true), 1_000);
+      escalation.unref();
+    };
     options.signal?.addEventListener('abort', cancel, { once: true });
-    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, options.timeoutMs);
+    const timeout = setTimeout(() => { timedOut = true; terminateProcessTree(child, true); }, options.timeoutMs);
     child.once('error', reject);
     child.once('close', (code, signal) => {
       clearTimeout(timeout);
+      if (escalation) clearTimeout(escalation);
       options.signal?.removeEventListener('abort', cancel);
       const stdoutBuffer = Buffer.concat(stdout);
       const stderrBuffer = Buffer.concat(stderr);
@@ -215,13 +254,22 @@ async function gitOutput(repository: string, argv: string[]) {
   return result.stdout;
 }
 
-export function verifyTaskEnvelope(task: TaskEnvelope, publicKey: KeyObject, now = new Date()): void {
+export function verifyTaskEnvelope(
+  task: TaskEnvelope,
+  publicKey: KeyObject,
+  now = new Date(),
+  resolvePublicKey?: ActionDecisionPublicKeyResolver,
+): void {
   const contract = validateTaskEnvelopeContract(task);
   if (!contract.ok) throw new Error(`Task failed schema validation: ${JSON.stringify(contract.errors)}`);
   if (!task.signature) throw new Error('Task signature is required.');
   if (Date.parse(task.expiresAt) <= now.getTime()) throw new Error('Task has expired.');
   const { signature, ...unsigned } = task;
-  if (!verifyCanonicalObject(unsigned, signature, publicKey)) throw new Error('Task signature is invalid.');
+  const verificationKey = task.signerKeyVersion
+    ? resolvePublicKey?.(task.signerKeyVersion)
+    : publicKey;
+  if (!verificationKey) throw new Error('Task signing key version is unavailable or expired.');
+  if (!verifyCanonicalObject(unsigned, signature, verificationKey)) throw new Error('Task signature is invalid.');
 }
 
 export function providerInstructionsForTask(task: TaskEnvelope): string {
@@ -251,6 +299,24 @@ function receiptForDurableStorage(receipt: TaskReceipt): TaskReceipt {
     ...receipt,
     commandResults: receipt.commandResults.map((result) => ({ ...result, stdout: '', stderr: '' })),
   };
+}
+
+function assertValidExternalEffectReceipt(value: unknown): asserts value is ExternalEffectReceipt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('External-effect receipt is invalid.');
+  }
+  const receipt = value as Partial<ExternalEffectReceipt>;
+  if (receipt.schema !== 'dharma.external-effect-receipt/v1'
+    || !/^sha256:[a-f0-9]{64}$/.test(String(receipt.actionDigest || ''))
+    || typeof receipt.externalIdempotencyKey !== 'string'
+    || receipt.externalIdempotencyKey.length < 1 || receipt.externalIdempotencyKey.length > 500
+    || receipt.status !== 'committed'
+    || typeof receipt.providerReference !== 'string'
+    || receipt.providerReference.length < 1 || receipt.providerReference.length > 500
+    || !/^sha256:[a-f0-9]{64}$/.test(String(receipt.proofDigest || ''))
+    || !Number.isFinite(Date.parse(String(receipt.observedAt || '')))) {
+    throw new Error('External-effect receipt is invalid.');
+  }
 }
 
 function assertValidTaskReceipt(value: unknown, expectedTaskId?: string): asserts value is TaskReceipt {
@@ -285,6 +351,9 @@ function assertValidTaskReceipt(value: unknown, expectedTaskId?: string): assert
     if (!acknowledgement.ok || receipt.actionAcknowledgement.taskId !== receipt.taskId) {
       throw new Error('Task receipt action acknowledgement is invalid.');
     }
+  }
+  if (receipt.externalEffectReceipt !== undefined) {
+    assertValidExternalEffectReceipt(receipt.externalEffectReceipt);
   }
 }
 
@@ -565,6 +634,11 @@ export function canonicalTaskActionForTask(
     workspaceId: task.workspaceId,
     taskType: task.taskType,
     instructions: task.instructions,
+    ...(task.source ? {
+      source: task.source,
+      stateEnvelope: task.stateEnvelope,
+      evidenceReferences: task.evidenceReferences,
+    } : {}),
     skillBundle: task.skillBundle,
     requiredSkills: task.requiredSkills,
     authority: task.authority,
@@ -573,6 +647,39 @@ export function canonicalTaskActionForTask(
     budget: task.budget,
     expiresAt: task.expiresAt,
   };
+}
+
+export function parseExternalEffectReceipt(
+  stdout: string,
+  expected: { actionDigest: string; externalIdempotencyKey: string },
+): ExternalEffectReceipt {
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let value: unknown;
+  for (const line of lines.reverse()) {
+    try {
+      const candidate = JSON.parse(line) as unknown;
+      if (candidate && typeof candidate === 'object'
+        && (candidate as { schema?: unknown }).schema === 'dharma.external-effect-receipt/v1') {
+        value = candidate;
+        break;
+      }
+    } catch { /* verifier output may contain non-JSON diagnostics before the receipt */ }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('External-effect verifier did not emit a Dharma effect receipt.');
+  }
+  assertValidExternalEffectReceipt(value);
+  const receipt = value as Partial<ExternalEffectReceipt>;
+  if (receipt.schema !== 'dharma.external-effect-receipt/v1'
+    || receipt.actionDigest !== expected.actionDigest
+    || receipt.externalIdempotencyKey !== expected.externalIdempotencyKey
+    || receipt.status !== 'committed'
+    || typeof receipt.providerReference !== 'string' || receipt.providerReference.length < 1 || receipt.providerReference.length > 500
+    || !/^sha256:[a-f0-9]{64}$/.test(String(receipt.proofDigest || ''))
+    || !Number.isFinite(Date.parse(String(receipt.observedAt || '')))) {
+    throw new Error('External-effect receipt does not match the signed action and idempotency key.');
+  }
+  return receipt as ExternalEffectReceipt;
 }
 
 export async function authorizeEmbeddedActionDecision(input: {
@@ -640,13 +747,14 @@ export async function executeTask(input: {
   workspace: string;
   relayStateDirectory: string;
   serverPublicKey: KeyObject;
+  serverPublicKeyResolver?: ActionDecisionPublicKeyResolver;
   receiptStore: FileTaskReceiptStore;
   signal?: AbortSignal;
   providerExecutor?: ProviderTaskExecutor;
   actionDecisions?: ActionDecisionReceiver;
   actionExecutionJournal?: FileActionExecutionJournal;
 }): Promise<TaskReceipt> {
-  verifyTaskEnvelope(input.task, input.serverPublicKey);
+  verifyTaskEnvelope(input.task, input.serverPublicKey, new Date(), input.serverPublicKeyResolver);
   const taskExpiresAt = Date.parse(input.task.expiresAt);
   const remainingTaskMs = () => taskExpiresAt - Date.now();
   if (!Number.isFinite(taskExpiresAt) || remainingTaskMs() <= 0) throw new Error('Task envelope expired.');
@@ -663,6 +771,14 @@ export async function executeTask(input: {
   for (const { commandId } of input.task.acceptance.commands) {
     if (!allowed.has(commandId)) throw new Error(`Acceptance command is outside task authority: ${commandId}`);
   }
+  const effectReceiptCommandId = input.task.acceptance.externalEffectReceiptCommandId;
+  if (effectReceiptCommandId
+    && !input.task.acceptance.commands.some(({ commandId }) => commandId === effectReceiptCommandId)) {
+    throw new Error('External-effect receipt command must be an acceptance command.');
+  }
+  if (requiresActionDecisionReceipt(input.task) && input.task.authority.network !== 'deny' && !effectReceiptCommandId) {
+    throw new Error('Network-authorized tasks require a registered external-effect receipt verifier.');
+  }
 
   const receiptRequired = requiresActionDecisionReceipt(input.task);
   const journal = input.actionExecutionJournal
@@ -674,6 +790,7 @@ export async function executeTask(input: {
   let journalRecord: ActionExecutionJournalRecord | null = null;
   let executionClaimed = false;
   let contained = false;
+  let externalEffectReceipt: ExternalEffectReceipt | undefined;
   const startedAt = new Date().toISOString();
 
   if (receiptRequired) {
@@ -825,9 +942,22 @@ export async function executeTask(input: {
           acceptanceTimeBudgetMs,
         ),
         signal: input.signal,
+        ...(decisionReceipt ? {
+          environment: {
+            DHARMA_EXTERNAL_IDEMPOTENCY_KEY: decisionReceipt.decisionId,
+            DHARMA_ACTION_DIGEST: decisionReceipt.actionDigest,
+          },
+        } : {}),
       });
       if (remainingTaskMs() <= 0) throw new Error('Task expired during acceptance verification.');
       commandResults.push({ commandId, ...result });
+      if (receiptRequired && commandId === input.task.acceptance.externalEffectReceiptCommandId
+        && decisionReceipt) {
+        externalEffectReceipt = parseExternalEffectReceipt(result.stdout, {
+          actionDigest: decisionReceipt.actionDigest,
+          externalIdempotencyKey: decisionReceipt.decisionId,
+        });
+      }
       if (result.exitCode !== 0 || result.timedOut) { status = input.signal?.aborted ? 'cancelled' : 'failed'; break; }
     }
     } catch (error) {
@@ -840,7 +970,8 @@ export async function executeTask(input: {
       });
     }
   }
-  if (receiptRequired && !contained && status === 'completed' && input.task.authority.network !== 'deny') {
+  if (receiptRequired && !contained && status === 'completed' && input.task.authority.network !== 'deny'
+    && !externalEffectReceipt) {
     const message = 'Provider completion cannot prove an external network effect without a provider-specific effect receipt.';
     status = 'failed';
     commandResults.push({
@@ -871,6 +1002,7 @@ export async function executeTask(input: {
     worktree,
     branch,
     commandResults,
+    ...(externalEffectReceipt ? { externalEffectReceipt } : {}),
     ...(actionAcknowledgement ? { actionAcknowledgement } : {}),
     startedAt,
     completedAt: new Date().toISOString(),

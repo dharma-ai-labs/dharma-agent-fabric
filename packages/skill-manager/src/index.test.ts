@@ -98,11 +98,13 @@ test('expired replacement polling verifies the signed bundle, endpoint, and prot
     }),
     /has expired/,
   );
-  assert.equal((await getExpiredSkillBundleAuthorizationForReplacement({
+  const expiredAuthorization = await getExpiredSkillBundleAuthorizationForReplacement({
     nativeSkillDirectory: native, workspaceId, provider: 'codex', organizationId: 'org_test',
     organizationAgentId, deviceId, serverPublicKey: server.publicKey, devicePublicKey: device.publicKey,
     expectedReceiptHash: receipt.receiptHash, now: new Date(Date.parse(expiresAt) + 1),
-  }))?.bundleId, bundle.bundleId);
+  });
+  assert.equal(expiredAuthorization?.bundleId, bundle.bundleId);
+  assert.equal(expiredAuthorization?.bundleHash, bundle.bundleHash);
   await assert.rejects(
     getExpiredSkillBundleAuthorizationForReplacement({
       nativeSkillDirectory: native, workspaceId, provider: 'codex', organizationId: 'org_test',
