@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-sdk",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Organization-scoped TypeScript SDK for managed, local BYOK, and GCP Vertex BYOK Agent Fabric APIs",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/sdk#readme",
@@ -31,5 +31,8 @@
   },
   "scripts": {
     "test": "node --test dist/*.test.js"
+  },
+  "devDependencies": {
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.6"
   }
 }

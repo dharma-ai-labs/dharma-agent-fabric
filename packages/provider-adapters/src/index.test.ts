@@ -272,6 +272,7 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   let observed: Record<string, unknown> = {};
   const result = await executeProviderTask({
     provider: 'codex', workspace: root, instructions: 'Fix the parser test.', timeoutSeconds: 30, allowedCommandArgv: [['npm', 'test']], allowWrites: true,
+    externalIdempotencyKey: 'decision-123', actionDigest: `sha256:${'a'.repeat(64)}`,
     runner: async (input) => {
       observed = input;
       return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('{"type":"result"}\n'), stderr: Buffer.alloc(0) };
@@ -281,6 +282,10 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   assert.equal(observed.stdin, 'Fix the parser test.');
   assert.deepEqual((observed.argv as string[]).slice(0, 3), ['exec', '--ignore-user-config', '--json']);
   assert.ok((observed.argv as string[]).includes('sandbox_workspace_write.network_access=false'));
+  assert.deepEqual(observed.environment, {
+    DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'decision-123',
+    DHARMA_ACTION_DIGEST: `sha256:${'a'.repeat(64)}`,
+  });
   assert.equal(result.exitCode, 0);
 });
 

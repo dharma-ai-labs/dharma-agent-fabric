@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  actionDecisionCapabilityFreshUntil,
   canonicalFilesystemPath,
   installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
@@ -23,6 +24,7 @@ import {
   materializeInlineSkillFiles,
   nativeSkillDirectory,
   normalizeGitRemoteIdentity,
+  postTaskOutcome,
   parseCliOptions,
   parseSelectedProviderIds,
   pathExistsOrThrow,
@@ -63,6 +65,43 @@ test('uses the production B2B portal and keeps hq-url as a compatibility alias',
     ['hq-url', 'https://legacy.example'],
     ['portal-url', 'https://www.dharma-ai.io'],
   ])), 'https://www.dharma-ai.io');
+});
+
+test('posts action enforcement before a consequential task completion event', async () => {
+  const events: string[] = [];
+  const acknowledgement = {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    endpointId: '22222222-2222-4222-8222-222222222222',
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    disposition: 'executed' as const,
+    externalIdempotencyKeyHash: 'b'.repeat(64),
+    resultDigest: `sha256:${'c'.repeat(64)}`,
+    acknowledgedAt: new Date().toISOString(),
+  };
+  await postTaskOutcome({
+    task: {
+      taskId: acknowledgement.taskId,
+      actionDecision: {
+        id: '33333333-3333-4333-8333-333333333333',
+        actionDigest: acknowledgement.actionDigest,
+        receipt: {} as never,
+        signature: 'signature',
+        keyVersion: 'kms:test/1',
+      },
+    },
+    receipt: { status: 'completed', actionAcknowledgement: acknowledgement },
+    payload: { status: 'completed' },
+    async postEnforcement(decisionId, body) {
+      events.push(`enforcement:${decisionId}:${body.disposition}`);
+    },
+    async postEvent(taskId, eventType) {
+      events.push(`event:${taskId}:${eventType}`);
+    },
+  });
+  assert.deepEqual(events, [
+    'enforcement:33333333-3333-4333-8333-333333333333:executed',
+    'event:11111111-1111-4111-8111-111111111111:completed',
+  ]);
 });
 
 test('fail-closed existence checks distinguish absence from unreadable state', async () => {
@@ -126,6 +165,32 @@ test('organization raw evidence retention is validated and defaults explicitly',
   assert.equal(rawLocalRetentionDays({ retention: { rawLocalDays: 7 } }), 7);
   assert.throws(() => rawLocalRetentionDays({ retention: { rawLocalDays: 0 } }), /between 1 and 3650/);
   assert.throws(() => rawLocalRetentionDays({ retention: { rawLocalDays: 1.5 } }), /between 1 and 3650/);
+});
+
+test('action-decision capability freshness never outlives its key or keyset', () => {
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const base = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_test', generation: 1, signedByKeyVersion: 'kms/1', signature: 'signature',
+    issuedAt: new Date(now.getTime() - 60_000).toISOString(),
+    expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(),
+    keys: [{
+      keyVersion: 'kms/1', publicKeyEd25519: 'public', status: 'active' as const,
+      notBefore: new Date(now.getTime() - 60_000).toISOString(),
+      notAfter: new Date(now.getTime() + 90_000).toISOString(),
+    }],
+  };
+  assert.equal(
+    actionDecisionCapabilityFreshUntil(base, ['kms/1'], now),
+    new Date(now.getTime() + 90_000).toISOString(),
+  );
+  assert.throws(
+    () => actionDecisionCapabilityFreshUntil({
+      ...base,
+      keys: [{ ...base.keys[0]!, notAfter: now.toISOString() }],
+    }, ['kms/1'], now),
+    /invalid_or_expired/,
+  );
 });
 
 test('version is parser-safe structured output', async () => {

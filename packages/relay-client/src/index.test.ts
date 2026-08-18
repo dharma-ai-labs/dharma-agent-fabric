@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify, type JsonWebKey } from 'node:crypto';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -12,12 +12,19 @@ import {
   loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity,
   isDefinitiveAgentFabricRejection,
+  installTrustedServerSigningKeyset,
+  loadDeviceEnrollmentAnchor,
+  recoverDeviceEnrollmentConsistency,
   normalizeHqUrl,
   normalizeRelayUrl,
   saveDeviceConfig,
   saveActiveSkillAuthorizationAnchor,
   saveDeviceEnrollmentAnchor,
 } from './index.js';
+import {
+  signCanonicalObject,
+  type TrustedServerSigningKeyset,
+} from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 function memoryStore(): SecureSecretStore {
@@ -33,6 +40,53 @@ function memoryStore(): SecureSecretStore {
 async function anchorConfig(configPath: string, store: SecureSecretStore) {
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   await saveDeviceEnrollmentAnchor({ config, store });
+}
+
+function keysetFixture(now: Date) {
+  const first = generateKeyPairSync('ed25519');
+  const second = generateKeyPairSync('ed25519');
+  const firstPublic = (first.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const secondPublic = (second.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const notBefore = new Date(now.getTime() - 60_000).toISOString();
+  const notAfter = new Date(now.getTime() + 60 * 60_000).toISOString();
+  const initialUnsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a', generation: 1,
+    keys: [{ keyVersion: 'kms/1', publicKeyEd25519: firstPublic, status: 'active' as const, notBefore, notAfter }],
+    signedByKeyVersion: 'kms/1', issuedAt: now.toISOString(), expiresAt: notAfter,
+  };
+  const initial: TrustedServerSigningKeyset = {
+    ...initialUnsigned, signature: signCanonicalObject(initialUnsigned, first.privateKey),
+  };
+  const rotatedUnsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a', generation: 2,
+    keys: [
+      { keyVersion: 'kms/1', publicKeyEd25519: firstPublic, status: 'overlap' as const, notBefore, notAfter },
+      { keyVersion: 'kms/2', publicKeyEd25519: secondPublic, status: 'active' as const, notBefore, notAfter },
+    ],
+    signedByKeyVersion: 'kms/1', issuedAt: new Date(now.getTime() + 1_000).toISOString(), expiresAt: notAfter,
+  };
+  const rotated: TrustedServerSigningKeyset = {
+    ...rotatedUnsigned, signature: signCanonicalObject(rotatedUnsigned, first.privateKey),
+  };
+  return { firstPublic, initial, rotated };
+}
+
+async function saveKeysetConfig(input: {
+  configPath: string;
+  publicKeyEd25519: string;
+  devicePublicKeyEd25519?: string;
+  keyset: TrustedServerSigningKeyset;
+  now: Date;
+}) {
+  await saveDeviceConfig(input.configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: input.devicePublicKeyEd25519 ?? input.publicKeyEd25519,
+    serverPublicKeyEd25519: input.publicKeyEd25519,
+    serverSigningKeyset: input.keyset, relayUrl: 'wss://relay.example', enrolledAt: input.now.toISOString(),
+  });
 }
 
 test('HQ and relay origins fail closed for deceptive hosts, credentials, and plaintext non-loopback transport', () => {
@@ -51,6 +105,194 @@ test('device identity remains stable in the OS secret store', async () => {
   const second = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
   assert.equal(first.publicKeyEd25519, second.publicKeyEd25519);
   assert.ok(first.privateJwk.d);
+});
+
+test('action enforcement acknowledgement uses the device-signed decision route', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-action-enforcement-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const requests: Request[] = [];
+  const client = await AgentFabricClient.open({
+    configPath,
+    statePath,
+    store,
+    fetcher: async (url, init) => {
+      requests.push(new Request(url, init));
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    },
+  });
+  await client.openSession();
+  const decisionId = '33333333-3333-4333-8333-333333333333';
+  await client.postActionEnforcement(decisionId, {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    endpointId: '22222222-2222-4222-8222-222222222222',
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    disposition: 'executed',
+    externalIdempotencyKeyHash: 'b'.repeat(64),
+    resultDigest: `sha256:${'c'.repeat(64)}`,
+    acknowledgedAt: new Date().toISOString(),
+  });
+  const request = requests.at(-1)!;
+  assert.equal(new URL(request.url).pathname, `/api/v1/orgs/org_a/agent-fabric/decisions/${decisionId}/enforcements`);
+  assert.equal(request.headers.get('x-dharma-signature')?.length ? true : false, true);
+});
+
+test('stale action enforcement is refreshed and re-signed without changing its effect digests', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-stale-action-enforcement-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const bodies: Array<Record<string, unknown>> = [];
+  const client = await AgentFabricClient.open({
+    configPath,
+    statePath,
+    store,
+    fetcher: async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    },
+  });
+  await client.openSession();
+  await client.postActionEnforcement('33333333-3333-4333-8333-333333333333', {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    endpointId: '22222222-2222-4222-8222-222222222222',
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    disposition: 'executed',
+    externalIdempotencyKeyHash: 'b'.repeat(64),
+    resultDigest: `sha256:${'c'.repeat(64)}`,
+    acknowledgedAt: '2026-01-01T00:00:00.000Z',
+  });
+  const sent = bodies.at(-1)!;
+  assert.ok(Date.parse(String(sent.acknowledgedAt)) > Date.now() - 60_000);
+  assert.equal(sent.actionDigest, `sha256:${'a'.repeat(64)}`);
+  assert.equal(sent.externalIdempotencyKeyHash, 'b'.repeat(64));
+  assert.equal(sent.resultDigest, `sha256:${'c'.repeat(64)}`);
+});
+
+test('trusted server signing keyset is verified against the secure enrollment root before installation', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-signing-keyset-'));
+  const configPath = resolve(root, 'device.json');
+  const signing = generateKeyPairSync('ed25519');
+  const publicKeyEd25519 = (signing.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const unsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a',
+    generation: 1,
+    keys: [{
+      keyVersion: 'kms/1', publicKeyEd25519, status: 'active' as const,
+      notBefore: new Date(now.getTime() - 60_000).toISOString(),
+      notAfter: new Date(now.getTime() + 60 * 60_000).toISOString(),
+    }],
+    signedByKeyVersion: 'kms/1',
+    issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 60 * 60_000).toISOString(),
+  };
+  const candidate: TrustedServerSigningKeyset = {
+    ...unsigned,
+    signature: signCanonicalObject(unsigned, signing.privateKey),
+  };
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519, serverPublicKeyEd25519: publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: now.toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const installed = await installTrustedServerSigningKeyset({ configPath, candidate, store, now });
+  assert.deepEqual(installed.serverSigningKeyset, candidate);
+  await assert.rejects(
+    installTrustedServerSigningKeyset({
+      configPath,
+      candidate: { ...candidate, organizationId: 'org_other', generation: 2 },
+      store,
+      now,
+    }),
+    /organization_mismatch|bad_signature/,
+  );
+});
+
+test('interrupted keyset installation recovers either verified write order without weakening trust', async () => {
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const fixture = keysetFixture(now);
+
+  const anchorAheadStore = memoryStore();
+  const anchorAheadRoot = await mkdtemp(resolve(tmpdir(), 'fabric-keyset-anchor-ahead-'));
+  const anchorAheadPath = resolve(anchorAheadRoot, 'device.json');
+  await saveKeysetConfig({ configPath: anchorAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.initial, now });
+  await anchorConfig(anchorAheadPath, anchorAheadStore);
+  const anchorAheadConfig = JSON.parse(await readFile(anchorAheadPath, 'utf8'));
+  await saveDeviceEnrollmentAnchor({ config: { ...anchorAheadConfig, serverSigningKeyset: fixture.rotated }, store: anchorAheadStore });
+  const recoveredDisk = await recoverDeviceEnrollmentConsistency({ configPath: anchorAheadPath, store: anchorAheadStore, now });
+  assert.equal(recoveredDisk.serverSigningKeyset?.generation, 2);
+  assert.equal(JSON.parse(await readFile(anchorAheadPath, 'utf8')).serverSigningKeyset.generation, 2);
+
+  const diskAheadStore = memoryStore();
+  const diskAheadRoot = await mkdtemp(resolve(tmpdir(), 'fabric-keyset-disk-ahead-'));
+  const diskAheadPath = resolve(diskAheadRoot, 'device.json');
+  await saveKeysetConfig({ configPath: diskAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.initial, now });
+  await anchorConfig(diskAheadPath, diskAheadStore);
+  await saveKeysetConfig({ configPath: diskAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.rotated, now });
+  const recoveredAnchor = await recoverDeviceEnrollmentConsistency({ configPath: diskAheadPath, store: diskAheadStore, now });
+  assert.equal(recoveredAnchor.serverSigningKeyset?.generation, 2);
+  assert.equal((await loadDeviceEnrollmentAnchor({ config: recoveredAnchor, store: diskAheadStore })).serverSigningKeyset?.generation, 2);
+});
+
+test('authenticated workspace responses can deliver only chain-verified periodic keysets', async () => {
+  const now = new Date();
+  const fixture = keysetFixture(now);
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-keyset-workspace-delivery-'));
+  const configPath = resolve(root, 'device.json');
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  await saveKeysetConfig({
+    configPath, publicKeyEd25519: fixture.firstPublic,
+    devicePublicKeyEd25519: identity.publicKeyEd25519, keyset: fixture.initial, now,
+  });
+  await anchorConfig(configPath, store);
+  const client = await AgentFabricClient.open({
+    configPath, statePath: resolve(root, 'state.json'), store,
+    fetcher: async (url) => new Response(JSON.stringify(
+      new URL(url).pathname.endsWith('/agent-fabric/workspaces')
+        ? { workspaceId: 'workspace', serverSigningKeyset: fixture.rotated }
+        : { ok: true },
+    ), { status: 201 }),
+  });
+  await client.openSession();
+  await client.registerWorkspace({ workspaceId: 'workspace' });
+  assert.equal(client.config.serverSigningKeyset?.generation, 2);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).serverSigningKeyset.generation, 2);
+
+  const untrusted = { ...fixture.rotated, generation: 3, signature: 'invalid' };
+  const rejectingClient = await AgentFabricClient.open({
+    configPath, statePath: resolve(root, 'state-reject.json'), store,
+    fetcher: async (url) => new Response(JSON.stringify(
+      new URL(url).pathname.endsWith('/agent-fabric/workspaces')
+        ? { workspaceId: 'workspace', serverSigningKeyset: untrusted }
+        : { ok: true },
+    ), { status: 201 }),
+  });
+  await rejectingClient.openSession();
+  await assert.rejects(rejectingClient.registerWorkspace({ workspaceId: 'workspace' }), /Server signing keyset was rejected/);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).serverSigningKeyset.generation, 2);
 });
 
 test('active skill authorization anchors can be restored or removed transactionally', async () => {
