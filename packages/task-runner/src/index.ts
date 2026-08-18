@@ -178,6 +178,7 @@ function terminateProcessTree(child: ReturnType<typeof spawn>, force: boolean) {
       stdio: 'ignore',
     });
     killer.unref();
+    child.kill(force ? 'SIGKILL' : 'SIGTERM');
     return;
   }
   try { process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM'); }
