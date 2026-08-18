@@ -78,20 +78,36 @@ const windowsRead = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma 
 const windowsWrite = `${windowsPreamble}$value=[Console]::In.ReadToEnd(); try {$old=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($old)} catch {}; $credential=[Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime]::new("Dharma Agent Fabric",$args[0],$value); $vault.Add($credential)`;
 const windowsDelete = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($credential)} catch {exit 3}`;
 
-interface WindowsCommandSpec { command: string; prefixArgs: string[] }
+interface WindowsCommandSpec {
+  command: string;
+  prefixArgs: string[];
+  timeoutMs: number;
+  retryAttempts: number;
+}
 
 function windowsCommandSpec(platform = process.platform): WindowsCommandSpec {
-  if (platform === 'win32') return { command: 'powershell.exe', prefixArgs: [] };
+  if (platform === 'win32') {
+    return {
+      command: 'powershell.exe',
+      prefixArgs: [],
+      timeoutMs: 5_000,
+      retryAttempts: 3,
+    };
+  }
   return {
     command: '/init',
     prefixArgs: ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'],
+    // WSL cold-start and WinRT activation routinely exceed five seconds.
+    // Keep the bridge bounded while allowing one transient retry.
+    timeoutMs: 15_000,
+    retryAttempts: 2,
   };
 }
 
-function windowsStore(command?: string): SecureSecretStore {
-  const commandSpec = command
-    ? { command, prefixArgs: [] }
-    : windowsCommandSpec();
+function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec): SecureSecretStore {
+  const commandSpec = commandSpecOverride ?? (command
+    ? { command, prefixArgs: [], timeoutMs: 5_000, retryAttempts: 3 }
+    : windowsCommandSpec());
   const invoke = (script: string, account: string, secret?: string) => withTransientWindowsRetry(
     () => run(commandSpec.command, [
       ...commandSpec.prefixArgs,
@@ -100,7 +116,8 @@ function windowsStore(command?: string): SecureSecretStore {
       '-Command',
       `& { ${script} }`,
       account,
-    ], secret, 5_000),
+    ], secret, commandSpec.timeoutMs),
+    { attempts: commandSpec.retryAttempts },
   );
   return {
     backend: 'windows-credential-manager',
