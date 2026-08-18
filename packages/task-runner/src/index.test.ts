@@ -355,6 +355,47 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
   );
   assert.equal(durableJournal.includes('done'), false);
   assert.equal(durableJournal.includes('released'), false);
+
+  const networkPolicy = {
+    ...policy,
+    tasks: { ...policy.tasks, defaultNetwork: 'allowlisted_domains' as const },
+  };
+  const networkBase = {
+    ...baseTask,
+    taskId: randomUUID(),
+    target: { ...baseTask.target, endpointId: randomUUID() },
+    authority: {
+      ...baseTask.authority,
+      network: 'allowlisted_domains' as const,
+      allowlistedDomains: ['api.example.test'],
+    },
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    nonce: randomUUID(),
+  };
+  const networkDecision = embedDecision(networkBase, 'release', decisionKeys.privateKey, new Date());
+  const networkUnsigned = { ...networkBase, actionDecision: networkDecision };
+  const networkTask = {
+    ...networkUnsigned,
+    signature: signCanonicalObject(networkUnsigned, taskKeys.privateKey),
+  } as TaskEnvelope;
+  const networkResult = await executeTask({
+    task: networkTask,
+    policy: networkPolicy,
+    workspace,
+    relayStateDirectory: resolve(root, 'network-state'),
+    serverPublicKey: taskKeys.publicKey,
+    receiptStore: new FileTaskReceiptStore(resolve(root, 'network-receipts')),
+    actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
+    providerExecutor: async () => ({
+      provider: 'codex', exitCode: 0, signal: null, timedOut: false,
+      stdout: 'provider said it sent the request', stderr: '',
+      stdoutSha256: `sha256:${'2'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }),
+  });
+  assert.equal(networkResult.status, 'failed');
+  assert.equal(networkResult.actionAcknowledgement?.disposition, 'unknown');
+  assert.match(networkResult.commandResults.at(-1)?.stderr || '', /cannot prove an external network effect/);
 });
 
 test('one-use receipt replay guard rejects a second consumption atomically', async () => {

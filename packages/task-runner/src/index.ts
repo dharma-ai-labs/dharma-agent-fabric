@@ -820,6 +820,16 @@ export async function executeTask(input: {
       });
     }
   }
+  if (receiptRequired && !contained && status === 'completed' && input.task.authority.network !== 'deny') {
+    const message = 'Provider completion cannot prove an external network effect without a provider-specific effect receipt.';
+    status = 'failed';
+    commandResults.push({
+      commandId: 'runner', exitCode: null, signal: null, timedOut: false,
+      stdoutSha256: `sha256:${'0'.repeat(64)}`,
+      stderrSha256: `sha256:${createHash('sha256').update(message).digest('hex')}`,
+      stdout: '', stderr: message,
+    });
+  }
   const actionAcknowledgement = decisionReceipt && input.task.target.endpointId
     ? buildActionDecisionAcknowledgement({
       taskId: input.task.taskId,
