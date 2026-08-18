@@ -824,6 +824,9 @@ export class AgentFabricClient {
     const taskId = decodeURIComponent(route[1]!);
     const trajectoryCapsuleHash = String(payload?.trajectoryCapsuleHash || '');
     if (request.eventType !== 'completed') return;
+    // First-run tasks without an active skill are valid completions, but they
+    // do not stage a signed trajectory for recovery.
+    if (!trajectoryCapsuleHash) return;
     const receiptHash = String(receipt?.hash || '');
     if (!/^[0-9a-f-]{36}$/i.test(taskId)
       || !/^sha256:[a-f0-9]{64}$/.test(trajectoryCapsuleHash)) {
