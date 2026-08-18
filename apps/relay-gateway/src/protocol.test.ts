@@ -45,6 +45,21 @@ test('relay accepts bundle-qualified skill receipts', () => {
   assert.match(parsed.pathname, /skills\/d327bcce.*\/receipts$/);
 });
 
+test('relay accepts only UUID-scoped action enforcement receipts', () => {
+  const decisionId = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
+  assert.doesNotThrow(() => parseRelayRequest({
+    ...request,
+    pathname: `/api/v1/orgs/org_customer/agent-fabric/decisions/${decisionId}/enforcements`,
+  }));
+  for (const pathname of [
+    '/api/v1/orgs/org_customer/agent-fabric/decisions/all/enforcements',
+    `/api/v1/orgs/org_customer/agent-fabric/decisions/${decisionId}/enforcements/replay`,
+    `/api/v1/orgs/org_customer/agent-fabric/decisions/${decisionId}`,
+  ]) {
+    assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);
+  }
+});
+
 test('relay accepts only bounded evidence poll and response routes', () => {
   assert.doesNotThrow(() => parseRelayRequest({
     ...request,
