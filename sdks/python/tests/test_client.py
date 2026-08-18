@@ -75,6 +75,33 @@ class AgentFabricClientTest(unittest.TestCase):
         self.assertEqual(json.loads(request.data)["attachments"][0]["mimeType"], "image/png")
         self.assertNotIn("run.app", request.full_url)
 
+    def test_action_decision_uses_hq_and_keeps_acknowledgement_device_only(self):
+        captured = []
+
+        def fake_urlopen(request, timeout):
+            captured.append((request, timeout))
+            return _Response({"ok": True, "decision": {"outcome": "release"}})
+
+        client = AgentFabricClient("org_northstar", "dharma_org_test")
+        with patch("dharma_agent_fabric.client.urlopen", fake_urlopen):
+            client.request_action_decision({
+                "evaluationContractId": "11111111-1111-4111-8111-111111111111",
+                "task": {"taskId": "22222222-2222-4222-8222-222222222222"},
+                "stateEnvelope": {"proposed_action": "apply_patch"},
+                "evidenceReferences": [],
+            })
+            client.list_action_decisions()
+            client.transition_evaluation_contract({
+                "contractId": "11111111-1111-4111-8111-111111111111",
+                "action": "activate",
+                "confirmation": "ACTIVATE EVALUATION CONTRACT 11111111-1111-4111-8111-111111111111",
+            })
+
+        self.assertEqual(captured[0][0].full_url, "https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/decisions")
+        self.assertEqual(captured[1][0].full_url, "https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/decisions")
+        self.assertEqual(captured[2][0].full_url, "https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/evaluation-contracts")
+        self.assertFalse(hasattr(client, "acknowledge_action_decision_enforcement"))
+
 
 if __name__ == "__main__":
     unittest.main()

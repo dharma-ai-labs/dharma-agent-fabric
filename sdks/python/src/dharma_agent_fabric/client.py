@@ -132,6 +132,12 @@ class AgentFabricClient:
     def list_tasks(self) -> dict[str, Any]:
         return self.request("GET", self._org_path("/tasks"))
 
+    def list_action_decisions(self) -> dict[str, Any]:
+        return self.request("GET", self._org_path("/decisions"))
+
+    def request_action_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        return self.request("POST", self._org_path("/decisions"), decision)
+
     def dispatch_handoff(self, handoff: dict[str, Any]) -> dict[str, Any]:
         return self.request("POST", self._org_path("/conversations"), handoff)
 
@@ -140,6 +146,12 @@ class AgentFabricClient:
 
     def request_analysis(self, analysis: dict[str, Any]) -> dict[str, Any]:
         return self.request("POST", self._org_path("/evals"), analysis)
+
+    def list_evaluation_contracts(self) -> dict[str, Any]:
+        return self.request("GET", self._org_path("/evaluation-contracts"))
+
+    def transition_evaluation_contract(self, transition: dict[str, Any]) -> dict[str, Any]:
+        return self.request("POST", self._org_path("/evaluation-contracts"), transition)
 
     def submit_managed_run(self, run: AgentFabricManagedRun) -> dict[str, Any]:
         return self.request("POST", self._managed_path("/agent-runs"), run)

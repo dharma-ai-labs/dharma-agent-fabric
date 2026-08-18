@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderCapability, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
@@ -1714,6 +1714,13 @@ function selectedProviderAdapters(providerIds: ProviderId[] | null) {
     : providerAdapters;
 }
 
+function receiptAwareProviderCapabilities(providers: ProviderCapability[]) {
+  return providers.map((provider) => ({
+    ...provider,
+    actionDecisionReceipts: provider.taskExecution === 'available' ? 'available' as const : 'unavailable' as const,
+  }));
+}
+
 async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
   const verbose = flags.has('verbose') || flags.has('diagnostic');
   return {
@@ -1794,7 +1801,9 @@ async function syncWorkspacePolicy(
   apply = true,
   providerIds: ProviderId[] | null = null,
 ) {
-  const providers = await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability()));
+  const providers = receiptAwareProviderCapabilities(
+    await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
+  );
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
@@ -2078,7 +2087,9 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     controlBranch: registered.controlBranch,
     policyRevision: authoritativeRevision,
   });
-  const providers = await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability()));
+  const providers = receiptAwareProviderCapabilities(
+    await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
+  );
   const nativeSkillResult = await installAvailableNativeAgentFabricBootstraps({
     providers,
     workspace,
@@ -2526,6 +2537,33 @@ export function assertTaskWorkspacePolicy(input: {
   }
 }
 
+export async function acknowledgeTaskActionDecision(input: {
+  task: Pick<TaskEnvelope, 'taskId' | 'actionDecision'>;
+  receipt: Pick<TaskReceipt, 'actionAcknowledgement'>;
+  postEnforcement: (decisionId: string, acknowledgement: NonNullable<TaskReceipt['actionAcknowledgement']>) => Promise<unknown>;
+}): Promise<boolean> {
+  const acknowledgement = input.receipt.actionAcknowledgement;
+  if (!acknowledgement) return false;
+  const decisionId = input.task.actionDecision?.id;
+  if (!decisionId) throw new Error('Task produced an action acknowledgement without an embedded decision.');
+  if (acknowledgement.taskId !== input.task.taskId) {
+    throw new Error('Task action acknowledgement does not match the executed task.');
+  }
+  await input.postEnforcement(decisionId, acknowledgement);
+  return true;
+}
+
+export async function postTaskOutcome(input: {
+  task: Pick<TaskEnvelope, 'taskId' | 'actionDecision'>;
+  receipt: Pick<TaskReceipt, 'status' | 'actionAcknowledgement'>;
+  payload: Record<string, unknown>;
+  postEnforcement: (decisionId: string, acknowledgement: NonNullable<TaskReceipt['actionAcknowledgement']>) => Promise<unknown>;
+  postEvent: (taskId: string, eventType: TaskReceipt['status'], payload: Record<string, unknown>) => Promise<unknown>;
+}) {
+  await acknowledgeTaskActionDecision(input);
+  return input.postEvent(input.task.taskId, input.receipt.status, input.payload);
+}
+
 async function stageSignedTaskTrajectoryRecovery(
   taskId: string,
   workspaceId: string,
@@ -2735,6 +2773,11 @@ async function executeOneTask(
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
+      ...(task.actionDecision ? {
+        actionDecisions: {
+          resolvePublicKey: (keyVersion: string) => keyVersion === task.actionDecision?.keyVersion ? serverPublicKey : null,
+        },
+      } : {}),
     });
   } finally {
     clearInterval(heartbeat);
@@ -2758,9 +2801,15 @@ async function executeOneTask(
     })
     : null;
   if (prepared) await stageSignedTaskTrajectoryRecovery(task.taskId, workspace.workspaceId, taskPolicy, prepared);
-  await fabric.postTaskEvent(task.taskId, receipt.status, {
-    ...summary,
-    ...(prepared ? { trajectoryCapsuleHash: prepared.capsule.capsuleHash } : {}),
+  await postTaskOutcome({
+    task,
+    receipt,
+    payload: {
+      ...summary,
+      ...(prepared ? { trajectoryCapsuleHash: prepared.capsule.capsuleHash } : {}),
+    },
+    postEnforcement: (decisionId, acknowledgement) => fabric.postActionEnforcement(decisionId, acknowledgement),
+    postEvent: (taskId, eventType, payload) => fabric.postTaskEvent(taskId, eventType, payload),
   });
   let trajectory = null;
   if (receipt.status === 'completed' && task.skillBundle) {
@@ -3268,7 +3317,9 @@ export async function run(argv: string[]): Promise<Output> {
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
-  if (command === 'providers' && subcommand === 'list') return { providers: await Promise.all(providerAdapters.map((adapter) => adapter.capability())) };
+  if (command === 'providers' && subcommand === 'list') return {
+    providers: receiptAwareProviderCapabilities(await Promise.all(providerAdapters.map((adapter) => adapter.capability()))),
+  };
   if (command === 'repositories' && subcommand === 'discover') {
     return repositoriesDiscover(flags, positional.slice(2), repeated.get('root') || []);
   }
@@ -3287,7 +3338,7 @@ export async function run(argv: string[]): Promise<Output> {
     return {
       ...listed,
       relay: await relayProcessState(),
-      providers: await Promise.all(providerAdapters.map((adapter) => adapter.capability())),
+      providers: receiptAwareProviderCapabilities(await Promise.all(providerAdapters.map((adapter) => adapter.capability()))),
     };
   }
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));

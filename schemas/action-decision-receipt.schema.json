@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/action-decision-receipt/v1",
+  "title": "KMS-Signed Action Decision Receipt Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "decisionId", "organizationId", "actionId", "taskId", "targetEndpointId", "workspaceId", "evaluationContractId", "evaluationContractVersion", "actionDigest", "stateEnvelopeHash", "evidenceReferences", "outcome", "reasonCodes", "confidence", "evaluator", "nonce", "issuedAt", "expiresAt", "keyVersion"],
+  "properties": {
+    "schema": { "const": "dharma.action-decision-receipt/v1" },
+    "decisionId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "actionId": { "type": "string", "format": "uuid" },
+    "taskId": { "type": "string", "format": "uuid" },
+    "targetEndpointId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "evaluationContractId": { "type": "string", "format": "uuid" },
+    "evaluationContractVersion": { "type": "integer", "minimum": 1 },
+    "actionDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "stateEnvelopeHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "evidenceReferences": { "type": "array", "maxItems": 20, "items": { "type": "object", "additionalProperties": false, "required": ["trajectoryId", "revision", "capsuleHash"], "properties": { "trajectoryId": { "type": "string", "format": "uuid" }, "revision": { "type": "integer", "minimum": 1 }, "capsuleHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" } } } },
+    "outcome": { "type": "string", "enum": ["release", "block", "escalate", "withhold"] },
+    "reasonCodes": { "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9_]{1,80}$" } },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "evaluator": { "type": "object", "additionalProperties": false, "required": ["provider", "model", "configDigest"], "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 200 }, "model": { "type": "string", "minLength": 1, "maxLength": 200 }, "configDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" } } },
+    "nonce": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "keyVersion": { "type": "string", "minLength": 1, "maxLength": 500 }
+  }
+}

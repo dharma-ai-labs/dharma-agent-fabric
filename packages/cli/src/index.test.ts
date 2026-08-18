@@ -23,6 +23,7 @@ import {
   materializeInlineSkillFiles,
   nativeSkillDirectory,
   normalizeGitRemoteIdentity,
+  postTaskOutcome,
   parseCliOptions,
   parseSelectedProviderIds,
   pathExistsOrThrow,
@@ -63,6 +64,43 @@ test('uses the production B2B portal and keeps hq-url as a compatibility alias',
     ['hq-url', 'https://legacy.example'],
     ['portal-url', 'https://www.dharma-ai.io'],
   ])), 'https://www.dharma-ai.io');
+});
+
+test('posts action enforcement before a consequential task completion event', async () => {
+  const events: string[] = [];
+  const acknowledgement = {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    endpointId: '22222222-2222-4222-8222-222222222222',
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    disposition: 'executed' as const,
+    externalIdempotencyKeyHash: 'b'.repeat(64),
+    resultDigest: `sha256:${'c'.repeat(64)}`,
+    acknowledgedAt: new Date().toISOString(),
+  };
+  await postTaskOutcome({
+    task: {
+      taskId: acknowledgement.taskId,
+      actionDecision: {
+        id: '33333333-3333-4333-8333-333333333333',
+        actionDigest: acknowledgement.actionDigest,
+        receipt: {} as never,
+        signature: 'signature',
+        keyVersion: 'kms:test/1',
+      },
+    },
+    receipt: { status: 'completed', actionAcknowledgement: acknowledgement },
+    payload: { status: 'completed' },
+    async postEnforcement(decisionId, body) {
+      events.push(`enforcement:${decisionId}:${body.disposition}`);
+    },
+    async postEvent(taskId, eventType) {
+      events.push(`event:${taskId}:${eventType}`);
+    },
+  });
+  assert.deepEqual(events, [
+    'enforcement:33333333-3333-4333-8333-333333333333:executed',
+    'event:11111111-1111-4111-8111-111111111111:completed',
+  ]);
 });
 
 test('fail-closed existence checks distinguish absence from unreadable state', async () => {

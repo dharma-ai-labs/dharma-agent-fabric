@@ -203,3 +203,58 @@ test('SDK binds local, managed ADK, and Vertex BYOK endpoints to one repository 
   });
   assert.equal(requests.every((request) => !request.url.includes('run.app')), true);
 });
+
+test('SDK requests action decisions through HQ and keeps effect acknowledgement device-only', async () => {
+  const requests: Request[] = [];
+  const client = new AgentFabricClient({
+    organizationId: 'org_northstar',
+    token: 'dharma_org_test',
+    fetcher: async (input, init) => {
+      requests.push(new Request(input, init));
+      return new Response(JSON.stringify({ ok: true, decision: { outcome: 'release' } }), { status: 201 });
+    },
+  });
+  await client.requestActionDecision({
+    evaluationContractId: '11111111-1111-4111-8111-111111111111',
+    task: {
+      taskId: '22222222-2222-4222-8222-222222222222',
+      workspaceId: '33333333-3333-4333-8333-333333333333',
+      targetEndpointId: '44444444-4444-4444-8444-444444444444',
+      taskType: 'external_request',
+      instructions: 'Apply the bounded approved patch.',
+      authority: { writePaths: ['src/**'], commands: ['test'], network: 'deny' },
+      execution: { commandId: 'test', argv: [] },
+      acceptance: { requiredChecks: ['test'] },
+      budget: { maxRuntimeSeconds: 120 },
+    },
+    stateEnvelope: {
+      intent: 'Apply one reviewed patch.',
+      evidence_used: ['trajectory:checkout'],
+      known_state: { failingCheck: 'test' },
+      unknown_or_missing_state: [],
+      allowed_next_actions: ['apply_patch'],
+      blocked_actions: ['deploy'],
+      decision_authority: 'source patch only',
+      tool_results: [{ tool: 'test', status: 'failed' }],
+      proposed_action: 'apply_patch',
+    },
+    evidenceReferences: [{
+      trajectoryId: '55555555-5555-4555-8555-555555555555',
+      revision: 1,
+      capsuleHash: `sha256:${'a'.repeat(64)}`,
+    }],
+  }, { idempotencyKey: 'decision-1' });
+  await client.listActionDecisions('?limit=10');
+  await client.transitionEvaluationContract({
+    contractId: '11111111-1111-4111-8111-111111111111',
+    action: 'activate',
+    confirmation: 'ACTIVATE EVALUATION CONTRACT 11111111-1111-4111-8111-111111111111',
+  }, { idempotencyKey: 'contract-activate-1' });
+
+  assert.equal(requests[0]?.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/decisions');
+  assert.equal(requests[0]?.headers.get('idempotency-key'), 'decision-1');
+  assert.equal(requests[1]?.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/decisions?limit=10');
+  assert.equal(requests[2]?.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/evaluation-contracts');
+  assert.equal(requests[2]?.headers.get('idempotency-key'), 'contract-activate-1');
+  assert.equal('acknowledgeActionDecisionEnforcement' in client, false);
+});

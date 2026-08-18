@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/action-decision-acknowledgement/v1",
+  "title": "Action Decision Enforcement Acknowledgement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["taskId", "endpointId", "actionDigest", "disposition", "externalIdempotencyKeyHash", "resultDigest", "acknowledgedAt"],
+  "properties": {
+    "taskId": { "type": "string", "format": "uuid" },
+    "endpointId": { "type": "string", "format": "uuid" },
+    "actionDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "disposition": { "type": "string", "enum": ["executed", "contained", "unknown"] },
+    "externalIdempotencyKeyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "resultDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "acknowledgedAt": { "type": "string", "format": "date-time" }
+  }
+}

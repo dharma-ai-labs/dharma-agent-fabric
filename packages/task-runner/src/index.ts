@@ -1,9 +1,20 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
-import { validateTaskEnvelopeContract, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import {
+  buildActionDecisionAcknowledgement,
+  validateTaskEnvelopeContract,
+  verifyActionDecisionReceipt,
+  verifyCanonicalObject,
+  type ActionDecisionAcknowledgement,
+  type ActionDecisionEnvelope,
+  type ActionDecisionPublicKeyResolver,
+  type ActionDecisionReceipt,
+  type ProviderId,
+  type TaskAction,
+} from '@dharma-ai-labs/agent-fabric-contracts';
 import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   executeProviderTask,
@@ -16,7 +27,9 @@ export interface TaskEnvelope {
   organizationId: string;
   workspaceId: string;
   taskType: 'external_request' | 'a2a_handoff' | 'evaluation_retest' | 'remediation_smoke';
-  target: { deviceId: string; provider: ProviderId };
+  target: { deviceId: string; endpointId?: string; provider: ProviderId };
+  requiredCapabilities?: ReadonlyArray<'action_decision_receipts_v1'>;
+  actionDecision?: ActionDecisionEnvelope;
   source?: { taskId: string; endpointId: string };
   skillBundle: { bundleId: string; bundleHash: string } | null;
   instructions: string;
@@ -38,6 +51,7 @@ export interface TaskEnvelope {
     commands: Array<{ commandId: string }>;
     network: string;
     git: 'read_only' | 'task_branch' | 'merge_allowed' | 'deploy_allowed';
+    allowlistedDomains?: string[];
   };
   execution: { isolation: 'git_worktree'; timeoutSeconds: number; leaseSeconds: number; maximumConcurrentAgents: number };
   acceptance: { commands: Array<{ commandId: string }>; requiredArtifacts: string[] };
@@ -65,6 +79,7 @@ export interface TaskReceipt {
   worktree: string;
   branch: string;
   commandResults: CommandResult[];
+  actionAcknowledgement?: ActionDecisionAcknowledgement;
   startedAt: string;
   completedAt: string;
 }
@@ -78,6 +93,26 @@ export type ProviderTaskExecutor = (input: {
   allowWrites: boolean;
   signal?: AbortSignal;
 }) => Promise<ProviderExecutionResult>;
+
+export interface ActionDecisionReplayGuard {
+  consume(decisionId: string, actionDigest: string): Promise<boolean>;
+}
+
+export interface ActionDecisionReceiver {
+  resolvePublicKey: ActionDecisionPublicKeyResolver;
+  replayGuard?: ActionDecisionReplayGuard;
+  now?: () => Date;
+}
+
+export class ActionDecisionDeniedError extends Error {
+  constructor(
+    message: string,
+    readonly receipt: ActionDecisionReceipt,
+  ) {
+    super(message);
+    this.name = 'ActionDecisionDeniedError';
+  }
+}
 
 function normalizePolicyPath(value: string) {
   return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
@@ -228,6 +263,85 @@ export class FileTaskReceiptStore {
   }
 }
 
+export class FileActionDecisionReplayGuard implements ActionDecisionReplayGuard {
+  constructor(private readonly directory: string) {}
+
+  async consume(decisionId: string, actionDigest: string): Promise<boolean> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const target = resolve(this.directory, `${decisionId}.json`);
+    try {
+      const handle = await open(target, 'wx', 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify({
+          decisionId,
+          actionDigest,
+          consumedAt: new Date().toISOString(),
+        })}\n`);
+      } finally {
+        await handle.close();
+      }
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
+  }
+}
+
+export function canonicalTaskActionForTask(
+  task: TaskEnvelope,
+  actionId: string,
+): TaskAction {
+  if (!task.target.endpointId) throw new Error('Receipt-required task target endpoint is unavailable.');
+  return {
+    schema: 'dharma.task-action/v1',
+    organizationId: task.organizationId,
+    actionId,
+    taskId: task.taskId,
+    targetEndpointId: task.target.endpointId,
+    workspaceId: task.workspaceId,
+    taskType: task.taskType,
+    instructions: task.instructions,
+    requiredSkills: task.requiredSkills,
+    authority: task.authority,
+    execution: task.execution,
+    acceptance: task.acceptance,
+    budget: task.budget,
+    expiresAt: task.expiresAt,
+  };
+}
+
+export async function authorizeEmbeddedActionDecision(input: {
+  task: TaskEnvelope;
+  receiver: ActionDecisionReceiver;
+  replayGuard: ActionDecisionReplayGuard;
+}): Promise<ActionDecisionReceipt> {
+  const envelope = input.task.actionDecision;
+  if (!envelope) throw new Error('Embedded action-decision receipt is unavailable; execution is denied.');
+  const action = canonicalTaskActionForTask(input.task, envelope.receipt.actionId);
+  const verification = verifyActionDecisionReceipt(
+    envelope,
+    action,
+    input.receiver.resolvePublicKey,
+    input.receiver.now?.() ?? new Date(),
+  );
+  if (!verification.ok) throw new Error(`Action-decision receipt is invalid: ${verification.reason}.`);
+  if (!await input.replayGuard.consume(envelope.id, envelope.actionDigest)) {
+    throw new Error('Action-decision receipt replay was rejected.');
+  }
+  if (envelope.receipt.outcome !== 'release') {
+    throw new ActionDecisionDeniedError(
+      `Action-decision outcome ${envelope.receipt.outcome} denied execution.`,
+      envelope.receipt,
+    );
+  }
+  return envelope.receipt;
+}
+
+function requiresActionDecisionReceipt(task: TaskEnvelope): boolean {
+  return task.requiredCapabilities?.includes('action_decision_receipts_v1') ?? false;
+}
+
 export async function executeTask(input: {
   task: TaskEnvelope;
   policy: OrganizationPolicy;
@@ -237,6 +351,7 @@ export async function executeTask(input: {
   receiptStore: FileTaskReceiptStore;
   signal?: AbortSignal;
   providerExecutor?: ProviderTaskExecutor;
+  actionDecisions?: ActionDecisionReceiver;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey);
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
@@ -263,18 +378,33 @@ export async function executeTask(input: {
   const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
   const startedAt = new Date().toISOString();
   const commandResults: CommandResult[] = [];
+  const receiptRequired = requiresActionDecisionReceipt(input.task);
+  const replayGuard = input.actionDecisions?.replayGuard
+    ?? new FileActionDecisionReplayGuard(resolve(input.relayStateDirectory, 'action-decision-replay'));
+  let decisionReceipt: ActionDecisionReceipt | null = null;
+  let contained = false;
   let status: TaskReceipt['status'] = 'completed';
   try {
+    if (receiptRequired) {
+      if (!input.actionDecisions) throw new Error('Action-decision public key resolver is unavailable; execution is denied.');
+      decisionReceipt = await authorizeEmbeddedActionDecision({
+        task: input.task,
+        receiver: input.actionDecisions,
+        replayGuard,
+      });
+    }
     const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
-    const providerResult = await (input.providerExecutor ?? executeProviderTask)({
+    const providerInstructions = providerInstructionsForTask(input.task);
+    const providerInput = {
       provider: input.task.target.provider,
       workspace: worktree,
-      instructions: providerInstructionsForTask(input.task),
+      instructions: providerInstructions,
       timeoutSeconds: input.task.execution.timeoutSeconds,
       allowedCommandArgv: allowedCommands,
       allowWrites: input.task.authority.writePaths.length > 0,
       signal: input.signal,
-    });
+    };
+    const providerResult: ProviderExecutionResult = await (input.providerExecutor ?? executeProviderTask)(providerInput);
     commandResults.push({
       commandId: `provider.${input.task.target.provider}`,
       exitCode: providerResult.exitCode,
@@ -318,6 +448,10 @@ export async function executeTask(input: {
     }
   } catch (error) {
     status = input.signal?.aborted ? 'cancelled' : 'failed';
+    if (error instanceof ActionDecisionDeniedError) {
+      decisionReceipt = error.receipt;
+      contained = true;
+    }
     commandResults.push({
       commandId: 'runner', exitCode: null, signal: null, timedOut: false,
       stdoutSha256: `sha256:${'0'.repeat(64)}`,
@@ -325,12 +459,28 @@ export async function executeTask(input: {
       stdout: '', stderr: error instanceof Error ? error.message : String(error),
     });
   }
+  const actionAcknowledgement = decisionReceipt && input.task.target.endpointId
+    ? buildActionDecisionAcknowledgement({
+      taskId: input.task.taskId,
+      endpointId: input.task.target.endpointId,
+      actionDigest: decisionReceipt.actionDigest,
+      disposition: contained ? 'contained' : status === 'completed' ? 'executed' : 'unknown',
+      externalIdempotencyKey: decisionReceipt.decisionId,
+      result: {
+        status,
+        commandResults: commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({
+          commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256,
+        })),
+      },
+    }, input.actionDecisions?.now?.() ?? new Date())
+    : undefined;
   const receipt: TaskReceipt = {
     taskId: input.task.taskId,
     status,
     worktree,
     branch,
     commandResults,
+    ...(actionAcknowledgement ? { actionAcknowledgement } : {}),
     startedAt,
     completedAt: new Date().toISOString(),
   };

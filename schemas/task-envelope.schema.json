@@ -62,7 +62,31 @@
         "provider": {
           "type": "string",
           "enum": ["codex", "claude", "agy"]
+        },
+        "endpointId": {
+          "type": "string",
+          "format": "uuid"
         }
+      }
+    },
+    "requiredCapabilities": {
+      "type": "array",
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "const": "action_decision_receipts_v1"
+      }
+    },
+    "actionDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "actionDigest", "receipt", "signature", "keyVersion"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "actionDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "receipt": { "$ref": "https://schemas.dharma-ai.io/action-decision-receipt/v1" },
+        "signature": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "keyVersion": { "type": "string", "minLength": 1, "maxLength": 500 }
       }
     },
     "source": {
@@ -377,6 +401,35 @@
             { "required": ["stateEnvelope"] },
             { "required": ["evidenceReferences"] }
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "requiredCapabilities": {
+            "type": "array",
+            "contains": { "const": "action_decision_receipts_v1" }
+          }
+        },
+        "required": ["requiredCapabilities"]
+      },
+      "then": {
+        "required": ["actionDecision"],
+        "properties": {
+          "target": { "type": "object", "required": ["endpointId"] }
+        }
+      }
+    },
+    {
+      "if": { "required": ["actionDecision"] },
+      "then": {
+        "required": ["requiredCapabilities"],
+        "properties": {
+          "requiredCapabilities": {
+            "type": "array",
+            "contains": { "const": "action_decision_receipts_v1" }
+          }
         }
       }
     }

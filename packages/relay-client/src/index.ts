@@ -488,6 +488,9 @@ export class AgentFabricClient {
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });
   }
+  postActionEnforcement(decisionId: string, body: unknown) {
+    return this.signedPost(`/agent-fabric/decisions/${encodeURIComponent(decisionId)}/enforcements`, body);
+  }
   listRecoveredTaskCompletions(): RecoveredTaskCompletion[] {
     return (this.#state.recoveredTaskCompletions || []).map((item) => ({ ...item }));
   }

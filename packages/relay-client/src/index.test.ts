@@ -53,6 +53,45 @@ test('device identity remains stable in the OS secret store', async () => {
   assert.ok(first.privateJwk.d);
 });
 
+test('action enforcement acknowledgement uses the device-signed decision route', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-action-enforcement-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const requests: Request[] = [];
+  const client = await AgentFabricClient.open({
+    configPath,
+    statePath,
+    store,
+    fetcher: async (url, init) => {
+      requests.push(new Request(url, init));
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    },
+  });
+  await client.openSession();
+  const decisionId = '33333333-3333-4333-8333-333333333333';
+  await client.postActionEnforcement(decisionId, {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    endpointId: '22222222-2222-4222-8222-222222222222',
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    disposition: 'executed',
+    externalIdempotencyKeyHash: 'b'.repeat(64),
+    resultDigest: `sha256:${'c'.repeat(64)}`,
+    acknowledgedAt: new Date().toISOString(),
+  });
+  const request = requests.at(-1)!;
+  assert.equal(new URL(request.url).pathname, `/api/v1/orgs/org_a/agent-fabric/decisions/${decisionId}/enforcements`);
+  assert.equal(request.headers.get('x-dharma-signature')?.length ? true : false, true);
+});
+
 test('active skill authorization anchors can be restored or removed transactionally', async () => {
   const store = memoryStore();
   const config = {

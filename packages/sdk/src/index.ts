@@ -30,6 +30,38 @@ export interface AgentFabricEvidenceReference {
   capsuleHash: `sha256:${string}`;
 }
 
+export interface AgentFabricActionDecisionStateEnvelope extends AgentFabricStateEnvelope {
+  proposed_action: string;
+}
+
+export interface AgentFabricActionDecisionTask {
+  taskId: string;
+  workspaceId: string;
+  targetEndpointId: string;
+  taskType: 'external_request';
+  instructions: string;
+  requiredSkills?: string[];
+  authority: Record<string, unknown>;
+  execution: Record<string, unknown>;
+  acceptance: Record<string, unknown>;
+  budget: Record<string, unknown>;
+  expiresAt?: string;
+}
+
+export interface AgentFabricActionDecisionInput {
+  actionId?: string;
+  evaluationContractId: string;
+  task: AgentFabricActionDecisionTask;
+  stateEnvelope: AgentFabricActionDecisionStateEnvelope;
+  evidenceReferences: AgentFabricEvidenceReference[];
+}
+
+export interface AgentFabricEvaluationContractTransition {
+  contractId: string;
+  action: 'activate' | 'retire' | 'reject';
+  confirmation: string;
+}
+
 export interface AgentFabricHandoffInput {
   sourceTaskId: string;
   targetEndpointId: string;
@@ -224,6 +256,12 @@ export class AgentFabricClient {
   listTrajectories(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/trajectories${query}`)); }
   listFailures(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/failures${query}`)); }
   listAnalysisWindows(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/evals${query}`)); }
+  listEvaluationContracts() {
+    return this.request<Record<string, unknown>>('GET', this.orgPath('/evaluation-contracts'));
+  }
+  transitionEvaluationContract(input: AgentFabricEvaluationContractTransition, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath('/evaluation-contracts'), input, options);
+  }
   listRemediations(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/remediations${query}`)); }
   transitionRemediationTarget(targetId: string, input: AgentFabricRemediationActionInput, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', this.orgPath(`/remediations/${encodeURIComponent(targetId)}`), input, options);
@@ -234,6 +272,12 @@ export class AgentFabricClient {
     return this.request<Record<string, unknown>>('POST', this.orgPath('/tasks'), input, options);
   }
   listTasks(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/tasks${query}`)); }
+  listActionDecisions(query = '') {
+    return this.request<Record<string, unknown>>('GET', this.orgPath(`/decisions${query}`));
+  }
+  requestActionDecision(input: AgentFabricActionDecisionInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.orgPath('/decisions'), input, options);
+  }
   listHandoffs() { return this.request<Record<string, unknown>>('GET', this.orgPath('/conversations')); }
   dispatchHandoff(input: AgentFabricHandoffInput, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', this.orgPath('/conversations'), input, options);
