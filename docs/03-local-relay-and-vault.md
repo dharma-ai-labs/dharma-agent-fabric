@@ -122,6 +122,7 @@ The relay advertises capability slices independently:
   "sessionContinuation": "partial",
   "skillInstall": "available",
   "activation": "next_session",
+  "skillRollback": "available",
   "usageEvidence": "partial"
 }
 ```

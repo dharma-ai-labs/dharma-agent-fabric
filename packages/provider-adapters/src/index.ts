@@ -38,7 +38,7 @@ export interface DiscoveryRequest {
 
 export interface ProviderAdapter {
   providerId: ProviderId;
-  capability(): Promise<ProviderCapability>;
+  capability(): Promise<ProviderCapability & { skillRollback: 'available' | 'partial' | 'unavailable' }>;
   discover(request: DiscoveryRequest): Promise<ProviderSession[]>;
 }
 
@@ -643,6 +643,7 @@ function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): Provide
         sessionContinuation: 'unavailable',
         skillInstall: version ? 'available' : 'unavailable',
         activation: 'next_session',
+        skillRollback: version ? 'available' : 'unavailable',
         usageEvidence: 'partial',
       };
     },
@@ -679,21 +680,25 @@ function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): Provide
   };
 }
 
+export function agyCapability(version: string | null): ProviderCapability & { skillRollback: 'unavailable' } {
+  return {
+    provider: 'agy',
+    version,
+    evidence: version ? 'partial' : 'unavailable',
+    configuredAssets: version ? 'partial' : 'unavailable',
+    taskExecution: version ? 'partial' : 'unavailable',
+    sessionContinuation: version ? 'partial' : 'unavailable',
+    skillInstall: version ? 'partial' : 'unavailable',
+    activation: 'unavailable',
+    skillRollback: 'unavailable',
+    usageEvidence: 'unavailable',
+  };
+}
+
 export const agyAdapter: ProviderAdapter = {
   providerId: 'agy',
   async capability() {
-    const version = await executableVersion('agy');
-    return {
-      provider: 'agy',
-      version,
-      evidence: version ? 'partial' : 'unavailable',
-      configuredAssets: version ? 'partial' : 'unavailable',
-      taskExecution: version ? 'partial' : 'unavailable',
-      sessionContinuation: version ? 'partial' : 'unavailable',
-      skillInstall: version ? 'available' : 'unavailable',
-      activation: version ? 'next_session' : 'unavailable',
-      usageEvidence: 'unavailable',
-    };
+    return agyCapability(await executableVersion('agy'));
   },
   async discover(request) {
     const maximumSessions = Math.min(Math.max(request.maximumSessions ?? 100, 1), 1_000);

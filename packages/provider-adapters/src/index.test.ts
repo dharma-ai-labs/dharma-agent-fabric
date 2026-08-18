@@ -4,12 +4,40 @@ import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import test from 'node:test';
 import {
+  agyCapability,
   agyAdapter,
   codexAdapter,
   defaultProcessRunner,
   executeProviderTask,
   providerProcessEnvironment,
 } from './index.js';
+
+test('Agy 1.1.13 capabilities fail closed for signed effects and host lifecycle claims', () => {
+  assert.deepEqual(agyCapability('1.1.13'), {
+    provider: 'agy',
+    version: '1.1.13',
+    evidence: 'partial',
+    configuredAssets: 'partial',
+    taskExecution: 'partial',
+    sessionContinuation: 'partial',
+    skillInstall: 'partial',
+    activation: 'unavailable',
+    skillRollback: 'unavailable',
+    usageEvidence: 'unavailable',
+  });
+  assert.deepEqual(agyCapability(null), {
+    provider: 'agy',
+    version: null,
+    evidence: 'unavailable',
+    configuredAssets: 'unavailable',
+    taskExecution: 'unavailable',
+    sessionContinuation: 'unavailable',
+    skillInstall: 'unavailable',
+    activation: 'unavailable',
+    skillRollback: 'unavailable',
+    usageEvidence: 'unavailable',
+  });
+});
 
 test('provider subprocess environment excludes cloud and model credentials', () => {
   const env = providerProcessEnvironment({

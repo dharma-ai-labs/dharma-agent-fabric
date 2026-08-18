@@ -118,6 +118,14 @@
               "unavailable"
             ]
           },
+          "skillRollback": {
+            "type": "string",
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
           "usageEvidence": {
             "type": "string",
             "enum": [
@@ -125,6 +133,64 @@
               "partial",
               "unavailable"
             ]
+          },
+          "actionDecisionReceipts": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable"
+            ]
+          },
+          "actionDecisionReceiver": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "protocol",
+              "protocolVersion",
+              "journalSchema",
+              "state",
+              "selfTestedAt",
+              "freshUntil",
+              "trustedKeyVersions"
+            ],
+            "properties": {
+              "protocol": {
+                "const": "action_decision_receipts_v1"
+              },
+              "protocolVersion": {
+                "const": 1
+              },
+              "journalSchema": {
+                "const": "dharma.action-execution-journal/v1"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "available",
+                  "unavailable"
+                ]
+              },
+              "selfTestedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "freshUntil": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "trustedKeyVersions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           }
         }
       }
