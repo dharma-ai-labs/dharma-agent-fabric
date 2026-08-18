@@ -63,6 +63,11 @@ const canonicalTaskSchema = JSON.parse(await readFile(resolve(schemaDir, 'task-e
 if (JSON.stringify(runtimeTaskSchema) !== JSON.stringify(canonicalTaskSchema)) {
   throw new Error('Runtime task-envelope schema copy is out of sync with the canonical schema.');
 }
+const runtimeTaskActionSchema = JSON.parse(await readFile(resolve(root, 'packages/contracts/src/task-action.schema.json'), 'utf8'));
+const canonicalTaskActionSchema = JSON.parse(await readFile(resolve(schemaDir, 'task-action.schema.json'), 'utf8'));
+if (JSON.stringify(runtimeTaskActionSchema) !== JSON.stringify(canonicalTaskActionSchema)) {
+  throw new Error('Runtime task-action schema copy is out of sync with the canonical schema.');
+}
 
 for (const name of names) {
   const schema = JSON.parse(await readFile(resolve(schemaDir, name), 'utf8'));

@@ -2817,6 +2817,9 @@ async function executeOneTask(
   return await withWorkspaceSkillActivationLock(task.workspaceId, task.target.provider, async () => {
   if (task.target.deviceId !== config.deviceId) throw new Error('Task target does not match this enrolled device.');
   const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
+  const serverPublicKeyResolver = config.serverSigningKeyset
+    ? createActionDecisionPublicKeyResolver(config.serverSigningKeyset)
+    : undefined;
   const activeSkill = await activeSkillAuthorization(
     task.target.provider, task.workspaceId, String(workspace.repositoryAgentId || ''), config,
   );
@@ -2844,6 +2847,7 @@ async function executeOneTask(
   try {
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
+      ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
         actionDecisions: {

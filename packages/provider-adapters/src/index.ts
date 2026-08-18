@@ -80,10 +80,25 @@ export function providerProcessEnvironment(source: NodeJS.ProcessEnv = process.e
   return env;
 }
 
+function terminateProcessTree(child: ReturnType<typeof spawn>, force: boolean) {
+  if (!child.pid) return;
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', ...(force ? ['/f'] : [])], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    killer.unref();
+    return;
+  }
+  try { process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM'); }
+  catch { child.kill(force ? 'SIGKILL' : 'SIGTERM'); }
+}
+
 export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
   const child = spawn(input.command, input.argv, {
     cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...providerProcessEnvironment(), ...(input.environment || {}) },
+    detached: process.platform !== 'win32',
   });
   const maximum = 5_000_000;
   const stdout: Buffer[] = [];
@@ -106,7 +121,7 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
         const event = JSON.parse(line) as { type?: unknown; is_error?: unknown; subtype?: unknown };
         if (event.type !== 'result') return false;
         terminalResultCode = event.is_error === true || String(event.subtype || '').includes('error') ? 1 : 0;
-        child.kill('SIGTERM');
+        terminateProcessTree(child, false);
         return true;
       } catch {
         return false;
@@ -120,12 +135,18 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
     if (terminalResultCode === null && complete(pendingJson)) pendingJson = '';
   });
   child.stderr.on('data', (chunk: Buffer) => { stderrBytes = collect(stderr, chunk, stderrBytes); });
-  const cancel = () => child.kill('SIGTERM');
+  let escalation: NodeJS.Timeout | undefined;
+  const cancel = () => {
+    terminateProcessTree(child, false);
+    escalation = setTimeout(() => terminateProcessTree(child, true), 1_000);
+    escalation.unref();
+  };
   input.signal?.addEventListener('abort', cancel, { once: true });
-  const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, input.timeoutMs);
+  const timeout = setTimeout(() => { timedOut = true; terminateProcessTree(child, true); }, input.timeoutMs);
   child.once('error', reject);
   child.once('close', (exitCode, signal) => {
     clearTimeout(timeout);
+    if (escalation) clearTimeout(escalation);
     input.signal?.removeEventListener('abort', cancel);
     accept({
       exitCode: terminalResultCode ?? exitCode,

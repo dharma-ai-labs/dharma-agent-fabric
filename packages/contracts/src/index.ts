@@ -123,6 +123,18 @@ export interface TaskAction {
   workspaceId: string;
   taskType: 'external_request' | 'a2a_handoff' | 'evaluation_retest' | 'remediation_smoke';
   instructions: string;
+  source?: { taskId: string; endpointId: string };
+  stateEnvelope?: {
+    intent: string;
+    evidence_used: string[];
+    known_state: Record<string, unknown>;
+    unknown_or_missing_state: string[];
+    allowed_next_actions: string[];
+    blocked_actions: string[];
+    decision_authority: string;
+    tool_results: unknown[];
+  };
+  evidenceReferences?: Array<{ trajectoryId: string; revision: number; capsuleHash: string }>;
   skillBundle: { bundleId: string; bundleHash: string } | null;
   requiredSkills: Array<{ skillId: string; version: string; commit: string; contentHash: string }>;
   authority: {
@@ -134,7 +146,11 @@ export interface TaskAction {
     allowlistedDomains?: string[];
   };
   execution: { isolation: 'git_worktree'; timeoutSeconds: number; leaseSeconds: number; maximumConcurrentAgents: number };
-  acceptance: { commands: Array<{ commandId: string }>; requiredArtifacts: string[] };
+  acceptance: {
+    commands: Array<{ commandId: string }>;
+    requiredArtifacts: string[];
+    externalEffectReceiptCommandId?: string;
+  };
   budget: { mode: 'byok_local' | 'byok_cloud' | 'dharma_managed'; maximumDharmaCostCents: number; maximumProviderCostCents?: number | null };
   expiresAt: string;
 }
