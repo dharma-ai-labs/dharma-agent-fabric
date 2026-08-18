@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.10';
+const VERSION = '0.2.11';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -479,7 +479,8 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
       const reasonCodes = Array.isArray(analysis.reasonCodes) ? analysis.reasonCodes : null;
       const allowedReasons = new Set(['runtime_failure_signal', 'tool_call_without_result', 'tool_result_without_call', 'partial_evidence']);
       if (analysis.schema !== 'dharma.local-trajectory-analysis/v1' || analysis.analyzer !== 'deterministic'
-        || !eventKinds || Object.entries(eventKinds).some(([key, value]) => !fixedEventKinds.has(key)
+        || !eventKinds || Object.entries(eventKinds).some(([key, value]) => !(fixedEventKinds.has(key)
+          || (signedTaskCapture && key === 'unknown'))
           || !Number.isSafeInteger(value) || Number(value) < 0)
         || !reasonCodes || reasonCodes.some((value) => typeof value !== 'string' || !allowedReasons.has(value))) {
         throw new Error('Local-analysis trajectory capsule contains invalid free-form analysis data.');
