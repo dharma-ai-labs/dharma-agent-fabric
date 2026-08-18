@@ -479,7 +479,7 @@ export class FileActionExecutionJournal {
 
   async claim(record: ActionExecutionJournalRecord, maximumAgeMs: number): Promise<ActionExecutionClaim> {
     if (record.state !== 'replay_authorized') throw new Error('Action execution is not authorized for claiming.');
-    const boundedAgeMs = Math.min(Math.max(maximumAgeMs, 60_000), 24 * 60 * 60_000);
+    const boundedAgeMs = Math.min(Math.max(maximumAgeMs, 1), 24 * 60 * 60_000);
     const claim: ActionExecutionClaim = {
       schema: 'dharma.action-execution-claim/v1', taskId: record.taskId,
       decisionId: record.decisionId, actionDigest: record.actionDigest,
@@ -646,6 +646,9 @@ export async function executeTask(input: {
   actionExecutionJournal?: FileActionExecutionJournal;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey);
+  const taskExpiresAt = Date.parse(input.task.expiresAt);
+  const remainingTaskMs = () => taskExpiresAt - Date.now();
+  if (!Number.isFinite(taskExpiresAt) || remainingTaskMs() <= 0) throw new Error('Task envelope expired.');
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
   const previous = await input.receiptStore.get(input.task.taskId);
   if (previous) return previous;
@@ -724,7 +727,10 @@ export async function executeTask(input: {
       try {
         await journal.claim(
           journalRecord,
-          (input.task.execution.timeoutSeconds + input.task.execution.leaseSeconds + 300) * 1_000,
+          Math.min(
+            (input.task.execution.timeoutSeconds + input.task.execution.leaseSeconds + 300) * 1_000,
+            remainingTaskMs(),
+          ),
         );
         executionClaimed = true;
       } catch (error) {
@@ -754,11 +760,16 @@ export async function executeTask(input: {
       const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
     const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
     const providerInstructions = providerInstructionsForTask(input.task);
+    const providerTimeBudgetSeconds = Math.min(
+      input.task.execution.timeoutSeconds,
+      Math.floor(remainingTaskMs() / 1_000),
+    );
+    if (providerTimeBudgetSeconds < 1) throw new Error('Task expires before provider execution can start.');
     const providerInput = {
       provider: input.task.target.provider,
       workspace: worktree,
       instructions: providerInstructions,
-      timeoutSeconds: input.task.execution.timeoutSeconds,
+      timeoutSeconds: providerTimeBudgetSeconds,
       allowedCommandArgv: allowedCommands,
       allowWrites: input.task.authority.writePaths.length > 0,
       ...(decisionReceipt ? {
@@ -768,6 +779,7 @@ export async function executeTask(input: {
       signal: input.signal,
     };
     const providerResult: ProviderExecutionResult = await (input.providerExecutor ?? executeProviderTask)(providerInput);
+    if (remainingTaskMs() <= 0) throw new Error('Task expired during provider execution.');
     if (executionClaimed) await journal.recordEffectObserved(input.task.taskId, providerResult);
     commandResults.push({
       commandId: `provider.${input.task.target.provider}`,
@@ -802,11 +814,18 @@ export async function executeTask(input: {
         ? assertPathWithinWorkspace(worktree, command.workingDirectory)
         : worktree;
       const [executable, ...argv] = command.argv;
+      const acceptanceTimeBudgetMs = remainingTaskMs();
+      if (acceptanceTimeBudgetMs <= 0) throw new Error('Task expired before acceptance verification.');
       const result = await runProcess(executable!, argv, {
         cwd,
-        timeoutMs: Math.min(command.timeoutSeconds, input.task.execution.timeoutSeconds) * 1_000,
+        timeoutMs: Math.min(
+          command.timeoutSeconds * 1_000,
+          input.task.execution.timeoutSeconds * 1_000,
+          acceptanceTimeBudgetMs,
+        ),
         signal: input.signal,
       });
+      if (remainingTaskMs() <= 0) throw new Error('Task expired during acceptance verification.');
       commandResults.push({ commandId, ...result });
       if (result.exitCode !== 0 || result.timedOut) { status = input.signal?.aborted ? 'cancelled' : 'failed'; break; }
     }

@@ -309,7 +309,7 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
     requiredCapabilities: ['action_decision_receipts_v1'] as const,
     skillBundle: null, instructions: 'Inspect the repository.', requiredSkills: [],
     authority: { readPaths: ['.'], writePaths: [], commands: [{ commandId: 'verify' }], network: 'deny', git: 'task_branch' as const },
-    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 120, leaseSeconds: 20, maximumConcurrentAgents: 1 },
     acceptance: { commands: [{ commandId: 'verify' }], requiredArtifacts: [] }, budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
     createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), nonce: randomUUID(),
   } satisfies Omit<TaskEnvelope, 'actionDecision' | 'signature'>;
@@ -336,6 +336,7 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
       executions += 1;
       assert.equal(providerInput.externalIdempotencyKey, actionDecision.id);
       assert.equal(providerInput.actionDigest, actionDecision.actionDigest);
+      assert.ok(providerInput.timeoutSeconds <= 60, 'provider timeout must not outlive the signed task');
       return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'done', stderr: '', stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
     },
   });
