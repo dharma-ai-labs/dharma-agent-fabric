@@ -9,6 +9,7 @@ import {
   codexAdapter,
   defaultProcessRunner,
   executeProviderTask,
+  providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
 
@@ -62,6 +63,40 @@ test('provider subprocess environment adds the supported per-user CLI install di
     PATH: ['/usr/bin', localBin].join(delimiter),
   });
   assert.deepEqual(env.PATH?.split(delimiter), ['/usr/bin', localBin]);
+});
+
+test('Claude signed-task output preserves ordered tool evidence without reasoning content', () => {
+  const records = providerExecutionRecords({
+    provider: 'claude',
+    workspace: '/workspace',
+    startedAt: '2026-08-18T18:00:00.000Z',
+    endedAt: '2026-08-18T18:00:01.000Z',
+    stdout: [
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'private chain' }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'package.json' } }] } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'package evidence' }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'The package is Agent Fabric.' }] } },
+      { type: 'result', subtype: 'success', result: 'The package is Agent Fabric.' },
+    ].map((value) => JSON.stringify(value)).join('\n'),
+  });
+
+  assert.deepEqual(records.map((record) => record.kind), ['tool_call', 'tool_result', 'agent_message']);
+  assert.equal(records[0]?.native.toolName, 'Read');
+  assert.equal(records[1]?.native.toolUseId, 'tool-1');
+  assert.equal(records[2]?.native.content, 'The package is Agent Fabric.');
+  assert.equal(JSON.stringify(records).includes('private chain'), false);
+});
+
+test('provider execution output retains the bounded message fallback for plain output', () => {
+  const records = providerExecutionRecords({
+    provider: 'agy',
+    workspace: '/workspace',
+    startedAt: '2026-08-18T18:00:00.000Z',
+    endedAt: '2026-08-18T18:00:01.000Z',
+    stdout: 'plain provider response',
+  });
+  assert.deepEqual(records.map((record) => record.kind), ['agent_message']);
+  assert.equal(records[0]?.native.content, 'plain provider response');
 });
 
 test('Codex discovery admits only sessions bound to the requested workspace', async () => {

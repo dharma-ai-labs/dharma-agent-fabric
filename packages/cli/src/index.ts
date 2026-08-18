@@ -14,7 +14,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, providerExecutionRecords, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.11';
+const VERSION = '0.2.12';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -2453,9 +2453,30 @@ export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, wor
     coverage: 'observed',
     startedAt: receipt.startedAt,
     endedAt: receipt.completedAt,
-    records: [
-      instructionRecord,
-      ...receipt.commandResults.map((result, index) => ({
+    records: [instructionRecord, ...receipt.commandResults.flatMap((result, index) => {
+      if (result.commandId.startsWith('provider.')) {
+        return providerExecutionRecords({
+          provider: task.target.provider,
+          stdout: result.stdout,
+          workspace,
+          startedAt: receipt.startedAt,
+          endedAt: receipt.completedAt,
+        }).map((record, recordIndex) => ({
+          ...record,
+          line: (index + 2) * 1_000_000 + recordIndex,
+          native: {
+            ...record.native,
+            taskId: task.taskId,
+            commandId: result.commandId,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            timedOut: result.timedOut,
+            stdoutSha256: result.stdoutSha256,
+            stderrSha256: result.stderrSha256,
+          },
+        }));
+      }
+      return [{
         native: {
           taskId: task.taskId,
           commandId: result.commandId,
@@ -2471,10 +2492,10 @@ export function taskReceiptSession(task: TaskEnvelope, receipt: TaskReceipt, wor
         line: index + 2,
         workspace,
         timestamp: receipt.completedAt,
-        kind: result.commandId.startsWith('provider.') ? 'agent_message' : 'validation',
+        kind: 'validation',
         coverage: 'observed' as const,
-      })),
-    ],
+      }];
+    })],
   };
 }
 

@@ -334,6 +334,145 @@ function inferKind(record: Record<string, unknown>): string {
   return 'metadata';
 }
 
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function providerRecord(input: {
+  native: Record<string, unknown>;
+  workspace: string;
+  line: number;
+  timestamp: string;
+  kind?: string;
+}): SourceRecord {
+  return {
+    native: stripProtectedNativeContent(input.native) as Record<string, unknown>,
+    sourcePath: 'dharma-task-receipt',
+    line: input.line,
+    workspace: input.workspace,
+    timestamp: input.timestamp,
+    kind: input.kind || inferKind(input.native),
+    coverage: 'observed',
+  };
+}
+
+function claudeExecutionRecords(input: {
+  stdout: string;
+  workspace: string;
+  startedAt: string;
+  endedAt: string;
+}): SourceRecord[] {
+  const records: SourceRecord[] = [];
+  let line = 0;
+  let finalTextObserved = false;
+  for (const rawLine of input.stdout.split(/\r?\n/)) {
+    if (!rawLine.trim()) continue;
+    line += 1;
+    let event: Record<string, unknown>;
+    try { event = object(JSON.parse(rawLine)); } catch { continue; }
+    const eventType = String(event.type || '');
+    const message = object(event.message);
+    const content = Array.isArray(message.content) ? message.content : [];
+    if (eventType === 'assistant') {
+      for (const [contentIndex, rawBlock] of content.entries()) {
+        const block = object(rawBlock);
+        const blockType = String(block.type || '');
+        if (blockType === 'tool_use') {
+          records.push(providerRecord({
+            native: {
+              type: 'tool_call',
+              providerEventType: eventType,
+              toolUseId: block.id,
+              toolName: block.name,
+              input: block.input,
+            },
+            workspace: input.workspace,
+            line: line * 1_000 + contentIndex,
+            timestamp: input.startedAt,
+            kind: 'tool_call',
+          }));
+        } else if (blockType === 'text' && typeof block.text === 'string' && block.text.trim()) {
+          finalTextObserved = true;
+          records.push(providerRecord({
+            native: { type: 'agent_message', role: 'assistant', content: block.text },
+            workspace: input.workspace,
+            line: line * 1_000 + contentIndex,
+            timestamp: input.endedAt,
+            kind: 'agent_message',
+          }));
+        }
+      }
+    } else if (eventType === 'user') {
+      for (const [contentIndex, rawBlock] of content.entries()) {
+        const block = object(rawBlock);
+        if (String(block.type || '') !== 'tool_result') continue;
+        records.push(providerRecord({
+          native: {
+            type: 'tool_result',
+            role: 'tool',
+            toolUseId: block.tool_use_id,
+            isError: block.is_error === true,
+            content: block.content,
+          },
+          workspace: input.workspace,
+          line: line * 1_000 + contentIndex,
+          timestamp: input.endedAt,
+          kind: 'tool_result',
+        }));
+      }
+    } else if (eventType === 'result' && !finalTextObserved && typeof event.result === 'string' && event.result.trim()) {
+      records.push(providerRecord({
+        native: { type: 'agent_message', role: 'assistant', content: event.result },
+        workspace: input.workspace,
+        line: line * 1_000,
+        timestamp: input.endedAt,
+        kind: 'agent_message',
+      }));
+      finalTextObserved = true;
+    }
+  }
+  return records;
+}
+
+export function providerExecutionRecords(input: {
+  provider: ProviderId;
+  stdout: string;
+  workspace: string;
+  startedAt: string;
+  endedAt: string;
+}): SourceRecord[] {
+  const claudeRecords = input.provider === 'claude' ? claudeExecutionRecords(input) : [];
+  if (claudeRecords.length > 0) return claudeRecords;
+
+  const records: SourceRecord[] = [];
+  let line = 0;
+  for (const rawLine of input.stdout.split(/\r?\n/)) {
+    if (!rawLine.trim()) continue;
+    line += 1;
+    let native: Record<string, unknown>;
+    try { native = object(JSON.parse(rawLine)); } catch { continue; }
+    const kind = inferKind(native);
+    if (kind === 'metadata') continue;
+    records.push(providerRecord({
+      native,
+      workspace: input.workspace,
+      line,
+      timestamp: kind === 'agent_message' ? input.endedAt : input.startedAt,
+      kind,
+    }));
+  }
+  if (records.length > 0) return records;
+  return [providerRecord({
+    native: { type: 'agent_message', role: 'assistant', content: input.stdout },
+    workspace: input.workspace,
+    line: 1,
+    timestamp: input.endedAt,
+    kind: 'agent_message',
+  })];
+}
+
 const PROTECTED_NATIVE_FIELDS = new Set([
   'encrypted_content',
   'encryptedContent',

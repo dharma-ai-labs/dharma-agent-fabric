@@ -1344,9 +1344,47 @@ test('signed task receipt becomes a deterministic provider session for candidate
   assert.equal(session.records[0]?.timestamp, receipt.startedAt);
   assert.equal(session.records[0]?.sourcePath, 'dharma-task-receipt');
   assert.equal(session.records[1]?.kind, 'agent_message');
-  assert.equal(session.records[1]?.native.stdout, 'bounded result');
+  assert.equal(session.records[1]?.native.content, 'bounded result');
   assert.equal(JSON.stringify(session.records[0]?.native).includes('/workspace'), false);
   assert.equal(JSON.stringify(session.records[0]?.native).includes('/private/worktree'), false);
+});
+
+test('signed Claude task receipt retains tool call, result, and final answer ordering', () => {
+  const task = {
+    schema: 'dharma.task/v1' as const,
+    taskId: '11111111-1111-4111-8111-111111111119', organizationId: 'org_test', workspaceId: 'workspace_test',
+    taskType: 'evaluation_retest' as const,
+    target: { deviceId: '22222222-2222-4222-8222-222222222222', provider: 'claude' as const },
+    skillBundle: { bundleId: '77777777-7777-4777-8777-777777777777', bundleHash: `sha256:${'a'.repeat(64)}` },
+    instructions: 'Read package.json before answering.', requiredSkills: [],
+    authority: { readPaths: ['package.json'], writePaths: [], commands: [{ commandId: 'provider.claude' }], network: 'deny', git: 'read_only' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 60, leaseSeconds: 120, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] },
+    budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: '2026-08-18T18:00:00.000Z', expiresAt: '2026-08-18T18:05:00.000Z', nonce: 'nonce', signature: null,
+  };
+  const stdout = [
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'package.json' } }] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'observed package' }] } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Observed answer.' }] } },
+    { type: 'result', subtype: 'success', result: 'Observed answer.' },
+  ].map((value) => JSON.stringify(value)).join('\n');
+  const receipt = {
+    taskId: task.taskId, status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/test',
+    startedAt: '2026-08-18T18:00:01.000Z', completedAt: '2026-08-18T18:00:02.000Z',
+    commandResults: [{
+      commandId: 'provider.claude', exitCode: 0, signal: null, timedOut: false, stdout, stderr: '',
+      stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+
+  const session = taskReceiptSession(task, receipt, '/workspace');
+  assert.deepEqual(session.records.map((record) => record.kind), [
+    'user_message', 'tool_call', 'tool_result', 'agent_message',
+  ]);
+  assert.equal(session.records[1]?.native.taskId, task.taskId);
+  assert.equal(session.records[2]?.native.commandId, 'provider.claude');
+  assert.equal(session.records[3]?.native.content, 'Observed answer.');
 });
 
 test('signed A2A task evidence records the same structured instructions sent to the provider', () => {
