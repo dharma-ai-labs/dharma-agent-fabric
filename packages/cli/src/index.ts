@@ -1072,16 +1072,19 @@ export function taskResponsePreview(receipt: TaskReceipt) {
 
 export function assertTaskSkillPin(
   pinned: TaskEnvelope['skillBundle'],
-  activeBundleId: string | null,
+  active: { bundleId: string; bundleHash: string } | null,
 ): void {
   if (pinned === undefined) throw new Error('Task is missing its signed skill bundle pin.');
-  if ((pinned?.bundleId || null) !== activeBundleId) {
+  if ((pinned?.bundleId || null) !== (active?.bundleId || null)) {
     throw new Error(
-      `Task skill bundle does not match the active local bundle (task=${pinned?.bundleId || 'none'}, local=${activeBundleId || 'none'}).`,
+      `Task skill bundle does not match the active local bundle (task=${pinned?.bundleId || 'none'}, local=${active?.bundleId || 'none'}).`,
     );
   }
   if (pinned && !/^sha256:[a-f0-9]{64}$/.test(pinned.bundleHash)) {
     throw new Error('Task skill bundle hash is invalid.');
+  }
+  if (pinned && pinned.bundleHash !== active?.bundleHash) {
+    throw new Error('Task skill bundle hash does not match the active local bundle.');
   }
 }
 
@@ -2825,7 +2828,7 @@ async function executeOneTask(
   );
   const activeBundleId = activeSkill?.bundleId ?? null;
   try {
-    assertTaskSkillPin(task.skillBundle, activeBundleId);
+    assertTaskSkillPin(task.skillBundle, activeSkill);
   } catch (error) {
     await fabric.postTaskEvent(task.taskId, 'failed', {
       phase: 'preflight',
