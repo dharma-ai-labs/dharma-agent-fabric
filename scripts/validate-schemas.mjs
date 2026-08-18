@@ -14,6 +14,50 @@ for (const name of names) {
   ajv.addSchema(schema);
 }
 
+const validateDeviceCapabilities = ajv.getSchema('https://schemas.dharma-ai.io/device-capabilities/v1');
+const deviceCapabilities = {
+  schema: 'dharma.device-capabilities/v1',
+  deviceId: 'device_schema_test',
+  organizationId: 'org_schema_test',
+  platform: 'linux',
+  environmentKind: 'wsl',
+  relayVersion: '0.1.0',
+  providers: [{
+    provider: 'agy',
+    version: '1.1.13',
+    evidence: 'partial',
+    configuredAssets: 'partial',
+    taskExecution: 'partial',
+    sessionContinuation: 'partial',
+    skillInstall: 'partial',
+    activation: 'unavailable',
+    skillRollback: 'unavailable',
+    usageEvidence: 'unavailable',
+    actionDecisionReceipts: 'unavailable',
+    actionDecisionReceiver: {
+      protocol: 'action_decision_receipts_v1',
+      protocolVersion: 1,
+      journalSchema: 'dharma.action-execution-journal/v1',
+      state: 'unavailable',
+      selfTestedAt: '2026-08-18T00:00:00.000Z',
+      freshUntil: '2026-08-18T00:00:00.000Z',
+      trustedKeyVersions: [],
+      reason: 'provider_task_execution_unavailable',
+    },
+  }],
+  workspaces: ['workspace_schema_test'],
+  observedAt: '2026-08-18T00:00:00.000Z',
+};
+if (!validateDeviceCapabilities?.(deviceCapabilities)) {
+  throw new Error(`Device capabilities are invalid: ${ajv.errorsText(validateDeviceCapabilities?.errors)}`);
+}
+if (validateDeviceCapabilities({
+  ...deviceCapabilities,
+  providers: [{ ...deviceCapabilities.providers[0], skillRollback: 'unknown' }],
+})) {
+  throw new Error('Device capability schema accepted an invalid rollback capability.');
+}
+
 const runtimeTaskSchema = JSON.parse(await readFile(resolve(root, 'packages/contracts/src/task-envelope.schema.json'), 'utf8'));
 const canonicalTaskSchema = JSON.parse(await readFile(resolve(schemaDir, 'task-envelope.schema.json'), 'utf8'));
 if (JSON.stringify(runtimeTaskSchema) !== JSON.stringify(canonicalTaskSchema)) {

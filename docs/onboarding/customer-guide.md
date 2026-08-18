@@ -165,7 +165,7 @@ For each selected repository, the CLI:
 5. obtains the permanent control branch and agent identity from HQ;
 6. writes the repository bootstrap without storing the source path or Git credential;
 7. detects Codex, Claude Code, and Agy independently;
-8. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill in every detected provider's native Skill directory;
+8. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill only for detected providers that report Skill installation as available;
 9. waits for browser approval and continues automatically without a manual resume command;
 10. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
 

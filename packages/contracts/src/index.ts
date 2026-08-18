@@ -60,6 +60,7 @@ export interface ProviderCapability {
   sessionContinuation: 'available' | 'partial' | 'unavailable';
   skillInstall: 'available' | 'partial' | 'unavailable';
   activation: 'next_task' | 'next_session' | 'host_restart' | 'immediate_safe_reload' | 'unavailable';
+  skillRollback?: 'available' | 'partial' | 'unavailable';
   usageEvidence: 'available' | 'partial' | 'unavailable';
   actionDecisionReceipts?: 'available' | 'unavailable';
   actionDecisionReceiver?: {
