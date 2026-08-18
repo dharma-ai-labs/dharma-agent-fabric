@@ -664,6 +664,36 @@ test('accepted task completion replay preserves the server receipt until the CLI
   assert.deepEqual(final.listRecoveredTaskCompletions(), []);
 });
 
+test('an accepted task completion without staged trajectory evidence does not poison the outbox', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-without-evidence-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  const taskId = 'd93ce685-113c-45f7-8ba0-334cc7b917f4';
+  const receiptHash = `sha256:${'b'.repeat(64)}`;
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  let calls = 0;
+  const fetcher = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ ok: true, receipt: { hash: receiptHash } }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await client.postTaskEvent(taskId, 'completed', { status: 'completed' });
+  assert.deepEqual(client.listRecoveredTaskCompletions(), []);
+  const durableState = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(durableState.pending, null);
+  await assert.doesNotReject(client.signedPost('/agent-fabric/tasks/poll', { leaseSeconds: 30 }));
+  assert.equal(calls, 3);
+});
+
 test('a malformed successful task acknowledgement remains pending until a durable receipt arrives', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-receipt-'));
