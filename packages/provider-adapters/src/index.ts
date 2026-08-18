@@ -56,6 +56,7 @@ export interface ProviderExecutionResult {
 export type ProviderProcessRunner = (input: {
   command: string; argv: string[]; cwd: string; stdin: string; timeoutMs: number; signal?: AbortSignal;
   completeOnResultJson?: boolean;
+  environment?: Record<string, string>;
 }) => Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: Buffer; stderr: Buffer }>;
 
 export function providerProcessEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -82,7 +83,7 @@ export function providerProcessEnvironment(source: NodeJS.ProcessEnv = process.e
 export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
   const child = spawn(input.command, input.argv, {
     cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: providerProcessEnvironment(),
+    env: { ...providerProcessEnvironment(), ...(input.environment || {}) },
   });
   const maximum = 5_000_000;
   const stdout: Buffer[] = [];
@@ -144,6 +145,8 @@ export async function executeProviderTask(input: {
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
   allowWrites: boolean;
+  externalIdempotencyKey?: string;
+  actionDigest?: string;
   signal?: AbortSignal;
   runner?: ProviderProcessRunner;
 }): Promise<ProviderExecutionResult> {
@@ -207,6 +210,10 @@ export async function executeProviderTask(input: {
       timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
       signal: input.signal,
       completeOnResultJson: input.provider === 'claude',
+      environment: {
+        ...(input.externalIdempotencyKey ? { DHARMA_EXTERNAL_IDEMPOTENCY_KEY: input.externalIdempotencyKey } : {}),
+        ...(input.actionDigest ? { DHARMA_ACTION_DIGEST: input.actionDigest } : {}),
+      },
     });
     let stderr = result.stderr.toString('utf8');
     let exitCode = result.exitCode;

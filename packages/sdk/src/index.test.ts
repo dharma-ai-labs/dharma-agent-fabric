@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { validateActionDecisionTaskRequestContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { AgentFabricApiError, AgentFabricClient } from './index.js';
 
 test('SDK sends organization-scoped bearer requests and idempotency keys without exposing cloud endpoints', async () => {
@@ -222,10 +223,12 @@ test('SDK requests action decisions through HQ and keeps effect acknowledgement 
       targetEndpointId: '44444444-4444-4444-8444-444444444444',
       taskType: 'external_request',
       instructions: 'Apply the bounded approved patch.',
-      authority: { writePaths: ['src/**'], commands: ['test'], network: 'deny' },
-      execution: { commandId: 'test', argv: [] },
-      acceptance: { requiredChecks: ['test'] },
-      budget: { maxRuntimeSeconds: 120 },
+      requiredSkills: [{ skillId: 'checkout-boundary', version: '1.0.0', commit: 'abc123', contentHash: `sha256:${'b'.repeat(64)}` }],
+      authority: { commandIds: ['test'], readPaths: ['src/**'], writePaths: ['src/**'], network: 'deny', git: 'task_branch' },
+      timeoutSeconds: 120,
+      leaseSeconds: 180,
+      acceptanceCommandIds: ['test'],
+      requiredArtifacts: ['test-report.json'],
     },
     stateEnvelope: {
       intent: 'Apply one reviewed patch.',
@@ -253,6 +256,13 @@ test('SDK requests action decisions through HQ and keeps effect acknowledgement 
 
   assert.equal(requests[0]?.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/decisions');
   assert.equal(requests[0]?.headers.get('idempotency-key'), 'decision-1');
+  const publishedBody = JSON.parse(await requests[0]!.clone().text());
+  assert.equal(validateActionDecisionTaskRequestContract(publishedBody.task).ok, true);
+  assert.deepEqual(publishedBody.task.authority.commandIds, ['test']);
+  assert.equal(publishedBody.task.requiredSkills[0].contentHash, `sha256:${'b'.repeat(64)}`);
+  assert.equal('execution' in publishedBody.task, false);
+  assert.equal('acceptance' in publishedBody.task, false);
+  assert.equal('budget' in publishedBody.task, false);
   assert.equal(requests[1]?.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/decisions?limit=10');
   assert.equal(requests[2]?.url, 'https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/evaluation-contracts');
   assert.equal(requests[2]?.headers.get('idempotency-key'), 'contract-activate-1');

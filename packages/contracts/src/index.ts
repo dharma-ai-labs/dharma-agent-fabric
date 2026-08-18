@@ -1,10 +1,12 @@
-import { createHash, sign, verify, type KeyObject } from 'node:crypto';
+import { createHash, createPublicKey, sign, verify, type JsonWebKey, type KeyObject } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import type { ErrorObject } from 'ajv';
 import actionDecisionAcknowledgementSchema from './action-decision-acknowledgement.schema.json' with { type: 'json' };
 import actionDecisionReceiptSchema from './action-decision-receipt.schema.json' with { type: 'json' };
+import actionDecisionTaskRequestSchema from './action-decision-task-request.schema.json' with { type: 'json' };
+import serverSigningKeysetSchema from './server-signing-keyset.schema.json' with { type: 'json' };
 import taskActionSchema from './task-action.schema.json' with { type: 'json' };
 import taskEnvelopeSchema from './task-envelope.schema.json' with { type: 'json' };
 
@@ -60,6 +62,55 @@ export interface ProviderCapability {
   activation: 'next_task' | 'next_session' | 'host_restart' | 'immediate_safe_reload' | 'unavailable';
   usageEvidence: 'available' | 'partial' | 'unavailable';
   actionDecisionReceipts?: 'available' | 'unavailable';
+  actionDecisionReceiver?: {
+    protocol: 'action_decision_receipts_v1';
+    protocolVersion: 1;
+    journalSchema: 'dharma.action-execution-journal/v1';
+    state: 'available' | 'unavailable';
+    selfTestedAt: string;
+    freshUntil: string;
+    trustedKeyVersions: string[];
+    reason?: string;
+  };
+}
+
+export interface ActionDecisionTaskRequest {
+  taskId?: string;
+  targetEndpointId: string;
+  workspaceId: string;
+  taskType: 'external_request' | 'a2a_handoff' | 'evaluation_retest' | 'remediation_smoke';
+  instructions: string;
+  requiredSkills?: Array<{ skillId: string; version: string; commit: string; contentHash: string }>;
+  authority: {
+    commandIds: string[];
+    readPaths: string[];
+    writePaths: string[];
+    network?: string;
+    git?: 'read_only' | 'task_branch' | 'merge_allowed' | 'deploy_allowed';
+    allowlistedDomains?: string[];
+  };
+  timeoutSeconds?: number;
+  leaseSeconds?: number;
+  acceptanceCommandIds?: string[];
+  requiredArtifacts?: string[];
+  expiresAt?: string;
+}
+
+export interface TrustedServerSigningKeyset {
+  schema: 'dharma.server-signing-keyset/v1';
+  organizationId: string;
+  generation: number;
+  keys: Array<{
+    keyVersion: string;
+    publicKeyEd25519: string;
+    status: 'active' | 'overlap';
+    notBefore: string;
+    notAfter: string;
+  }>;
+  signedByKeyVersion: string;
+  issuedAt: string;
+  expiresAt: string;
+  signature: string;
 }
 
 export interface TaskAction {
@@ -175,6 +226,8 @@ addFormats(actionDecisionAjv);
 const taskActionValidator = actionDecisionAjv.compile(taskActionSchema);
 const actionDecisionReceiptValidator = actionDecisionAjv.compile(actionDecisionReceiptSchema);
 const actionDecisionAcknowledgementValidator = actionDecisionAjv.compile(actionDecisionAcknowledgementSchema);
+const actionDecisionTaskRequestValidator = actionDecisionAjv.compile(actionDecisionTaskRequestSchema);
+const serverSigningKeysetValidator = actionDecisionAjv.compile(serverSigningKeysetSchema);
 
 function contractResult(
   validator: ((value: unknown) => boolean) & { errors?: ErrorObject[] | null },
@@ -205,6 +258,18 @@ export function validateActionDecisionAcknowledgementContract(
   value: unknown,
 ): { ok: true } | { ok: false; errors: ErrorObject[] } {
   return contractResult(actionDecisionAcknowledgementValidator, value);
+}
+
+export function validateActionDecisionTaskRequestContract(
+  value: unknown,
+): { ok: true } | { ok: false; errors: ErrorObject[] } {
+  return contractResult(actionDecisionTaskRequestValidator, value);
+}
+
+export function validateTrustedServerSigningKeysetContract(
+  value: unknown,
+): { ok: true } | { ok: false; errors: ErrorObject[] } {
+  return contractResult(serverSigningKeysetValidator, value);
 }
 
 export function actionDecisionDigest(action: TaskAction): string {
@@ -290,6 +355,110 @@ export function buildActionDecisionAcknowledgement(
   const contract = validateActionDecisionAcknowledgementContract(acknowledgement);
   if (!contract.ok) throw new Error(`Action acknowledgement failed schema validation: ${JSON.stringify(contract.errors)}`);
   return acknowledgement;
+}
+
+export function refreshActionDecisionAcknowledgement(
+  acknowledgement: ActionDecisionAcknowledgement,
+  now = new Date(),
+): ActionDecisionAcknowledgement {
+  const current = validateActionDecisionAcknowledgementContract(acknowledgement);
+  if (!current.ok) throw new Error(`Action acknowledgement failed schema validation: ${JSON.stringify(current.errors)}`);
+  const refreshed = { ...acknowledgement, acknowledgedAt: now.toISOString() };
+  const contract = validateActionDecisionAcknowledgementContract(refreshed);
+  if (!contract.ok) throw new Error(`Refreshed action acknowledgement failed schema validation: ${JSON.stringify(contract.errors)}`);
+  return refreshed;
+}
+
+const SERVER_SIGNING_KEYSET_MAX_LIFETIME_MS = 30 * 24 * 60 * 60_000;
+const SERVER_SIGNING_KEY_OVERLAP_MS = 10 * 60_000;
+
+function unsignedServerSigningKeyset(keyset: TrustedServerSigningKeyset) {
+  const { signature, ...unsigned } = keyset;
+  return unsigned;
+}
+
+function keysetTimeFailure(keyset: TrustedServerSigningKeyset, now: Date): string | null {
+  const issuedAt = Date.parse(keyset.issuedAt);
+  const expiresAt = Date.parse(keyset.expiresAt);
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)
+    || expiresAt <= issuedAt || expiresAt - issuedAt > SERVER_SIGNING_KEYSET_MAX_LIFETIME_MS) {
+    return 'invalid_lifetime';
+  }
+  if (issuedAt > now.getTime() + 5 * 60_000) return 'not_yet_valid';
+  if (expiresAt <= now.getTime()) return 'expired';
+  const versions = new Set<string>();
+  for (const key of keyset.keys) {
+    if (versions.has(key.keyVersion)) return 'duplicate_key_version';
+    versions.add(key.keyVersion);
+    const notBefore = Date.parse(key.notBefore);
+    const notAfter = Date.parse(key.notAfter);
+    if (!Number.isFinite(notBefore) || !Number.isFinite(notAfter) || notAfter <= notBefore) return 'invalid_key_lifetime';
+  }
+  if (!keyset.keys.some((key) => key.status === 'active'
+    && Date.parse(key.notBefore) <= now.getTime() && Date.parse(key.notAfter) > now.getTime())) {
+    return 'no_active_key';
+  }
+  return null;
+}
+
+export type ServerSigningKeysetVerificationResult = { ok: true } | { ok: false; reason: string };
+
+export function verifyInitialServerSigningKeyset(
+  keyset: TrustedServerSigningKeyset,
+  pinnedRootPublicKey: KeyObject,
+  organizationId: string,
+  now = new Date(),
+): ServerSigningKeysetVerificationResult {
+  if (!validateTrustedServerSigningKeysetContract(keyset).ok) return { ok: false, reason: 'schema_invalid' };
+  if (keyset.organizationId !== organizationId) return { ok: false, reason: 'organization_mismatch' };
+  const timeFailure = keysetTimeFailure(keyset, now);
+  if (timeFailure) return { ok: false, reason: timeFailure };
+  const pinned = pinnedRootPublicKey.export({ format: 'jwk' }) as JsonWebKey;
+  const signer = keyset.keys.find((key) => key.keyVersion === keyset.signedByKeyVersion);
+  if (!signer || signer.publicKeyEd25519 !== pinned.x) return { ok: false, reason: 'untrusted_initial_signer' };
+  return verifyCanonicalObject(unsignedServerSigningKeyset(keyset), keyset.signature, pinnedRootPublicKey)
+    ? { ok: true }
+    : { ok: false, reason: 'bad_signature' };
+}
+
+export function verifyServerSigningKeysetUpdate(
+  current: TrustedServerSigningKeyset,
+  candidate: TrustedServerSigningKeyset,
+  now = new Date(),
+): ServerSigningKeysetVerificationResult {
+  if (!validateTrustedServerSigningKeysetContract(current).ok
+    || !validateTrustedServerSigningKeysetContract(candidate).ok) return { ok: false, reason: 'schema_invalid' };
+  if (candidate.organizationId !== current.organizationId) return { ok: false, reason: 'organization_mismatch' };
+  if (candidate.generation <= current.generation) return { ok: false, reason: 'generation_not_advanced' };
+  const timeFailure = keysetTimeFailure(candidate, now);
+  if (timeFailure) return { ok: false, reason: timeFailure };
+  const signer = current.keys.find((key) => key.keyVersion === candidate.signedByKeyVersion
+    && Date.parse(key.notBefore) <= now.getTime() && Date.parse(key.notAfter) > now.getTime());
+  if (!signer) return { ok: false, reason: 'untrusted_update_signer' };
+  const retained = candidate.keys.find((key) => key.keyVersion === signer.keyVersion
+    && key.publicKeyEd25519 === signer.publicKeyEd25519
+    && Date.parse(key.notAfter) >= now.getTime() + SERVER_SIGNING_KEY_OVERLAP_MS);
+  if (!retained) return { ok: false, reason: 'rotation_overlap_missing' };
+  const publicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: signer.publicKeyEd25519 }, format: 'jwk' });
+  return verifyCanonicalObject(unsignedServerSigningKeyset(candidate), candidate.signature, publicKey)
+    ? { ok: true }
+    : { ok: false, reason: 'bad_signature' };
+}
+
+export function createActionDecisionPublicKeyResolver(
+  keyset: TrustedServerSigningKeyset,
+  now = new Date(),
+): ActionDecisionPublicKeyResolver {
+  if (!validateTrustedServerSigningKeysetContract(keyset).ok || keysetTimeFailure(keyset, now)) return () => null;
+  const keys = new Map(keyset.keys
+    .filter((key) => Date.parse(key.notBefore) <= now.getTime() && Date.parse(key.notAfter) > now.getTime())
+    .map((key) => [key.keyVersion, key.publicKeyEd25519]));
+  return (keyVersion) => {
+    const value = keys.get(keyVersion);
+    if (!value) return null;
+    try { return createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: value }, format: 'jwk' }); }
+    catch { return null; }
+  };
 }
 
 export function envelopeSigningPayload(envelope: Omit<ProtocolEnvelope, 'signature'>): Buffer {

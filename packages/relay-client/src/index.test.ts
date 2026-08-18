@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify, type JsonWebKey } from 'node:crypto';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -12,12 +12,17 @@ import {
   loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity,
   isDefinitiveAgentFabricRejection,
+  installTrustedServerSigningKeyset,
   normalizeHqUrl,
   normalizeRelayUrl,
   saveDeviceConfig,
   saveActiveSkillAuthorizationAnchor,
   saveDeviceEnrollmentAnchor,
 } from './index.js';
+import {
+  signCanonicalObject,
+  type TrustedServerSigningKeyset,
+} from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 function memoryStore(): SecureSecretStore {
@@ -90,6 +95,90 @@ test('action enforcement acknowledgement uses the device-signed decision route',
   const request = requests.at(-1)!;
   assert.equal(new URL(request.url).pathname, `/api/v1/orgs/org_a/agent-fabric/decisions/${decisionId}/enforcements`);
   assert.equal(request.headers.get('x-dharma-signature')?.length ? true : false, true);
+});
+
+test('stale action enforcement is refreshed and re-signed without changing its effect digests', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-stale-action-enforcement-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const bodies: Array<Record<string, unknown>> = [];
+  const client = await AgentFabricClient.open({
+    configPath,
+    statePath,
+    store,
+    fetcher: async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    },
+  });
+  await client.openSession();
+  await client.postActionEnforcement('33333333-3333-4333-8333-333333333333', {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    endpointId: '22222222-2222-4222-8222-222222222222',
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    disposition: 'executed',
+    externalIdempotencyKeyHash: 'b'.repeat(64),
+    resultDigest: `sha256:${'c'.repeat(64)}`,
+    acknowledgedAt: '2026-01-01T00:00:00.000Z',
+  });
+  const sent = bodies.at(-1)!;
+  assert.ok(Date.parse(String(sent.acknowledgedAt)) > Date.now() - 60_000);
+  assert.equal(sent.actionDigest, `sha256:${'a'.repeat(64)}`);
+  assert.equal(sent.externalIdempotencyKeyHash, 'b'.repeat(64));
+  assert.equal(sent.resultDigest, `sha256:${'c'.repeat(64)}`);
+});
+
+test('trusted server signing keyset is verified against the secure enrollment root before installation', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-signing-keyset-'));
+  const configPath = resolve(root, 'device.json');
+  const signing = generateKeyPairSync('ed25519');
+  const publicKeyEd25519 = (signing.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const unsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a',
+    generation: 1,
+    keys: [{
+      keyVersion: 'kms/1', publicKeyEd25519, status: 'active' as const,
+      notBefore: new Date(now.getTime() - 60_000).toISOString(),
+      notAfter: new Date(now.getTime() + 60 * 60_000).toISOString(),
+    }],
+    signedByKeyVersion: 'kms/1',
+    issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 60 * 60_000).toISOString(),
+  };
+  const candidate: TrustedServerSigningKeyset = {
+    ...unsigned,
+    signature: signCanonicalObject(unsigned, signing.privateKey),
+  };
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519, serverPublicKeyEd25519: publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: now.toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const installed = await installTrustedServerSigningKeyset({ configPath, candidate, store, now });
+  assert.deepEqual(installed.serverSigningKeyset, candidate);
+  await assert.rejects(
+    installTrustedServerSigningKeyset({
+      configPath,
+      candidate: { ...candidate, organizationId: 'org_other', generation: 2 },
+      store,
+      now,
+    }),
+    /organization_mismatch|bad_signature/,
+  );
 });
 
 test('active skill authorization anchors can be restored or removed transactionally', async () => {

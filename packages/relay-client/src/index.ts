@@ -1,7 +1,16 @@
-import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { canonicalize, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import {
+  canonicalize,
+  refreshActionDecisionAcknowledgement,
+  validateActionDecisionAcknowledgementContract,
+  verifyInitialServerSigningKeyset,
+  verifyServerSigningKeysetUpdate,
+  type ActionDecisionAcknowledgement,
+  type ProviderId,
+  type TrustedServerSigningKeyset,
+} from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
@@ -14,6 +23,7 @@ export interface DeviceConfig {
   platform: 'windows' | 'wsl' | 'macos' | 'linux';
   publicKeyEd25519: string;
   serverPublicKeyEd25519: string;
+  serverSigningKeyset?: TrustedServerSigningKeyset;
   relayUrl: string;
   enrolledAt: string;
   evidenceQuotaLedgerInitializedAt?: string;
@@ -142,6 +152,7 @@ export interface DeviceEnrollmentAnchor {
   deviceId: string;
   devicePublicKeyEd25519: string;
   serverPublicKeyEd25519: string;
+  serverSigningKeyset?: TrustedServerSigningKeyset;
   enrolledAt: string;
 }
 
@@ -170,6 +181,7 @@ export async function saveDeviceEnrollmentAnchor(input: {
     deviceId: input.config.deviceId,
     devicePublicKeyEd25519: input.config.publicKeyEd25519,
     serverPublicKeyEd25519: input.config.serverPublicKeyEd25519,
+    ...(input.config.serverSigningKeyset ? { serverSigningKeyset: input.config.serverSigningKeyset } : {}),
     enrolledAt: input.config.enrolledAt,
   };
   const serialized = JSON.stringify(anchor);
@@ -194,6 +206,7 @@ export async function loadDeviceEnrollmentAnchor(input: {
     || anchor.deviceId !== input.config.deviceId
     || anchor.devicePublicKeyEd25519 !== input.config.publicKeyEd25519
     || anchor.serverPublicKeyEd25519 !== input.config.serverPublicKeyEd25519
+    || JSON.stringify(anchor.serverSigningKeyset ?? null) !== JSON.stringify(input.config.serverSigningKeyset ?? null)
     || !Number.isFinite(Date.parse(anchor.enrolledAt))) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
@@ -404,6 +417,29 @@ export async function saveDeviceConfig(path: string, config: DeviceConfig) {
   await atomicJson(path, { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) });
 }
 
+export async function installTrustedServerSigningKeyset(input: {
+  configPath: string;
+  candidate: TrustedServerSigningKeyset;
+  store?: SecureSecretStore;
+  now?: Date;
+}): Promise<DeviceConfig> {
+  const config = await loadDeviceConfig(input.configPath);
+  const now = input.now ?? new Date();
+  const verification = config.serverSigningKeyset
+    ? verifyServerSigningKeysetUpdate(config.serverSigningKeyset, input.candidate, now)
+    : verifyInitialServerSigningKeyset(
+      input.candidate,
+      createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
+      config.organizationId,
+      now,
+    );
+  if (!verification.ok) throw new Error(`Server signing keyset was rejected: ${verification.reason}.`);
+  const next = { ...config, serverSigningKeyset: input.candidate };
+  await saveDeviceConfig(input.configPath, next);
+  await saveDeviceEnrollmentAnchor({ config: next, store: input.store });
+  return next;
+}
+
 export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
   const config = JSON.parse(await readFile(path, 'utf8')) as DeviceConfig;
   if (config.schema !== 'dharma.device-config/v1' || !config.deviceId || !config.organizationId || !config.hqUrl) {
@@ -488,7 +524,9 @@ export class AgentFabricClient {
   postTaskEvent(taskId: string, eventType: string, payload: unknown) {
     return this.signedPost(`/agent-fabric/tasks/${encodeURIComponent(taskId)}/events`, { eventType, payload });
   }
-  postActionEnforcement(decisionId: string, body: unknown) {
+  postActionEnforcement(decisionId: string, body: ActionDecisionAcknowledgement) {
+    const contract = validateActionDecisionAcknowledgementContract(body);
+    if (!contract.ok) throw new Error(`Action acknowledgement failed schema validation: ${JSON.stringify(contract.errors)}`);
     return this.signedPost(`/agent-fabric/decisions/${encodeURIComponent(decisionId)}/enforcements`, body);
   }
   listRecoveredTaskCompletions(): RecoveredTaskCompletion[] {
@@ -574,6 +612,50 @@ export class AgentFabricClient {
       this.#state.pending = null;
       await this.#persist();
       throw error;
+    }
+    if (/\/agent-fabric\/decisions\/[^/]+\/enforcements$/.test(pending.pathname)) {
+      let acknowledgement: ActionDecisionAcknowledgement;
+      try {
+        acknowledgement = JSON.parse(pending.body) as ActionDecisionAcknowledgement;
+      } catch {
+        acknowledgement = {} as ActionDecisionAcknowledgement;
+      }
+      const contract = validateActionDecisionAcknowledgementContract(acknowledgement);
+      if (!contract.ok) {
+        this.#state.nextSequence = Math.max(
+          this.#state.nextSequence + 1,
+          Number(pending.headers['x-dharma-sequence'] || 0) + 1,
+        );
+        this.#state.pending = null;
+        await this.#persist();
+        throw new Error('Stale action acknowledgement is invalid and was discarded.');
+      }
+      const acknowledgedAt = Date.parse(acknowledgement.acknowledgedAt);
+      if (!Number.isFinite(acknowledgedAt)
+        || Date.now() - acknowledgedAt > 8 * 60_000
+        || acknowledgedAt > Date.now() + 5 * 60_000) {
+        const refreshed = refreshActionDecisionAcknowledgement(acknowledgement);
+        const sequence = Number(pending.headers['x-dharma-sequence'] || 0) + 1;
+        const timestamp = new Date().toISOString();
+        const messageId = randomUUID();
+        const nonce = randomBytes(24).toString('base64url');
+        pending.body = canonicalize(refreshed);
+        const signingPayload = Buffer.from(JSON.stringify({
+          bodyHash: `sha256:${sha256(pending.body)}`,
+          deviceId: this.config.deviceId, messageId, method: pending.method, nonce,
+          organizationId: this.config.organizationId, pathname: pending.pathname,
+          sequence, sessionId: pending.headers['x-dharma-session-id'], timestamp,
+        }), 'utf8');
+        pending.headers['x-dharma-message-id'] = messageId;
+        pending.headers['x-dharma-timestamp'] = timestamp;
+        pending.headers['x-dharma-nonce'] = nonce;
+        pending.headers['x-dharma-sequence'] = String(sequence);
+        pending.headers['x-dharma-signature'] = sign(
+          null, signingPayload, { key: this.#privateJwk, format: 'jwk' },
+        ).toString('base64url');
+        this.#state.nextSequence = sequence;
+        await this.#persist();
+      }
     }
     const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
     if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {

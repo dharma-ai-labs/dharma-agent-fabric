@@ -17,6 +17,7 @@ import {
   canonicalTaskActionForTask,
   executeTask,
   FileActionDecisionReplayGuard,
+  FileActionExecutionJournal,
   FileTaskReceiptStore,
   providerInstructionsForTask,
   type TaskEnvelope,
@@ -326,8 +327,10 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
         },
       },
     },
-    providerExecutor: async () => {
+    providerExecutor: async (providerInput) => {
       executions += 1;
+      assert.equal(providerInput.externalIdempotencyKey, actionDecision.id);
+      assert.equal(providerInput.actionDigest, actionDecision.actionDigest);
       return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'done', stderr: '', stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
     },
   });
@@ -350,6 +353,31 @@ test('one-use receipt replay guard rejects a second consumption atomically', asy
   const actionDigest = `sha256:${'a'.repeat(64)}`;
   const consumed = await Promise.all([guard.consume(decisionId, actionDigest), guard.consume(decisionId, actionDigest)]);
   assert.deepEqual(consumed.sort(), [false, true]);
+});
+
+test('a crashed external-effect claim remains durable and cannot be claimed again', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-journal-crash-'));
+  const journal = new FileActionExecutionJournal(root, 2_147_483_647);
+  const taskId = randomUUID();
+  const prepared = await journal.prepare({
+    taskId,
+    decisionId: randomUUID(),
+    endpointId: randomUUID(),
+    actionDigest: `sha256:${'a'.repeat(64)}`,
+    externalIdempotencyKey: randomUUID(),
+    worktree: '/tmp/dharma-worktree',
+    branch: `dharma/task/${taskId}`,
+  });
+  const authorized = await journal.transition(taskId, ['prepared'], 'replay_authorized');
+  await journal.claim(authorized);
+
+  const recovered = new FileActionExecutionJournal(root);
+  const record = await recovered.get(taskId);
+  const claim = await recovered.getClaim(taskId);
+  assert.equal(record?.state, 'executing');
+  assert.ok(claim);
+  assert.equal(recovered.isClaimOwnerAlive(claim!), false);
+  await assert.rejects(recovered.claim(record!), /not authorized for claiming/);
 });
 
 test('one embedded block receipt is consumed, contains the task, and never reaches the provider', async () => {

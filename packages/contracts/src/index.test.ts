@@ -1,19 +1,25 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, type JsonWebKey } from 'node:crypto';
 import test from 'node:test';
 import {
   actionDecisionDigest,
   buildActionDecisionAcknowledgement,
   canonicalize,
+  createActionDecisionPublicKeyResolver,
+  refreshActionDecisionAcknowledgement,
   signCanonicalObject,
   signEnvelope,
   validateActionDecisionReceiptContract,
+  validateActionDecisionTaskRequestContract,
+  verifyInitialServerSigningKeyset,
+  verifyServerSigningKeysetUpdate,
   verifyActionDecisionReceipt,
   verifyCanonicalObject,
   verifyEnvelope,
   type ActionDecisionEnvelope,
   type ActionDecisionReceipt,
   type TaskAction,
+  type TrustedServerSigningKeyset,
 } from './index.js';
 
 test('canonicalize sorts nested object keys but preserves arrays', () => {
@@ -165,4 +171,80 @@ test('action acknowledgement helper emits the exact HQ enforcement payload', () 
   assert.match(executed.resultDigest, /^sha256:[a-f0-9]{64}$/);
   const contained = buildActionDecisionAcknowledgement({ ...common, disposition: 'contained' }, new Date('2026-08-17T20:00:00.000Z'));
   assert.equal(contained.disposition, 'contained');
+  const refreshed = refreshActionDecisionAcknowledgement(executed, new Date('2026-08-17T20:08:00.000Z'));
+  assert.equal(refreshed.acknowledgedAt, '2026-08-17T20:08:00.000Z');
+  assert.equal(refreshed.actionDigest, executed.actionDigest);
+  assert.equal(refreshed.externalIdempotencyKeyHash, executed.externalIdempotencyKeyHash);
+  assert.equal(refreshed.resultDigest, executed.resultDigest);
+});
+
+test('action decision task request matches the flat HQ parser contract', () => {
+  const request = {
+    taskId: randomUUID(), targetEndpointId: randomUUID(), workspaceId: 'workspace-test',
+    taskType: 'external_request', instructions: 'Apply the bounded repair.',
+    requiredSkills: [{ skillId: 'dharma-boundary', version: '1.2.0', commit: 'abc123', contentHash: `sha256:${'d'.repeat(64)}` }],
+    authority: {
+      commandIds: ['verify'], readPaths: ['src/**'], writePaths: ['src/parser.ts'],
+      network: 'deny', git: 'task_branch', allowlistedDomains: [],
+    },
+    timeoutSeconds: 120, leaseSeconds: 180, acceptanceCommandIds: ['verify'],
+    requiredArtifacts: ['test-report.json'], expiresAt: '2026-08-17T20:10:00.000Z',
+  };
+  assert.equal(validateActionDecisionTaskRequestContract(request).ok, true);
+  assert.equal(validateActionDecisionTaskRequestContract({ ...request, requiredSkills: ['dharma-boundary'] }).ok, false);
+  assert.equal(validateActionDecisionTaskRequestContract({ ...request, authority: { ...request.authority, commands: [{ commandId: 'verify' }] } }).ok, false);
+  assert.equal(validateActionDecisionTaskRequestContract({ ...request, execution: { timeoutSeconds: 120 } }).ok, false);
+});
+
+function signedKeyset(input: {
+  organizationId?: string;
+  generation: number;
+  signerVersion: string;
+  signerPrivateKey: ReturnType<typeof generateKeyPairSync>['privateKey'];
+  keys: TrustedServerSigningKeyset['keys'];
+  now: Date;
+}): TrustedServerSigningKeyset {
+  const unsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: input.organizationId ?? 'org_test', generation: input.generation,
+    keys: input.keys, signedByKeyVersion: input.signerVersion,
+    issuedAt: input.now.toISOString(), expiresAt: new Date(input.now.getTime() + 24 * 60 * 60_000).toISOString(),
+  };
+  return { ...unsigned, signature: signCanonicalObject(unsigned, input.signerPrivateKey) };
+}
+
+test('trusted signing keyset supports overlap rotation and rollback without trusting receipt metadata', () => {
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const root = generateKeyPairSync('ed25519');
+  const rotated = generateKeyPairSync('ed25519');
+  const rootX = (root.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const rotatedX = (rotated.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const key = (keyVersion: string, publicKeyEd25519: string, status: 'active' | 'overlap', minutes: number) => ({
+    keyVersion, publicKeyEd25519, status,
+    notBefore: new Date(now.getTime() - 60_000).toISOString(),
+    notAfter: new Date(now.getTime() + minutes * 60_000).toISOString(),
+  });
+  const initial = signedKeyset({ generation: 1, signerVersion: 'kms/1', signerPrivateKey: root.privateKey, keys: [key('kms/1', rootX, 'active', 120)], now });
+  assert.deepEqual(verifyInitialServerSigningKeyset(initial, root.publicKey, 'org_test', now), { ok: true });
+  const rotation = signedKeyset({
+    generation: 2, signerVersion: 'kms/1', signerPrivateKey: root.privateKey,
+    keys: [key('kms/1', rootX, 'overlap', 30), key('kms/2', rotatedX, 'active', 120)], now,
+  });
+  assert.deepEqual(verifyServerSigningKeysetUpdate(initial, rotation, now), { ok: true });
+  assert.ok(createActionDecisionPublicKeyResolver(rotation, now)('kms/2'));
+  assert.equal(createActionDecisionPublicKeyResolver(rotation, now)('kms/untrusted'), null);
+
+  const rollback = signedKeyset({
+    generation: 3, signerVersion: 'kms/2', signerPrivateKey: rotated.privateKey,
+    keys: [key('kms/1', rootX, 'active', 120), key('kms/2', rotatedX, 'overlap', 30)], now,
+  });
+  assert.deepEqual(verifyServerSigningKeysetUpdate(rotation, rollback, now), { ok: true });
+  assert.ok(createActionDecisionPublicKeyResolver(rollback, now)('kms/1'));
+
+  const noOverlap = signedKeyset({
+    generation: 3, signerVersion: 'kms/2', signerPrivateKey: rotated.privateKey,
+    keys: [key('kms/1', rootX, 'active', 120), key('kms/2', rotatedX, 'overlap', 5)], now,
+  });
+  assert.deepEqual(verifyServerSigningKeysetUpdate(rotation, noOverlap, now), { ok: false, reason: 'rotation_overlap_missing' });
+  assert.deepEqual(verifyInitialServerSigningKeyset({ ...initial, organizationId: 'other' }, root.publicKey, 'org_test', now), { ok: false, reason: 'organization_mismatch' });
 });

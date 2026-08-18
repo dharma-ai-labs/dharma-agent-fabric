@@ -35,16 +35,24 @@ export interface AgentFabricActionDecisionStateEnvelope extends AgentFabricState
 }
 
 export interface AgentFabricActionDecisionTask {
-  taskId: string;
-  workspaceId: string;
+  taskId?: string;
   targetEndpointId: string;
-  taskType: 'external_request';
+  workspaceId: string;
+  taskType: 'external_request' | 'a2a_handoff' | 'evaluation_retest' | 'remediation_smoke';
   instructions: string;
-  requiredSkills?: string[];
-  authority: Record<string, unknown>;
-  execution: Record<string, unknown>;
-  acceptance: Record<string, unknown>;
-  budget: Record<string, unknown>;
+  requiredSkills?: Array<{ skillId: string; version: string; commit: string; contentHash: string }>;
+  authority: {
+    commandIds: string[];
+    readPaths: string[];
+    writePaths: string[];
+    network?: string;
+    git?: 'read_only' | 'task_branch' | 'merge_allowed' | 'deploy_allowed';
+    allowlistedDomains?: string[];
+  };
+  timeoutSeconds?: number;
+  leaseSeconds?: number;
+  acceptanceCommandIds?: string[];
+  requiredArtifacts?: string[];
   expiresAt?: string;
 }
 

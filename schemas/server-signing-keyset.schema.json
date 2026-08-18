@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/server-signing-keyset/v1",
+  "title": "Trusted Server Signing Keyset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "generation", "keys", "signedByKeyVersion", "issuedAt", "expiresAt", "signature"],
+  "properties": {
+    "schema": { "const": "dharma.server-signing-keyset/v1" },
+    "organizationId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "generation": { "type": "integer", "minimum": 1 },
+    "keys": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "object", "additionalProperties": false, "required": ["keyVersion", "publicKeyEd25519", "status", "notBefore", "notAfter"], "properties": { "keyVersion": { "type": "string", "minLength": 1, "maxLength": 500 }, "publicKeyEd25519": { "type": "string", "minLength": 43, "maxLength": 100 }, "status": { "type": "string", "enum": ["active", "overlap"] }, "notBefore": { "type": "string", "format": "date-time" }, "notAfter": { "type": "string", "format": "date-time" } } } },
+    "signedByKeyVersion": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "signature": { "type": "string", "minLength": 1, "maxLength": 1000 }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/action-decision-task-request/v1",
+  "title": "Action Decision Task Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["targetEndpointId", "workspaceId", "taskType", "instructions", "authority"],
+  "properties": {
+    "taskId": { "type": "string", "format": "uuid" },
+    "targetEndpointId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "taskType": { "type": "string", "enum": ["external_request", "a2a_handoff", "evaluation_retest", "remediation_smoke"] },
+    "instructions": { "type": "string", "minLength": 1, "maxLength": 20000 },
+    "requiredSkills": { "type": "array", "maxItems": 50, "items": { "type": "object", "additionalProperties": false, "required": ["skillId", "version", "commit", "contentHash"], "properties": { "skillId": { "type": "string", "minLength": 1, "maxLength": 200 }, "version": { "type": "string", "minLength": 1, "maxLength": 100 }, "commit": { "type": "string", "minLength": 1, "maxLength": 200 }, "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" } } } },
+    "authority": { "type": "object", "additionalProperties": false, "required": ["commandIds", "readPaths", "writePaths"], "properties": { "commandIds": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }, "readPaths": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "writePaths": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "network": { "type": "string", "minLength": 1, "maxLength": 100 }, "git": { "type": "string", "enum": ["read_only", "task_branch", "merge_allowed", "deploy_allowed"] }, "allowlistedDomains": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 253 } } } },
+    "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+    "leaseSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+    "acceptanceCommandIds": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+    "requiredArtifacts": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+    "expiresAt": { "type": "string", "format": "date-time" }
+  }
+}

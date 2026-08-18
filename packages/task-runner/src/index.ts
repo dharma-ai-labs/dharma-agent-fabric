@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
@@ -91,6 +91,8 @@ export type ProviderTaskExecutor = (input: {
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
   allowWrites: boolean;
+  externalIdempotencyKey?: string;
+  actionDigest?: string;
   signal?: AbortSignal;
 }) => Promise<ProviderExecutionResult>;
 
@@ -263,6 +265,192 @@ export class FileTaskReceiptStore {
   }
 }
 
+export type ActionExecutionJournalState =
+  | 'prepared'
+  | 'replay_authorization_started'
+  | 'replay_authorized'
+  | 'executing'
+  | 'effect_observed'
+  | 'receipt_recorded';
+
+export interface ActionExecutionJournalRecord {
+  schema: 'dharma.action-execution-journal/v1';
+  taskId: string;
+  decisionId: string;
+  endpointId: string;
+  actionDigest: string;
+  externalIdempotencyKey: string;
+  worktree: string;
+  branch: string;
+  state: ActionExecutionJournalState;
+  preparedAt: string;
+  updatedAt: string;
+  providerResultDigest?: string;
+  receipt?: TaskReceipt;
+}
+
+export interface ActionExecutionClaim {
+  schema: 'dharma.action-execution-claim/v1';
+  taskId: string;
+  decisionId: string;
+  actionDigest: string;
+  ownerId: string;
+  pid: number;
+  claimedAt: string;
+}
+
+async function durableJsonWrite(path: string, value: unknown): Promise<void> {
+  const directory = resolve(path, '..');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const handle = await open(temp, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(temp, path);
+  try {
+    const directoryHandle = await open(directory, 'r');
+    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+  } catch {
+    // Directory fsync is unavailable on some supported hosts; the file itself
+    // has still been flushed before the atomic rename.
+  }
+}
+
+export class FileActionExecutionJournal {
+  readonly ownerId = randomUUID();
+
+  constructor(
+    private readonly directory: string,
+    private readonly pid = process.pid,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  private recordPath(taskId: string) { return resolve(this.directory, `${taskId}.json`); }
+  private claimPath(taskId: string) { return resolve(this.directory, `${taskId}.claim.json`); }
+
+  async get(taskId: string): Promise<ActionExecutionJournalRecord | null> {
+    try {
+      const record = JSON.parse(await readFile(this.recordPath(taskId), 'utf8')) as ActionExecutionJournalRecord;
+      if (record.schema !== 'dharma.action-execution-journal/v1' || record.taskId !== taskId) {
+        throw new Error('Action execution journal record is invalid.');
+      }
+      return record;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  async getClaim(taskId: string): Promise<ActionExecutionClaim | null> {
+    try {
+      const claim = JSON.parse(await readFile(this.claimPath(taskId), 'utf8')) as ActionExecutionClaim;
+      if (claim.schema !== 'dharma.action-execution-claim/v1' || claim.taskId !== taskId) {
+        throw new Error('Action execution claim is invalid.');
+      }
+      return claim;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  async prepare(input: Omit<ActionExecutionJournalRecord, 'schema' | 'state' | 'preparedAt' | 'updatedAt'>): Promise<{
+    record: ActionExecutionJournalRecord;
+    created: boolean;
+  }> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const now = this.now().toISOString();
+    const record: ActionExecutionJournalRecord = {
+      schema: 'dharma.action-execution-journal/v1', ...input,
+      state: 'prepared', preparedAt: now, updatedAt: now,
+    };
+    try {
+      const handle = await open(this.recordPath(input.taskId), 'wx', 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(record)}\n`);
+        await handle.sync();
+      } finally { await handle.close(); }
+      return { record, created: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const existing = await this.get(input.taskId);
+      if (!existing
+        || existing.decisionId !== input.decisionId
+        || existing.endpointId !== input.endpointId
+        || existing.actionDigest !== input.actionDigest
+        || existing.externalIdempotencyKey !== input.externalIdempotencyKey
+        || existing.worktree !== input.worktree
+        || existing.branch !== input.branch) {
+        throw new Error('Action execution journal conflicts with the signed task.');
+      }
+      return { record: existing, created: false };
+    }
+  }
+
+  async transition(
+    taskId: string,
+    allowed: ActionExecutionJournalState[],
+    state: ActionExecutionJournalState,
+    patch: Partial<ActionExecutionJournalRecord> = {},
+  ): Promise<ActionExecutionJournalRecord> {
+    const current = await this.get(taskId);
+    if (!current || !allowed.includes(current.state)) {
+      throw new Error(`Action execution journal transition to ${state} is invalid.`);
+    }
+    const next = { ...current, ...patch, state, updatedAt: this.now().toISOString() };
+    await durableJsonWrite(this.recordPath(taskId), next);
+    return next;
+  }
+
+  async claim(record: ActionExecutionJournalRecord): Promise<ActionExecutionClaim> {
+    if (record.state !== 'replay_authorized') throw new Error('Action execution is not authorized for claiming.');
+    const claim: ActionExecutionClaim = {
+      schema: 'dharma.action-execution-claim/v1', taskId: record.taskId,
+      decisionId: record.decisionId, actionDigest: record.actionDigest,
+      ownerId: this.ownerId, pid: this.pid, claimedAt: this.now().toISOString(),
+    };
+    const handle = await open(this.claimPath(record.taskId), 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(claim)}\n`);
+      await handle.sync();
+    } finally { await handle.close(); }
+    await this.transition(record.taskId, ['replay_authorized'], 'executing');
+    return claim;
+  }
+
+  isClaimOwnerAlive(claim: ActionExecutionClaim): boolean {
+    if (claim.ownerId === this.ownerId && claim.pid === this.pid) return true;
+    try { process.kill(claim.pid, 0); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+  }
+
+  async recordEffectObserved(taskId: string, providerResult: unknown): Promise<void> {
+    await this.transition(taskId, ['executing'], 'effect_observed', {
+      providerResultDigest: `sha256:${createHash('sha256').update(JSON.stringify(providerResult)).digest('hex')}`,
+    });
+  }
+
+  async recordReceipt(receipt: TaskReceipt): Promise<void> {
+    await this.transition(receipt.taskId, [
+      'prepared', 'replay_authorization_started', 'replay_authorized', 'executing', 'effect_observed',
+    ], 'receipt_recorded', { receipt });
+    await rm(this.claimPath(receipt.taskId), { force: true });
+  }
+
+  async selfTest(): Promise<void> {
+    const path = resolve(this.directory, `.self-test-${randomUUID()}.json`);
+    try {
+      await durableJsonWrite(path, { schema: 'dharma.action-execution-journal-self-test/v1' });
+      const value = JSON.parse(await readFile(path, 'utf8')) as { schema?: string };
+      if (value.schema !== 'dharma.action-execution-journal-self-test/v1') throw new Error('Journal self-test readback failed.');
+    } finally { await rm(path, { force: true }); }
+  }
+}
+
 export class FileActionDecisionReplayGuard implements ActionDecisionReplayGuard {
   constructor(private readonly directory: string) {}
 
@@ -316,30 +504,58 @@ export async function authorizeEmbeddedActionDecision(input: {
   receiver: ActionDecisionReceiver;
   replayGuard: ActionDecisionReplayGuard;
 }): Promise<ActionDecisionReceipt> {
-  const envelope = input.task.actionDecision;
-  if (!envelope) throw new Error('Embedded action-decision receipt is unavailable; execution is denied.');
-  const action = canonicalTaskActionForTask(input.task, envelope.receipt.actionId);
-  const verification = verifyActionDecisionReceipt(
-    envelope,
-    action,
-    input.receiver.resolvePublicKey,
-    input.receiver.now?.() ?? new Date(),
-  );
-  if (!verification.ok) throw new Error(`Action-decision receipt is invalid: ${verification.reason}.`);
+  const receipt = verifyEmbeddedActionDecision(input.task, input.receiver);
+  const envelope = input.task.actionDecision!;
   if (!await input.replayGuard.consume(envelope.id, envelope.actionDigest)) {
     throw new Error('Action-decision receipt replay was rejected.');
   }
-  if (envelope.receipt.outcome !== 'release') {
+  if (receipt.outcome !== 'release') {
     throw new ActionDecisionDeniedError(
-      `Action-decision outcome ${envelope.receipt.outcome} denied execution.`,
-      envelope.receipt,
+      `Action-decision outcome ${receipt.outcome} denied execution.`,
+      receipt,
     );
   }
+  return receipt;
+}
+
+export function verifyEmbeddedActionDecision(
+  task: TaskEnvelope,
+  receiver: ActionDecisionReceiver,
+): ActionDecisionReceipt {
+  const envelope = task.actionDecision;
+  if (!envelope) throw new Error('Embedded action-decision receipt is unavailable; execution is denied.');
+  const action = canonicalTaskActionForTask(task, envelope.receipt.actionId);
+  const verification = verifyActionDecisionReceipt(
+    envelope,
+    action,
+    receiver.resolvePublicKey,
+    receiver.now?.() ?? new Date(),
+  );
+  if (!verification.ok) throw new Error(`Action-decision receipt is invalid: ${verification.reason}.`);
   return envelope.receipt;
 }
 
 function requiresActionDecisionReceipt(task: TaskEnvelope): boolean {
   return task.requiredCapabilities?.includes('action_decision_receipts_v1') ?? false;
+}
+
+function interruptedActionReceipt(record: ActionExecutionJournalRecord, now: Date): TaskReceipt {
+  const commandResults: CommandResult[] = [{
+    commandId: 'runner', exitCode: null, signal: null, timedOut: false,
+    stdoutSha256: `sha256:${'0'.repeat(64)}`,
+    stderrSha256: `sha256:${createHash('sha256').update('External effect outcome is unknown after receiver restart.').digest('hex')}`,
+    stdout: '', stderr: 'External effect outcome is unknown after receiver restart; execution was not repeated.',
+  }];
+  return {
+    taskId: record.taskId, status: 'failed', worktree: record.worktree, branch: record.branch,
+    commandResults,
+    actionAcknowledgement: buildActionDecisionAcknowledgement({
+      taskId: record.taskId, endpointId: record.endpointId, actionDigest: record.actionDigest,
+      disposition: 'unknown', externalIdempotencyKey: record.externalIdempotencyKey,
+      result: { status: 'failed', recovery: 'abandoned_execution_claim', commandResults },
+    }, now),
+    startedAt: record.preparedAt, completedAt: now.toISOString(),
+  };
 }
 
 export async function executeTask(input: {
@@ -352,6 +568,7 @@ export async function executeTask(input: {
   signal?: AbortSignal;
   providerExecutor?: ProviderTaskExecutor;
   actionDecisions?: ActionDecisionReceiver;
+  actionExecutionJournal?: FileActionExecutionJournal;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey);
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
@@ -368,31 +585,95 @@ export async function executeTask(input: {
     if (!allowed.has(commandId)) throw new Error(`Acceptance command is outside task authority: ${commandId}`);
   }
 
+  const receiptRequired = requiresActionDecisionReceipt(input.task);
+  const journal = input.actionExecutionJournal
+    ?? new FileActionExecutionJournal(resolve(input.relayStateDirectory, 'action-execution-journal'));
   const worktreeRoot = resolve(input.relayStateDirectory, 'worktrees');
   const worktree = assertContained(worktreeRoot, resolve(worktreeRoot, input.task.taskId));
   const branch = `dharma/task/${input.task.taskId}`;
-  await mkdir(worktreeRoot, { recursive: true, mode: 0o700 });
-  await rm(worktree, { recursive: true, force: true });
-  await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD']);
-  await git(worktree, ['switch', '-c', branch]);
-  const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
-  const startedAt = new Date().toISOString();
-  const commandResults: CommandResult[] = [];
-  const receiptRequired = requiresActionDecisionReceipt(input.task);
-  const replayGuard = input.actionDecisions?.replayGuard
-    ?? new FileActionDecisionReplayGuard(resolve(input.relayStateDirectory, 'action-decision-replay'));
   let decisionReceipt: ActionDecisionReceipt | null = null;
+  let journalRecord: ActionExecutionJournalRecord | null = null;
+  let executionClaimed = false;
   let contained = false;
-  let status: TaskReceipt['status'] = 'completed';
-  try {
-    if (receiptRequired) {
-      if (!input.actionDecisions) throw new Error('Action-decision public key resolver is unavailable; execution is denied.');
-      decisionReceipt = await authorizeEmbeddedActionDecision({
-        task: input.task,
-        receiver: input.actionDecisions,
-        replayGuard,
-      });
+  const startedAt = new Date().toISOString();
+
+  if (receiptRequired) {
+    if (!input.actionDecisions) throw new Error('Action-decision public key resolver is unavailable; execution is denied.');
+    if (!input.task.target.endpointId) throw new Error('Receipt-required task target endpoint is unavailable.');
+    decisionReceipt = verifyEmbeddedActionDecision(input.task, input.actionDecisions);
+    const prepared = await journal.prepare({
+      taskId: input.task.taskId, decisionId: decisionReceipt.decisionId,
+      endpointId: input.task.target.endpointId, actionDigest: decisionReceipt.actionDigest,
+      externalIdempotencyKey: decisionReceipt.decisionId, worktree, branch,
+    });
+    journalRecord = prepared.record;
+    if (journalRecord.state === 'receipt_recorded') {
+      if (!journalRecord.receipt) throw new Error('Action execution journal is missing its recorded receipt.');
+      await input.receiptStore.put(journalRecord.receipt);
+      return journalRecord.receipt;
     }
+    const priorClaim = await journal.getClaim(input.task.taskId);
+    if (priorClaim) {
+      if (priorClaim.decisionId !== journalRecord.decisionId || priorClaim.actionDigest !== journalRecord.actionDigest) {
+        throw new Error('Action execution claim conflicts with the signed decision.');
+      }
+      if (journal.isClaimOwnerAlive(priorClaim)) throw new Error('Action execution is already in progress.');
+      const recovered = interruptedActionReceipt(journalRecord, input.actionDecisions.now?.() ?? new Date());
+      await journal.recordReceipt(recovered);
+      await input.receiptStore.put(recovered);
+      return recovered;
+    }
+    if (journalRecord.state === 'replay_authorization_started'
+      || journalRecord.state === 'executing'
+      || journalRecord.state === 'effect_observed') {
+      const recovered = interruptedActionReceipt(journalRecord, input.actionDecisions.now?.() ?? new Date());
+      await journal.recordReceipt(recovered);
+      await input.receiptStore.put(recovered);
+      return recovered;
+    }
+    if (decisionReceipt.outcome !== 'release') {
+      contained = true;
+    } else if (journalRecord.state === 'prepared') {
+      if (input.actionDecisions.replayGuard) {
+        journalRecord = await journal.transition(input.task.taskId, ['prepared'], 'replay_authorization_started');
+        if (!await input.actionDecisions.replayGuard.consume(decisionReceipt.decisionId, decisionReceipt.actionDigest)) {
+          throw new Error('Action-decision receipt replay was rejected.');
+        }
+        journalRecord = await journal.transition(input.task.taskId, ['replay_authorization_started'], 'replay_authorized');
+      } else {
+        journalRecord = await journal.transition(input.task.taskId, ['prepared'], 'replay_authorized');
+      }
+    }
+    if (!contained) {
+      if (journalRecord.state !== 'replay_authorized') throw new Error('Action execution journal is not ready for execution.');
+      try {
+        await journal.claim(journalRecord);
+        executionClaimed = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        throw new Error('Action execution is already claimed by another receiver.');
+      }
+    }
+  }
+
+  const commandResults: CommandResult[] = [];
+  let status: TaskReceipt['status'] = contained ? 'failed' : 'completed';
+  if (contained && decisionReceipt) {
+    commandResults.push({
+      commandId: 'runner', exitCode: null, signal: null, timedOut: false,
+      stdoutSha256: `sha256:${'0'.repeat(64)}`,
+      stderrSha256: `sha256:${createHash('sha256').update(`Action-decision outcome ${decisionReceipt.outcome} denied execution.`).digest('hex')}`,
+      stdout: '', stderr: `Action-decision outcome ${decisionReceipt.outcome} denied execution.`,
+    });
+  }
+
+  if (!contained) {
+    try {
+      await mkdir(worktreeRoot, { recursive: true, mode: 0o700 });
+      await rm(worktree, { recursive: true, force: true });
+      await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD']);
+      await git(worktree, ['switch', '-c', branch]);
+      const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
     const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
     const providerInstructions = providerInstructionsForTask(input.task);
     const providerInput = {
@@ -402,9 +683,14 @@ export async function executeTask(input: {
       timeoutSeconds: input.task.execution.timeoutSeconds,
       allowedCommandArgv: allowedCommands,
       allowWrites: input.task.authority.writePaths.length > 0,
+      ...(decisionReceipt ? {
+        externalIdempotencyKey: decisionReceipt.decisionId,
+        actionDigest: decisionReceipt.actionDigest,
+      } : {}),
       signal: input.signal,
     };
     const providerResult: ProviderExecutionResult = await (input.providerExecutor ?? executeProviderTask)(providerInput);
+    if (executionClaimed) await journal.recordEffectObserved(input.task.taskId, providerResult);
     commandResults.push({
       commandId: `provider.${input.task.target.provider}`,
       exitCode: providerResult.exitCode,
@@ -446,18 +732,15 @@ export async function executeTask(input: {
       commandResults.push({ commandId, ...result });
       if (result.exitCode !== 0 || result.timedOut) { status = input.signal?.aborted ? 'cancelled' : 'failed'; break; }
     }
-  } catch (error) {
-    status = input.signal?.aborted ? 'cancelled' : 'failed';
-    if (error instanceof ActionDecisionDeniedError) {
-      decisionReceipt = error.receipt;
-      contained = true;
+    } catch (error) {
+      status = input.signal?.aborted ? 'cancelled' : 'failed';
+      commandResults.push({
+        commandId: 'runner', exitCode: null, signal: null, timedOut: false,
+        stdoutSha256: `sha256:${'0'.repeat(64)}`,
+        stderrSha256: `sha256:${createHash('sha256').update(String(error)).digest('hex')}`,
+        stdout: '', stderr: error instanceof Error ? error.message : String(error),
+      });
     }
-    commandResults.push({
-      commandId: 'runner', exitCode: null, signal: null, timedOut: false,
-      stdoutSha256: `sha256:${'0'.repeat(64)}`,
-      stderrSha256: `sha256:${createHash('sha256').update(String(error)).digest('hex')}`,
-      stdout: '', stderr: error instanceof Error ? error.message : String(error),
-    });
   }
   const actionAcknowledgement = decisionReceipt && input.task.target.endpointId
     ? buildActionDecisionAcknowledgement({
@@ -484,6 +767,7 @@ export async function executeTask(input: {
     startedAt,
     completedAt: new Date().toISOString(),
   };
+  if (receiptRequired) await journal.recordReceipt(receipt);
   await input.receiptStore.put(receipt);
   return receipt;
 }

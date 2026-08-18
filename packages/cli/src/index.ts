@@ -7,7 +7,11 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { canonicalize, sha256, validateContract, verifyCanonicalObject, type ProviderCapability, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import {
+  canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
+  validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
+  type ProviderCapability, type ProviderId, type TrustedServerSigningKeyset,
+} from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
@@ -20,6 +24,7 @@ import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent
 import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import {
   executeTask,
+  FileActionExecutionJournal,
   FileTaskReceiptStore,
   providerInstructionsForTask,
   type TaskEnvelope,
@@ -1315,6 +1320,16 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         deviceName: pending.name, platform: pending.platform, publicKeyEd25519: pending.publicKeyEd25519,
         serverPublicKeyEd25519: result.serverPublicKeyEd25519, relayUrl: result.relayUrl, enrolledAt: new Date().toISOString(),
       };
+      if (result.serverSigningKeyset) {
+        const candidate = result.serverSigningKeyset as TrustedServerSigningKeyset;
+        const verification = verifyInitialServerSigningKeyset(
+          candidate,
+          createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: result.serverPublicKeyEd25519 }, format: 'jwk' }),
+          pending.organizationId,
+        );
+        if (!verification.ok) throw new Error(`Enrollment signing keyset was rejected: ${verification.reason}.`);
+        config.serverSigningKeyset = candidate;
+      }
       await saveDeviceConfig(configPath(), config);
       await saveDeviceEnrollmentAnchor({ config });
       await rm(pendingEnrollmentPath(), { force: true });
@@ -1714,11 +1729,51 @@ function selectedProviderAdapters(providerIds: ProviderId[] | null) {
     : providerAdapters;
 }
 
-function receiptAwareProviderCapabilities(providers: ProviderCapability[]) {
-  return providers.map((provider) => ({
-    ...provider,
-    actionDecisionReceipts: provider.taskExecution === 'available' ? 'available' as const : 'unavailable' as const,
-  }));
+export async function receiptAwareProviderCapabilities(
+  providers: ProviderCapability[],
+  now = new Date(),
+): Promise<ProviderCapability[]> {
+  const selfTestedAt = now.toISOString();
+  const freshUntil = new Date(now.getTime() + 5 * 60_000).toISOString();
+  let receiverState: 'available' | 'unavailable' = 'unavailable';
+  let reason = 'device_not_enrolled';
+  let trustedKeyVersions: string[] = [];
+  try {
+    const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+    await loadDeviceEnrollmentAnchor({ config });
+    const keyset = config.serverSigningKeyset;
+    if (!keyset) throw new Error('trusted_server_signing_keyset_unavailable');
+    if (!validateTrustedServerSigningKeysetContract(keyset).ok
+      || Date.parse(keyset.expiresAt) <= now.getTime()) {
+      throw new Error('trusted_server_signing_keyset_invalid_or_expired');
+    }
+    const resolver = createActionDecisionPublicKeyResolver(keyset, now);
+    trustedKeyVersions = keyset.keys
+      .filter((key) => resolver(key.keyVersion) !== null)
+      .map((key) => key.keyVersion);
+    if (trustedKeyVersions.length === 0) throw new Error('trusted_server_signing_keys_unavailable');
+    await new FileActionExecutionJournal(resolve(dharmaHome(), 'relay', 'action-execution-journal')).selfTest();
+    receiverState = 'available';
+    reason = '';
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  return providers.map((provider) => {
+    const available = provider.taskExecution === 'available' && receiverState === 'available';
+    return {
+      ...provider,
+      actionDecisionReceipts: available ? 'available' as const : 'unavailable' as const,
+      actionDecisionReceiver: {
+        protocol: 'action_decision_receipts_v1' as const,
+        protocolVersion: 1 as const,
+        journalSchema: 'dharma.action-execution-journal/v1' as const,
+        state: available ? 'available' as const : 'unavailable' as const,
+        selfTestedAt, freshUntil,
+        trustedKeyVersions: available ? trustedKeyVersions : [],
+        ...(!available ? { reason: provider.taskExecution !== 'available' ? 'provider_task_execution_unavailable' : reason } : {}),
+      },
+    };
+  });
 }
 
 async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
@@ -1801,7 +1856,7 @@ async function syncWorkspacePolicy(
   apply = true,
   providerIds: ProviderId[] | null = null,
 ) {
-  const providers = receiptAwareProviderCapabilities(
+  const providers = await receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
   );
   const response = await fabric.registerWorkspace({
@@ -2087,7 +2142,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     controlBranch: registered.controlBranch,
     policyRevision: authoritativeRevision,
   });
-  const providers = receiptAwareProviderCapabilities(
+  const providers = await receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
   );
   const nativeSkillResult = await installAvailableNativeAgentFabricBootstraps({
@@ -2775,7 +2830,9 @@ async function executeOneTask(
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
         actionDecisions: {
-          resolvePublicKey: (keyVersion: string) => keyVersion === task.actionDecision?.keyVersion ? serverPublicKey : null,
+          resolvePublicKey: config.serverSigningKeyset
+            ? createActionDecisionPublicKeyResolver(config.serverSigningKeyset)
+            : () => null,
         },
       } : {}),
     });
@@ -3318,7 +3375,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return {
-    providers: receiptAwareProviderCapabilities(await Promise.all(providerAdapters.map((adapter) => adapter.capability()))),
+    providers: await receiptAwareProviderCapabilities(await Promise.all(providerAdapters.map((adapter) => adapter.capability()))),
   };
   if (command === 'repositories' && subcommand === 'discover') {
     return repositoriesDiscover(flags, positional.slice(2), repeated.get('root') || []);
@@ -3338,7 +3395,7 @@ export async function run(argv: string[]): Promise<Output> {
     return {
       ...listed,
       relay: await relayProcessState(),
-      providers: receiptAwareProviderCapabilities(await Promise.all(providerAdapters.map((adapter) => adapter.capability()))),
+      providers: await receiptAwareProviderCapabilities(await Promise.all(providerAdapters.map((adapter) => adapter.capability()))),
     };
   }
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));
