@@ -960,6 +960,22 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
     events: reduced.events.map((event) => ({ ...event, skillBundleId: signedTaskBundleId })),
   };
   assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(signedTask, base.policy));
+  const legacySignedTask = {
+    ...signedTask,
+    localAnalysis: {
+      ...signedTask.localAnalysis,
+      eventKinds: { user_message: 1, unknown: 1 },
+    },
+  };
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(legacySignedTask, base.policy));
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...reduced,
+    localAnalysis: { ...reduced.localAnalysis, eventKinds: { user_message: 1, unknown: 1 } },
+  }, base.policy), /invalid free-form analysis/i);
+  assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
+    ...signedTask,
+    localAnalysis: { ...signedTask.localAnalysis, eventKinds: { user_message: 1, system: 1 } },
+  }, base.policy), /invalid free-form analysis/i);
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...signedTask,
     captureProvenance: { ...signedTask.captureProvenance, taskReceiptHash: null },
