@@ -337,11 +337,30 @@ test('secret-shaped property names and provider kinds never enter a capsule', ()
   });
   const encoded = JSON.stringify(capsule);
   assert.equal(encoded.includes(secret), false);
-  assert.equal(capsule.events[0]?.kind, 'unknown');
+  assert.equal(capsule.events[0]?.kind, 'metadata');
   assert.equal(capsule.events[0]?.payload.nativeKind, 'unknown');
   assert.equal(capsule.events[0]?.source.sourceKind, 'unknown');
-  assert.deepEqual(capsule.localAnalysis?.eventKinds, { unknown: 1 });
+  assert.deepEqual(capsule.localAnalysis?.eventKinds, { metadata: 1 });
   assert.equal(capsule.redactionReceipt.classes.includes('openai_key'), true);
+});
+
+test('reduced Claude capsules normalize native-only event types before local analysis', () => {
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', policy,
+    rawContentId: `sha256:${'4'.repeat(64)}`, rawBytes: 1_000,
+    session: {
+      provider: 'claude', sessionId: 'claude_native_types', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-08-18T17:00:00.000Z', endedAt: '2026-08-18T17:00:01.000Z',
+      records: [
+        { native: { type: 'system' }, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-18T17:00:00.000Z', kind: 'metadata' },
+        { native: { type: 'rate_limit_event' }, sourcePath: '/private/session.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-18T17:00:00.100Z', kind: 'metadata' },
+        { native: { type: 'assistant' }, sourcePath: '/private/session.jsonl', line: 3, workspace: '/repo', timestamp: '2026-08-18T17:00:00.200Z', kind: 'agent_message' },
+      ],
+    },
+  });
+
+  assert.deepEqual(capsule.events.map((event) => event.kind), ['metadata', 'metadata', 'agent_message']);
+  assert.deepEqual(capsule.localAnalysis?.eventKinds, { metadata: 2, agent_message: 1 });
 });
 
 test('deep provider records are conservatively omitted without overflowing traversal', () => {

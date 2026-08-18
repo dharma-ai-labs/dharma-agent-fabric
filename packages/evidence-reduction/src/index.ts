@@ -290,6 +290,19 @@ function isErrorRecord(record: SourceRecord): boolean {
     || /(error|failed|failure|exception|timeout|cancelled|max_turns)/i.test(`${nativeType} ${status} ${subtype}`);
 }
 
+const REDUCED_EVENT_KINDS = new Set([
+  'user_message', 'agent_message', 'tool_call', 'tool_result', 'command', 'file_read', 'file_write',
+  'git', 'validation', 'permission', 'subagent', 'error', 'retry', 'session_state', 'metadata', 'collapsed_output',
+]);
+
+function normalizedReducedEventKind(value: unknown): string {
+  const kind = safeKind(value);
+  if (REDUCED_EVENT_KINDS.has(kind)) return kind;
+  if (/(?:error|fail|exception|timeout|cancel)/i.test(kind)) return 'error';
+  if (/retry/i.test(kind)) return 'retry';
+  return 'metadata';
+}
+
 function buildLocalAnalysis(session: ProviderSession): NonNullable<TrajectoryCapsule['localAnalysis']> {
   const eventKinds: Record<string, number> = {};
   let totalBytes = 0;
@@ -298,7 +311,7 @@ function buildLocalAnalysis(session: ProviderSession): NonNullable<TrajectoryCap
   let results = 0;
   let errorRecords = 0;
   for (const record of session.records) {
-    const kind = safeSourceKind(record);
+    const kind = normalizedReducedEventKind(record.kind);
     eventKinds[kind] = (eventKinds[kind] ?? 0) + 1;
     const bytes = nativeRecordBytes(record);
     totalBytes += bytes;
@@ -496,7 +509,7 @@ export function buildTrajectoryCapsule(input: {
   let automaticInputBytes = 0;
   let automaticOutputBytes = 0;
   for (const [index, record] of input.session.records.entries()) {
-    const recordKind = safeKind(record.kind);
+    const recordKind = normalizedReducedEventKind(record.kind);
     const excludedPath = referencesExcludedPath(record.native, input.policy.evidence.excludePaths);
     if (excludedPath) {
       stats.classes.add('configured_excluded_path');

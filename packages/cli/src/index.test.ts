@@ -48,6 +48,7 @@ import {
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { buildTrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { CLI_USAGE } from './usage.js';
 import {
@@ -1014,6 +1015,48 @@ test('reduced capsules cannot disguise provider content as local analysis', asyn
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy({
     ...reduced, redactionReceipt: { ...reduced.redactionReceipt, disclosedClasses: ['customer-secret-in-metadata'] },
   }, base.policy), /invalid redaction receipt classes/i);
+});
+
+test('a generated reduced Claude task capsule passes the current authorization boundary', async () => {
+  const base = await materializeWorkspacePolicy({
+    workspace: await mkdtemp(join(tmpdir(), 'dharma-claude-reduced-')),
+    organizationId: 'org_northstar',
+    revision: 'local',
+  });
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_northstar',
+    deviceId: '22222222-2222-4222-8222-222222222222',
+    workspaceId: 'workspace-northstar',
+    policy: base.policy,
+    taskId: '55555555-5555-4555-8555-555555555555',
+    activeSkillBundleId: '44444444-4444-4444-8444-444444444444',
+    activeSkillBundleActivatedAt: '2026-08-18T16:59:00.000Z',
+    activeSkillBundleExpiresAt: '2026-08-19T17:00:00.000Z',
+    activeSkillBundleVerifiedAt: '2026-08-18T17:00:00.000Z',
+    captureProvenance: {
+      sourceClass: 'signed_task_execution',
+      collectedAt: '2026-08-18T17:00:01.000Z',
+      taskReceiptHash: `sha256:${'b'.repeat(64)}`,
+    },
+    rawContentId: `sha256:${'c'.repeat(64)}`,
+    rawBytes: 1_000,
+    session: {
+      provider: 'claude',
+      sessionId: 'claude-native-session',
+      sourcePath: '/private/claude.jsonl',
+      workspace: '/repo',
+      coverage: 'observed',
+      startedAt: '2026-08-18T17:00:00.000Z',
+      endedAt: '2026-08-18T17:00:01.000Z',
+      records: [
+        { native: { type: 'system' }, sourcePath: '/private/claude.jsonl', line: 1, workspace: '/repo', timestamp: '2026-08-18T17:00:00.000Z', kind: 'metadata' },
+        { native: { type: 'rate_limit_event' }, sourcePath: '/private/claude.jsonl', line: 2, workspace: '/repo', timestamp: '2026-08-18T17:00:00.100Z', kind: 'metadata' },
+        { native: { type: 'assistant' }, sourcePath: '/private/claude.jsonl', line: 3, workspace: '/repo', timestamp: '2026-08-18T17:00:00.200Z', kind: 'agent_message' },
+      ],
+    },
+  });
+
+  assert.doesNotThrow(() => assertCapsuleAuthorizedByCurrentPolicy(capsule as unknown as Record<string, unknown>, base.policy));
 });
 
 test('server withdrawal resets a workspace to local analysis without retaining a consent receipt', async () => {
