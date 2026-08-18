@@ -13,6 +13,8 @@ import {
   loadOrCreateDeviceIdentity,
   isDefinitiveAgentFabricRejection,
   installTrustedServerSigningKeyset,
+  loadDeviceEnrollmentAnchor,
+  recoverDeviceEnrollmentConsistency,
   normalizeHqUrl,
   normalizeRelayUrl,
   saveDeviceConfig,
@@ -38,6 +40,53 @@ function memoryStore(): SecureSecretStore {
 async function anchorConfig(configPath: string, store: SecureSecretStore) {
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   await saveDeviceEnrollmentAnchor({ config, store });
+}
+
+function keysetFixture(now: Date) {
+  const first = generateKeyPairSync('ed25519');
+  const second = generateKeyPairSync('ed25519');
+  const firstPublic = (first.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const secondPublic = (second.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const notBefore = new Date(now.getTime() - 60_000).toISOString();
+  const notAfter = new Date(now.getTime() + 60 * 60_000).toISOString();
+  const initialUnsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a', generation: 1,
+    keys: [{ keyVersion: 'kms/1', publicKeyEd25519: firstPublic, status: 'active' as const, notBefore, notAfter }],
+    signedByKeyVersion: 'kms/1', issuedAt: now.toISOString(), expiresAt: notAfter,
+  };
+  const initial: TrustedServerSigningKeyset = {
+    ...initialUnsigned, signature: signCanonicalObject(initialUnsigned, first.privateKey),
+  };
+  const rotatedUnsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a', generation: 2,
+    keys: [
+      { keyVersion: 'kms/1', publicKeyEd25519: firstPublic, status: 'overlap' as const, notBefore, notAfter },
+      { keyVersion: 'kms/2', publicKeyEd25519: secondPublic, status: 'active' as const, notBefore, notAfter },
+    ],
+    signedByKeyVersion: 'kms/1', issuedAt: new Date(now.getTime() + 1_000).toISOString(), expiresAt: notAfter,
+  };
+  const rotated: TrustedServerSigningKeyset = {
+    ...rotatedUnsigned, signature: signCanonicalObject(rotatedUnsigned, first.privateKey),
+  };
+  return { firstPublic, initial, rotated };
+}
+
+async function saveKeysetConfig(input: {
+  configPath: string;
+  publicKeyEd25519: string;
+  devicePublicKeyEd25519?: string;
+  keyset: TrustedServerSigningKeyset;
+  now: Date;
+}) {
+  await saveDeviceConfig(input.configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: input.devicePublicKeyEd25519 ?? input.publicKeyEd25519,
+    serverPublicKeyEd25519: input.publicKeyEd25519,
+    serverSigningKeyset: input.keyset, relayUrl: 'wss://relay.example', enrolledAt: input.now.toISOString(),
+  });
 }
 
 test('HQ and relay origins fail closed for deceptive hosts, credentials, and plaintext non-loopback transport', () => {
@@ -179,6 +228,71 @@ test('trusted server signing keyset is verified against the secure enrollment ro
     }),
     /organization_mismatch|bad_signature/,
   );
+});
+
+test('interrupted keyset installation recovers either verified write order without weakening trust', async () => {
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const fixture = keysetFixture(now);
+
+  const anchorAheadStore = memoryStore();
+  const anchorAheadRoot = await mkdtemp(resolve(tmpdir(), 'fabric-keyset-anchor-ahead-'));
+  const anchorAheadPath = resolve(anchorAheadRoot, 'device.json');
+  await saveKeysetConfig({ configPath: anchorAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.initial, now });
+  await anchorConfig(anchorAheadPath, anchorAheadStore);
+  const anchorAheadConfig = JSON.parse(await readFile(anchorAheadPath, 'utf8'));
+  await saveDeviceEnrollmentAnchor({ config: { ...anchorAheadConfig, serverSigningKeyset: fixture.rotated }, store: anchorAheadStore });
+  const recoveredDisk = await recoverDeviceEnrollmentConsistency({ configPath: anchorAheadPath, store: anchorAheadStore, now });
+  assert.equal(recoveredDisk.serverSigningKeyset?.generation, 2);
+  assert.equal(JSON.parse(await readFile(anchorAheadPath, 'utf8')).serverSigningKeyset.generation, 2);
+
+  const diskAheadStore = memoryStore();
+  const diskAheadRoot = await mkdtemp(resolve(tmpdir(), 'fabric-keyset-disk-ahead-'));
+  const diskAheadPath = resolve(diskAheadRoot, 'device.json');
+  await saveKeysetConfig({ configPath: diskAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.initial, now });
+  await anchorConfig(diskAheadPath, diskAheadStore);
+  await saveKeysetConfig({ configPath: diskAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.rotated, now });
+  const recoveredAnchor = await recoverDeviceEnrollmentConsistency({ configPath: diskAheadPath, store: diskAheadStore, now });
+  assert.equal(recoveredAnchor.serverSigningKeyset?.generation, 2);
+  assert.equal((await loadDeviceEnrollmentAnchor({ config: recoveredAnchor, store: diskAheadStore })).serverSigningKeyset?.generation, 2);
+});
+
+test('authenticated workspace responses can deliver only chain-verified periodic keysets', async () => {
+  const now = new Date();
+  const fixture = keysetFixture(now);
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-keyset-workspace-delivery-'));
+  const configPath = resolve(root, 'device.json');
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  await saveKeysetConfig({
+    configPath, publicKeyEd25519: fixture.firstPublic,
+    devicePublicKeyEd25519: identity.publicKeyEd25519, keyset: fixture.initial, now,
+  });
+  await anchorConfig(configPath, store);
+  const client = await AgentFabricClient.open({
+    configPath, statePath: resolve(root, 'state.json'), store,
+    fetcher: async (url) => new Response(JSON.stringify(
+      new URL(url).pathname.endsWith('/agent-fabric/workspaces')
+        ? { workspaceId: 'workspace', serverSigningKeyset: fixture.rotated }
+        : { ok: true },
+    ), { status: 201 }),
+  });
+  await client.openSession();
+  await client.registerWorkspace({ workspaceId: 'workspace' });
+  assert.equal(client.config.serverSigningKeyset?.generation, 2);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).serverSigningKeyset.generation, 2);
+
+  const untrusted = { ...fixture.rotated, generation: 3, signature: 'invalid' };
+  const rejectingClient = await AgentFabricClient.open({
+    configPath, statePath: resolve(root, 'state-reject.json'), store,
+    fetcher: async (url) => new Response(JSON.stringify(
+      new URL(url).pathname.endsWith('/agent-fabric/workspaces')
+        ? { workspaceId: 'workspace', serverSigningKeyset: untrusted }
+        : { ok: true },
+    ), { status: 201 }),
+  });
+  await rejectingClient.openSession();
+  await assert.rejects(rejectingClient.registerWorkspace({ workspaceId: 'workspace' }), /Server signing keyset was rejected/);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).serverSigningKeyset.generation, 2);
 });
 
 test('active skill authorization anchors can be restored or removed transactionally', async () => {

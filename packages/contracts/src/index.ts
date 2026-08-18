@@ -430,6 +430,8 @@ export function verifyServerSigningKeysetUpdate(
     || !validateTrustedServerSigningKeysetContract(candidate).ok) return { ok: false, reason: 'schema_invalid' };
   if (candidate.organizationId !== current.organizationId) return { ok: false, reason: 'organization_mismatch' };
   if (candidate.generation <= current.generation) return { ok: false, reason: 'generation_not_advanced' };
+  const currentTimeFailure = keysetTimeFailure(current, now);
+  if (currentTimeFailure) return { ok: false, reason: `current_${currentTimeFailure}` };
   const timeFailure = keysetTimeFailure(candidate, now);
   if (timeFailure) return { ok: false, reason: timeFailure };
   const signer = current.keys.find((key) => key.keyVersion === candidate.signedByKeyVersion
@@ -437,6 +439,8 @@ export function verifyServerSigningKeysetUpdate(
   if (!signer) return { ok: false, reason: 'untrusted_update_signer' };
   const retained = candidate.keys.find((key) => key.keyVersion === signer.keyVersion
     && key.publicKeyEd25519 === signer.publicKeyEd25519
+    && key.notBefore === signer.notBefore
+    && Date.parse(key.notAfter) <= Date.parse(signer.notAfter)
     && Date.parse(key.notAfter) >= now.getTime() + SERVER_SIGNING_KEY_OVERLAP_MS);
   if (!retained) return { ok: false, reason: 'rotation_overlap_missing' };
   const publicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: signer.publicKeyEd25519 }, format: 'jwk' });

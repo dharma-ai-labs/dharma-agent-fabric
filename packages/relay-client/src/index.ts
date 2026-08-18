@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import {
   canonicalize,
@@ -156,6 +156,30 @@ export interface DeviceEnrollmentAnchor {
   enrolledAt: string;
 }
 
+function enrollmentAnchorFromConfig(config: DeviceConfig): DeviceEnrollmentAnchor {
+  return {
+    schema: 'dharma.device-enrollment-anchor/v1',
+    hqUrl: normalizeHqUrl(config.hqUrl),
+    organizationId: config.organizationId,
+    deviceId: config.deviceId,
+    devicePublicKeyEd25519: config.publicKeyEd25519,
+    serverPublicKeyEd25519: config.serverPublicKeyEd25519,
+    ...(config.serverSigningKeyset ? { serverSigningKeyset: config.serverSigningKeyset } : {}),
+    enrolledAt: config.enrolledAt,
+  };
+}
+
+function enrollmentAnchorHasBaseIdentity(anchor: DeviceEnrollmentAnchor, config: DeviceConfig): boolean {
+  return anchor.schema === 'dharma.device-enrollment-anchor/v1'
+    && anchor.hqUrl === normalizeHqUrl(config.hqUrl)
+    && anchor.organizationId === config.organizationId
+    && anchor.deviceId === config.deviceId
+    && anchor.devicePublicKeyEd25519 === config.publicKeyEd25519
+    && anchor.serverPublicKeyEd25519 === config.serverPublicKeyEd25519
+    && anchor.enrolledAt === config.enrolledAt
+    && Number.isFinite(Date.parse(anchor.enrolledAt));
+}
+
 export interface ActiveSkillAuthorizationAnchor {
   schema: 'dharma.active-skill-authorization-anchor/v1';
   organizationId: string;
@@ -174,16 +198,7 @@ export async function saveDeviceEnrollmentAnchor(input: {
   store?: SecureSecretStore;
 }): Promise<DeviceEnrollmentAnchor> {
   const store = input.store ?? await createSystemSecureStore();
-  const anchor: DeviceEnrollmentAnchor = {
-    schema: 'dharma.device-enrollment-anchor/v1',
-    hqUrl: normalizeHqUrl(input.config.hqUrl),
-    organizationId: input.config.organizationId,
-    deviceId: input.config.deviceId,
-    devicePublicKeyEd25519: input.config.publicKeyEd25519,
-    serverPublicKeyEd25519: input.config.serverPublicKeyEd25519,
-    ...(input.config.serverSigningKeyset ? { serverSigningKeyset: input.config.serverSigningKeyset } : {}),
-    enrolledAt: input.config.enrolledAt,
-  };
+  const anchor = enrollmentAnchorFromConfig(input.config);
   const serialized = JSON.stringify(anchor);
   const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId);
   await store.put(account, serialized);
@@ -200,14 +215,9 @@ export async function loadDeviceEnrollmentAnchor(input: {
   const serialized = await store.get(account);
   if (!serialized) throw new Error('Device enrollment is not anchored in secure storage. Run dharma login again.');
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
-  if (anchor.schema !== 'dharma.device-enrollment-anchor/v1'
-    || anchor.hqUrl !== normalizeHqUrl(input.config.hqUrl)
-    || anchor.organizationId !== input.config.organizationId
-    || anchor.deviceId !== input.config.deviceId
-    || anchor.devicePublicKeyEd25519 !== input.config.publicKeyEd25519
-    || anchor.serverPublicKeyEd25519 !== input.config.serverPublicKeyEd25519
+  if (!enrollmentAnchorHasBaseIdentity(anchor, input.config)
     || JSON.stringify(anchor.serverSigningKeyset ?? null) !== JSON.stringify(input.config.serverSigningKeyset ?? null)
-    || !Number.isFinite(Date.parse(anchor.enrolledAt))) {
+  ) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
   return anchor;
@@ -333,8 +343,20 @@ export async function saveEvidenceQuotaAnchor(input: {
 async function atomicJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const handle = await open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   await rename(temporary, path);
+  try {
+    const directory = await open(dirname(path), 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
+  } catch {
+    // Directory fsync is unavailable on some supported hosts.
+  }
 }
 
 function errorMessage(body: unknown, status: number) {
@@ -417,26 +439,75 @@ export async function saveDeviceConfig(path: string, config: DeviceConfig) {
   await atomicJson(path, { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) });
 }
 
+function verifyKeysetTransition(
+  config: DeviceConfig,
+  current: TrustedServerSigningKeyset | undefined,
+  candidate: TrustedServerSigningKeyset,
+  now: Date,
+) {
+  return current
+    ? verifyServerSigningKeysetUpdate(current, candidate, now)
+    : verifyInitialServerSigningKeyset(
+      candidate,
+      createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
+      config.organizationId,
+      now,
+    );
+}
+
+export async function recoverDeviceEnrollmentConsistency(input: {
+  configPath: string;
+  store?: SecureSecretStore;
+  now?: Date;
+}): Promise<DeviceConfig> {
+  const config = await loadDeviceConfig(input.configPath);
+  const store = input.store ?? await createSystemSecureStore();
+  const serialized = await store.get(enrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
+  if (!serialized) return config;
+  const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
+  if (!enrollmentAnchorHasBaseIdentity(anchor, config)) {
+    throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
+  }
+  if (JSON.stringify(anchor.serverSigningKeyset ?? null) === JSON.stringify(config.serverSigningKeyset ?? null)) {
+    return config;
+  }
+
+  const now = input.now ?? new Date();
+  if (anchor.serverSigningKeyset) {
+    const verification = verifyKeysetTransition(config, config.serverSigningKeyset, anchor.serverSigningKeyset, now);
+    if (verification.ok) {
+      const recovered = { ...config, serverSigningKeyset: anchor.serverSigningKeyset };
+      await saveDeviceConfig(input.configPath, recovered);
+      return recovered;
+    }
+  }
+  if (config.serverSigningKeyset) {
+    const verification = verifyKeysetTransition(config, anchor.serverSigningKeyset, config.serverSigningKeyset, now);
+    if (verification.ok) {
+      await saveDeviceEnrollmentAnchor({ config, store });
+      return config;
+    }
+  }
+  throw new Error('Interrupted server signing keyset installation could not be verified. Run dharma login again.');
+}
+
 export async function installTrustedServerSigningKeyset(input: {
   configPath: string;
   candidate: TrustedServerSigningKeyset;
   store?: SecureSecretStore;
   now?: Date;
 }): Promise<DeviceConfig> {
-  const config = await loadDeviceConfig(input.configPath);
+  const store = input.store ?? await createSystemSecureStore();
+  const config = await recoverDeviceEnrollmentConsistency({ configPath: input.configPath, store, now: input.now });
   const now = input.now ?? new Date();
-  const verification = config.serverSigningKeyset
-    ? verifyServerSigningKeysetUpdate(config.serverSigningKeyset, input.candidate, now)
-    : verifyInitialServerSigningKeyset(
-      input.candidate,
-      createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
-      config.organizationId,
-      now,
-    );
+  if (JSON.stringify(config.serverSigningKeyset ?? null) === JSON.stringify(input.candidate)) return config;
+  const verification = verifyKeysetTransition(config, config.serverSigningKeyset, input.candidate, now);
   if (!verification.ok) throw new Error(`Server signing keyset was rejected: ${verification.reason}.`);
   const next = { ...config, serverSigningKeyset: input.candidate };
+  // The protected anchor is the write-ahead record. If the process stops before
+  // the disk configuration is replaced, startup verifies and completes it.
+  await saveDeviceEnrollmentAnchor({ config: next, store });
   await saveDeviceConfig(input.configPath, next);
-  await saveDeviceEnrollmentAnchor({ config: next, store: input.store });
   return next;
 }
 
@@ -452,14 +523,21 @@ export class AgentFabricClient {
   readonly config: DeviceConfig;
   readonly #privateJwk: JsonWebKey;
   readonly #statePath: string;
+  readonly #configPath: string;
+  readonly #store: SecureSecretStore;
   readonly #fetcher: typeof fetch;
   readonly #directTransport: boolean;
   #state: ProtocolState;
   #serial: Promise<unknown> = Promise.resolve();
 
-  private constructor(input: { config: DeviceConfig; privateJwk: JsonWebKey; statePath: string; state: ProtocolState; fetcher?: typeof fetch }) {
+  private constructor(input: {
+    config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
+    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch;
+  }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
+    this.#configPath = input.configPath;
+    this.#store = input.store;
     this.#statePath = input.statePath;
     this.#state = input.state;
     this.#fetcher = input.fetcher || fetch;
@@ -467,11 +545,12 @@ export class AgentFabricClient {
   }
 
   static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch }) {
-    const config = await loadDeviceConfig(input.configPath);
-    const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId, store: input.store });
+    const store = input.store ?? await createSystemSecureStore();
+    const config = await recoverDeviceEnrollmentConsistency({ configPath: input.configPath, store });
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId, store });
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
     try {
-      await loadDeviceEnrollmentAnchor({ config, store: input.store });
+      await loadDeviceEnrollmentAnchor({ config, store });
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes('not anchored in secure storage')) throw error;
       throw new Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.');
@@ -490,7 +569,10 @@ export class AgentFabricClient {
       }
     }
     state.recoveredTaskCompletions ??= [];
-    return new AgentFabricClient({ config, privateJwk: identity.privateJwk, statePath: input.statePath, state, fetcher: input.fetcher });
+    return new AgentFabricClient({
+      config, privateJwk: identity.privateJwk, configPath: input.configPath,
+      statePath: input.statePath, state, store, fetcher: input.fetcher,
+    });
   }
 
   async openSession(relayVersion = '0.1.0') {
@@ -513,7 +595,18 @@ export class AgentFabricClient {
     });
   }
 
-  registerWorkspace(body: unknown) { return this.signedPost('/agent-fabric/workspaces', body); }
+  async registerWorkspace(body: unknown) {
+    const response = await this.signedPost('/agent-fabric/workspaces', body);
+    if (response.serverSigningKeyset !== undefined) {
+      const next = await installTrustedServerSigningKeyset({
+        configPath: this.#configPath,
+        candidate: response.serverSigningKeyset as TrustedServerSigningKeyset,
+        store: this.#store,
+      });
+      Object.assign(this.config, next);
+    }
+    return response;
+  }
   connectRepositoryAgent(body: unknown) { return this.signedPost('/agent-fabric/repository-agents', body); }
   syncTrajectory(body: unknown) { return this.signedPost('/agent-fabric/trajectories', body); }
   pollEvidence(body: { workspaceId: string }) { return this.signedPost('/agent-fabric/evidence-requests/poll', body); }

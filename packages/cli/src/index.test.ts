@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  actionDecisionCapabilityFreshUntil,
   canonicalFilesystemPath,
   installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
@@ -164,6 +165,32 @@ test('organization raw evidence retention is validated and defaults explicitly',
   assert.equal(rawLocalRetentionDays({ retention: { rawLocalDays: 7 } }), 7);
   assert.throws(() => rawLocalRetentionDays({ retention: { rawLocalDays: 0 } }), /between 1 and 3650/);
   assert.throws(() => rawLocalRetentionDays({ retention: { rawLocalDays: 1.5 } }), /between 1 and 3650/);
+});
+
+test('action-decision capability freshness never outlives its key or keyset', () => {
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const base = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_test', generation: 1, signedByKeyVersion: 'kms/1', signature: 'signature',
+    issuedAt: new Date(now.getTime() - 60_000).toISOString(),
+    expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(),
+    keys: [{
+      keyVersion: 'kms/1', publicKeyEd25519: 'public', status: 'active' as const,
+      notBefore: new Date(now.getTime() - 60_000).toISOString(),
+      notAfter: new Date(now.getTime() + 90_000).toISOString(),
+    }],
+  };
+  assert.equal(
+    actionDecisionCapabilityFreshUntil(base, ['kms/1'], now),
+    new Date(now.getTime() + 90_000).toISOString(),
+  );
+  assert.throws(
+    () => actionDecisionCapabilityFreshUntil({
+      ...base,
+      keys: [{ ...base.keys[0]!, notAfter: now.toISOString() }],
+    }, ['kms/1'], now),
+    /invalid_or_expired/,
+  );
 });
 
 test('version is parser-safe structured output', async () => {

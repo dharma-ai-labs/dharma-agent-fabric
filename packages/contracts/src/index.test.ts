@@ -247,4 +247,33 @@ test('trusted signing keyset supports overlap rotation and rollback without trus
   });
   assert.deepEqual(verifyServerSigningKeysetUpdate(rotation, noOverlap, now), { ok: false, reason: 'rotation_overlap_missing' });
   assert.deepEqual(verifyInitialServerSigningKeyset({ ...initial, organizationId: 'other' }, root.publicKey, 'org_test', now), { ok: false, reason: 'organization_mismatch' });
+
+  const expiredCurrent = signedKeyset({
+    generation: 4, signerVersion: 'kms/1', signerPrivateKey: root.privateKey,
+    keys: [key('kms/1', rootX, 'active', 120)],
+    now: new Date(now.getTime() - 31 * 24 * 60 * 60_000),
+  });
+  const attemptedRevival = signedKeyset({
+    generation: 5, signerVersion: 'kms/1', signerPrivateKey: root.privateKey,
+    keys: [key('kms/1', rootX, 'active', 120)], now,
+  });
+  assert.deepEqual(
+    verifyServerSigningKeysetUpdate(expiredCurrent, attemptedRevival, now),
+    { ok: false, reason: 'current_expired' },
+  );
+
+  const expiringKey = key('kms/1', rootX, 'active', 30);
+  const boundedCurrent = signedKeyset({
+    generation: 6, signerVersion: 'kms/1', signerPrivateKey: root.privateKey,
+    keys: [expiringKey], now,
+  });
+  const extendedKey = { ...expiringKey, notAfter: new Date(now.getTime() + 120 * 60_000).toISOString() };
+  const attemptedExtension = signedKeyset({
+    generation: 7, signerVersion: 'kms/1', signerPrivateKey: root.privateKey,
+    keys: [extendedKey], now,
+  });
+  assert.deepEqual(
+    verifyServerSigningKeysetUpdate(boundedCurrent, attemptedExtension, now),
+    { ok: false, reason: 'rotation_overlap_missing' },
+  );
 });

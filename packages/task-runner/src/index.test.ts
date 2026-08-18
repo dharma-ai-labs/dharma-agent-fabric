@@ -74,8 +74,13 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   assert.equal(providerExecutions, 1);
   assert.equal(providerAllowWrites, false);
   assert.equal('actionAcknowledgement' in first, false);
-  assert.deepEqual(second, first);
-  assert.equal(JSON.parse(await readFile(resolve(root, 'receipts', `${task.taskId}.json`), 'utf8')).taskId, task.taskId);
+  assert.equal(second.commandResults.every((result) => result.stdout === '' && result.stderr === ''), true);
+  const durableReceiptText = await readFile(resolve(root, 'receipts', `${task.taskId}.json`), 'utf8');
+  assert.equal(durableReceiptText.includes('agent completed'), false);
+  assert.equal(durableReceiptText.includes('verified'), false);
+  const durableReceipt = JSON.parse(durableReceiptText);
+  assert.equal(durableReceipt.taskId, task.taskId);
+  assert.equal(durableReceipt.commandResults[0].stdoutSha256, `sha256:${'1'.repeat(64)}`);
 });
 
 test('task signature tampering is rejected before worktree creation', async () => {
@@ -344,6 +349,12 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
   assert.equal(result.actionAcknowledgement?.actionDigest, task.actionDecision?.actionDigest);
   assert.match(result.actionAcknowledgement?.externalIdempotencyKeyHash || '', /^[a-f0-9]{64}$/);
   assert.match(result.actionAcknowledgement?.resultDigest || '', /^sha256:[a-f0-9]{64}$/);
+  const durableJournal = await readFile(
+    resolve(root, 'state', 'action-execution-journal', `${task.taskId}.json`),
+    'utf8',
+  );
+  assert.equal(durableJournal.includes('done'), false);
+  assert.equal(durableJournal.includes('released'), false);
 });
 
 test('one-use receipt replay guard rejects a second consumption atomically', async () => {
@@ -369,7 +380,7 @@ test('a crashed external-effect claim remains durable and cannot be claimed agai
     branch: `dharma/task/${taskId}`,
   });
   const authorized = await journal.transition(taskId, ['prepared'], 'replay_authorized');
-  await journal.claim(authorized);
+  await journal.claim(authorized, 60_000);
 
   const recovered = new FileActionExecutionJournal(root);
   const record = await recovered.get(taskId);
@@ -377,7 +388,45 @@ test('a crashed external-effect claim remains durable and cannot be claimed agai
   assert.equal(record?.state, 'executing');
   assert.ok(claim);
   assert.equal(recovered.isClaimOwnerAlive(claim!), false);
-  await assert.rejects(recovered.claim(record!), /not authorized for claiming/);
+  await assert.rejects(recovered.claim(record!, 60_000), /not authorized for claiming/);
+});
+
+test('external-effect claims expire despite PID reuse', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-journal-pid-reuse-'));
+  let now = new Date('2026-08-17T20:00:00.000Z');
+  const journal = new FileActionExecutionJournal(root, process.pid, () => now);
+  const taskId = randomUUID();
+  const prepared = await journal.prepare({
+    taskId, decisionId: randomUUID(), endpointId: randomUUID(),
+    actionDigest: `sha256:${'a'.repeat(64)}`, externalIdempotencyKey: randomUUID(),
+    worktree: '/tmp/dharma-worktree', branch: `dharma/task/${taskId}`,
+  });
+  const authorized = await journal.transition(taskId, ['prepared'], 'replay_authorized');
+  const claim = await journal.claim(authorized, 60_000);
+  assert.equal(journal.isClaimOwnerAlive(claim), true);
+  now = new Date(now.getTime() + 60_001);
+  assert.equal(journal.isClaimOwnerAlive(claim), false);
+});
+
+test('durable stores reject malformed or decision-conflicting receipts', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-journal-validation-'));
+  const receiptStore = new FileTaskReceiptStore(resolve(root, 'receipts'));
+  const taskId = randomUUID();
+  await mkdir(resolve(root, 'receipts'), { recursive: true });
+  await writeFile(resolve(root, 'receipts', `${taskId}.json`), JSON.stringify({ taskId, status: 'completed' }));
+  await assert.rejects(receiptStore.get(taskId), /Task receipt is invalid/);
+
+  const journalRoot = resolve(root, 'journal');
+  await mkdir(journalRoot, { recursive: true });
+  await writeFile(resolve(journalRoot, `${taskId}.json`), JSON.stringify({
+    schema: 'dharma.action-execution-journal/v1', taskId,
+    decisionId: randomUUID(), endpointId: randomUUID(), actionDigest: `sha256:${'a'.repeat(64)}`,
+    externalIdempotencyKey: randomUUID(), worktree: '/tmp/dharma-worktree',
+    branch: `dharma/task/${taskId}`, state: 'receipt_recorded',
+    preparedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    receipt: { taskId, status: 'completed' },
+  }));
+  await assert.rejects(new FileActionExecutionJournal(journalRoot).get(taskId), /Task receipt is invalid/);
 });
 
 test('one embedded block receipt is consumed, contains the task, and never reaches the provider', async () => {

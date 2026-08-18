@@ -18,7 +18,8 @@ import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, type Provide
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
-  isDefinitiveAgentFabricRejection, saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
+  isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
+  saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
 import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
@@ -1723,6 +1724,21 @@ export function parseSelectedProviderIds(values: Array<string | boolean>): Provi
   return selected as ProviderId[];
 }
 
+export function actionDecisionCapabilityFreshUntil(
+  keyset: TrustedServerSigningKeyset,
+  trustedKeyVersions: string[],
+  now = new Date(),
+): string {
+  const trustedExpiries = keyset.keys
+    .filter((key) => trustedKeyVersions.includes(key.keyVersion))
+    .map((key) => Date.parse(key.notAfter));
+  const earliestExpiry = Math.min(Date.parse(keyset.expiresAt), ...trustedExpiries);
+  if (!Number.isFinite(earliestExpiry) || earliestExpiry <= now.getTime()) {
+    throw new Error('trusted_server_signing_keys_invalid_or_expired');
+  }
+  return new Date(Math.min(now.getTime() + 5 * 60_000, earliestExpiry)).toISOString();
+}
+
 function selectedProviderAdapters(providerIds: ProviderId[] | null) {
   return providerIds
     ? providerAdapters.filter((adapter) => providerIds.includes(adapter.providerId))
@@ -1734,12 +1750,12 @@ export async function receiptAwareProviderCapabilities(
   now = new Date(),
 ): Promise<ProviderCapability[]> {
   const selfTestedAt = now.toISOString();
-  const freshUntil = new Date(now.getTime() + 5 * 60_000).toISOString();
+  let freshUntil = now.toISOString();
   let receiverState: 'available' | 'unavailable' = 'unavailable';
   let reason = 'device_not_enrolled';
   let trustedKeyVersions: string[] = [];
   try {
-    const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+    const config = await recoverDeviceEnrollmentConsistency({ configPath: configPath(), now });
     await loadDeviceEnrollmentAnchor({ config });
     const keyset = config.serverSigningKeyset;
     if (!keyset) throw new Error('trusted_server_signing_keyset_unavailable');
@@ -1752,6 +1768,7 @@ export async function receiptAwareProviderCapabilities(
       .filter((key) => resolver(key.keyVersion) !== null)
       .map((key) => key.keyVersion);
     if (trustedKeyVersions.length === 0) throw new Error('trusted_server_signing_keys_unavailable');
+    freshUntil = actionDecisionCapabilityFreshUntil(keyset, trustedKeyVersions, now);
     await new FileActionExecutionJournal(resolve(dharmaHome(), 'relay', 'action-execution-journal')).selfTest();
     receiverState = 'available';
     reason = '';

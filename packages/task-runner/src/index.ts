@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
 import {
   buildActionDecisionAcknowledgement,
+  validateActionDecisionAcknowledgementContract,
   validateTaskEnvelopeContract,
   verifyActionDecisionReceipt,
   verifyCanonicalObject,
@@ -245,11 +246,57 @@ export function providerInstructionsForTask(task: TaskEnvelope): string {
   return instructions;
 }
 
+function receiptForDurableStorage(receipt: TaskReceipt): TaskReceipt {
+  return {
+    ...receipt,
+    commandResults: receipt.commandResults.map((result) => ({ ...result, stdout: '', stderr: '' })),
+  };
+}
+
+function assertValidTaskReceipt(value: unknown, expectedTaskId?: string): asserts value is TaskReceipt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Task receipt is invalid.');
+  const receipt = value as Partial<TaskReceipt>;
+  if (typeof receipt.taskId !== 'string' || !/^[0-9a-f-]{36}$/i.test(receipt.taskId)
+    || (expectedTaskId && receipt.taskId !== expectedTaskId)
+    || !['completed', 'failed', 'cancelled'].includes(String(receipt.status))
+    || typeof receipt.worktree !== 'string' || !isAbsolute(receipt.worktree)
+    || receipt.branch !== `dharma/task/${receipt.taskId}`
+    || !Array.isArray(receipt.commandResults) || receipt.commandResults.length > 100
+    || !Number.isFinite(Date.parse(String(receipt.startedAt || '')))
+    || !Number.isFinite(Date.parse(String(receipt.completedAt || '')))
+    || Date.parse(String(receipt.completedAt)) < Date.parse(String(receipt.startedAt))) {
+    throw new Error('Task receipt is invalid.');
+  }
+  for (const result of receipt.commandResults) {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Task receipt command result is invalid.');
+    const command = result as Partial<CommandResult>;
+    if (typeof command.commandId !== 'string' || command.commandId.length < 1 || command.commandId.length > 200
+      || !(command.exitCode === null || Number.isInteger(command.exitCode))
+      || !(command.signal === null || typeof command.signal === 'string')
+      || typeof command.timedOut !== 'boolean'
+      || !/^sha256:[a-f0-9]{64}$/.test(String(command.stdoutSha256 || ''))
+      || !/^sha256:[a-f0-9]{64}$/.test(String(command.stderrSha256 || ''))
+      || typeof command.stdout !== 'string' || typeof command.stderr !== 'string') {
+      throw new Error('Task receipt command result is invalid.');
+    }
+  }
+  if (receipt.actionAcknowledgement !== undefined) {
+    const acknowledgement = validateActionDecisionAcknowledgementContract(receipt.actionAcknowledgement);
+    if (!acknowledgement.ok || receipt.actionAcknowledgement.taskId !== receipt.taskId) {
+      throw new Error('Task receipt action acknowledgement is invalid.');
+    }
+  }
+}
+
 export class FileTaskReceiptStore {
   constructor(private readonly directory: string) {}
 
   async get(taskId: string): Promise<TaskReceipt | null> {
-    try { return JSON.parse(await readFile(resolve(this.directory, `${taskId}.json`), 'utf8')) as TaskReceipt; }
+    try {
+      const receipt = JSON.parse(await readFile(resolve(this.directory, `${taskId}.json`), 'utf8')) as unknown;
+      assertValidTaskReceipt(receipt, taskId);
+      return receipt;
+    }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
@@ -257,11 +304,9 @@ export class FileTaskReceiptStore {
   }
 
   async put(receipt: TaskReceipt): Promise<void> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    assertValidTaskReceipt(receipt, receipt.taskId);
     const target = resolve(this.directory, `${receipt.taskId}.json`);
-    const temp = `${target}.${process.pid}.tmp`;
-    await writeFile(temp, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-    await rename(temp, target);
+    await durableJsonWrite(target, receiptForDurableStorage(receipt));
   }
 }
 
@@ -297,6 +342,7 @@ export interface ActionExecutionClaim {
   ownerId: string;
   pid: number;
   claimedAt: string;
+  expiresAt: string;
 }
 
 async function durableJsonWrite(path: string, value: unknown): Promise<void> {
@@ -335,8 +381,28 @@ export class FileActionExecutionJournal {
   async get(taskId: string): Promise<ActionExecutionJournalRecord | null> {
     try {
       const record = JSON.parse(await readFile(this.recordPath(taskId), 'utf8')) as ActionExecutionJournalRecord;
-      if (record.schema !== 'dharma.action-execution-journal/v1' || record.taskId !== taskId) {
+      if (record.schema !== 'dharma.action-execution-journal/v1' || record.taskId !== taskId
+        || !/^[0-9a-f-]{36}$/i.test(record.taskId)
+        || !/^[0-9a-f-]{36}$/i.test(record.decisionId) || !/^[0-9a-f-]{36}$/i.test(record.endpointId)
+        || !/^sha256:[a-f0-9]{64}$/.test(record.actionDigest)
+        || typeof record.externalIdempotencyKey !== 'string' || !record.externalIdempotencyKey
+        || typeof record.worktree !== 'string' || !isAbsolute(record.worktree)
+        || record.branch !== `dharma/task/${record.taskId}`
+        || !['prepared', 'replay_authorization_started', 'replay_authorized', 'executing', 'effect_observed', 'receipt_recorded'].includes(record.state)
+        || !Number.isFinite(Date.parse(record.preparedAt)) || !Number.isFinite(Date.parse(record.updatedAt))
+        || (record.providerResultDigest !== undefined && !/^sha256:[a-f0-9]{64}$/.test(record.providerResultDigest))) {
         throw new Error('Action execution journal record is invalid.');
+      }
+      if (record.state === 'receipt_recorded' && !record.receipt) {
+        throw new Error('Action execution journal is missing its recorded receipt.');
+      }
+      if (record.receipt) {
+        assertValidTaskReceipt(record.receipt, taskId);
+        const acknowledgement = record.receipt.actionAcknowledgement;
+        if (acknowledgement
+          && (acknowledgement.endpointId !== record.endpointId || acknowledgement.actionDigest !== record.actionDigest)) {
+          throw new Error('Action execution journal receipt conflicts with the signed decision.');
+        }
       }
       return record;
     } catch (error) {
@@ -348,7 +414,12 @@ export class FileActionExecutionJournal {
   async getClaim(taskId: string): Promise<ActionExecutionClaim | null> {
     try {
       const claim = JSON.parse(await readFile(this.claimPath(taskId), 'utf8')) as ActionExecutionClaim;
-      if (claim.schema !== 'dharma.action-execution-claim/v1' || claim.taskId !== taskId) {
+      if (claim.schema !== 'dharma.action-execution-claim/v1' || claim.taskId !== taskId
+        || !/^[0-9a-f-]{36}$/i.test(claim.taskId) || !/^[0-9a-f-]{36}$/i.test(claim.decisionId)
+        || !/^sha256:[a-f0-9]{64}$/.test(claim.actionDigest)
+        || typeof claim.ownerId !== 'string' || !Number.isInteger(claim.pid) || claim.pid <= 0
+        || !Number.isFinite(Date.parse(claim.claimedAt)) || !Number.isFinite(Date.parse(claim.expiresAt))
+        || Date.parse(claim.expiresAt) <= Date.parse(claim.claimedAt)) {
         throw new Error('Action execution claim is invalid.');
       }
       return claim;
@@ -406,12 +477,14 @@ export class FileActionExecutionJournal {
     return next;
   }
 
-  async claim(record: ActionExecutionJournalRecord): Promise<ActionExecutionClaim> {
+  async claim(record: ActionExecutionJournalRecord, maximumAgeMs: number): Promise<ActionExecutionClaim> {
     if (record.state !== 'replay_authorized') throw new Error('Action execution is not authorized for claiming.');
+    const boundedAgeMs = Math.min(Math.max(maximumAgeMs, 60_000), 24 * 60 * 60_000);
     const claim: ActionExecutionClaim = {
       schema: 'dharma.action-execution-claim/v1', taskId: record.taskId,
       decisionId: record.decisionId, actionDigest: record.actionDigest,
       ownerId: this.ownerId, pid: this.pid, claimedAt: this.now().toISOString(),
+      expiresAt: new Date(this.now().getTime() + boundedAgeMs).toISOString(),
     };
     const handle = await open(this.claimPath(record.taskId), 'wx', 0o600);
     try {
@@ -423,6 +496,7 @@ export class FileActionExecutionJournal {
   }
 
   isClaimOwnerAlive(claim: ActionExecutionClaim): boolean {
+    if (Date.parse(claim.expiresAt) <= this.now().getTime()) return false;
     if (claim.ownerId === this.ownerId && claim.pid === this.pid) return true;
     try { process.kill(claim.pid, 0); return true; }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
@@ -435,9 +509,10 @@ export class FileActionExecutionJournal {
   }
 
   async recordReceipt(receipt: TaskReceipt): Promise<void> {
+    assertValidTaskReceipt(receipt, receipt.taskId);
     await this.transition(receipt.taskId, [
       'prepared', 'replay_authorization_started', 'replay_authorized', 'executing', 'effect_observed',
-    ], 'receipt_recorded', { receipt });
+    ], 'receipt_recorded', { receipt: receiptForDurableStorage(receipt) });
     await rm(this.claimPath(receipt.taskId), { force: true });
   }
 
@@ -647,7 +722,10 @@ export async function executeTask(input: {
     if (!contained) {
       if (journalRecord.state !== 'replay_authorized') throw new Error('Action execution journal is not ready for execution.');
       try {
-        await journal.claim(journalRecord);
+        await journal.claim(
+          journalRecord,
+          (input.task.execution.timeoutSeconds + input.task.execution.leaseSeconds + 300) * 1_000,
+        );
         executionClaimed = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
