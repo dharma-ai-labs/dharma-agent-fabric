@@ -104,10 +104,10 @@ function windowsCommandSpec(platform = process.platform): WindowsCommandSpec {
   };
 }
 
-function windowsStore(command?: string): SecureSecretStore {
-  const commandSpec = command
+function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec): SecureSecretStore {
+  const commandSpec = commandSpecOverride ?? (command
     ? { command, prefixArgs: [], timeoutMs: 5_000, retryAttempts: 3 }
-    : windowsCommandSpec();
+    : windowsCommandSpec());
   const invoke = (script: string, account: string, secret?: string) => withTransientWindowsRetry(
     () => run(commandSpec.command, [
       ...commandSpec.prefixArgs,
