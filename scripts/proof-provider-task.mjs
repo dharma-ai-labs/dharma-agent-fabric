@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import process from 'node:process';
 import { executeProviderTask } from '../packages/provider-adapters/dist/index.js';
+import { responseTextFromEvent } from '../packages/cli/dist/index.js';
 
 const provider = process.argv[2];
 const workspace = resolve(process.argv[3] || '.');
@@ -34,6 +35,8 @@ for (const line of result.stdout.split(/\r?\n/)) {
       semanticMarkerObserved ||= typeof event.item.text === 'string' && event.item.text.includes('dharma-agent-fabric');
     }
     if (event.type === 'turn.completed') terminalSubtype = 'turn.completed';
+    const responseText = responseTextFromEvent(event);
+    semanticMarkerObserved ||= typeof responseText === 'string' && responseText.includes('dharma-agent-fabric');
   } catch {
     // Provider diagnostics are excluded from semantic proof.
   }
