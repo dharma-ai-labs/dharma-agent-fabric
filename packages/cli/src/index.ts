@@ -1026,7 +1026,7 @@ export function sourceRepositoryFingerprint(remote: string | null, explicitKey?:
   return { fingerprint: `sha256:${createHash('sha256').update(identity).digest('hex')}`, source };
 }
 
-function responseTextFromEvent(value: unknown): string | null {
+export function responseTextFromEvent(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const event = value as Record<string, unknown>;
   const item = event.item && typeof event.item === 'object' && !Array.isArray(event.item)

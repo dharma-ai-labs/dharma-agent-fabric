@@ -38,6 +38,7 @@ import {
   reserveDailyContentUpload,
   run,
   sourceRepositoryFingerprint,
+  responseTextFromEvent,
   taskResponsePreview,
   taskReceiptSession,
   taskSkillPinFailureCode,
@@ -1224,6 +1225,14 @@ test('task response preview extracts the final agent message and removes secrets
   assert.match(preview?.text || '', /Architecture summary/);
   assert.equal(preview?.text.includes('secret-secret-secret'), false);
   assert.ok((preview?.redactedValues || 0) >= 1);
+});
+
+test('provider response extraction recognizes the supported Agy success envelope', () => {
+  assert.equal(
+    responseTextFromEvent({ status: 'SUCCESS', response: 'dharma-agent-fabric' }),
+    'dharma-agent-fabric',
+  );
+  assert.equal(responseTextFromEvent({ status: 'ERROR', response: 'ignored' }), null);
 });
 
 test('task response preview exposes bounded Agy success output', () => {
