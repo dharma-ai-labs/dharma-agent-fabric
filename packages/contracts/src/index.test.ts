@@ -69,6 +69,10 @@ test('embedded action-decision receipts verify the exact HQ task action and KMS 
     workspaceId: 'workspace_test',
     taskType: 'external_request',
     instructions: 'Apply the bounded repair.',
+    skillBundle: {
+      bundleId: '77777777-7777-4777-8777-777777777777',
+      bundleHash: `sha256:${'d'.repeat(64)}`,
+    },
     requiredSkills: [],
     authority: { readPaths: ['src/**'], writePaths: ['src/parser.ts'], commands: [{ commandId: 'verify' }], network: 'deny', git: 'task_branch', allowlistedDomains: [] },
     execution: { isolation: 'git_worktree', timeoutSeconds: 60, leaseSeconds: 60, maximumConcurrentAgents: 1 },
@@ -109,6 +113,10 @@ test('embedded action-decision receipts verify the exact HQ task action and KMS 
   assert.deepEqual(verifyActionDecisionReceipt(embedded, action, (version) => version === receipt.keyVersion ? publicKey : null, now), { ok: true });
   assert.deepEqual(
     verifyActionDecisionReceipt(embedded, { ...action, instructions: 'Different effect.' }, () => publicKey, now),
+    { ok: false, reason: 'digest_mismatch' },
+  );
+  assert.deepEqual(
+    verifyActionDecisionReceipt(embedded, { ...action, skillBundle: null }, () => publicKey, now),
     { ok: false, reason: 'digest_mismatch' },
   );
   for (const field of ['organizationId', 'taskId', 'actionId', 'targetEndpointId', 'workspaceId'] as const) {

@@ -122,6 +122,7 @@ export interface TaskAction {
   workspaceId: string;
   taskType: 'external_request' | 'a2a_handoff' | 'evaluation_retest' | 'remediation_smoke';
   instructions: string;
+  skillBundle: { bundleId: string; bundleHash: string } | null;
   requiredSkills: Array<{ skillId: string; version: string; commit: string; contentHash: string }>;
   authority: {
     readPaths: string[];

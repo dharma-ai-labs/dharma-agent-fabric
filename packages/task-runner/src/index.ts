@@ -565,6 +565,7 @@ export function canonicalTaskActionForTask(
     workspaceId: task.workspaceId,
     taskType: task.taskType,
     instructions: task.instructions,
+    skillBundle: task.skillBundle,
     requiredSkills: task.requiredSkills,
     authority: task.authority,
     execution: task.execution,
