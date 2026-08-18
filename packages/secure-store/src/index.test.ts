@@ -17,10 +17,14 @@ test('WSL launches Windows Credential Manager through the interop bridge', () =>
   assert.deepEqual(secureStoreInternals.windowsCommandSpec('linux'), {
     command: '/init',
     prefixArgs: ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'],
+    timeoutMs: 15_000,
+    retryAttempts: 2,
   });
   assert.deepEqual(secureStoreInternals.windowsCommandSpec('win32'), {
     command: 'powershell.exe',
     prefixArgs: [],
+    timeoutMs: 5_000,
+    retryAttempts: 3,
   });
 });
 
