@@ -468,7 +468,7 @@ export async function recoverDeviceEnrollmentConsistency(input: {
   if (!enrollmentAnchorHasBaseIdentity(anchor, config)) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
-  if (JSON.stringify(anchor.serverSigningKeyset ?? null) === JSON.stringify(config.serverSigningKeyset ?? null)) {
+  if (canonicalize(anchor.serverSigningKeyset ?? null) === canonicalize(config.serverSigningKeyset ?? null)) {
     return config;
   }
 
@@ -500,7 +500,7 @@ export async function installTrustedServerSigningKeyset(input: {
   const store = input.store ?? await createSystemSecureStore();
   const config = await recoverDeviceEnrollmentConsistency({ configPath: input.configPath, store, now: input.now });
   const now = input.now ?? new Date();
-  if (JSON.stringify(config.serverSigningKeyset ?? null) === JSON.stringify(input.candidate)) return config;
+  if (canonicalize(config.serverSigningKeyset ?? null) === canonicalize(input.candidate)) return config;
   const verification = verifyKeysetTransition(config, config.serverSigningKeyset, input.candidate, now);
   if (!verification.ok) throw new Error(`Server signing keyset was rejected: ${verification.reason}.`);
   const next = { ...config, serverSigningKeyset: input.candidate };

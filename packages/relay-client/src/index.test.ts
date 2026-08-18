@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createPublicKey, generateKeyPairSync, verify, type JsonWebKey } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
@@ -227,6 +227,87 @@ test('trusted server signing keyset is verified against the secure enrollment ro
       now,
     }),
     /organization_mismatch|bad_signature/,
+  );
+});
+
+test('repeated canonical signing keysets are idempotent while same-generation substitutions fail closed', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-signing-keyset-repeat-'));
+  const configPath = resolve(root, 'device.json');
+  const signing = generateKeyPairSync('ed25519');
+  const replacement = generateKeyPairSync('ed25519');
+  const publicKeyEd25519 = (signing.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const replacementPublicKey = (replacement.publicKey.export({ format: 'jwk' }) as JsonWebKey).x!;
+  const now = new Date('2026-08-17T20:00:00.000Z');
+  const notBefore = new Date(now.getTime() - 60_000).toISOString();
+  const notAfter = new Date(now.getTime() + 60 * 60_000).toISOString();
+  const unsigned = {
+    schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: 'org_a',
+    generation: 1,
+    keys: [{ keyVersion: 'kms/1', publicKeyEd25519, status: 'active' as const, notBefore, notAfter }],
+    signedByKeyVersion: 'kms/1',
+    issuedAt: now.toISOString(),
+    expiresAt: notAfter,
+  };
+  const candidate: TrustedServerSigningKeyset = {
+    ...unsigned,
+    signature: signCanonicalObject(unsigned, signing.privateKey),
+  };
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519, serverPublicKeyEd25519: publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: now.toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  await installTrustedServerSigningKeyset({ configPath, candidate, store, now });
+
+  const before = await stat(configPath);
+  const reordered: TrustedServerSigningKeyset = {
+    signature: candidate.signature,
+    expiresAt: candidate.expiresAt,
+    issuedAt: candidate.issuedAt,
+    signedByKeyVersion: candidate.signedByKeyVersion,
+    keys: candidate.keys.map((key) => ({
+      notAfter: key.notAfter,
+      notBefore: key.notBefore,
+      status: key.status,
+      publicKeyEd25519: key.publicKeyEd25519,
+      keyVersion: key.keyVersion,
+    })),
+    generation: candidate.generation,
+    organizationId: candidate.organizationId,
+    schema: candidate.schema,
+  };
+  const repeated = await installTrustedServerSigningKeyset({ configPath, candidate: reordered, store, now });
+  const after = await stat(configPath);
+  assert.deepEqual(repeated.serverSigningKeyset, candidate);
+  assert.equal(after.ino, before.ino, 'idempotent delivery must not replace the device configuration');
+
+  await assert.rejects(
+    installTrustedServerSigningKeyset({
+      configPath,
+      candidate: {
+        ...candidate,
+        keys: [{ ...candidate.keys[0]!, publicKeyEd25519: replacementPublicKey }],
+      },
+      store,
+      now,
+    }),
+    /generation_not_advanced/,
+  );
+  await assert.rejects(
+    installTrustedServerSigningKeyset({
+      configPath,
+      candidate: {
+        ...candidate,
+        expiresAt: new Date(Date.parse(candidate.expiresAt) + 60_000).toISOString(),
+      },
+      store,
+      now,
+    }),
+    /generation_not_advanced/,
   );
 });
 
