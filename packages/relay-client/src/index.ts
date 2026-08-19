@@ -703,7 +703,10 @@ export class AgentFabricClient {
     const pending: PendingRequest = {
       method, pathname, body: serialized,
       headers: {
-        ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+        ...(method === 'POST' ? {
+          'content-type': 'application/json',
+          'idempotency-key': messageId,
+        } : {}),
         'x-dharma-device-id': this.config.deviceId,
         'x-dharma-session-id': this.#state.sessionId, 'x-dharma-message-id': messageId,
         'x-dharma-timestamp': timestamp, 'x-dharma-nonce': nonce,

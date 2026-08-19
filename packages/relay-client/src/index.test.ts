@@ -543,7 +543,15 @@ test('control-agent reads and chat turns use the enrolled device signature', asy
     relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
   });
   await anchorConfig(configPath, store);
-  const calls: Array<{ method: string; pathname: string; search: string; body: unknown; signed: boolean }> = [];
+  const calls: Array<{
+    method: string;
+    pathname: string;
+    search: string;
+    body: unknown;
+    signed: boolean;
+    idempotencyKey: string | null;
+    messageId: string;
+  }> = [];
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
     const parsed = new URL(String(url));
     const headers = new Headers(init?.headers);
@@ -571,6 +579,8 @@ test('control-agent reads and chat turns use the enrolled device signature', asy
       method: String(init?.method), pathname: parsed.pathname, search: parsed.search,
       body: serialized ? JSON.parse(serialized) : null,
       signed: Boolean(headers.get('x-dharma-signature')),
+      idempotencyKey: headers.get('idempotency-key'),
+      messageId,
     });
     return new Response(JSON.stringify({ ok: true }), { status: parsed.pathname.endsWith('/sessions') && init?.method === 'POST' ? 201 : 200 });
   };
@@ -589,6 +599,10 @@ test('control-agent reads and chat turns use the enrolled device signature', asy
   ]);
   assert.equal(calls.at(-3)?.body, null);
   assert.deepEqual(calls.at(-2)?.body, { message: 'Show agent status.' });
+  assert.equal(calls.at(-4)?.idempotencyKey, calls.at(-4)?.messageId);
+  assert.equal(calls.at(-3)?.idempotencyKey, null);
+  assert.equal(calls.at(-2)?.idempotencyKey, calls.at(-2)?.messageId);
+  assert.equal(calls.at(-1)?.idempotencyKey, null);
 });
 
 test('signed outbox retries the exact message after an unknown network outcome', async () => {
@@ -605,6 +619,7 @@ test('signed outbox retries the exact message after an unknown network outcome',
   });
   await anchorConfig(configPath, store);
   const messageIds: string[] = [];
+  const idempotencyKeys: Array<string | null> = [];
   const timestamps: string[] = [];
   let failAfterAccept = false;
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
@@ -613,6 +628,7 @@ test('signed outbox retries the exact message after an unknown network outcome',
     const body = String(init?.body || '');
     const messageId = headers.get('x-dharma-message-id')!;
     messageIds.push(messageId);
+    idempotencyKeys.push(headers.get('idempotency-key'));
     timestamps.push(headers.get('x-dharma-timestamp')!);
     const payload = Buffer.from(JSON.stringify({
       bodyHash: `sha256:${createHash('sha256').update(body).digest('hex')}`,
@@ -635,6 +651,8 @@ test('signed outbox retries the exact message after an unknown network outcome',
   const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await resumed.registerWorkspace({ workspaceId: 'ignored-until-pending-is-acked' });
   assert.equal(messageIds.at(-2), messageIds.at(-1));
+  assert.equal(idempotencyKeys.at(-2), messageIds.at(-2));
+  assert.equal(idempotencyKeys.at(-1), messageIds.at(-1));
   assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });
 
