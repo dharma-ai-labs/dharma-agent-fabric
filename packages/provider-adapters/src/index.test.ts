@@ -8,10 +8,29 @@ import {
   agyAdapter,
   codexAdapter,
   defaultProcessRunner,
+  executableVersion,
   executeProviderTask,
   providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
+
+test('provider discovery finds supported per-user CLI installations outside the parent PATH', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-provider-local-bin-'));
+  const localBin = join(home, '.local', 'bin');
+  let observedPath = '';
+  const version = await executableVersion(
+    'agy',
+    { HOME: home, PATH: '/usr/bin:/bin' },
+    (executable, argv, options) => {
+      assert.equal(executable, 'agy');
+      assert.deepEqual(argv, ['--version']);
+      observedPath = String(options.env.PATH || '');
+      return { status: 0, stdout: '1.1.15\n', stderr: '' };
+    },
+  );
+  assert.equal(version, '1.1.15');
+  assert.equal(observedPath, ['/usr/bin:/bin', localBin].join(delimiter));
+});
 
 test('Agy 1.1.13 capabilities fail closed for signed effects and host lifecycle claims', () => {
   assert.deepEqual(agyCapability('1.1.13'), {

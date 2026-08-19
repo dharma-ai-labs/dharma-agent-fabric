@@ -1257,6 +1257,53 @@ test('native bootstrap installation makes the repository skill verifiable by Cod
   assert.equal(verified.nativeInstalled, true);
 });
 
+test('Agy skill verification requires the native plugin to be discoverable by the provider', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-skill-verification-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(workspace, { recursive: true });
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId: 'workspace_test',
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const nativeRoot = nativeSkillDirectory('agy', {}, home);
+  const skillRoot = join(nativeRoot, 'dharma-agent-fabric');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(join(skillRoot, 'SKILL.md'), '# Managed skill\n');
+  await writeFile(join(skillRoot, '.dharma-agent-fabric-bootstrap.json'), JSON.stringify({
+    schema: 'dharma.native-skill-bootstrap/v2',
+    managedBy: 'dharma-agent-fabric',
+    provider: 'agy',
+  }));
+  const missing = await verifyAgentFabricSkillInstallation({
+    provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+    listAgyPlugins: async () => ({ stdout: '{"imports":[]}' }),
+  });
+  assert.equal(missing.nativeInstalled, true);
+  assert.equal(missing.nativeDiscovered, false);
+  assert.equal(missing.activationAttested, false);
+  assert.equal(missing.bootstrapReady, false);
+  assert.equal(missing.signedLifecycleReady, false);
+  assert.equal(missing.ready, false);
+
+  const discovered = await verifyAgentFabricSkillInstallation({
+    provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+    listAgyPlugins: async () => ({
+      stdout: '{"imports":[{"name":"dharma-agent-fabric","components":["skills"]}]}',
+    }),
+  });
+  assert.equal(discovered.nativeDiscovered, true);
+  assert.equal(discovered.activationAttested, false);
+  assert.equal(discovered.bootstrapReady, true);
+  assert.equal(discovered.signedLifecycleReady, false);
+  assert.equal(discovered.ready, true);
+  assert.equal(discovered.verificationScope, 'generic_bootstrap');
+  assert.match(discovered.nextAction, /signed activation and rollback remain unavailable/);
+});
+
 test('native bootstrap installation refuses to overwrite an unmanaged provider skill', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-native-skill-unmanaged-'));
   const home = join(root, 'home');
@@ -1297,7 +1344,7 @@ test('native bootstrap installation isolates provider failures during onboarding
     providers: [
       { provider: 'codex', skillInstall: 'available' },
       { provider: 'claude', skillInstall: 'unavailable' },
-      { provider: 'agy', skillInstall: 'available' },
+      { provider: 'agy', skillInstall: 'partial' },
     ],
     workspace: '/workspace',
     workspaceId: 'workspace_test',

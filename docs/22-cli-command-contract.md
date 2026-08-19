@@ -90,7 +90,7 @@ dharma skills verify --provider <codex|claude|agy> --workspace <path>
 dharma skills sync --workspace-id <id> --provider <codex|claude|agy> --policy <path>
 ```
 
-`skills verify` checks both the repository-scoped Skill and the provider-native managed bootstrap. `skills sync` polls for an approved, signed rollout and installs it with a receipt. Active bundle state is workspace-scoped, so one provider installation can retain independently reversible releases for several connected repositories. Bundle inspection, planning, promotion, and rollback remain dashboard/control-plane operations; they are not public CLI commands in this release.
+`skills verify` checks both the repository-scoped Skill and the provider-native managed bootstrap. Its `ready` field means that the generic bootstrap is installed and discoverable; it does not attest an active signed remediation bundle. The separate `signedLifecycleReady` and `activationAttested` fields remain false for Agy because its public plugin interface does not expose signed content identity or transactional rollback. `skills sync` polls for an approved, signed rollout and installs it with a receipt only for providers whose lifecycle capability supports that operation. Active bundle state is workspace-scoped, so one provider installation can retain independently reversible releases for several connected repositories. Bundle inspection, planning, promotion, and rollback remain dashboard/control-plane operations; they are not public CLI commands in this release.
 
 ## Policy
 
