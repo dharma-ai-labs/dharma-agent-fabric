@@ -102,22 +102,17 @@ class AgentFabricClientTest(unittest.TestCase):
         self.assertEqual(captured[2][0].full_url, "https://www.dharma-ai.io/api/v1/orgs/org_northstar/agent-fabric/evaluation-contracts")
         self.assertFalse(hasattr(client, "acknowledge_action_decision_enforcement"))
 
-    def test_control_agent_messages_use_org_token_and_admin_approvals_use_portal_session(self):
+    def test_control_agent_messages_use_org_token_and_admin_decisions_use_portal_link(self):
         captured = []
 
         def fake_urlopen(request, timeout):
             captured.append((request, timeout))
             return _Response({"ok": True})
 
-        client = AgentFabricClient(
-            "org_northstar",
-            "dharma_org_test",
-            portal_session_cookie="clerk-session-token",
-        )
+        client = AgentFabricClient("org_northstar", "dharma_org_test")
         with patch("dharma_agent_fabric.client.urlopen", fake_urlopen):
             client.list_control_agent_events("session / one", after_sequence=7)
             client.submit_control_agent_message("session / one", "Inspect the latest failures.")
-            client.approve_control_agent_tool_call("tool / one", "approval-key")
 
         events_request = captured[0][0]
         self.assertEqual(
@@ -130,19 +125,16 @@ class AgentFabricClientTest(unittest.TestCase):
         self.assertEqual(json.loads(message_request.data), {"message": "Inspect the latest failures."})
         self.assertEqual(message_request.headers["Authorization"], "Bearer dharma_org_test")
 
-        approval_request = captured[2][0]
-        self.assertIsNone(approval_request.get_header("Authorization"))
-        self.assertEqual(approval_request.get_header("Cookie"), "__session=clerk-session-token")
-        self.assertEqual(approval_request.get_header("Idempotency-key"), "approval-key")
         self.assertEqual(
-            json.loads(approval_request.data),
-            {"confirmed": True, "idempotencyKey": "approval-key"},
+            client.control_agent_decision_url("tool / one", "approve", "session / one"),
+            "https://www.dharma-ai.io/portal/dashboard?orgId=org_northstar&controlAgent=open&toolCallId=tool+%2F+one&decision=approve&sessionId=session+%2F+one",
         )
 
-    def test_control_agent_approval_fails_closed_without_portal_session(self):
+    def test_control_agent_decision_url_rejects_unknown_decisions(self):
         client = AgentFabricClient("org_northstar", "dharma_org_test")
-        with self.assertRaisesRegex(ValueError, "portal_session_cookie is required"):
-            client.approve_control_agent_tool_call("tool-one")
+        with self.assertRaisesRegex(ValueError, "decision must be approve or reject"):
+            client.control_agent_decision_url("tool-one", "execute")
+        self.assertFalse(hasattr(client, "approve_control_agent_tool_call"))
 
 
 if __name__ == "__main__":
