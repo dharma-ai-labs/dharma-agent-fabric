@@ -104,12 +104,36 @@ requests remain the current path to semantic review. Content is still locally
 secret-redacted, workspace-bound, size-capped, previewable, and auditable.
 
 The versioned TypeScript client is `@dharma-ai-labs/agent-fabric-sdk`; the Python
-client is `dharma-agent-fabric-sdk`. Both call the organization-scoped Dharma
-HQ API rather than customer cloud or internal worker endpoints.
+client is `dharma-agent-fabric-sdk`. Both call the organization-scoped API at
+`www.dharma-ai.io` rather than customer cloud or internal worker endpoints.
 
 See [the company onboarding and operations guide](docs/onboarding/customer-guide.md)
 for the purchase, GitHub, CLI, managed ADK, GCP BYOK, evaluation, remediation,
 cross-agent handoff, and offboarding flow.
+
+## Organization control agent
+
+Enabled organizations receive one managed control agent registered as a normal
+Agent Fabric logical agent. Local users can use it through their enrolled
+device without placing an organization token in a prompt or shell history:
+
+```bash
+dharma assistant chat --message "Summarize the newest failure family" --confirm
+dharma assistant history
+dharma assistant status --session-id <session-id>
+```
+
+The chat turn is usage-metered and runs in the organization's Dharma-managed
+GCP environment. Reads use the server-side organization context. Paid or
+mutating work is returned as a bounded tool proposal; it does not execute from
+the CLI. `dharma assistant approve` and `dharma assistant reject` open the
+authenticated portal at the exact session and proposal so an organization
+admin can make the decision there. The URL itself never approves an action.
+
+The control agent can request signed, task-bound work from authorized local,
+managed ADK, or GCP Vertex BYOK endpoints. It cannot obtain provider
+credentials, arbitrary shell access, unrestricted files, or authority beyond
+the user's organization role and the endpoint's signed policy.
 
 ## Codex plugin
 
@@ -125,7 +149,7 @@ codex mcp login dharma-agent-fabric
 
 The plugin connects to the OAuth-protected MCP resource at
 `https://mcp.dharma-ai.io/mcp`. Evidence expansion and every mutation require
-explicit confirmation; organization membership and the underlying HQ API
+explicit confirmation; organization membership and the underlying platform API
 capabilities remain authoritative.
 
 ## Development

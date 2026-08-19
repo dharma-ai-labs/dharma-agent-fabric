@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.12';
+const VERSION = '0.2.13';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -1275,6 +1275,122 @@ async function openVerificationUri(url: string) {
     } catch {}
   }
   return false;
+}
+
+export type ControlAgentCliClient = Pick<AgentFabricClient,
+  'listControlAgentSessions'
+  | 'createControlAgentSession'
+  | 'submitControlAgentMessage'
+  | 'listControlAgentEvents'
+>;
+
+type ControlAgentCliClientFactory = () => Promise<ControlAgentCliClient>;
+
+function validatedControlAgentId(value: string, label: string) {
+  if (!UUID_PATTERN.test(value)) throw new Error(`${label} must be a UUID.`);
+  return value;
+}
+
+function controlAgentSessionId(response: Record<string, unknown>) {
+  const session = response.session && typeof response.session === 'object' && !Array.isArray(response.session)
+    ? response.session as Record<string, unknown>
+    : null;
+  const id = typeof session?.id === 'string' ? session.id : '';
+  return validatedControlAgentId(id, 'Created control-agent session ID');
+}
+
+export function controlAgentDecisionUrl(input: {
+  portalOrigin: string;
+  organizationId: string;
+  toolCallId: string;
+  decision: 'approve' | 'reject';
+  sessionId?: string;
+}) {
+  const url = new URL('/portal/dashboard', normalizeHqUrl(input.portalOrigin));
+  url.searchParams.set('orgId', input.organizationId);
+  url.searchParams.set('controlAgent', 'open');
+  url.searchParams.set('toolCallId', validatedControlAgentId(input.toolCallId, 'Control-agent tool call ID'));
+  url.searchParams.set('decision', input.decision);
+  if (input.sessionId) {
+    url.searchParams.set('sessionId', validatedControlAgentId(input.sessionId, 'Control-agent session ID'));
+  }
+  return url.toString();
+}
+
+export async function runAssistantCommand(
+  subcommand: string | undefined,
+  flags: Map<string, string | boolean>,
+  openClient: ControlAgentCliClientFactory = client,
+  openUrl: (url: string) => Promise<boolean> = openVerificationUri,
+): Promise<Record<string, unknown>> {
+  if (!['chat', 'history', 'status', 'approve', 'reject'].includes(String(subcommand))) {
+    throw new Error('Assistant command must be chat, history, status, approve, or reject.');
+  }
+
+  if (subcommand === 'approve' || subcommand === 'reject') {
+    const config = await readDeviceConfig();
+    if (!config) throw new Error('Assistant approval requires an enrolled device. Run dharma login first.');
+    const toolCallId = required(flags, 'tool-call-id');
+    const sessionId = typeof flags.get('session-id') === 'string' ? String(flags.get('session-id')) : undefined;
+    const url = controlAgentDecisionUrl({
+      portalOrigin: portalUrl(flags, config.hqUrl),
+      organizationId: config.organizationId,
+      toolCallId,
+      decision: subcommand,
+      ...(sessionId ? { sessionId } : {}),
+    });
+    const opened = flags.has('no-open') ? false : await openUrl(url);
+    return {
+      ok: true,
+      decision: subcommand,
+      approvalPerformed: false,
+      opened,
+      url,
+      nextStep: 'Review the exact tool authority and confirm or reject it in the authenticated Dharma portal.',
+    };
+  }
+
+  const fabric = await openClient();
+  if (subcommand === 'history') {
+    const sessionId = typeof flags.get('session-id') === 'string'
+      ? validatedControlAgentId(String(flags.get('session-id')), 'Control-agent session ID')
+      : null;
+    if (!sessionId) return fabric.listControlAgentSessions();
+    const afterSequence = Number(flags.get('after-sequence') || 0);
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new Error('--after-sequence must be a non-negative integer.');
+    }
+    return fabric.listControlAgentEvents(sessionId, afterSequence);
+  }
+
+  if (subcommand === 'status') {
+    const sessionId = validatedControlAgentId(required(flags, 'session-id'), 'Control-agent session ID');
+    const [session, events] = await Promise.all([
+      fabric.listControlAgentSessions(sessionId),
+      fabric.listControlAgentEvents(sessionId, 0),
+    ]);
+    return { ok: true, sessionId, session, events };
+  }
+
+  requireExplicitConfirmation(flags, 'Sending a paid organization control-agent message');
+  const suppliedBody = flags.has('json-body') || flags.has('body-file')
+    ? await commandJsonBody(flags)
+    : { message: required(flags, 'message') };
+  const message = typeof suppliedBody.message === 'string' ? suppliedBody.message.trim() : '';
+  if (!message) throw new Error('Assistant chat requires a non-empty message.');
+  const sessionIdFlag = typeof flags.get('session-id') === 'string'
+    ? validatedControlAgentId(String(flags.get('session-id')), 'Control-agent session ID')
+    : null;
+  const created = sessionIdFlag ? null : await fabric.createControlAgentSession(String(flags.get('title') || 'CLI conversation'));
+  const sessionId = sessionIdFlag || controlAgentSessionId(created!);
+  const accepted = await fabric.submitControlAgentMessage(sessionId, suppliedBody);
+  return {
+    ok: true,
+    sessionId,
+    sessionCreated: Boolean(created),
+    accepted,
+    statusCommand: `dharma assistant status --session-id ${sessionId}`,
+  };
 }
 
 async function login(flags: Map<string, string | boolean>): Promise<Output> {
@@ -3466,6 +3582,7 @@ export async function run(argv: string[]): Promise<Output> {
       return status;
     }
   }
+  if (command === 'assistant') return runAssistantCommand(subcommand, flags);
   if ([
     'organization', 'agents', 'experiments', 'failures', 'remediations', 'handoffs', 'usage',
   ].includes(String(command)) || (

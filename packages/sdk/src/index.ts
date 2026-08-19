@@ -11,6 +11,7 @@ export interface AgentFabricClientOptions {
 export interface AgentFabricRequestOptions {
   idempotencyKey?: string;
   signal?: AbortSignal;
+  authMode?: 'organization_token' | 'portal_session';
 }
 
 export interface AgentFabricStateEnvelope {
@@ -105,6 +106,11 @@ export interface AgentFabricManagedRunInput {
   metadata?: Record<string, unknown>;
   maxRuntimeSeconds?: number;
   estimatedCredits?: number;
+}
+
+export interface AgentFabricControlAgentMessageInput {
+  message: string;
+  attachments?: AgentFabricImageAttachment[];
 }
 
 export interface AgentFabricRepositoryAgentInput {
@@ -209,17 +215,23 @@ export class AgentFabricClient {
 
   async request<T>(method: string, path: string, body?: unknown, options: AgentFabricRequestOptions = {}): Promise<T> {
     if (!path.startsWith('/')) throw new Error('Agent Fabric path must start with /.');
-    const token = typeof this.tokenSource === 'function' ? await this.tokenSource() : this.tokenSource;
-    if (!token.trim()) throw new Error('Agent Fabric token resolver returned an empty token.');
+    const authMode = options.authMode || 'organization_token';
+    const token = authMode === 'organization_token'
+      ? typeof this.tokenSource === 'function' ? await this.tokenSource() : this.tokenSource
+      : '';
+    if (authMode === 'organization_token' && !token.trim()) {
+      throw new Error('Agent Fabric token resolver returned an empty token.');
+    }
     const mutation = !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
     const response = await this.fetcher(`${this.baseUrl}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${token}`,
+        ...(authMode === 'organization_token' ? { authorization: `Bearer ${token}` } : {}),
         accept: 'application/json',
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(mutation ? { 'idempotency-key': options.idempotencyKey || idempotencyKey() } : {}),
       },
+      credentials: authMode === 'portal_session' ? 'include' : 'omit',
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: options.signal,
     });
@@ -231,6 +243,10 @@ export class AgentFabricClient {
 
   orgPath(path: string) {
     return `/api/v1/orgs/${encodeURIComponent(this.organizationId)}/agent-fabric${path}`;
+  }
+
+  controlAgentPath(path: string) {
+    return `/api/v1/orgs/${encodeURIComponent(this.organizationId)}/control-agent${path}`;
   }
 
   onboarding() { return this.request<Record<string, unknown>>('GET', this.orgPath('/onboarding')); }
@@ -276,6 +292,37 @@ export class AgentFabricClient {
   }
   listSkills(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/skills${query}`)); }
   usage(query = '') { return this.request<Record<string, unknown>>('GET', this.orgPath(`/usage${query}`)); }
+  listControlAgentSessions(sessionId?: string) {
+    const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+    return this.request<Record<string, unknown>>('GET', this.controlAgentPath(`/sessions${query}`));
+  }
+  createControlAgentSession(title = 'New conversation', options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.controlAgentPath('/sessions'), { title }, options);
+  }
+  submitControlAgentMessage(sessionId: string, input: AgentFabricControlAgentMessageInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', this.controlAgentPath(`/sessions/${encodeURIComponent(sessionId)}/messages`), input, options);
+  }
+  listControlAgentEvents(sessionId: string, afterSequence = 0) {
+    return this.request<Record<string, unknown>>('GET', this.controlAgentPath(`/sessions/${encodeURIComponent(sessionId)}/events?afterSequence=${afterSequence}`));
+  }
+  approveControlAgentToolCall(toolCallId: string, options: AgentFabricRequestOptions = {}) {
+    const executionIdempotencyKey = options.idempotencyKey || idempotencyKey();
+    return this.request<Record<string, unknown>>(
+      'POST',
+      this.controlAgentPath(`/tool-calls/${encodeURIComponent(toolCallId)}/approve`),
+      { confirmed: true, idempotencyKey: executionIdempotencyKey },
+      { ...options, idempotencyKey: executionIdempotencyKey, authMode: 'portal_session' },
+    );
+  }
+  rejectControlAgentToolCall(toolCallId: string, options: AgentFabricRequestOptions = {}) {
+    const executionIdempotencyKey = options.idempotencyKey || idempotencyKey();
+    return this.request<Record<string, unknown>>(
+      'POST',
+      this.controlAgentPath(`/tool-calls/${encodeURIComponent(toolCallId)}/reject`),
+      { confirmed: true, idempotencyKey: executionIdempotencyKey },
+      { ...options, idempotencyKey: executionIdempotencyKey, authMode: 'portal_session' },
+    );
+  }
   dispatchTask(input: Record<string, unknown>, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', this.orgPath('/tasks'), input, options);
   }

@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, NotRequired, TypedDict
 from urllib.error import HTTPError
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -69,6 +69,9 @@ class AgentFabricClient:
 
     def _managed_path(self, path: str) -> str:
         return f"/api/orgs/{self._encoded_organization_id}{path}"
+
+    def _control_agent_path(self, path: str) -> str:
+        return f"/api/v1/orgs/{self._encoded_organization_id}/control-agent{path}"
 
     def request(
         self,
@@ -176,3 +179,44 @@ class AgentFabricClient:
 
     def usage(self) -> dict[str, Any]:
         return self.request("GET", self._org_path("/usage"))
+
+    def list_control_agent_sessions(self, session_id: str | None = None) -> dict[str, Any]:
+        query = f"?sessionId={quote(session_id, safe='')}" if session_id else ""
+        return self.request("GET", self._control_agent_path(f"/sessions{query}"))
+
+    def create_control_agent_session(self, title: str = "New conversation") -> dict[str, Any]:
+        return self.request("POST", self._control_agent_path("/sessions"), {"title": title})
+
+    def submit_control_agent_message(
+        self,
+        session_id: str,
+        message: str,
+        attachments: list[AgentFabricImageAttachment] | None = None,
+    ) -> dict[str, Any]:
+        return self.request("POST", self._control_agent_path(f"/sessions/{quote(session_id, safe='')}/messages"), {
+            "message": message,
+            **({"attachments": attachments} if attachments else {}),
+        })
+
+    def list_control_agent_events(self, session_id: str, after_sequence: int = 0) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            self._control_agent_path(f"/sessions/{quote(session_id, safe='')}/events?afterSequence={after_sequence}"),
+        )
+
+    def control_agent_decision_url(
+        self,
+        tool_call_id: str,
+        decision: str,
+        session_id: str | None = None,
+    ) -> str:
+        if decision not in {"approve", "reject"}:
+            raise ValueError("decision must be approve or reject")
+        parameters = {
+            "orgId": self.organization_id,
+            "controlAgent": "open",
+            "toolCallId": tool_call_id,
+            "decision": decision,
+            **({"sessionId": session_id} if session_id else {}),
+        }
+        return f"{self.base_url}/portal/dashboard?{urlencode(parameters)}"

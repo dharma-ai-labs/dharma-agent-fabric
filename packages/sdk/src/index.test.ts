@@ -42,6 +42,40 @@ test('SDK returns stable typed API errors', async () => {
   });
 });
 
+test('SDK exposes control-agent chat with organization tokens and keeps decisions portal-session bound', async () => {
+  const requests: Request[] = [];
+  const client = new AgentFabricClient({
+    organizationId: 'org_northstar',
+    token: 'dharma_org_test',
+    fetcher: async (input, init) => {
+      requests.push(new Request(input, init));
+      return new Response(JSON.stringify({ ok: true }), { status: init?.method === 'POST' ? 202 : 200 });
+    },
+  });
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const toolCallId = '22222222-2222-4222-8222-222222222222';
+  await client.createControlAgentSession('Readiness review', { idempotencyKey: 'control-session-1' });
+  await client.submitControlAgentMessage(sessionId, { message: 'Show the active release gates.' }, { idempotencyKey: 'control-message-1' });
+  await client.listControlAgentEvents(sessionId, 7);
+  await client.approveControlAgentToolCall(toolCallId, { idempotencyKey: 'control-approve-1' });
+
+  assert.deepEqual(requests.map((request) => new URL(request.url).pathname), [
+    '/api/v1/orgs/org_northstar/control-agent/sessions',
+    `/api/v1/orgs/org_northstar/control-agent/sessions/${sessionId}/messages`,
+    `/api/v1/orgs/org_northstar/control-agent/sessions/${sessionId}/events`,
+    `/api/v1/orgs/org_northstar/control-agent/tool-calls/${toolCallId}/approve`,
+  ]);
+  assert.equal(requests[0]?.headers.get('authorization'), 'Bearer dharma_org_test');
+  assert.equal(requests[2]?.headers.get('authorization'), 'Bearer dharma_org_test');
+  assert.equal(requests[3]?.headers.get('authorization'), null);
+  assert.equal(requests[3]?.credentials, 'include');
+  assert.equal(requests[3]?.headers.get('idempotency-key'), 'control-approve-1');
+  assert.deepEqual(JSON.parse(await requests[3]!.text()), {
+    confirmed: true,
+    idempotencyKey: 'control-approve-1',
+  });
+});
+
 test('SDK sends the server handoff contract and keyless GCP BYOK verification', async () => {
   const requests: Request[] = [];
   const client = new AgentFabricClient({

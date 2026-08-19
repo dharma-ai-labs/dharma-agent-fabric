@@ -11,6 +11,7 @@ import {
   activateAgyPlugin,
   actionDecisionCapabilityFreshUntil,
   canonicalFilesystemPath,
+  controlAgentDecisionUrl,
   installAvailableNativeAgentFabricBootstraps,
   assertCapsuleAuthorizedByCurrentPolicy,
   assertRecoveredTaskWorkspacePolicy,
@@ -37,6 +38,7 @@ import {
   releaseDailyContentUpload,
   reserveDailyContentUpload,
   run,
+  runAssistantCommand,
   sourceRepositoryFingerprint,
   responseTextFromEvent,
   taskResponsePreview,
@@ -275,6 +277,87 @@ test('global npm symlinks still execute the CLI entrypoint', async () => {
 
 test('unknown commands fail as usage errors', async () => {
   await assert.rejects(() => run(['unknown']), /Usage:/);
+});
+
+test('assistant chat uses the enrolled device client and preserves explicit paid confirmation', async () => {
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  const calls: Array<{ method: string; values: unknown[] }> = [];
+  const openClient = async () => ({
+    async listControlAgentSessions(...values: unknown[]) {
+      calls.push({ method: 'list-sessions', values });
+      return { ok: true };
+    },
+    async createControlAgentSession(...values: unknown[]) {
+      calls.push({ method: 'create-session', values });
+      return { ok: true, session: { id: sessionId } };
+    },
+    async submitControlAgentMessage(...values: unknown[]) {
+      calls.push({ method: 'submit-message', values });
+      return { ok: true, turn: { runId: 'run-one' } };
+    },
+    async listControlAgentEvents(...values: unknown[]) {
+      calls.push({ method: 'list-events', values });
+      return { ok: true, events: [] };
+    },
+  });
+
+  await assert.rejects(
+    () => runAssistantCommand('chat', new Map([['message', 'Inspect failures.']]), openClient),
+    /requires --confirm/,
+  );
+  const result = await runAssistantCommand('chat', new Map<string, string | boolean>([
+    ['message', 'Inspect failures.'],
+    ['title', 'Failure review'],
+    ['confirm', true],
+  ]), openClient);
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.sessionCreated, true);
+  assert.deepEqual(calls, [
+    { method: 'create-session', values: ['Failure review'] },
+    { method: 'submit-message', values: [sessionId, { message: 'Inspect failures.' }] },
+  ]);
+});
+
+test('assistant history and status read only the selected device-scoped session', async () => {
+  const sessionId = '22222222-2222-4222-8222-222222222222';
+  const calls: string[] = [];
+  const openClient = async () => ({
+    async listControlAgentSessions(id?: string) {
+      calls.push(`sessions:${id || 'all'}`);
+      return { ok: true, sessions: [] };
+    },
+    async createControlAgentSession() { throw new Error('not expected'); },
+    async submitControlAgentMessage() { throw new Error('not expected'); },
+    async listControlAgentEvents(id: string, afterSequence?: number) {
+      calls.push(`events:${id}:${afterSequence || 0}`);
+      return { ok: true, events: [] };
+    },
+  });
+  await runAssistantCommand('history', new Map([
+    ['session-id', sessionId],
+    ['after-sequence', '7'],
+  ]), openClient);
+  await runAssistantCommand('status', new Map([['session-id', sessionId]]), openClient);
+  assert.deepEqual(calls, [
+    `events:${sessionId}:7`,
+    `sessions:${sessionId}`,
+    `events:${sessionId}:0`,
+  ]);
+});
+
+test('assistant decisions deep-link to authenticated portal review without performing approval', () => {
+  const url = new URL(controlAgentDecisionUrl({
+    portalOrigin: 'https://www.dharma-ai.io',
+    organizationId: 'org_northstar',
+    toolCallId: '33333333-3333-4333-8333-333333333333',
+    sessionId: '44444444-4444-4444-8444-444444444444',
+    decision: 'approve',
+  }));
+  assert.equal(url.origin, 'https://www.dharma-ai.io');
+  assert.equal(url.pathname, '/portal/dashboard');
+  assert.equal(url.searchParams.get('orgId'), 'org_northstar');
+  assert.equal(url.searchParams.get('toolCallId'), '33333333-3333-4333-8333-333333333333');
+  assert.equal(url.searchParams.get('decision'), 'approve');
 });
 
 test('organization commands require environment credentials and explicit confirmation for mutations', async () => {
