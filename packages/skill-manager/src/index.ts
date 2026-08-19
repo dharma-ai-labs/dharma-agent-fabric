@@ -55,6 +55,12 @@ export interface InstallReceipt {
   signature: string;
 }
 
+export type ProviderActivationCheck = {
+  name: string;
+  status: 'pass' | 'fail' | 'unavailable';
+  details: string | null;
+};
+
 export interface ActiveSkillBundleAuthorization {
   bundleId: string;
   bundleHash: string;
@@ -532,6 +538,7 @@ export async function installSkillBundle(input: {
   provider: ProviderId;
   smokeCommandId?: string;
   organizationApprovalId?: string;
+  providerActivationCheck?: () => Promise<ProviderActivationCheck>;
 }): Promise<InstallReceipt> {
   const startedAt = new Date().toISOString();
   verifySkillBundle(input.bundle, input.serverPublicKey);
@@ -622,6 +629,25 @@ export async function installSkillBundle(input: {
       });
       status = await restorePreviousBundle();
     }
+  }
+  if (status === 'active' && input.providerActivationCheck) {
+    let check: ProviderActivationCheck;
+    try {
+      check = await input.providerActivationCheck();
+      if (!/^provider:[a-z0-9._-]+:activation$/.test(check.name)
+        || !['pass', 'fail', 'unavailable'].includes(check.status)
+        || (check.details !== null && (typeof check.details !== 'string' || check.details.length > 1_000))) {
+        throw new Error('Provider activation check returned an invalid result.');
+      }
+    } catch (error) {
+      check = {
+        name: `provider:${input.provider}:activation`,
+        status: 'fail',
+        details: error instanceof Error ? error.message.slice(0, 1_000) : 'Provider activation check failed.',
+      };
+    }
+    checks.push(check);
+    if (check.status === 'fail') status = await restorePreviousBundle();
   }
   const receiptBase = {
     schema: 'dharma.install-receipt/v1' as const,

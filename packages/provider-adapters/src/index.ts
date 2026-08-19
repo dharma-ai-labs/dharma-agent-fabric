@@ -855,7 +855,18 @@ function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): Provide
   };
 }
 
-export function agyCapability(version: string | null): ProviderCapability & { skillRollback: 'unavailable' } {
+function versionAtLeast(version: string, minimum: [number, number, number]) {
+  const parsed = version.match(/^(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+  if (!parsed || parsed.some((value) => !Number.isInteger(value))) return false;
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (parsed[index]! > minimum[index]!) return true;
+    if (parsed[index]! < minimum[index]!) return false;
+  }
+  return true;
+}
+
+export function agyCapability(version: string | null): ProviderCapability & { skillRollback: 'available' | 'unavailable' } {
+  const signedLifecycle = Boolean(version && versionAtLeast(version, [1, 1, 15]));
   return {
     provider: 'agy',
     version,
@@ -864,8 +875,8 @@ export function agyCapability(version: string | null): ProviderCapability & { sk
     taskExecution: version ? 'partial' : 'unavailable',
     sessionContinuation: version ? 'partial' : 'unavailable',
     skillInstall: version ? 'partial' : 'unavailable',
-    activation: 'unavailable',
-    skillRollback: 'unavailable',
+    activation: signedLifecycle ? 'next_session' : 'unavailable',
+    skillRollback: signedLifecycle ? 'available' : 'unavailable',
     usageEvidence: 'unavailable',
   };
 }

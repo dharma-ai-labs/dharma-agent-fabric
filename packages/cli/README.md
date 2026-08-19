@@ -40,6 +40,14 @@ Current provider adapters are Codex, Claude Code, and Agy. Run
 `dharma providers list` because evidence, task, continuation, Skill installation,
 activation, and usage capabilities are reported independently.
 
+Agy 1.1.15 Skill activation uses only its supported plugin and sandboxed print
+interfaces. During onboarding, Dharma adds the narrow read-only
+`command(git status)` preflight to Agy's permission allowlist. It never uses
+`--dangerously-skip-permissions`. A signed remediation Skill contains a
+content-bound activation token; Agy must return that token with a fresh nonce
+before the device signs an active installation receipt. A mismatch restores the
+previous bundle before the receipt is posted.
+
 Signed workspace registration returns the organization-admin-approved evidence
 policy from Dharma HQ. The CLI applies that server revision to
 `.dharma/approved-policy.json` automatically. Without an active content grant,

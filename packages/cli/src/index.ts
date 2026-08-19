@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.15';
+const VERSION = '0.2.16';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -3219,9 +3219,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
       });
     } catch {}
   }
-  const activationAttested = input.provider === 'agy' ? false : nativeInstalled;
   const bootstrapReady = repositoryInstalled && nativeInstalled && nativeDiscovered;
-  const signedLifecycleReady = bootstrapReady && activationAttested;
   let workspaceId: string | undefined;
   let organizationAgentId: string | undefined;
   try {
@@ -3235,6 +3233,25 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const activeBundleId = workspaceId && organizationAgentId && config
     ? (await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config))?.bundleId ?? null
     : null;
+  let activationAttested = input.provider !== 'agy' ? nativeInstalled : false;
+  if (input.provider === 'agy' && activeBundleId && workspaceId) {
+    try {
+      const receipt = JSON.parse(await readFile(resolve(
+        nativeRoot,
+        '.dharma-managed',
+        'workspaces',
+        workspaceId,
+        'active',
+        'INSTALL_RECEIPT.json',
+      ), 'utf8')) as { checks?: unknown };
+      activationAttested = Array.isArray(receipt.checks) && receipt.checks.some((item) => (
+        item && typeof item === 'object'
+        && (item as Record<string, unknown>).name === 'provider:agy:activation'
+        && (item as Record<string, unknown>).status === 'pass'
+      ));
+    } catch {}
+  }
+  const signedLifecycleReady = bootstrapReady && activationAttested && Boolean(activeBundleId);
   return {
     provider: input.provider,
     ready: bootstrapReady,
@@ -3251,9 +3268,9 @@ export async function verifyAgentFabricSkillInstallation(input: {
     nativeSkillPath,
     workspaceId: workspaceId || null,
     activeBundleId,
-    activation: input.provider === 'agy' ? 'unavailable' : 'next_session',
-    nextAction: input.provider === 'agy' && bootstrapReady
-        ? 'The Agy bootstrap is installed and discoverable. Invoke /dharma-agent-fabric in a new Agy session; signed activation and rollback remain unavailable.'
+    activation: input.provider === 'agy' ? (activationAttested ? 'attested' : 'manual_invocation_required') : 'next_session',
+    nextAction: input.provider === 'agy' && bootstrapReady && !activationAttested
+        ? 'The Agy bootstrap is installed and discoverable. A signed remediation bundle must include and pass the content-bound activation challenge before full lifecycle support is reported.'
       : bootstrapReady
         ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
       : 'Run dharma onboard again from the repository root.',
@@ -3271,6 +3288,7 @@ export async function activateAgyPlugin(input: {
   home?: string;
   execute?: AgyPluginExecutor;
 } = {}) {
+  await ensureAgyReadOnlyAttestationPermission({ env: input.env, home: input.home });
   const root = resolve(nativeSkillDirectory('agy', input.env, input.home), '..');
   const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
   const options = { timeout: 30_000, env: providerProcessEnvironment(input.env) };
@@ -3281,6 +3299,169 @@ export async function activateAgyPlugin(input: {
   await execute('agy', ['plugin', 'validate', root], options);
   await execute('agy', ['plugin', 'install', root], options);
   await execute('agy', ['plugin', 'enable', 'dharma-agent-fabric'], options);
+}
+
+const AGY_ATTESTATION_PERMISSION = 'command(git status)';
+const AGY_ACTIVATION_TOKEN = /^Dharma activation token: `(sha256:[a-f0-9]{64})`$/m;
+
+export async function ensureAgyReadOnlyAttestationPermission(input: {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+} = {}) {
+  const configRoot = resolve(
+    input.env?.AGY_CONFIG_DIR || resolve(input.home || homedir(), '.gemini', 'antigravity-cli'),
+  );
+  const settingsPath = resolve(configRoot, 'settings.json');
+  await mkdir(configRoot, { recursive: true, mode: 0o700 });
+  let settings: Record<string, unknown> = {};
+  if (await pathExists(settingsPath)) {
+    const parsed = JSON.parse(await readFile(settingsPath, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Agy settings must be a JSON object before Dharma can add its read-only preflight permission.');
+    }
+    settings = parsed as Record<string, unknown>;
+  }
+  const permissions = settings.permissions && typeof settings.permissions === 'object' && !Array.isArray(settings.permissions)
+    ? settings.permissions as Record<string, unknown>
+    : {};
+  const current = permissions.allow;
+  if (current !== undefined && (!Array.isArray(current) || current.some((item) => typeof item !== 'string'))) {
+    throw new Error('Agy permissions.allow must be a string array.');
+  }
+  const allow = [...new Set([...(Array.isArray(current) ? current : []), AGY_ATTESTATION_PERMISSION])];
+  if (Array.isArray(current) && current.length === allow.length) {
+    return { changed: false, settingsPath, permission: AGY_ATTESTATION_PERMISSION };
+  }
+  const updated = { ...settings, permissions: { ...permissions, allow } };
+  const temporary = resolve(configRoot, `.settings.${randomUUID()}.tmp`);
+  await writeFile(temporary, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, settingsPath);
+  return { changed: true, settingsPath, permission: AGY_ATTESTATION_PERMISSION };
+}
+
+type AgyAttestationExecutor = (
+  executable: string,
+  argv: string[],
+  options: { timeout: number; env: NodeJS.ProcessEnv; cwd: string },
+) => Promise<{ stdout: string | Buffer }>;
+
+function parseAgyStructuredResponse(stdout: string | Buffer): Record<string, unknown> | null {
+  try {
+    const outer = JSON.parse(String(stdout)) as Record<string, unknown>;
+    if (outer.status !== 'SUCCESS' || typeof outer.response !== 'string') return null;
+    const match = outer.response.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const value = JSON.parse(match[0]) as unknown;
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function attestAgySkillActivation(input: {
+  skillId: string;
+  skillPath: string;
+  workspace: string;
+  challenge?: string;
+  env?: NodeJS.ProcessEnv;
+  execute?: AgyAttestationExecutor;
+}) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.skillId)) {
+    throw new Error('Agy activation skill identifier is invalid.');
+  }
+  const skill = await readFile(input.skillPath, 'utf8');
+  const token = skill.match(AGY_ACTIVATION_TOKEN)?.[1];
+  if (!token) {
+    return {
+      name: 'provider:agy:activation',
+      status: 'unavailable' as const,
+      details: `Signed skill ${input.skillId} does not contain a Dharma activation token.`,
+    };
+  }
+  const challenge = input.challenge || randomUUID();
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(challenge)) throw new Error('Agy activation challenge is invalid.');
+  const schema = JSON.stringify({
+    type: 'object',
+    additionalProperties: false,
+    required: ['challenge', 'activationToken'],
+    properties: {
+      challenge: { type: 'string' },
+      activationToken: { type: 'string' },
+    },
+  });
+  const prompt = `/${input.skillId}\nDharma activation attestation. Do not use tools or inspect files. Return only JSON with fields challenge and activationToken. Challenge: ${challenge}`;
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  let stdout: string | Buffer;
+  try {
+    ({ stdout } = await execute('agy', [
+      '--new-project',
+      '--print', prompt,
+      '--output-format', 'json',
+      '--json-schema', schema,
+      '--model', input.env?.DHARMA_AGY_ATTEST_MODEL || 'gemini-3.7-flash-low',
+      '--mode', 'plan',
+      '--sandbox',
+      '--print-timeout', '90s',
+    ], {
+      timeout: 120_000,
+      env: providerProcessEnvironment(input.env),
+      cwd: await realpath(input.workspace),
+    }));
+  } catch (error) {
+    return {
+      name: 'provider:agy:activation',
+      status: 'fail' as const,
+      details: error instanceof Error ? `Agy activation process failed: ${error.message}`.slice(0, 1_000) : 'Agy activation process failed.',
+    };
+  }
+  const response = parseAgyStructuredResponse(stdout);
+  if (!response || response.challenge !== challenge) {
+    return {
+      name: 'provider:agy:activation',
+      status: 'fail' as const,
+      details: 'Agy did not return the fresh activation challenge.',
+    };
+  }
+  if (response.activationToken !== token) {
+    return {
+      name: 'provider:agy:activation',
+      status: 'fail' as const,
+      details: 'Agy returned an activation token that does not match the installed signed skill.',
+    };
+  }
+  return {
+    name: 'provider:agy:activation',
+    status: 'pass' as const,
+    details: `Agy expanded ${input.skillId} and returned a fresh content-bound challenge.`,
+  };
+}
+
+export async function attestAgySkillBundleActivation(input: {
+  bundle: SkillBundle;
+  nativeSkillDirectory: string;
+  workspace: string;
+}) {
+  if (input.bundle.skills.length === 0) {
+    return {
+      name: 'provider:agy:activation',
+      status: 'unavailable' as const,
+      details: 'The signed bundle contains no Agy skill content to attest.',
+    };
+  }
+  await activateAgyPlugin();
+  for (const skill of input.bundle.skills) {
+    const check = await attestAgySkillActivation({
+      skillId: skill.skillId,
+      skillPath: resolve(input.nativeSkillDirectory, skill.skillId, 'SKILL.md'),
+      workspace: input.workspace,
+    });
+    if (check.status !== 'pass') return check;
+  }
+  return {
+    name: 'provider:agy:activation',
+    status: 'pass' as const,
+    details: `Agy expanded ${input.bundle.skills.length} signed skill${input.bundle.skills.length === 1 ? '' : 's'} with fresh content-bound challenges.`,
+  };
 }
 
 function containedInlinePath(root: string, value: string) {
@@ -3437,6 +3618,13 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       provider,
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
       organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
+      ...(provider === 'agy' ? {
+        providerActivationCheck: () => attestAgySkillBundleActivation({
+          bundle,
+          nativeSkillDirectory: destination,
+          workspace: workspace.path,
+        }),
+      } : {}),
     });
     const restoreAnchor = async () => {
       if (previousAnchor) {
@@ -3487,7 +3675,6 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
           activatedAt: receipt.completedAt,
           expiresAt: bundle.expiresAt ?? null,
         });
-        if (provider === 'agy') await activateAgyPlugin();
       }
     } catch (error) {
       await recoverLocalInstallation(error);
