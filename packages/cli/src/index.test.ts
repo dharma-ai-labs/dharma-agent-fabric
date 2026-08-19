@@ -678,12 +678,15 @@ test('workspace policy refreshes serialize before requesting a new signed author
   process.env.DHARMA_HOME = home;
   const events: string[] = [];
   try {
+    let firstEntered!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstEntered = resolve; });
     const first = withWorkspacePolicyRefreshLock('workspace-concurrent', async () => {
       events.push('first-start');
+      firstEntered();
       await new Promise((accept) => setTimeout(accept, 40));
       events.push('first-end');
     });
-    await new Promise((accept) => setTimeout(accept, 5));
+    await firstStarted;
     const second = withWorkspacePolicyRefreshLock('workspace-concurrent', async () => {
       events.push('second-start');
       events.push('second-end');
@@ -702,12 +705,15 @@ test('task execution and skill synchronization share one workspace-provider acti
   process.env.DHARMA_HOME = home;
   const events: string[] = [];
   try {
+    let taskEntered!: () => void;
+    const taskStarted = new Promise<void>((resolve) => { taskEntered = resolve; });
     const task = withWorkspaceSkillActivationLock('workspace-concurrent', 'codex', async () => {
       events.push('task-start');
+      taskEntered();
       await new Promise((accept) => setTimeout(accept, 40));
       events.push('task-end');
     });
-    await new Promise((accept) => setTimeout(accept, 5));
+    await taskStarted;
     const sync = withWorkspaceSkillActivationLock('workspace-concurrent', 'codex', async () => {
       events.push('sync-start');
       events.push('sync-end');
