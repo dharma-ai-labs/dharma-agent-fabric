@@ -273,15 +273,22 @@ export async function executeProviderTask(input: {
 export async function executableVersion(
   command: string,
   source: NodeJS.ProcessEnv = process.env,
+  probe?: (
+    executable: string,
+    argv: string[],
+    options: { encoding: 'utf8'; timeout: number; env: NodeJS.ProcessEnv },
+  ) => { status: number | null; stdout: string; stderr: string },
 ): Promise<string | null> {
-  const { spawnSync } = await import('node:child_process');
-  const result = spawnSync(command, ['--version'], {
+  const run = probe || (await import('node:child_process')).spawnSync;
+  const result = run(command, ['--version'], {
     encoding: 'utf8',
     timeout: 5_000,
     env: providerProcessEnvironment(source),
   });
   if (result.status !== 0) return null;
-  return (result.stdout || result.stderr).trim().split('\n')[0] || null;
+  const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout?.toString('utf8') || '';
+  const stderr = typeof result.stderr === 'string' ? result.stderr : result.stderr?.toString('utf8') || '';
+  return (stdout || stderr).trim().split('\n')[0] || null;
 }
 
 function insideWorkspace(workspace: string, candidate: string): boolean {

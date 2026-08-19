@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -17,11 +17,19 @@ import {
 test('provider discovery finds supported per-user CLI installations outside the parent PATH', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-provider-local-bin-'));
   const localBin = join(home, '.local', 'bin');
-  const executable = join(localBin, 'agy');
-  await mkdir(localBin, { recursive: true });
-  await writeFile(executable, '#!/bin/sh\nprintf "1.1.15\\n"\n');
-  await chmod(executable, 0o700);
-  assert.equal(await executableVersion('agy', { HOME: home, PATH: '/usr/bin:/bin' }), '1.1.15');
+  let observedPath = '';
+  const version = await executableVersion(
+    'agy',
+    { HOME: home, PATH: '/usr/bin:/bin' },
+    (executable, argv, options) => {
+      assert.equal(executable, 'agy');
+      assert.deepEqual(argv, ['--version']);
+      observedPath = String(options.env.PATH || '');
+      return { status: 0, stdout: '1.1.15\n', stderr: '' };
+    },
+  );
+  assert.equal(version, '1.1.15');
+  assert.equal(observedPath, ['/usr/bin:/bin', localBin].join(delimiter));
 });
 
 test('Agy 1.1.13 capabilities fail closed for signed effects and host lifecycle claims', () => {
