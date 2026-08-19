@@ -152,6 +152,16 @@ The plugin connects to the OAuth-protected MCP resource at
 explicit confirmation; organization membership and the underlying platform API
 capabilities remain authoritative.
 
+## Maintainer status
+
+This public README documents released package behavior and public operating
+boundaries; it is not the consolidated current-status matrix. Dharma
+maintainers with private repository access use the
+[Agent Fabric engineering status hub](https://github.com/dharma-ai-labs/dharmamegha/tree/main/docs/systems/agent-fabric-engineering)
+for current implementation, delivery, proof, governance, evidence, Linear
+gates, and cross-repository activity. Underlying GitHub, npm, Linear,
+deployment, and signed-receipt records remain authoritative for their facts.
+
 ## Development
 
 ```bash
