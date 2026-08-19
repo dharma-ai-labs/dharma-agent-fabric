@@ -3175,6 +3175,11 @@ export async function verifyAgentFabricSkillInstallation(input: {
   workspace: string;
   env?: NodeJS.ProcessEnv;
   home?: string;
+  listAgyPlugins?: (
+    executable: string,
+    argv: string[],
+    options: { timeout: number; env: NodeJS.ProcessEnv },
+  ) => Promise<{ stdout: string | Buffer }>;
 }) {
   const workspace = await realpath(input.workspace);
   const repositorySkillPath = resolve(workspace, '.agents', 'skills', 'dharma-agent-fabric', 'SKILL.md');
@@ -3196,7 +3201,11 @@ export async function verifyAgentFabricSkillInstallation(input: {
   let nativeDiscovered = input.provider === 'agy' ? false : nativeInstalled;
   if (input.provider === 'agy' && nativeInstalled) {
     try {
-      const { stdout } = await execFileAsync('agy', ['plugin', 'list'], {
+      const listAgyPlugins = input.listAgyPlugins
+        || ((executable: string, argv: string[], options: { timeout: number; env: NodeJS.ProcessEnv }) => (
+          execFileAsync(executable, argv, options)
+        ));
+      const { stdout } = await listAgyPlugins('agy', ['plugin', 'list'], {
         timeout: 30_000,
         env: providerProcessEnvironment(input.env),
       });

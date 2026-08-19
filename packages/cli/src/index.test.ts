@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -1261,17 +1261,7 @@ test('Agy skill verification requires the native plugin to be discoverable by th
   const root = await mkdtemp(join(tmpdir(), 'dharma-agy-skill-verification-'));
   const home = join(root, 'home');
   const workspace = join(root, 'repo');
-  const localBin = join(home, '.local', 'bin');
-  await mkdir(localBin, { recursive: true });
   await mkdir(workspace, { recursive: true });
-  await writeFile(join(localBin, 'agy'), `#!/bin/sh
-if [ "$1 $2" = "plugin list" ]; then
-  printf '%s\\n' '{"imports":[]}'
-  exit 0
-fi
-exit 1
-`);
-  await chmod(join(localBin, 'agy'), 0o700);
   await installRepositoryAgentFabricSkill({
     workspace,
     hqUrl: 'https://www.dharma-ai.io',
@@ -1290,6 +1280,7 @@ exit 1
   }));
   const missing = await verifyAgentFabricSkillInstallation({
     provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+    listAgyPlugins: async () => ({ stdout: '{"imports":[]}' }),
   });
   assert.equal(missing.nativeInstalled, true);
   assert.equal(missing.nativeDiscovered, false);
@@ -1298,15 +1289,11 @@ exit 1
   assert.equal(missing.signedLifecycleReady, false);
   assert.equal(missing.ready, false);
 
-  await writeFile(join(localBin, 'agy'), `#!/bin/sh
-if [ "$1 $2" = "plugin list" ]; then
-  printf '%s\\n' '{"imports":[{"name":"dharma-agent-fabric","components":["skills"]}]}'
-  exit 0
-fi
-exit 1
-`);
   const discovered = await verifyAgentFabricSkillInstallation({
     provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+    listAgyPlugins: async () => ({
+      stdout: '{"imports":[{"name":"dharma-agent-fabric","components":["skills"]}]}',
+    }),
   });
   assert.equal(discovered.nativeDiscovered, true);
   assert.equal(discovered.activationAttested, false);
