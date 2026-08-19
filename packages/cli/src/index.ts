@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.13';
+const VERSION = '0.2.14';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;

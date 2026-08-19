@@ -12,6 +12,7 @@ const request = {
     'x-dharma-message-id': '8eca231c-e9d2-40e5-bf9c-445ddfeee094',
     'x-dharma-timestamp': new Date().toISOString(), 'x-dharma-nonce': 'N0nc3_With-Enough_Entropy',
     'x-dharma-sequence': '1', 'x-dharma-signature': 'A'.repeat(86),
+    'idempotency-key': '8eca231c-e9d2-40e5-bf9c-445ddfeee094',
     authorization: 'Bearer secret', cookie: 'secret',
   },
 };
@@ -20,6 +21,7 @@ test('relay permits only Agent Fabric routes and strips ambient credentials', ()
   const parsed = parseRelayRequest(request);
   assert.equal(parsed.headers.authorization, undefined);
   assert.equal(parsed.headers.cookie, undefined);
+  assert.equal(parsed.headers['idempotency-key'], request.headers['idempotency-key']);
   assert.equal(parsed.pathname, request.pathname);
 });
 

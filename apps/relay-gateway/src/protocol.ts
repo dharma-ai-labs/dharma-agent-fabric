@@ -5,7 +5,7 @@ const AGENT_FABRIC_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabri
 const CONTROL_AGENT_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions|sessions\/[0-9a-f-]{36}\/messages)$/i;
 const CONTROL_AGENT_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions(?:\?sessionId=[0-9a-f-]{36})?|sessions\/[0-9a-f-]{36}\/events(?:\?afterSequence=\d+)?)$/i;
 const FORWARDED_HEADERS = new Set([
-  'content-type', 'x-dharma-correlation-id', 'x-dharma-device-id', 'x-dharma-session-id',
+  'content-type', 'idempotency-key', 'x-dharma-correlation-id', 'x-dharma-device-id', 'x-dharma-session-id',
   'x-dharma-message-id', 'x-dharma-timestamp', 'x-dharma-nonce', 'x-dharma-sequence', 'x-dharma-signature',
 ]);
 
