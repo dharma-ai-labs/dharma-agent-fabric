@@ -3130,7 +3130,7 @@ The repository-local skill and connection manifest are authoritative for the act
     provider: input.provider,
     nativeSkillDirectory: root,
     skillPath: resolve(skillRoot, 'SKILL.md'),
-    activation: 'next_session',
+    activation: input.provider === 'agy' ? 'manual_invocation_required' : 'next_session',
     verified: await pathExists(resolve(skillRoot, 'SKILL.md')) && await pathExists(marker),
   };
 }
@@ -3211,7 +3211,8 @@ export async function verifyAgentFabricSkillInstallation(input: {
     } catch {}
   }
   const activationAttested = input.provider === 'agy' ? false : nativeInstalled;
-  const ready = repositoryInstalled && nativeInstalled && nativeDiscovered && activationAttested;
+  const bootstrapReady = repositoryInstalled && nativeInstalled && nativeDiscovered;
+  const signedLifecycleReady = bootstrapReady && activationAttested;
   let workspaceId: string | undefined;
   let organizationAgentId: string | undefined;
   try {
@@ -3227,7 +3228,10 @@ export async function verifyAgentFabricSkillInstallation(input: {
     : null;
   return {
     provider: input.provider,
-    ready,
+    ready: bootstrapReady,
+    verificationScope: 'generic_bootstrap',
+    bootstrapReady,
+    signedLifecycleReady,
     repositoryInstalled,
     nativeInstalled,
     nativeManaged,
@@ -3239,10 +3243,10 @@ export async function verifyAgentFabricSkillInstallation(input: {
     workspaceId: workspaceId || null,
     activeBundleId,
     activation: input.provider === 'agy' ? 'unavailable' : 'next_session',
-    nextAction: ready
-      ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
-      : input.provider === 'agy' && repositoryInstalled && nativeInstalled && nativeDiscovered
+    nextAction: input.provider === 'agy' && bootstrapReady
         ? 'The Agy bootstrap is installed and discoverable. Invoke /dharma-agent-fabric in a new Agy session; signed activation and rollback remain unavailable.'
+      : bootstrapReady
+        ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
       : 'Run dharma onboard again from the repository root.',
   };
 }

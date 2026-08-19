@@ -1294,6 +1294,8 @@ exit 1
   assert.equal(missing.nativeInstalled, true);
   assert.equal(missing.nativeDiscovered, false);
   assert.equal(missing.activationAttested, false);
+  assert.equal(missing.bootstrapReady, false);
+  assert.equal(missing.signedLifecycleReady, false);
   assert.equal(missing.ready, false);
 
   await writeFile(join(localBin, 'agy'), `#!/bin/sh
@@ -1308,7 +1310,10 @@ exit 1
   });
   assert.equal(discovered.nativeDiscovered, true);
   assert.equal(discovered.activationAttested, false);
-  assert.equal(discovered.ready, false);
+  assert.equal(discovered.bootstrapReady, true);
+  assert.equal(discovered.signedLifecycleReady, false);
+  assert.equal(discovered.ready, true);
+  assert.equal(discovered.verificationScope, 'generic_bootstrap');
   assert.match(discovered.nextAction, /signed activation and rollback remain unavailable/);
 });
 
