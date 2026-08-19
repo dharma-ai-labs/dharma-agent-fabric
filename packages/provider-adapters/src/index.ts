@@ -270,9 +270,16 @@ export async function executeProviderTask(input: {
   }
 }
 
-async function executableVersion(command: string): Promise<string | null> {
+export async function executableVersion(
+  command: string,
+  source: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
   const { spawnSync } = await import('node:child_process');
-  const result = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5_000 });
+  const result = spawnSync(command, ['--version'], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: providerProcessEnvironment(source),
+  });
   if (result.status !== 0) return null;
   return (result.stdout || result.stderr).trim().split('\n')[0] || null;
 }

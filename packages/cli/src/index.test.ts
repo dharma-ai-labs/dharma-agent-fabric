@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -1257,6 +1257,58 @@ test('native bootstrap installation makes the repository skill verifiable by Cod
   assert.equal(verified.nativeInstalled, true);
 });
 
+test('Agy skill verification requires the native plugin to be discoverable by the provider', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-skill-verification-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  const localBin = join(home, '.local', 'bin');
+  await mkdir(localBin, { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(localBin, 'agy'), `#!/bin/sh
+if [ "$1 $2" = "plugin list" ]; then
+  printf '%s\\n' '{"imports":[]}'
+  exit 0
+fi
+exit 1
+`);
+  await chmod(join(localBin, 'agy'), 0o700);
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId: 'workspace_test',
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const nativeRoot = nativeSkillDirectory('agy', {}, home);
+  const skillRoot = join(nativeRoot, 'dharma-agent-fabric');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(join(skillRoot, 'SKILL.md'), '# Managed skill\n');
+  await writeFile(join(skillRoot, '.dharma-agent-fabric-bootstrap.json'), JSON.stringify({
+    schema: 'dharma.native-skill-bootstrap/v2',
+    managedBy: 'dharma-agent-fabric',
+    provider: 'agy',
+  }));
+  const missing = await verifyAgentFabricSkillInstallation({
+    provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+  });
+  assert.equal(missing.nativeInstalled, true);
+  assert.equal(missing.nativeDiscovered, false);
+  assert.equal(missing.ready, false);
+
+  await writeFile(join(localBin, 'agy'), `#!/bin/sh
+if [ "$1 $2" = "plugin list" ]; then
+  printf '%s\\n' '{"imports":[{"name":"dharma-agent-fabric","components":["skills"]}]}'
+  exit 0
+fi
+exit 1
+`);
+  const discovered = await verifyAgentFabricSkillInstallation({
+    provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+  });
+  assert.equal(discovered.nativeDiscovered, true);
+  assert.equal(discovered.ready, true);
+});
+
 test('native bootstrap installation refuses to overwrite an unmanaged provider skill', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-native-skill-unmanaged-'));
   const home = join(root, 'home');
@@ -1297,7 +1349,7 @@ test('native bootstrap installation isolates provider failures during onboarding
     providers: [
       { provider: 'codex', skillInstall: 'available' },
       { provider: 'claude', skillInstall: 'unavailable' },
-      { provider: 'agy', skillInstall: 'available' },
+      { provider: 'agy', skillInstall: 'partial' },
     ],
     workspace: '/workspace',
     workspaceId: 'workspace_test',

@@ -14,7 +14,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, providerExecutionRecords, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.14';
+const VERSION = '0.2.15';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 type Output = unknown;
@@ -3119,12 +3119,9 @@ The repository-local skill and connection manifest are authoritative for the act
   await mkdir(skillRoot, { recursive: true, mode: 0o700 });
   await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
   await writeFile(marker, `${JSON.stringify({
-    schema: 'dharma.native-skill-bootstrap/v1',
+    schema: 'dharma.native-skill-bootstrap/v2',
     managedBy: 'dharma-agent-fabric',
     provider: input.provider,
-    organizationId: input.organizationId,
-    workspaceId: input.workspaceId,
-    workspaceRouteHash: sha256(resolve(input.workspace)),
     hqUrl: input.hqUrl,
     installedAt: new Date().toISOString(),
   }, null, 2)}\n`, { mode: 0o600 });
@@ -3153,7 +3150,7 @@ export async function installAvailableNativeAgentFabricBootstraps(input: {
   const installed: Awaited<ReturnType<NativeBootstrapInstaller>>[] = [];
   const failures: Array<{ provider: string; code: 'native_skill_install_failed'; message: string }> = [];
   for (const capability of input.providers) {
-    if (capability.skillInstall !== 'available') continue;
+    if (capability.skillInstall === 'unavailable') continue;
     try {
       installed.push(await install({
         provider: capability.provider as ProviderId,
@@ -3186,7 +3183,33 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const nativeSkillPath = resolve(nativeRoot, 'dharma-agent-fabric', 'SKILL.md');
   const nativeMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
   const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
-  const nativeInstalled = await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath);
+  let nativeManaged = false;
+  if (await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath)) {
+    try {
+      const marker = JSON.parse(await readFile(nativeMarkerPath, 'utf8')) as Record<string, unknown>;
+      nativeManaged = marker.managedBy === 'dharma-agent-fabric'
+        && marker.provider === input.provider
+        && ['dharma.native-skill-bootstrap/v1', 'dharma.native-skill-bootstrap/v2'].includes(String(marker.schema));
+    } catch {}
+  }
+  const nativeInstalled = nativeManaged;
+  let nativeDiscovered = input.provider === 'agy' ? false : nativeInstalled;
+  if (input.provider === 'agy' && nativeInstalled) {
+    try {
+      const { stdout } = await execFileAsync('agy', ['plugin', 'list'], {
+        timeout: 30_000,
+        env: providerProcessEnvironment(input.env),
+      });
+      const list = JSON.parse(String(stdout)) as { imports?: unknown };
+      nativeDiscovered = Array.isArray(list.imports) && list.imports.some((item) => {
+        if (!item || typeof item !== 'object') return false;
+        const plugin = item as Record<string, unknown>;
+        return plugin.name === 'dharma-agent-fabric'
+          && Array.isArray(plugin.components)
+          && plugin.components.includes('skills');
+      });
+    } catch {}
+  }
   let workspaceId: string | undefined;
   let organizationAgentId: string | undefined;
   try {
@@ -3202,22 +3225,28 @@ export async function verifyAgentFabricSkillInstallation(input: {
     : null;
   return {
     provider: input.provider,
-    ready: repositoryInstalled && nativeInstalled,
+    ready: repositoryInstalled && nativeInstalled && nativeDiscovered,
     repositoryInstalled,
     nativeInstalled,
+    nativeManaged,
+    nativeDiscovered,
     repositorySkillPath,
     connectionPath,
     nativeSkillPath,
     workspaceId: workspaceId || null,
     activeBundleId,
     activation: 'next_session',
-    nextAction: repositoryInstalled && nativeInstalled
+    nextAction: repositoryInstalled && nativeInstalled && nativeDiscovered
       ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
       : 'Run dharma onboard again from the repository root.',
   };
 }
 
-type AgyPluginExecutor = (executable: string, argv: string[], options: { timeout: number }) => Promise<unknown>;
+type AgyPluginExecutor = (
+  executable: string,
+  argv: string[],
+  options: { timeout: number; env: NodeJS.ProcessEnv },
+) => Promise<unknown>;
 
 export async function activateAgyPlugin(input: {
   env?: NodeJS.ProcessEnv;
@@ -3226,13 +3255,14 @@ export async function activateAgyPlugin(input: {
 } = {}) {
   const root = resolve(nativeSkillDirectory('agy', input.env, input.home), '..');
   const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const options = { timeout: 30_000, env: providerProcessEnvironment(input.env) };
   await mkdir(root, { recursive: true, mode: 0o700 });
   const manifest = resolve(root, 'plugin.json');
   try { await access(manifest); }
   catch { await writeFile(manifest, `${JSON.stringify({ name: 'dharma-agent-fabric' }, null, 2)}\n`, { mode: 0o600 }); }
-  await execute('agy', ['plugin', 'validate', root], { timeout: 30_000 });
-  await execute('agy', ['plugin', 'install', root], { timeout: 30_000 });
-  await execute('agy', ['plugin', 'enable', 'dharma-agent-fabric'], { timeout: 30_000 });
+  await execute('agy', ['plugin', 'validate', root], options);
+  await execute('agy', ['plugin', 'install', root], options);
+  await execute('agy', ['plugin', 'enable', 'dharma-agent-fabric'], options);
 }
 
 function containedInlinePath(root: string, value: string) {
