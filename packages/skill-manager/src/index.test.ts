@@ -200,6 +200,98 @@ test('verified skill activates and a failed canary restores the prior bundle', a
   assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), firstBundleId);
 });
 
+test('provider activation check is signed into an active installation receipt', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-provider-activation-check-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Provider-attested skill\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey);
+  const receipt = await installSkillBundle({
+    bundle,
+    sourceDirectory: resolve(root, 'source'),
+    nativeSkillDirectory: native,
+    policy,
+    serverPublicKey: server.publicKey,
+    devicePrivateKey: device.privateKey,
+    deviceId: randomUUID(),
+    organizationAgentId,
+    workspaceId: randomUUID(),
+    provider: 'codex',
+    providerActivationCheck: async () => ({
+      name: 'provider:agy:activation',
+      status: 'pass',
+      details: 'content-bound challenge verified',
+    }),
+  });
+
+  assert.equal(receipt.status, 'active');
+  assert.deepEqual(receipt.checks.at(-1), {
+    name: 'provider:agy:activation',
+    status: 'pass',
+    details: 'content-bound challenge verified',
+  });
+});
+
+test('failed provider activation check restores the prior signed bundle', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-provider-activation-rollback-'));
+  const firstSourceRoot = resolve(root, 'first-source');
+  const secondSourceRoot = resolve(root, 'second-source');
+  const firstSource = resolve(firstSourceRoot, 'skill');
+  const secondSource = resolve(secondSourceRoot, 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(firstSource, { recursive: true });
+  await mkdir(secondSource, { recursive: true });
+  await writeFile(resolve(firstSource, 'SKILL.md'), '# First skill\n');
+  await writeFile(resolve(secondSource, 'SKILL.md'), '# Second skill\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const firstBundle = await signedBundle(firstSource, randomUUID(), server.privateKey, 'first');
+  const first = await installSkillBundle({
+    bundle: firstBundle,
+    sourceDirectory: firstSourceRoot,
+    nativeSkillDirectory: native,
+    policy,
+    serverPublicKey: server.publicKey,
+    devicePrivateKey: device.privateKey,
+    deviceId,
+    organizationAgentId,
+    workspaceId,
+    provider: 'codex',
+  });
+  assert.equal(first.status, 'active');
+  const secondBundle = await signedBundle(secondSource, randomUUID(), server.privateKey, 'second');
+  const second = await installSkillBundle({
+    bundle: secondBundle,
+    sourceDirectory: secondSourceRoot,
+    nativeSkillDirectory: native,
+    policy,
+    serverPublicKey: server.publicKey,
+    devicePrivateKey: device.privateKey,
+    deviceId,
+    organizationAgentId,
+    workspaceId,
+    provider: 'codex',
+    providerActivationCheck: async () => ({
+      name: 'provider:agy:activation',
+      status: 'fail',
+      details: 'activation token mismatch',
+    }),
+  });
+
+  assert.equal(second.status, 'rolled_back');
+  assert.deepEqual(second.checks.at(-1), {
+    name: 'provider:agy:activation',
+    status: 'fail',
+    details: 'activation token mismatch',
+  });
+  assert.equal(await readFile(resolve(native, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE'), 'utf8'), `${firstBundle.bundleId}\n`);
+});
+
 test('a server-rejected active receipt restores the prior local authorization', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-server-reject-'));
   const source = resolve(root, 'source', 'skill');

@@ -59,6 +59,21 @@ test('Agy 1.1.13 capabilities fail closed for signed effects and host lifecycle 
   });
 });
 
+test('Agy 1.1.15 advertises content-attested activation and transactional rollback support', () => {
+  assert.deepEqual(agyCapability('1.1.15'), {
+    provider: 'agy',
+    version: '1.1.15',
+    evidence: 'partial',
+    configuredAssets: 'partial',
+    taskExecution: 'partial',
+    sessionContinuation: 'partial',
+    skillInstall: 'partial',
+    activation: 'next_session',
+    skillRollback: 'available',
+    usageEvidence: 'unavailable',
+  });
+});
+
 test('provider subprocess environment excludes cloud and model credentials', () => {
   const env = providerProcessEnvironment({
     PATH: '/usr/bin', HOME: '/home/customer', CODEX_HOME: '/home/customer/.codex',

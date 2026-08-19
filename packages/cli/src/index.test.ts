@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
+  attestAgySkillActivation,
   actionDecisionCapabilityFreshUntil,
   canonicalFilesystemPath,
   controlAgentDecisionUrl,
@@ -40,6 +41,8 @@ import {
   run,
   runAssistantCommand,
   sourceRepositoryFingerprint,
+  ensureAgyReadOnlyAttestationPermission,
+  attestAgySkillBundleActivation,
   responseTextFromEvent,
   taskResponsePreview,
   taskReceiptSession,
@@ -1301,7 +1304,7 @@ test('Agy skill verification requires the native plugin to be discoverable by th
   assert.equal(discovered.signedLifecycleReady, false);
   assert.equal(discovered.ready, true);
   assert.equal(discovered.verificationScope, 'generic_bootstrap');
-  assert.match(discovered.nextAction, /signed activation and rollback remain unavailable/);
+  assert.match(discovered.nextAction, /content-bound activation challenge/);
 });
 
 test('native bootstrap installation refuses to overwrite an unmanaged provider skill', async () => {
@@ -1337,6 +1340,113 @@ test('Agy activation validates and registers the generated plugin before enablin
     { executable: 'agy', argv: ['plugin', 'install', root] },
     { executable: 'agy', argv: ['plugin', 'enable', 'dharma-agent-fabric'] },
   ]);
+});
+
+test('Agy attestation permission adds only the supported read-only Git preflight', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-agy-permission-'));
+  const root = join(home, '.gemini', 'antigravity-cli');
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, 'settings.json'), `${JSON.stringify({
+    enableTelemetry: false,
+    permissions: { allow: ['command(ls)'] },
+  }, null, 2)}\n`);
+
+  const first = await ensureAgyReadOnlyAttestationPermission({ home, env: {} });
+  const second = await ensureAgyReadOnlyAttestationPermission({ home, env: {} });
+  const settings = JSON.parse(await readFile(join(root, 'settings.json'), 'utf8'));
+
+  assert.equal(first.changed, true);
+  assert.equal(second.changed, false);
+  assert.deepEqual(settings.permissions.allow, ['command(ls)', 'command(git status)']);
+  assert.equal(settings.enableTelemetry, false);
+});
+
+test('Agy activation attestation proves the invoked skill token without unsafe permission bypasses', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-attestation-'));
+  const workspace = join(root, 'repo');
+  const skillPath = join(root, 'SKILL.md');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(skillPath, [
+    '# Signed remediation',
+    '',
+    'Dharma activation token: `sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`',
+    '',
+  ].join('\n'));
+  let observed: { executable?: string; argv?: string[]; cwd?: string } = {};
+  const result = await attestAgySkillActivation({
+    skillId: 'dharma-remediation',
+    skillPath,
+    workspace,
+    challenge: 'agy-test-challenge',
+    execute: async (executable, argv, options) => {
+      observed = { executable, argv, cwd: options.cwd };
+      return { stdout: JSON.stringify({
+        status: 'SUCCESS',
+        response: '```json\\n{"challenge":"agy-test-challenge","activationToken":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\\n```',
+      }) };
+    },
+  });
+
+  assert.equal(result.status, 'pass');
+  assert.equal(observed.executable, 'agy');
+  assert.equal(observed.cwd, workspace);
+  assert.ok(observed.argv?.includes('--sandbox'));
+  assert.ok(observed.argv?.includes('plan'));
+  assert.ok(observed.argv?.includes('gemini-3.7-flash-low'));
+  assert.equal(observed.argv?.includes('--dangerously-skip-permissions'), false);
+  assert.match(String(observed.argv?.[2]), /^\/dharma-remediation/);
+  assert.doesNotMatch(String(observed.argv?.[2]), /sha256:aaaaaaaa/);
+});
+
+test('Agy activation attestation fails closed on a mismatched content token', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-attestation-mismatch-'));
+  const skillPath = join(root, 'SKILL.md');
+  await writeFile(skillPath, 'Dharma activation token: `sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`\n');
+  const result = await attestAgySkillActivation({
+    skillId: 'dharma-remediation',
+    skillPath,
+    workspace: root,
+    challenge: 'agy-test-challenge',
+    execute: async () => ({ stdout: JSON.stringify({
+      status: 'SUCCESS',
+      response: '{"challenge":"agy-test-challenge","activationToken":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}',
+    }) }),
+  });
+  assert.equal(result.status, 'fail');
+  assert.equal(result.details, 'Agy returned an activation token that does not match the installed signed skill.');
+});
+
+test('Agy does not report content attestation for an empty clear bundle', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-agy-empty-attestation-'));
+  const result = await attestAgySkillBundleActivation({
+    bundle: {
+      schema: 'dharma.skill-bundle/v2',
+      bundleId: 'bundle_clear',
+      organizationId: 'org_test',
+      version: '0.0.0',
+      operation: 'clear',
+      riskClass: 'R0',
+      targetSelectors: {
+        organizationAgentIds: [],
+        deviceIds: [],
+        workspaceIds: [],
+        providers: ['agy'],
+      },
+      activationPolicy: 'next_session',
+      rollbackBundleId: null,
+      evaluationReceiptId: 'evaluation_clear',
+      bundleHash: 'unused-by-attestation',
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      skills: [],
+      signature: 'unused-by-attestation',
+    },
+    nativeSkillDirectory: root,
+    workspace: root,
+  });
+
+  assert.equal(result.status, 'unavailable');
+  assert.equal(result.details, 'The signed bundle contains no Agy skill content to attest.');
 });
 
 test('native bootstrap installation isolates provider failures during onboarding', async () => {
