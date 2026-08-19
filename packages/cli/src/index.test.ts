@@ -1293,6 +1293,7 @@ exit 1
   });
   assert.equal(missing.nativeInstalled, true);
   assert.equal(missing.nativeDiscovered, false);
+  assert.equal(missing.activationAttested, false);
   assert.equal(missing.ready, false);
 
   await writeFile(join(localBin, 'agy'), `#!/bin/sh
@@ -1306,7 +1307,9 @@ exit 1
     provider: 'agy', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
   });
   assert.equal(discovered.nativeDiscovered, true);
-  assert.equal(discovered.ready, true);
+  assert.equal(discovered.activationAttested, false);
+  assert.equal(discovered.ready, false);
+  assert.match(discovered.nextAction, /signed activation and rollback remain unavailable/);
 });
 
 test('native bootstrap installation refuses to overwrite an unmanaged provider skill', async () => {

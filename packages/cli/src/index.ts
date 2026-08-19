@@ -3210,6 +3210,8 @@ export async function verifyAgentFabricSkillInstallation(input: {
       });
     } catch {}
   }
+  const activationAttested = input.provider === 'agy' ? false : nativeInstalled;
+  const ready = repositoryInstalled && nativeInstalled && nativeDiscovered && activationAttested;
   let workspaceId: string | undefined;
   let organizationAgentId: string | undefined;
   try {
@@ -3225,19 +3227,22 @@ export async function verifyAgentFabricSkillInstallation(input: {
     : null;
   return {
     provider: input.provider,
-    ready: repositoryInstalled && nativeInstalled && nativeDiscovered,
+    ready,
     repositoryInstalled,
     nativeInstalled,
     nativeManaged,
     nativeDiscovered,
+    activationAttested,
     repositorySkillPath,
     connectionPath,
     nativeSkillPath,
     workspaceId: workspaceId || null,
     activeBundleId,
-    activation: 'next_session',
-    nextAction: repositoryInstalled && nativeInstalled && nativeDiscovered
+    activation: input.provider === 'agy' ? 'unavailable' : 'next_session',
+    nextAction: ready
       ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
+      : input.provider === 'agy' && repositoryInstalled && nativeInstalled && nativeDiscovered
+        ? 'The Agy bootstrap is installed and discoverable. Invoke /dharma-agent-fabric in a new Agy session; signed activation and rollback remain unavailable.'
       : 'Run dharma onboard again from the repository root.',
   };
 }
