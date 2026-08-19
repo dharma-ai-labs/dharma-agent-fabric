@@ -9,6 +9,7 @@ const actionDecisionTask = JSON.parse(await readFile(new URL('../schemas/action-
 const actionDecisionReceipt = JSON.parse(await readFile(new URL('../schemas/action-decision-receipt.schema.json', import.meta.url), 'utf8'));
 await SwaggerParser.validate(contract);
 await SwaggerParser.validate(sourceContract);
+assert.deepEqual(sourceContract, contract, 'JSON and YAML OpenAPI publications must remain identical');
 assert.equal(contract.openapi, '3.1.0');
 assert.ok(contract.paths['/api/v1/orgs/{orgId}/agent-fabric/onboarding']?.post);
 assert.ok(contract.paths['/api/v1/orgs/{orgId}/agent-fabric/conversations']?.post);
@@ -19,6 +20,12 @@ assert.ok(contract.paths['/api/v1/orgs/{orgId}/agent-fabric/byok/gcp']?.post);
 assert.ok(contract.paths['/api/v1/orgs/{orgId}/agent-fabric/decisions']?.post);
 assert.ok(contract.paths['/api/v1/orgs/{orgId}/agent-fabric/evaluation-contracts']?.post);
 assert.ok(contract.paths['/api/v1/orgs/{orgId}/agent-fabric/decisions/{decisionId}/enforcements']?.post);
+assert.ok(contract.paths['/api/v1/orgs/{orgId}/control-agent/sessions']?.get);
+assert.ok(contract.paths['/api/v1/orgs/{orgId}/control-agent/sessions']?.post);
+assert.ok(contract.paths['/api/v1/orgs/{orgId}/control-agent/sessions/{sessionId}/messages']?.post);
+assert.ok(contract.paths['/api/v1/orgs/{orgId}/control-agent/sessions/{sessionId}/events']?.get);
+assert.ok(contract.paths['/api/v1/orgs/{orgId}/control-agent/tool-calls/{toolCallId}/approve']?.post);
+assert.ok(contract.paths['/api/v1/orgs/{orgId}/control-agent/tool-calls/{toolCallId}/reject']?.post);
 assert.deepEqual(
   contract.components.schemas.ActionDecisionReceipt.properties.outcome.enum,
   ['release', 'block', 'escalate', 'withhold'],
@@ -83,6 +90,12 @@ assert.equal(
   contract.paths['/api/v1/orgs/{orgId}/agent-fabric/decisions/{decisionId}/enforcements'].post.operationId,
   'acknowledgeActionDecisionEnforcement',
 );
+assert.deepEqual(
+  contract.paths['/api/v1/orgs/{orgId}/control-agent/tool-calls/{toolCallId}/approve'].post.security,
+  [{ clerkSession: [] }],
+);
+assert.equal(contract.components.parameters.afterSequence.name, 'afterSequence');
+assert.equal(contract.components.securitySchemes.clerkSession.name, '__session');
 assert.ok(contract.paths['/api/orgs/{orgId}/agent-runs']?.post);
 assert.ok(contract.components.securitySchemes.organizationToken);
 assert.equal(contract.components.schemas.AgentEndpointRequest.oneOf.length, 2);

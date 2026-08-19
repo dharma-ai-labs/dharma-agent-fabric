@@ -33,6 +33,7 @@ If the remote app is unavailable, local capture, preview, Skill status, and prev
 - Inspect or synchronize trajectories: [Trajectory synchronization](references/trajectory-sync.md)
 - Dispatch, inspect, or respond to a task: [Task orchestration](references/task-orchestration.md)
 - Communicate with another agent: [Agent-to-agent communication](references/a2a.md)
+- Ask the organization control agent to inspect or propose work: [Organization control agent](references/control-agent.md)
 - Request evaluation or remediation: [Evaluation and remediation](references/evaluation-remediation.md)
 - Inspect, install, release, or roll back Skills: [Skill releases](references/skill-releases.md)
 - Explain managed versus BYOK cost: [BYOK and billing](references/byok-billing.md)

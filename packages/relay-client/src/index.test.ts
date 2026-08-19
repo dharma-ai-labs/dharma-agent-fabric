@@ -531,6 +531,66 @@ test('repository-agent connection uses the signed organization relay route', asy
   assert.equal(calls.at(-1)?.body.displayName, 'Northstar');
 });
 
+test('control-agent reads and chat turns use the enrolled device signature', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-control-agent-client-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const calls: Array<{ method: string; pathname: string; search: string; body: unknown; signed: boolean }> = [];
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    const parsed = new URL(String(url));
+    const headers = new Headers(init?.headers);
+    const serialized = init?.body == null ? '' : String(init.body);
+    const messageId = headers.get('x-dharma-message-id')!;
+    const signingPayload = Buffer.from(JSON.stringify({
+      bodyHash: `sha256:${createHash('sha256').update(serialized).digest('hex')}`,
+      deviceId: headers.get('x-dharma-device-id'),
+      messageId,
+      method: init?.method,
+      nonce: headers.get('x-dharma-nonce'),
+      organizationId: 'org_a',
+      pathname: `${parsed.pathname}${parsed.search}`,
+      sequence: Number(headers.get('x-dharma-sequence')),
+      sessionId: headers.get('x-dharma-session-id'),
+      timestamp: headers.get('x-dharma-timestamp'),
+    }));
+    assert.equal(verify(
+      null,
+      signingPayload,
+      createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 }, format: 'jwk' }),
+      Buffer.from(headers.get('x-dharma-signature')!, 'base64url'),
+    ), true);
+    calls.push({
+      method: String(init?.method), pathname: parsed.pathname, search: parsed.search,
+      body: serialized ? JSON.parse(serialized) : null,
+      signed: Boolean(headers.get('x-dharma-signature')),
+    });
+    return new Response(JSON.stringify({ ok: true }), { status: parsed.pathname.endsWith('/sessions') && init?.method === 'POST' ? 201 : 200 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath: resolve(root, 'state.json'), store, fetcher });
+  await client.openSession();
+  await client.createControlAgentSession('Operator session');
+  await client.listControlAgentSessions('d327bcce-2314-4c92-a6b7-13ec5570c1ee');
+  await client.submitControlAgentMessage('d327bcce-2314-4c92-a6b7-13ec5570c1ee', { message: 'Show agent status.' });
+  await client.listControlAgentEvents('d327bcce-2314-4c92-a6b7-13ec5570c1ee', 7);
+
+  assert.deepEqual(calls.slice(-4).map(({ method, pathname, search, signed }) => ({ method, pathname, search, signed })), [
+    { method: 'POST', pathname: '/api/v1/orgs/org_a/control-agent/sessions', search: '', signed: true },
+    { method: 'GET', pathname: '/api/v1/orgs/org_a/control-agent/sessions', search: '?sessionId=d327bcce-2314-4c92-a6b7-13ec5570c1ee', signed: true },
+    { method: 'POST', pathname: '/api/v1/orgs/org_a/control-agent/sessions/d327bcce-2314-4c92-a6b7-13ec5570c1ee/messages', search: '', signed: true },
+    { method: 'GET', pathname: '/api/v1/orgs/org_a/control-agent/sessions/d327bcce-2314-4c92-a6b7-13ec5570c1ee/events', search: '?afterSequence=7', signed: true },
+  ]);
+  assert.equal(calls.at(-3)?.body, null);
+  assert.deepEqual(calls.at(-2)?.body, { message: 'Show agent status.' });
+});
+
 test('signed outbox retries the exact message after an unknown network outcome', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-client-'));

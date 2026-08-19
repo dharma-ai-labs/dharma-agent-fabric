@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-relay-client",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Outbound signed device enrollment and relay client for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/relay-client#readme",

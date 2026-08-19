@@ -30,7 +30,7 @@ export interface DeviceConfig {
 }
 
 interface PendingRequest {
-  method: 'POST';
+  method: 'GET' | 'POST';
   pathname: string;
   body: string;
   headers: Record<string, string>;
@@ -69,7 +69,7 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
   const pending = state.pending as Record<string, unknown> | null;
   const pendingValid = pending === null || (
     typeof pending === 'object' && !Array.isArray(pending)
-    && pending.method === 'POST'
+    && (pending.method === 'POST' || pending.method === 'GET')
     && typeof pending.pathname === 'string' && pending.pathname.startsWith('/')
     && typeof pending.body === 'string'
     && pending.headers !== null && typeof pending.headers === 'object' && !Array.isArray(pending.headers)
@@ -649,13 +649,33 @@ export class AgentFabricClient {
     return this.signedPost(`/agent-fabric/skills/${encodeURIComponent(bundleId)}/receipts`, { rolloutId, receipt });
   }
 
-  signedPost(route: string, body: unknown): Promise<Record<string, unknown>> {
-    const operation = this.#serial.then(() => this.#signedPostNow(route, body));
+  listControlAgentSessions(sessionId?: string) {
+    const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+    return this.signedGet(`/control-agent/sessions${query}`);
+  }
+  createControlAgentSession(title = 'New conversation') {
+    return this.signedPost('/control-agent/sessions', { title });
+  }
+  submitControlAgentMessage(sessionId: string, body: unknown) {
+    return this.signedPost(`/control-agent/sessions/${encodeURIComponent(sessionId)}/messages`, body);
+  }
+  listControlAgentEvents(sessionId: string, afterSequence = 0) {
+    return this.signedGet(`/control-agent/sessions/${encodeURIComponent(sessionId)}/events?afterSequence=${afterSequence}`);
+  }
+
+  signedGet(route: string): Promise<Record<string, unknown>> {
+    const operation = this.#serial.then(() => this.#signedRequestNow('GET', route, undefined));
     this.#serial = operation.catch(() => undefined);
     return operation;
   }
 
-  async #signedPostNow(route: string, body: unknown): Promise<Record<string, unknown>> {
+  signedPost(route: string, body: unknown): Promise<Record<string, unknown>> {
+    const operation = this.#serial.then(() => this.#signedRequestNow('POST', route, body));
+    this.#serial = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
@@ -669,21 +689,22 @@ export class AgentFabricClient {
       return this.#sendPending();
     }
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
-    const serialized = canonicalize(body);
+    const serialized = method === 'GET' ? '' : canonicalize(body);
     const timestamp = new Date().toISOString();
     const messageId = randomUUID();
     const nonce = randomBytes(24).toString('base64url');
     const sequence = this.#state.nextSequence;
     const signingPayload = Buffer.from(JSON.stringify({
       bodyHash: `sha256:${sha256(serialized)}`, deviceId: this.config.deviceId, messageId,
-      method: 'POST', nonce, organizationId: this.config.organizationId, pathname,
+      method, nonce, organizationId: this.config.organizationId, pathname,
       sequence, sessionId: this.#state.sessionId, timestamp,
     }), 'utf8');
     const signature = sign(null, signingPayload, { key: this.#privateJwk, format: 'jwk' }).toString('base64url');
     const pending: PendingRequest = {
-      method: 'POST', pathname, body: serialized,
+      method, pathname, body: serialized,
       headers: {
-        'content-type': 'application/json', 'x-dharma-device-id': this.config.deviceId,
+        ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+        'x-dharma-device-id': this.config.deviceId,
         'x-dharma-session-id': this.#state.sessionId, 'x-dharma-message-id': messageId,
         'x-dharma-timestamp': timestamp, 'x-dharma-nonce': nonce,
         'x-dharma-sequence': String(sequence), 'x-dharma-signature': signature,
@@ -780,7 +801,9 @@ export class AgentFabricClient {
     let body: Record<string, unknown>;
     if (this.#directTransport) {
       const response = await this.#fetcher(`${this.config.hqUrl.replace(/\/$/, '')}${pending.pathname}`, {
-        method: pending.method, headers: pending.headers, body: pending.body,
+        method: pending.method,
+        headers: pending.headers,
+        body: pending.method === 'GET' ? undefined : pending.body,
       });
       status = response.status;
       body = await response.json() as Record<string, unknown>;

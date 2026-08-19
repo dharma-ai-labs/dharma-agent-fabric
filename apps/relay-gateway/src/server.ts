@@ -51,7 +51,10 @@ websocket.on('connection', (socket) => {
         lastPresence = { deviceId, value };
         stage = 'upstream';
         const upstream = await fetch(relayTarget(hqInternalUrl, message), {
-          method: message.method, headers: message.headers, body: message.body, signal: AbortSignal.timeout(30_000),
+          method: message.method,
+          headers: message.headers,
+          body: message.method === 'GET' ? undefined : message.body,
+          signal: AbortSignal.timeout(30_000),
         });
         const body = await upstream.text();
         process.stdout.write(`${JSON.stringify({

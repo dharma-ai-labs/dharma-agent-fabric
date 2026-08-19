@@ -31,6 +31,36 @@ test('relay permits the repository-agent control operation', () => {
   assert.equal(parsed.pathname.endsWith('/repository-agents'), true);
 });
 
+test('relay permits only the bounded control-agent read and chat surface', () => {
+  const sessionId = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
+  for (const pathname of [
+    '/api/v1/orgs/org_customer/control-agent/sessions',
+    `/api/v1/orgs/org_customer/control-agent/sessions/${sessionId}/messages`,
+  ]) {
+    assert.doesNotThrow(() => parseRelayRequest({ ...request, pathname }));
+  }
+  for (const pathname of [
+    '/api/v1/orgs/org_customer/control-agent/sessions',
+    `/api/v1/orgs/org_customer/control-agent/sessions?sessionId=${sessionId}`,
+    `/api/v1/orgs/org_customer/control-agent/sessions/${sessionId}/events?afterSequence=12`,
+  ]) {
+    assert.doesNotThrow(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }));
+  }
+  assert.throws(() => parseRelayRequest({
+    ...request,
+    method: 'GET',
+    pathname: '/api/v1/orgs/org_customer/control-agent/sessions',
+    body: '{}',
+  }), /get_body_forbidden/);
+  for (const pathname of [
+    '/api/v1/orgs/org_customer/control-agent/tool-calls/all/approve',
+    `/api/v1/orgs/org_customer/control-agent/sessions/${sessionId}/events?afterSequence=-1`,
+    `/api/v1/orgs/org_customer/control-agent/sessions/${sessionId}/messages?admin=true`,
+  ]) {
+    assert.throws(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }), /route_not_allowed/);
+  }
+});
+
 test('relay rejects arbitrary HQ, worker, and admin paths', () => {
   for (const pathname of ['/api/admin', '/api/workers/agent-executor', '/api/v1/orgs/org_customer/managed-agents']) {
     assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);

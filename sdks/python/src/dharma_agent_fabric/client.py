@@ -43,6 +43,7 @@ class AgentFabricClient:
         token: str | Callable[[], str],
         base_url: str = "https://www.dharma-ai.io",
         timeout_seconds: float = 30.0,
+        portal_session_cookie: str | None = None,
     ) -> None:
         if not organization_id.strip():
             raise ValueError("organization_id is required")
@@ -57,6 +58,11 @@ class AgentFabricClient:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        if portal_session_cookie is not None and (
+            not portal_session_cookie.strip() or any(character in portal_session_cookie for character in ";\r\n")
+        ):
+            raise ValueError("portal_session_cookie is invalid")
+        self.portal_session_cookie = portal_session_cookie
 
     def _token(self) -> str:
         value = self.token() if callable(self.token) else self.token
@@ -70,17 +76,28 @@ class AgentFabricClient:
     def _managed_path(self, path: str) -> str:
         return f"/api/orgs/{self._encoded_organization_id}{path}"
 
+    def _control_agent_path(self, path: str) -> str:
+        return f"/api/v1/orgs/{self._encoded_organization_id}/control-agent{path}"
+
     def request(
         self,
         method: str,
         path: str,
         body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        auth_mode: str = "organization_token",
     ) -> dict[str, Any]:
         if not path.startswith("/"):
             raise ValueError("path must start with /")
         mutation = method.upper() not in {"GET", "HEAD", "OPTIONS"}
-        headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json"}
+        if auth_mode == "organization_token":
+            headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json"}
+        elif auth_mode == "portal_session":
+            if self.portal_session_cookie is None:
+                raise ValueError("portal_session_cookie is required for organization-admin approval")
+            headers = {"Cookie": f"__session={self.portal_session_cookie}", "Accept": "application/json"}
+        else:
+            raise ValueError("auth_mode must be organization_token or portal_session")
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -176,3 +193,47 @@ class AgentFabricClient:
 
     def usage(self) -> dict[str, Any]:
         return self.request("GET", self._org_path("/usage"))
+
+    def list_control_agent_sessions(self, session_id: str | None = None) -> dict[str, Any]:
+        query = f"?sessionId={quote(session_id, safe='')}" if session_id else ""
+        return self.request("GET", self._control_agent_path(f"/sessions{query}"))
+
+    def create_control_agent_session(self, title: str = "New conversation") -> dict[str, Any]:
+        return self.request("POST", self._control_agent_path("/sessions"), {"title": title})
+
+    def submit_control_agent_message(
+        self,
+        session_id: str,
+        message: str,
+        attachments: list[AgentFabricImageAttachment] | None = None,
+    ) -> dict[str, Any]:
+        return self.request("POST", self._control_agent_path(f"/sessions/{quote(session_id, safe='')}/messages"), {
+            "message": message,
+            **({"attachments": attachments} if attachments else {}),
+        })
+
+    def list_control_agent_events(self, session_id: str, after_sequence: int = 0) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            self._control_agent_path(f"/sessions/{quote(session_id, safe='')}/events?afterSequence={after_sequence}"),
+        )
+
+    def approve_control_agent_tool_call(self, tool_call_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
+        key = idempotency_key or str(uuid.uuid4())
+        return self.request(
+            "POST",
+            self._control_agent_path(f"/tool-calls/{quote(tool_call_id, safe='')}/approve"),
+            {"confirmed": True, "idempotencyKey": key},
+            idempotency_key=key,
+            auth_mode="portal_session",
+        )
+
+    def reject_control_agent_tool_call(self, tool_call_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
+        key = idempotency_key or str(uuid.uuid4())
+        return self.request(
+            "POST",
+            self._control_agent_path(f"/tool-calls/{quote(tool_call_id, safe='')}/reject"),
+            {"confirmed": True, "idempotencyKey": key},
+            idempotency_key=key,
+            auth_mode="portal_session",
+        )
