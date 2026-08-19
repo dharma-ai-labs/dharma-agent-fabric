@@ -1395,7 +1395,7 @@ test('Agy activation attestation proves the invoked skill token without unsafe p
 
   assert.equal(result.status, 'pass');
   assert.equal(observed.executable, 'agy');
-  assert.equal(observed.cwd, workspace);
+  assert.equal(observed.cwd, await realpath(workspace));
   assert.ok(observed.argv?.includes('--sandbox'));
   assert.ok(observed.argv?.includes('plan'));
   assert.ok(observed.argv?.includes('gemini-3.7-flash-low'));
