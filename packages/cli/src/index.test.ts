@@ -1250,6 +1250,7 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
   const workspace = join(root, 'repo');
   const calls: Array<{ executable: string; argv: string[]; cwd: string }> = [];
   await mkdir(workspace, { recursive: true });
+  const canonicalWorkspace = await realpath(workspace);
   await installRepositoryAgentFabricSkill({
     workspace,
     hqUrl: 'https://www.dharma-ai.io',
@@ -1266,7 +1267,11 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
     },
   });
   assert.equal(installed.verified, true);
-  assert.deepEqual(calls[0], { executable: 'hermes', argv: ['skills', 'trust', workspace], cwd: workspace });
+  assert.deepEqual(calls[0], {
+    executable: 'hermes',
+    argv: ['skills', 'trust', canonicalWorkspace],
+    cwd: canonicalWorkspace,
+  });
   const verified = await verifyAgentFabricSkillInstallation({
     provider: 'hermes', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
     listHermesSkills: async () => ({ stdout: 'dharma-agent-fabric  local  trusted  enabled' }),
@@ -1279,6 +1284,7 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
 
 test('Hermes signed activation requires every installed bundle skill to be discovered', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'dharma-hermes-activation-'));
+  const canonicalWorkspace = await realpath(workspace);
   const bundle = {
     operation: 'install',
     skills: [{ skillId: 'price-boundary' }, { skillId: 'handoff-authority' }],
@@ -1292,7 +1298,7 @@ test('Hermes signed activation requires every installed bundle skill to be disco
     },
   });
   assert.equal(passed.status, 'pass');
-  assert.deepEqual(calls[0], ['skills', 'trust', workspace]);
+  assert.deepEqual(calls[0], ['skills', 'trust', canonicalWorkspace]);
   assert.deepEqual(calls[1], ['skills', 'list', '--source', 'local', '--enabled-only']);
 
   const failed = await attestHermesSkillBundleActivation({
