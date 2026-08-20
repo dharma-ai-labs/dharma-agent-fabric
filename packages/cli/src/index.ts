@@ -3350,7 +3350,12 @@ export async function attestHermesSkillBundleActivation(input: {
   try {
     ({ stdout } = await execute('hermes', ['skills', 'list', '--source', 'local', '--enabled-only'], {
       timeout: 30_000,
-      env: providerProcessEnvironment(input.env),
+      env: {
+        ...providerProcessEnvironment(input.env),
+        // Hermes renders a Rich table even when stdout is not a TTY. Give it
+        // enough width to preserve signed skill IDs for exact attestation.
+        COLUMNS: '1000',
+      },
       cwd: workspace,
     }));
   } catch (error) {

@@ -1287,17 +1287,23 @@ test('Hermes signed activation requires every installed bundle skill to be disco
   const canonicalWorkspace = await realpath(workspace);
   const bundle = {
     operation: 'install',
-    skills: [{ skillId: 'price-boundary' }, { skillId: 'handoff-authority' }],
+    skills: [
+      { skillId: 'price-boundary' },
+      { skillId: 'dharma-remediation-9bfa8496-65fd-4c06-9893-2270f400d2d7' },
+    ],
   } as unknown as SkillBundle;
   const calls: string[][] = [];
+  let listColumns: string | undefined;
   const passed = await attestHermesSkillBundleActivation({
     bundle, workspace,
-    execute: async (_executable, argv) => {
+    execute: async (_executable, argv, options) => {
       calls.push(argv);
-      return { stdout: argv[1] === 'list' ? 'price-boundary\nhandoff-authority\n' : '' };
+      if (argv[1] === 'list') listColumns = options.env.COLUMNS;
+      return { stdout: argv[1] === 'list' ? 'price-boundary\ndharma-remediation-9bfa8496-65fd-4c06-9893-2270f400d2d7\n' : '' };
     },
   });
   assert.equal(passed.status, 'pass');
+  assert.equal(listColumns, '1000');
   assert.deepEqual(calls[0], ['skills', 'trust', canonicalWorkspace]);
   assert.deepEqual(calls[1], ['skills', 'list', '--source', 'local', '--enabled-only']);
 
@@ -1306,7 +1312,7 @@ test('Hermes signed activation requires every installed bundle skill to be disco
     execute: async (_executable, argv) => ({ stdout: argv[1] === 'list' ? 'price-boundary\n' : '' }),
   });
   assert.equal(failed.status, 'fail');
-  assert.match(failed.details, /handoff-authority/);
+  assert.match(failed.details, /dharma-remediation-9bfa8496/);
 });
 
 test('native bootstrap installation makes the repository skill verifiable by Codex', async () => {
