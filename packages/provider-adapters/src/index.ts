@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { access, mkdtemp, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, relative, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+
+const execFileAsync = promisify(execFile);
 
 export interface SourceRecord {
   native: Record<string, unknown>;
@@ -63,7 +66,7 @@ export function providerProcessEnvironment(source: NodeJS.ProcessEnv = process.e
   const allowed = [
     'PATH', 'Path', 'HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TMP', 'TEMP', 'TMPDIR',
     'SHELL', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'PATHEXT', 'LANG', 'LC_ALL', 'TERM',
-    'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'AGY_CONFIG_DIR',
+    'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'AGY_CONFIG_DIR', 'HERMES_HOME',
   ];
   const env: NodeJS.ProcessEnv = {};
   for (const name of allowed) {
@@ -199,7 +202,7 @@ export async function executeProviderTask(input: {
       '--input-format', 'text', '--output-format', 'stream-json', '--permission-mode', 'acceptEdits',
       '--allowedTools', allowedTools.join(','), '--disallowedTools', 'WebFetch,WebSearch',
     ];
-  } else {
+  } else if (input.provider === 'agy') {
     if (input.allowWrites) {
       throw new Error('Agy write tasks are disabled because its supported CLI does not expose a path and command allowlist.');
     }
@@ -224,6 +227,22 @@ export async function executeProviderTask(input: {
       '--log-file', agyLogPath,
       '--print-timeout', `${Math.min(Math.max(input.timeoutSeconds, 1), 3_600)}s`,
     ];
+    stdin = '';
+  } else {
+    if (input.allowWrites) {
+      throw new Error('Hermes write tasks are disabled because its safe mode does not expose a Dharma-verifiable path allowlist.');
+    }
+    if (input.allowedCommandArgv.length > 0) {
+      throw new Error('Hermes tasks cannot receive registered shell commands.');
+    }
+    command = 'hermes';
+    temporaryDirectory = await mkdtemp(resolve(tmpdir(), 'dharma-hermes-task-'));
+    const usagePath = resolve(temporaryDirectory, 'usage.json');
+    const guardedInstructions = [
+      'Operate only inside the current repository. Remain in safe mode. Read files only. Do not modify files, run shell commands, use the network, or inspect parent or sibling directories.',
+      input.instructions,
+    ].join('\n\n');
+    argv = ['--ignore-user-config', '--safe-mode', '--usage-file', usagePath, '--oneshot', guardedInstructions];
     stdin = '';
   }
   try {
@@ -257,6 +276,9 @@ export async function executeProviderTask(input: {
         exitCode = 1;
         stderr = `${stderr}${stderr ? '\n' : ''}Agy authentication or execution failed. Run agy interactively to authenticate this device.`;
       }
+    } else if (input.provider === 'hermes' && result.exitCode === 0 && !result.stdout.toString('utf8').trim()) {
+      exitCode = 1;
+      stderr = `${stderr}${stderr ? '\n' : ''}Hermes returned no task result. Configure an inference provider with hermes model.`;
     }
     const stderrBuffer = Buffer.from(stderr, 'utf8');
     return {
@@ -552,7 +574,7 @@ async function boundedJsonlLines(
 }
 
 async function parseSessionFile(
-  provider: Exclude<ProviderId, 'agy'>,
+  provider: Exclude<ProviderId, 'agy' | 'hermes'>,
   path: string,
   workspace: string,
   limits: { maximumBytes?: number; maximumRecordBytes?: number } = {},
@@ -794,6 +816,108 @@ async function discoverAgyNativeTranscripts(
   return sessions;
 }
 
+export function parseHermesSessionExport(
+  jsonl: string,
+  workspace: string,
+  options: { sessionIds?: string[]; since?: Date; maximumSessions?: number } = {},
+): ProviderSession[] {
+  const requested = options.sessionIds ? new Set(options.sessionIds) : null;
+  const maximumSessions = Math.min(Math.max(options.maximumSessions ?? 100, 1), 1_000);
+  const sessions: ProviderSession[] = [];
+  for (const [rowIndex, line] of jsonl.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    let session: Record<string, unknown>;
+    try { session = object(JSON.parse(line)); } catch { continue; }
+    const recordedWorkspace = findString(session, ['cwd', 'workspace', 'working_directory']);
+    if (!recordedWorkspace || !insideWorkspace(workspace, recordedWorkspace)) continue;
+    const rawId = session.id ?? session.session_id;
+    if (typeof rawId !== 'string' || !rawId.trim()) continue;
+    const sessionId = `hermes-${createHash('sha256').update(rawId).digest('hex').slice(0, 24)}`;
+    if (requested && !requested.has(sessionId) && !requested.has(rawId)) continue;
+    const rawMessages = Array.isArray(session.messages) ? session.messages : [];
+    const records: SourceRecord[] = rawMessages
+      .filter((message): message is Record<string, unknown> => Boolean(message && typeof message === 'object' && !Array.isArray(message)))
+      .map((message, messageIndex) => {
+        const role = String(message.role || '').toLowerCase();
+        const kind = role === 'user' ? 'user_message'
+          : role === 'assistant' ? 'agent_message'
+            : role === 'tool' ? 'tool_result' : inferKind(message);
+        const timestamp = normalizeTimestamp(
+          findString(message, ['timestamp', 'created_at', 'createdAt', 'time']),
+          new Date(),
+        );
+        return {
+          native: stripProtectedNativeContent(message) as Record<string, unknown>,
+          sourcePath: 'hermes:sessions-export',
+          line: rowIndex * 10_000 + messageIndex + 1,
+          workspace: recordedWorkspace,
+          timestamp,
+          kind,
+          coverage: 'observed' as const,
+        };
+      });
+    if (records.length === 0) continue;
+    const startedAt = normalizeTimestamp(
+      findString(session, ['started_at', 'created_at', 'createdAt', 'timestamp']),
+      new Date(records[0]!.timestamp!),
+    );
+    const endedAt = normalizeTimestamp(
+      findString(session, ['ended_at', 'updated_at', 'updatedAt', 'last_active_at']),
+      new Date(records.at(-1)!.timestamp!),
+    );
+    if (options.since && Date.parse(endedAt) < options.since.getTime()) continue;
+    sessions.push({
+      provider: 'hermes', sessionId, sourcePath: 'hermes:sessions-export', workspace: resolve(workspace),
+      records, coverage: 'observed', startedAt, endedAt,
+    });
+  }
+  const ordered = sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+  return requested ? ordered : ordered.slice(-maximumSessions);
+}
+
+export function hermesCapability(version: string | null): ProviderCapability & { skillRollback: 'available' | 'unavailable' } {
+  return {
+    provider: 'hermes',
+    version,
+    evidence: version ? 'available' : 'unavailable',
+    configuredAssets: version ? 'partial' : 'unavailable',
+    taskExecution: version ? 'partial' : 'unavailable',
+    sessionContinuation: 'unavailable',
+    skillInstall: version ? 'available' : 'unavailable',
+    activation: version ? 'next_session' : 'unavailable',
+    skillRollback: version ? 'available' : 'unavailable',
+    usageEvidence: version ? 'partial' : 'unavailable',
+  };
+}
+
+export const hermesAdapter: ProviderAdapter = {
+  providerId: 'hermes',
+  async capability() {
+    return hermesCapability(await executableVersion('hermes'));
+  },
+  async discover(request) {
+    if (request.roots) {
+      const sessions: ProviderSession[] = [];
+      for (const root of request.roots) {
+        for (const path of await jsonlFiles(root)) {
+          sessions.push(...parseHermesSessionExport(await readFile(path, 'utf8'), request.workspace, request));
+        }
+      }
+      return sessions
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+        .slice(-(request.maximumSessions ?? 100));
+    }
+    const argv = ['sessions', 'export', '-', '--format', 'jsonl', '--cwd', resolve(request.workspace), '--yes', '--redact'];
+    if (request.since) argv.push('--after', request.since.toISOString());
+    const { stdout } = await execFileAsync('hermes', argv, {
+      timeout: 60_000,
+      maxBuffer: 67_108_864,
+      env: providerProcessEnvironment(),
+    });
+    return parseHermesSessionExport(String(stdout), request.workspace, request);
+  },
+};
+
 function defaultRoots(provider: ProviderId): string[] {
   if (provider === 'codex') {
     return [resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'sessions')];
@@ -801,10 +925,11 @@ function defaultRoots(provider: ProviderId): string[] {
   if (provider === 'claude') {
     return [resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude'), 'projects')];
   }
+  if (provider === 'hermes') return [];
   return [resolve(process.env.AGY_CONFIG_DIR || resolve(homedir(), '.gemini', 'antigravity-cli'), 'history.jsonl')];
 }
 
-function adapter(provider: Exclude<ProviderId, 'agy'>, command: string): ProviderAdapter {
+function adapter(provider: Exclude<ProviderId, 'agy' | 'hermes'>, command: string): ProviderAdapter {
   return {
     providerId: provider,
     async capability() {
@@ -910,5 +1035,5 @@ export const agyAdapter: ProviderAdapter = {
 
 export const codexAdapter = adapter('codex', 'codex');
 export const claudeAdapter = adapter('claude', 'claude');
-export const providerAdapters: ProviderAdapter[] = [codexAdapter, claudeAdapter, agyAdapter];
+export const providerAdapters: ProviderAdapter[] = [codexAdapter, claudeAdapter, agyAdapter, hermesAdapter];
 export { insideWorkspace, parseAgyHistoryFile, parseAgyTranscriptFile, parseSessionFile };

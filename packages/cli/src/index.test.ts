@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import {
   activateAgyPlugin,
   attestAgySkillActivation,
+  attestHermesSkillBundleActivation,
   actionDecisionCapabilityFreshUntil,
   canonicalFilesystemPath,
   controlAgentDecisionUrl,
@@ -489,7 +490,8 @@ test('CLI parser preserves repeated repository, key, and provider selections', (
   assert.equal(parsed.flags.get('non-interactive'), true);
   assert.deepEqual(parseSelectedProviderIds(parsed.repeated.get('provider') || []), ['codex', 'claude']);
   assert.deepEqual(parseSelectedProviderIds(['agy,codex', 'agy']), ['agy', 'codex']);
-  assert.throws(() => parseSelectedProviderIds(['unsupported']), /codex, claude, or agy/);
+  assert.deepEqual(parseSelectedProviderIds(['hermes,codex', 'hermes']), ['hermes', 'codex']);
+  assert.throws(() => parseSelectedProviderIds(['unsupported']), /codex, claude, agy, or hermes/);
 });
 
 test('workspace registration reuses a normalized repository identity across local paths', async () => {
@@ -1229,12 +1231,76 @@ test('provider skill roots map to each host native discovery directory', async (
     nativeSkillDirectory('agy', {}, home),
     join(home, '.gemini', 'antigravity-cli', 'plugins', 'dharma-agent-fabric', 'skills'),
   );
+  assert.equal(nativeSkillDirectory('hermes', {}, home), join(home, '.hermes', 'skills'));
   assert.equal(nativeSkillDirectory('codex', { CODEX_HOME: join(home, 'custom-codex') }, home), join(home, 'custom-codex', 'skills'));
   assert.equal(nativeSkillDirectory('claude', { CLAUDE_CONFIG_DIR: join(home, 'custom-claude') }, home), join(home, 'custom-claude', 'skills'));
   assert.equal(
     nativeSkillDirectory('agy', { AGY_CONFIG_DIR: join(home, 'custom-agy') }, home),
     join(home, 'custom-agy', 'plugins', 'dharma-agent-fabric', 'skills'),
   );
+  assert.equal(
+    nativeSkillDirectory('hermes', { HERMES_HOME: join(home, 'custom-hermes') }, home),
+    join(home, 'custom-hermes', 'skills'),
+  );
+});
+
+test('Hermes bootstrap trusts the repository and verifies native discovery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-hermes-skill-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  const calls: Array<{ executable: string; argv: string[]; cwd: string }> = [];
+  await mkdir(workspace, { recursive: true });
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId: 'workspace_test',
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const installed = await installNativeAgentFabricBootstrap({
+    provider: 'hermes', workspace, workspaceId: 'workspace_test', organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io', home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+    executeHermes: async (executable, argv, options) => {
+      calls.push({ executable, argv, cwd: options.cwd });
+      return { stdout: '' };
+    },
+  });
+  assert.equal(installed.verified, true);
+  assert.deepEqual(calls[0], { executable: 'hermes', argv: ['skills', 'trust', workspace], cwd: workspace });
+  const verified = await verifyAgentFabricSkillInstallation({
+    provider: 'hermes', workspace, home, env: { HOME: home, PATH: '/usr/bin:/bin' },
+    listHermesSkills: async () => ({ stdout: 'dharma-agent-fabric  local  trusted  enabled' }),
+  });
+  assert.equal(verified.ready, true);
+  assert.equal(verified.nativeDiscovered, true);
+  assert.equal(verified.activationAttested, false);
+  assert.match(verified.nextAction, /signed remediation bundle/);
+});
+
+test('Hermes signed activation requires every installed bundle skill to be discovered', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-hermes-activation-'));
+  const bundle = {
+    operation: 'install',
+    skills: [{ skillId: 'price-boundary' }, { skillId: 'handoff-authority' }],
+  } as unknown as SkillBundle;
+  const calls: string[][] = [];
+  const passed = await attestHermesSkillBundleActivation({
+    bundle, workspace,
+    execute: async (_executable, argv) => {
+      calls.push(argv);
+      return { stdout: argv[1] === 'list' ? 'price-boundary\nhandoff-authority\n' : '' };
+    },
+  });
+  assert.equal(passed.status, 'pass');
+  assert.deepEqual(calls[0], ['skills', 'trust', workspace]);
+  assert.deepEqual(calls[1], ['skills', 'list', '--source', 'local', '--enabled-only']);
+
+  const failed = await attestHermesSkillBundleActivation({
+    bundle, workspace,
+    execute: async (_executable, argv) => ({ stdout: argv[1] === 'list' ? 'price-boundary\n' : '' }),
+  });
+  assert.equal(failed.status, 'fail');
+  assert.match(failed.details, /handoff-authority/);
 });
 
 test('native bootstrap installation makes the repository skill verifiable by Codex', async () => {

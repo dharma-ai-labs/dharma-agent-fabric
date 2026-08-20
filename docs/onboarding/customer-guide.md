@@ -8,7 +8,7 @@ This guide is for a company administrator connecting local coding agents and pro
 - a private agent-control repository under `dharma-ai-labs`, with the company administrator invited as a collaborator;
 - a scoped organization API key for the public HQ API;
 - the open-source `@dharma-ai-labs/agent-fabric` CLI;
-- repository-local instructions and policy for Codex, Claude Code, and Agy;
+- repository-local instructions and policy for Codex, Claude Code, Agy, and Hermes Agent;
 - one selected execution boundary: Dharma-managed ADK, GCP Vertex BYOK, or local BYOK;
 - encrypted local evidence capture and reduced trajectory synchronization;
 - exact 100-trajectory analysis windows, versioned rubrics, and an organization-isolated Failure Atlas;
@@ -115,7 +115,7 @@ Typical scopes:
 
 The complete token is displayed once. Store it in the operating-system secret manager or CI secret store. Do not put it in Git, `.env.example`, logs, screenshots, issue text, or a chat transcript.
 
-## 5. Connect local Codex, Claude Code, and Agy
+## 5. Connect local Codex, Claude Code, Agy, and Hermes Agent
 
 Prerequisites:
 
@@ -164,7 +164,7 @@ For each selected repository, the CLI:
 4. registers the current device, workspace, and provider as endpoints of that agent;
 5. obtains the permanent control branch and agent identity from HQ;
 6. writes the repository bootstrap without storing the source path or Git credential;
-7. detects Codex, Claude Code, and Agy independently;
+7. detects Codex, Claude Code, Agy, and Hermes Agent independently;
 8. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill only for detected providers that report Skill installation as available;
 9. waits for browser approval and continues automatically without a manual resume command;
 10. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
@@ -217,7 +217,7 @@ The client policy contract supports `metadata_only`, `local_analysis`, or `custo
 
 Batch capture is deliberately bounded. Use `--maximum-sessions` after reviewing the preview counts, or pass a JSON `--session-ids-file` to select exact sessions.
 
-Use `claude` or `agy` as the provider only after the capability report says the required lifecycle is available. Provider evidence support alone does not imply remote task or skill activation support.
+Use `claude`, `agy`, or `hermes` as the provider only after the capability report says the required lifecycle is available. Hermes requires project trust and an inference provider before live tasks can run. Provider evidence or skill-discovery support alone does not imply remote task execution or content-level activation support.
 
 Start the outbound relay:
 
@@ -357,7 +357,7 @@ For offboarding, revoke devices and API keys, remove the customer collaborator, 
 Use the dashboard's current capability report as the authority. A feature is not available merely because its UI, source code, or plugin manifest exists. The following require live receipts before a broad GA claim:
 
 - unassisted fresh-company purchase-to-operation onboarding;
-- Codex, Claude Code, and Agy capture/task/skill/rollback lifecycles;
+- Codex, Claude Code, Agy, and Hermes capture/task/skill/rollback lifecycles that are marked available by the live capability report;
 - managed ADK and GCP BYOK real execution;
 - a complete 100-trajectory window through remediation and forced rollback;
 - OpenAI directory approval. Until OpenAI approves it, the plugin must be described as submitted or in review.

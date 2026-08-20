@@ -152,7 +152,7 @@
         "providers": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "enum": ["codex", "claude", "agy"] }
+          "items": { "type": "string", "enum": ["codex", "claude", "agy", "hermes"] }
         }
       }
     },

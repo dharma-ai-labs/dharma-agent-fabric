@@ -20,6 +20,7 @@ dharma repositories connect \
   --repo "$PWD" \
   --provider codex \
   --provider claude \
+  --provider hermes \
   --organization-id <organization-id> \
   --policy-revision <dashboard-policy-revision>
 dharma repositories status --repo "$PWD" --json
@@ -36,7 +37,7 @@ the same agent. The CLI derives repository identity from a credential-free
 normalized Git remote. Repositories without a remote require an explicit stable
 `--repository-key`; absolute paths are never identity.
 
-Current provider adapters are Codex, Claude Code, and Agy. Run
+Current provider adapters are Codex, Claude Code, Agy, and Hermes Agent. Run
 `dharma providers list` because evidence, task, continuation, Skill installation,
 activation, and usage capabilities are reported independently.
 
@@ -81,7 +82,7 @@ rejects trajectories that do not carry the installed candidate bundle ID:
 ```bash
 dharma skills sync \
   --workspace-id <workspace-id> \
-  --provider <codex|claude|agy> \
+  --provider <codex|claude|agy|hermes> \
   --policy .dharma/approved-policy.json \
   --approval-id <evaluation-authorization-id>
 

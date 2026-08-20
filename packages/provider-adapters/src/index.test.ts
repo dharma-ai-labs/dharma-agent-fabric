@@ -10,6 +10,9 @@ import {
   defaultProcessRunner,
   executableVersion,
   executeProviderTask,
+  hermesCapability,
+  hermesAdapter,
+  parseHermesSessionExport,
   providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
@@ -72,6 +75,16 @@ test('Agy 1.1.15 advertises content-attested activation and transactional rollba
     skillRollback: 'available',
     usageEvidence: 'unavailable',
   });
+});
+
+test('Hermes capabilities distinguish an installed host from an unavailable host', () => {
+  assert.deepEqual(hermesCapability('0.20.4'), {
+    provider: 'hermes', version: '0.20.4', evidence: 'available', configuredAssets: 'partial',
+    taskExecution: 'partial', sessionContinuation: 'unavailable', skillInstall: 'available',
+    activation: 'next_session', skillRollback: 'available', usageEvidence: 'partial',
+  });
+  assert.equal(hermesCapability(null).taskExecution, 'unavailable');
+  assert.equal(hermesCapability(null).skillInstall, 'unavailable');
 });
 
 test('provider subprocess environment excludes cloud and model credentials', () => {
@@ -197,6 +210,39 @@ test('Agy discovery reads the current native transcript bound by its workspace c
     if (previous === undefined) delete process.env.AGY_CONFIG_DIR;
     else process.env.AGY_CONFIG_DIR = previous;
   }
+});
+
+test('Hermes discovery parses only redacted official exports bound to the requested workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-hermes-export-'));
+  const workspace = join(root, 'repo');
+  const foreign = join(root, 'foreign');
+  const exports = join(root, 'exports');
+  await mkdir(workspace);
+  await mkdir(foreign);
+  await mkdir(exports);
+  const rows = [
+    {
+      id: 'session-local', cwd: workspace,
+      started_at: '2026-08-19T10:00:00Z', updated_at: '2026-08-19T10:00:02Z',
+      messages: [
+        { role: 'user', content: 'Inspect the repository.', timestamp: '2026-08-19T10:00:01Z' },
+        { role: 'assistant', content: 'The repository is bounded.', timestamp: '2026-08-19T10:00:02Z' },
+      ],
+    },
+    {
+      id: 'session-foreign', cwd: foreign,
+      messages: [{ role: 'user', content: 'Do not admit.', timestamp: '2026-08-19T10:00:03Z' }],
+    },
+  ].map((row) => JSON.stringify(row)).join('\n');
+  const parsed = parseHermesSessionExport(rows, workspace);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0]?.provider, 'hermes');
+  assert.equal(parsed[0]?.coverage, 'observed');
+  assert.deepEqual(parsed[0]?.records.map((record) => record.kind), ['user_message', 'agent_message']);
+  await writeFile(join(exports, 'sessions.jsonl'), rows);
+  const discovered = await hermesAdapter.discover({ workspace, roots: [exports] });
+  assert.equal(discovered.length, 1);
+  assert.equal(discovered[0]?.sessionId, parsed[0]?.sessionId);
 });
 
 test('Codex discovery supports no-copy JSONL source selectors', async () => {
@@ -498,6 +544,45 @@ test('Agy fails closed for writes, registered commands, and zero-exit authentica
   });
   assert.equal(unstructured.exitCode, 1);
   assert.match(unstructured.stderr, /execution failed/);
+});
+
+test('Hermes tasks use safe-mode one-shot execution and fail closed for effects or missing output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-hermes-task-'));
+  let observed: Record<string, unknown> = {};
+  const completed = await executeProviderTask({
+    provider: 'hermes', workspace: root, instructions: 'Summarize package metadata.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async (input) => {
+      observed = input;
+      return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('Bounded summary'), stderr: Buffer.alloc(0) };
+    },
+  });
+  assert.equal(observed.command, 'hermes');
+  assert.equal(observed.stdin, '');
+  const argv = observed.argv as string[];
+  assert.ok(argv.includes('--ignore-user-config'));
+  assert.ok(argv.includes('--safe-mode'));
+  assert.ok(argv.includes('--usage-file'));
+  assert.ok(argv.includes('--oneshot'));
+  assert.match(String(argv.at(-1)), /Summarize package metadata/);
+  assert.equal(completed.exitCode, 0);
+
+  await assert.rejects(() => executeProviderTask({
+    provider: 'hermes', workspace: root, instructions: 'Edit a file.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: true,
+  }), /Hermes write tasks are disabled/);
+  await assert.rejects(() => executeProviderTask({
+    provider: 'hermes', workspace: root, instructions: 'Run a command.', timeoutSeconds: 30,
+    allowedCommandArgv: [['npm', 'test']], allowWrites: false,
+  }), /Hermes tasks cannot receive registered shell commands/);
+
+  const missing = await executeProviderTask({
+    provider: 'hermes', workspace: root, instructions: 'Read only.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({ exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }),
+  });
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderr, /Configure an inference provider/);
 });
 
 test('Claude task execution pins a validated configured model', async () => {
