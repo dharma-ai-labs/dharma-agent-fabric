@@ -58,6 +58,28 @@ if (validateDeviceCapabilities({
   throw new Error('Device capability schema accepted an invalid rollback capability.');
 }
 
+const validateAgentEvent = ajv.getSchema('https://schemas.dharma-ai.io/agent-event/v1');
+const hermesAgentEvent = {
+  schema: 'dharma.agent-event/v1',
+  eventId: '11111111-1111-4111-8111-111111111111',
+  organizationId: 'org_schema_test',
+  deviceId: 'device_schema_test',
+  workspaceId: 'workspace_schema_test',
+  provider: 'hermes',
+  sessionId: 'hermes-schema-test',
+  sequence: 0,
+  occurredAt: '2026-08-20T00:00:00.000Z',
+  kind: 'agent_message',
+  coverage: 'observed',
+  payload: { contentOmitted: true },
+};
+if (!validateAgentEvent?.(hermesAgentEvent)) {
+  throw new Error(`Hermes agent event is invalid: ${ajv.errorsText(validateAgentEvent?.errors)}`);
+}
+if (validateAgentEvent({ ...hermesAgentEvent, provider: 'unregistered-provider' })) {
+  throw new Error('Agent event schema accepted an unregistered provider.');
+}
+
 const runtimeTaskSchema = JSON.parse(await readFile(resolve(root, 'packages/contracts/src/task-envelope.schema.json'), 'utf8'));
 const canonicalTaskSchema = JSON.parse(await readFile(resolve(schemaDir, 'task-envelope.schema.json'), 'utf8'));
 if (JSON.stringify(runtimeTaskSchema) !== JSON.stringify(canonicalTaskSchema)) {

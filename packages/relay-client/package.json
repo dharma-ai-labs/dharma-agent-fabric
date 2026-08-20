@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-relay-client",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "Outbound signed device enrollment and relay client for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/relay-client#readme",
@@ -30,7 +30,7 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@dharma-ai-labs/agent-fabric-contracts": "0.1.9",
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.10",
     "@dharma-ai-labs/agent-fabric-secure-store": "0.1.4"
   }
 }

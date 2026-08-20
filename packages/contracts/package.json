@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-contracts",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Versioned schemas, signatures, and TypeScript contracts for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/contracts#readme",
