@@ -14,7 +14,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -33,10 +33,15 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.16';
+const VERSION = '0.2.17';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
+const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
 type Output = unknown;
+
+function isLocalProviderId(value: string): value is ProviderId {
+  return (LOCAL_PROVIDER_IDS as readonly string[]).includes(value);
+}
 
 interface WorkspaceRecord {
   workspaceId: string;
@@ -375,7 +380,7 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
       event && typeof event === 'object' && !Array.isArray(event)
         ? String((event as Record<string, unknown>).skillBundleId || '') : ''
     )).filter(Boolean))];
-    if (!['codex', 'claude', 'agy'].includes(provider)
+    if (!isLocalProviderId(provider)
       || !digest.test(String(capsule.sessionId || ''))
       || (signedTaskCapture
         ? !uuid.test(String(capsule.taskId || ''))
@@ -791,7 +796,7 @@ export async function withWorkspaceSkillActivationLock<T>(
   provider: ProviderId,
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (!workspaceId || !['codex', 'claude', 'agy'].includes(provider)) {
+  if (!workspaceId || !isLocalProviderId(provider)) {
     throw new Error('Skill activation lock requires a registered workspace and supported provider.');
   }
   const key = createHash('sha256').update(`${workspaceId}:${provider}`).digest('hex');
@@ -964,6 +969,7 @@ function providerAdapter(provider: string) {
   if (provider === 'codex') return codexAdapter;
   if (provider === 'claude') return claudeAdapter;
   if (provider === 'agy') return agyAdapter;
+  if (provider === 'hermes') return hermesAdapter;
   return null;
 }
 
@@ -1838,8 +1844,8 @@ export function parseSelectedProviderIds(values: Array<string | boolean>): Provi
     .map((value) => value.trim())
     .filter(Boolean))];
   if (selected.length === 0) return null;
-  if (selected.some((value) => !['codex', 'claude', 'agy'].includes(value))) {
-    throw new Error('Repository providers must be codex, claude, or agy. Repeat --provider to select more than one.');
+  if (selected.some((value) => !isLocalProviderId(value))) {
+    throw new Error('Repository providers must be codex, claude, agy, or hermes. Repeat --provider to select more than one.');
   }
   return selected as ProviderId[];
 }
@@ -2161,7 +2167,7 @@ Use the installed \`dharma\` CLI for organization-scoped agent work. Never print
    Do not substitute a placeholder or shell variable. Stop unless the result reports \`ready: true\`. Restart the provider after the first installation so it discovers the native skill.
 2. Run \`dharma providers list\` to confirm the provider's independently tested evidence, task, continuation, skill, activation, and rollback capabilities.
 3. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\` or \`agy\` when that is the current agent. Confirm the policy mode and consent receipt before syncing.
+4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\`, \`agy\`, or \`hermes\` when that is the current agent. Confirm the policy mode and consent receipt before syncing.
 5. Run local deterministic self-analysis during capture. Deliver event counts, timing, coverage, failure signals, tool-discipline results, reason codes, and content availability metadata. Do not invent a semantic judgment from metadata. Sessions flagged \`semanticReviewRecommended\` require a policy-authorized evidence request or customer-authorized content mode before server judging.
 6. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
 7. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
@@ -3081,7 +3087,29 @@ export function nativeSkillDirectory(
 ) {
   if (provider === 'codex') return resolve(env.CODEX_HOME || resolve(home, '.codex'), 'skills');
   if (provider === 'claude') return resolve(env.CLAUDE_CONFIG_DIR || resolve(home, '.claude'), 'skills');
+  if (provider === 'hermes') return resolve(env.HERMES_HOME || resolve(home, '.hermes'), 'skills');
   return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
+}
+
+type HermesSkillExecutor = (
+  executable: string,
+  argv: string[],
+  options: { timeout: number; env: NodeJS.ProcessEnv; cwd: string },
+) => Promise<{ stdout?: string | Buffer }>;
+
+export async function trustHermesProject(input: {
+  workspace: string;
+  env?: NodeJS.ProcessEnv;
+  execute?: HermesSkillExecutor;
+}) {
+  const workspace = await realpath(input.workspace);
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  await execute('hermes', ['skills', 'trust', workspace], {
+    timeout: 30_000,
+    env: providerProcessEnvironment(input.env),
+    cwd: workspace,
+  });
+  return { workspace, trusted: true };
 }
 
 export async function installNativeAgentFabricBootstrap(input: {
@@ -3092,6 +3120,7 @@ export async function installNativeAgentFabricBootstrap(input: {
   hqUrl: string;
   env?: NodeJS.ProcessEnv;
   home?: string;
+  executeHermes?: HermesSkillExecutor;
 }) {
   const root = nativeSkillDirectory(input.provider, input.env, input.home);
   const skillRoot = resolve(root, 'dharma-agent-fabric');
@@ -3126,6 +3155,13 @@ The repository-local skill and connection manifest are authoritative for the act
     installedAt: new Date().toISOString(),
   }, null, 2)}\n`, { mode: 0o600 });
   if (input.provider === 'agy') await activateAgyPlugin({ env: input.env, home: input.home });
+  if (input.provider === 'hermes') {
+    await trustHermesProject({
+      workspace: input.workspace,
+      env: input.env,
+      execute: input.executeHermes,
+    });
+  }
   return {
     provider: input.provider,
     nativeSkillDirectory: root,
@@ -3180,6 +3216,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     argv: string[],
     options: { timeout: number; env: NodeJS.ProcessEnv },
   ) => Promise<{ stdout: string | Buffer }>;
+  listHermesSkills?: HermesSkillExecutor;
 }) {
   const workspace = await realpath(input.workspace);
   const repositorySkillPath = resolve(workspace, '.agents', 'skills', 'dharma-agent-fabric', 'SKILL.md');
@@ -3198,7 +3235,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     } catch {}
   }
   const nativeInstalled = nativeManaged;
-  let nativeDiscovered = input.provider === 'agy' ? false : nativeInstalled;
+  let nativeDiscovered = ['agy', 'hermes'].includes(input.provider) ? false : nativeInstalled;
   if (input.provider === 'agy' && nativeInstalled) {
     try {
       const listAgyPlugins = input.listAgyPlugins
@@ -3219,6 +3256,20 @@ export async function verifyAgentFabricSkillInstallation(input: {
       });
     } catch {}
   }
+  if (input.provider === 'hermes' && nativeInstalled) {
+    try {
+      const listHermesSkills = input.listHermesSkills
+        || ((executable: string, argv: string[], options: { timeout: number; env: NodeJS.ProcessEnv; cwd: string }) => (
+          execFileAsync(executable, argv, options)
+        ));
+      const { stdout } = await listHermesSkills('hermes', ['skills', 'list', '--source', 'local', '--enabled-only'], {
+        timeout: 30_000,
+        env: providerProcessEnvironment(input.env),
+        cwd: workspace,
+      });
+      nativeDiscovered = /\bdharma-agent-fabric\b/.test(String(stdout || ''));
+    } catch {}
+  }
   const bootstrapReady = repositoryInstalled && nativeInstalled && nativeDiscovered;
   let workspaceId: string | undefined;
   let organizationAgentId: string | undefined;
@@ -3233,8 +3284,8 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const activeBundleId = workspaceId && organizationAgentId && config
     ? (await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config))?.bundleId ?? null
     : null;
-  let activationAttested = input.provider !== 'agy' ? nativeInstalled : false;
-  if (input.provider === 'agy' && activeBundleId && workspaceId) {
+  let activationAttested = !['agy', 'hermes'].includes(input.provider) ? nativeInstalled : false;
+  if (['agy', 'hermes'].includes(input.provider) && activeBundleId && workspaceId) {
     try {
       const receipt = JSON.parse(await readFile(resolve(
         nativeRoot,
@@ -3246,7 +3297,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
       ), 'utf8')) as { checks?: unknown };
       activationAttested = Array.isArray(receipt.checks) && receipt.checks.some((item) => (
         item && typeof item === 'object'
-        && (item as Record<string, unknown>).name === 'provider:agy:activation'
+        && (item as Record<string, unknown>).name === `provider:${input.provider}:activation`
         && (item as Record<string, unknown>).status === 'pass'
       ));
     } catch {}
@@ -3271,9 +3322,59 @@ export async function verifyAgentFabricSkillInstallation(input: {
     activation: input.provider === 'agy' ? (activationAttested ? 'attested' : 'manual_invocation_required') : 'next_session',
     nextAction: input.provider === 'agy' && bootstrapReady && !activationAttested
         ? 'The Agy bootstrap is installed and discoverable. A signed remediation bundle must include and pass the content-bound activation challenge before full lifecycle support is reported.'
+      : input.provider === 'hermes' && bootstrapReady && !activationAttested
+        ? 'The Hermes bootstrap is installed, the project is trusted, and the skill is discoverable. A signed remediation bundle must pass Hermes discovery before full lifecycle support is reported.'
       : bootstrapReady
         ? `Start a new ${input.provider} session from ${workspace} and invoke the dharma-agent-fabric skill.`
       : 'Run dharma onboard again from the repository root.',
+  };
+}
+
+export async function attestHermesSkillBundleActivation(input: {
+  bundle: SkillBundle;
+  workspace: string;
+  env?: NodeJS.ProcessEnv;
+  execute?: HermesSkillExecutor;
+}) {
+  if (input.bundle.skills.length === 0) {
+    return {
+      name: 'provider:hermes:activation',
+      status: 'unavailable' as const,
+      details: 'The signed bundle contains no Hermes skill content to discover.',
+    };
+  }
+  const workspace = await realpath(input.workspace);
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  await trustHermesProject({ workspace, env: input.env, execute });
+  let stdout: string | Buffer | undefined;
+  try {
+    ({ stdout } = await execute('hermes', ['skills', 'list', '--source', 'local', '--enabled-only'], {
+      timeout: 30_000,
+      env: providerProcessEnvironment(input.env),
+      cwd: workspace,
+    }));
+  } catch (error) {
+    return {
+      name: 'provider:hermes:activation',
+      status: 'fail' as const,
+      details: error instanceof Error ? `Hermes skill discovery failed: ${error.message}`.slice(0, 1_000) : 'Hermes skill discovery failed.',
+    };
+  }
+  const listing = String(stdout || '');
+  const missing = input.bundle.skills
+    .map((skill) => skill.skillId)
+    .filter((skillId) => !listing.includes(skillId));
+  if (missing.length) {
+    return {
+      name: 'provider:hermes:activation',
+      status: 'fail' as const,
+      details: `Hermes did not discover the installed signed skill${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`,
+    };
+  }
+  return {
+    name: 'provider:hermes:activation',
+    status: 'pass' as const,
+    details: `Hermes discovered ${input.bundle.skills.length} installed signed skill${input.bundle.skills.length === 1 ? '' : 's'} in the trusted workspace.`,
   };
 }
 
@@ -3533,7 +3634,7 @@ export async function installedBundleIdForSkillPollAfterAuthorizationFailure(inp
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
-  if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
+  if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
   const provider = providerValue as ProviderId;
   return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
   const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
@@ -3622,6 +3723,11 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         providerActivationCheck: () => attestAgySkillBundleActivation({
           bundle,
           nativeSkillDirectory: destination,
+          workspace: workspace.path,
+        }),
+      } : provider === 'hermes' ? {
+        providerActivationCheck: () => attestHermesSkillBundleActivation({
+          bundle,
           workspace: workspace.path,
         }),
       } : {}),
@@ -3832,7 +3938,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
   if (command === 'skills' && subcommand === 'status') {
     const providerValue = required(flags, 'provider');
-    if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
+    if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
     const root = nativeSkillDirectory(providerValue as ProviderId);
     const workspaceId = required(flags, 'workspace-id');
     const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
@@ -3849,7 +3955,7 @@ export async function run(argv: string[]): Promise<Output> {
   }
   if (command === 'skills' && subcommand === 'verify') {
     const providerValue = required(flags, 'provider');
-    if (!['codex', 'claude', 'agy'].includes(providerValue)) throw new Error('Skill provider must be codex, claude, or agy.');
+    if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
     const result = await verifyAgentFabricSkillInstallation({
       provider: providerValue as ProviderId,
       workspace: String(flags.get('workspace') || '.'),

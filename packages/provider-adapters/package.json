@@ -1,7 +1,7 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-provider-adapters",
-  "version": "0.1.12",
-  "description": "Capability-scoped Codex, Claude Code, and Agy adapters for Dharma Agent Fabric",
+  "version": "0.1.13",
+  "description": "Capability-scoped Codex, Claude Code, Agy, and Hermes adapters for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/provider-adapters#readme",
   "bugs": { "url": "https://github.com/dharma-ai-labs/dharma-agent-fabric/issues" },
@@ -13,5 +13,5 @@
   "files": ["dist", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
-  "dependencies": { "@dharma-ai-labs/agent-fabric-contracts": "0.1.8" }
+  "dependencies": { "@dharma-ai-labs/agent-fabric-contracts": "0.1.9" }
 }

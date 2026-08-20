@@ -119,7 +119,7 @@ export function verifySkillBundle(bundle: SkillBundle, serverPublicKey: KeyObjec
     || selectors.organizationAgentIds.some((value) => typeof value !== 'string' || !value)
     || selectors.deviceIds.some((value) => typeof value !== 'string' || !value)
     || selectors.workspaceIds.some((value) => typeof value !== 'string' || !value)
-    || selectors.providers.some((value) => !['codex', 'claude', 'agy'].includes(value))) {
+    || selectors.providers.some((value) => !['codex', 'claude', 'agy', 'hermes'].includes(value))) {
     throw new Error('Skill bundle target selectors are invalid.');
   }
 }

@@ -61,7 +61,7 @@
         },
         "provider": {
           "type": "string",
-          "enum": ["codex", "claude", "agy"]
+          "enum": ["codex", "claude", "agy", "hermes"]
         },
         "endpointId": {
           "type": "string",

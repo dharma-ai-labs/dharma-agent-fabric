@@ -43,6 +43,7 @@ evaluation lacks approved semantic evidence, the correct result is
 | Codex CLI/Desktop | available | available when installed | unavailable | available when installed | next session |
 | Claude Code | available | available when installed | unavailable | available when installed | next session |
 | Agy 1.0.1 | partial | read-only partial | partial | available when installed | plugin enable + next session |
+| Hermes Agent 0.20.4 | available through redacted session export | read-only when its model provider is configured | unavailable | available when installed | trusted project + next session |
 | Pi | unavailable | unavailable | unavailable | unavailable | unavailable |
 | Other Better Harness hosts | evidence adapter work | unavailable | unavailable | unavailable | unavailable |
 

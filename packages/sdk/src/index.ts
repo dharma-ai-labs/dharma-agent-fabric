@@ -1,5 +1,5 @@
 export type AgentFabricRuntimeMode = 'dharma_managed' | 'gcp_vertex_byok' | 'local_byok';
-export type AgentFabricProvider = 'codex' | 'claude' | 'agy' | 'managed' | 'gcp_vertex_byok';
+export type AgentFabricProvider = 'codex' | 'claude' | 'agy' | 'hermes' | 'managed' | 'gcp_vertex_byok';
 
 export interface AgentFabricClientOptions {
   organizationId: string;
@@ -121,7 +121,7 @@ export interface AgentFabricRepositoryAgentInput {
 
 export interface AgentFabricLocalEndpointInput {
   workspaceId: string;
-  provider: 'codex' | 'claude' | 'agy';
+  provider: 'codex' | 'claude' | 'agy' | 'hermes';
   priority?: number;
 }
 

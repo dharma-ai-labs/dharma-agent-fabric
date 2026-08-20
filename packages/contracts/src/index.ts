@@ -27,7 +27,7 @@ export type EvidenceState =
   | 'out_of_window'
   | 'not_supported';
 
-export type ProviderId = 'codex' | 'claude' | 'agy';
+export type ProviderId = 'codex' | 'claude' | 'agy' | 'hermes';
 
 export interface ProtocolEnvelope<T extends Record<string, unknown> = Record<string, unknown>> {
   schema: 'dharma.protocol-envelope/v1';
