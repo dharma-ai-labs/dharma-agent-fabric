@@ -1284,6 +1284,7 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
 
 test('Hermes signed activation requires every installed bundle skill to be discovered', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'dharma-hermes-activation-'));
+  const nativeRoot = join(workspace, 'skills');
   const canonicalWorkspace = await realpath(workspace);
   const bundle = {
     operation: 'install',
@@ -1292,14 +1293,21 @@ test('Hermes signed activation requires every installed bundle skill to be disco
       { skillId: 'dharma-remediation-9bfa8496-65fd-4c06-9893-2270f400d2d7' },
     ],
   } as unknown as SkillBundle;
+  await mkdir(join(nativeRoot, 'price-boundary'), { recursive: true });
+  await mkdir(join(nativeRoot, 'dharma-remediation-9bfa8496-65fd-4c06-9893-2270f400d2d7'), { recursive: true });
+  await writeFile(join(nativeRoot, 'price-boundary', 'SKILL.md'), '---\nname: price-boundary\n---\n');
+  await writeFile(
+    join(nativeRoot, 'dharma-remediation-9bfa8496-65fd-4c06-9893-2270f400d2d7', 'SKILL.md'),
+    '---\nname: signed-authority-scope\n---\n',
+  );
   const calls: string[][] = [];
   let listColumns: string | undefined;
   const passed = await attestHermesSkillBundleActivation({
-    bundle, workspace,
+    bundle, workspace, nativeSkillDirectory: nativeRoot,
     execute: async (_executable, argv, options) => {
       calls.push(argv);
       if (argv[1] === 'list') listColumns = options.env.COLUMNS;
-      return { stdout: argv[1] === 'list' ? 'price-boundary\ndharma-remediation-9bfa8496-65fd-4c06-9893-2270f400d2d7\n' : '' };
+      return { stdout: argv[1] === 'list' ? 'price-boundary\nsigned-authority-scope\n' : '' };
     },
   });
   assert.equal(passed.status, 'pass');
@@ -1308,7 +1316,7 @@ test('Hermes signed activation requires every installed bundle skill to be disco
   assert.deepEqual(calls[1], ['skills', 'list', '--source', 'local', '--enabled-only']);
 
   const failed = await attestHermesSkillBundleActivation({
-    bundle, workspace,
+    bundle, workspace, nativeSkillDirectory: nativeRoot,
     execute: async (_executable, argv) => ({ stdout: argv[1] === 'list' ? 'price-boundary\n' : '' }),
   });
   assert.equal(failed.status, 'fail');
