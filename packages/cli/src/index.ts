@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.19';
+const VERSION = '0.2.20';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3333,6 +3333,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
 export async function attestHermesSkillBundleActivation(input: {
   bundle: SkillBundle;
   workspace: string;
+  nativeSkillDirectory?: string;
   env?: NodeJS.ProcessEnv;
   execute?: HermesSkillExecutor;
 }) {
@@ -3366,9 +3367,22 @@ export async function attestHermesSkillBundleActivation(input: {
     };
   }
   const listing = String(stdout || '');
-  const missing = input.bundle.skills
-    .map((skill) => skill.skillId)
-    .filter((skillId) => !listing.includes(skillId));
+  const nativeRoot = input.nativeSkillDirectory || nativeSkillDirectory('hermes', input.env);
+  const discoveryNames = await Promise.all(input.bundle.skills.map(async (skill) => {
+    try {
+      const content = await readFile(resolve(nativeRoot, skill.skillId, 'SKILL.md'), 'utf8');
+      const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] || '';
+      const nameLine = frontmatter.match(/(?:^|\r?\n)name:\s*(?:"([^"]+)"|'([^']+)'|([^\r\n#]+))/);
+      const declaredName = (nameLine?.[1] || nameLine?.[2] || nameLine?.[3] || '').trim();
+      if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(declaredName)) {
+        return { skillId: skill.skillId, names: [skill.skillId, declaredName] };
+      }
+    } catch {}
+    return { skillId: skill.skillId, names: [skill.skillId] };
+  }));
+  const missing = discoveryNames
+    .filter(({ names }) => !names.some((name) => listing.includes(name)))
+    .map(({ skillId }) => skillId);
   if (missing.length) {
     return {
       name: 'provider:hermes:activation',
@@ -3734,6 +3748,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
         providerActivationCheck: () => attestHermesSkillBundleActivation({
           bundle,
           workspace: workspace.path,
+          nativeSkillDirectory: destination,
         }),
       } : {}),
     });
