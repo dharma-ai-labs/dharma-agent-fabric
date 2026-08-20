@@ -52,6 +52,8 @@ that task execution, continuation, or Skill activation works for that host.
 
 ## Customer onboarding
 
+The reusable company flow is documented in [the customer guide](docs/onboarding/customer-guide.md). The first production reference procedure, including exact BidStitch CLI, SDK, analysis, remediation, and rollback steps, is in [the BidStitch first-GA guide](docs/onboarding/bidstitch-first-ga.md).
+
 An organization starts at `https://www.dharma-ai.io/subscribe` with a local-agent
 trial, a paid package, or an explicitly sponsored canary. Dharma creates one
 private control repository under `dharma-ai-labs` and invites the customer's
