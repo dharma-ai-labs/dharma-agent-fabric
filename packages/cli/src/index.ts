@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.23';
+const VERSION = '0.2.24';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1412,18 +1412,32 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     expiresAt: string;
   };
   async function assertEnrollmentHomeCompatible(hqUrl: string, organizationId: string): Promise<void> {
-    let existing: DeviceConfig;
+    let existing: DeviceConfig | null = null;
     try {
       existing = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw new Error(`Existing device enrollment could not be validated: ${error instanceof Error ? error.message : String(error)}`);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(`Existing device enrollment could not be validated: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
-    if (existing.organizationId !== organizationId) {
+    if (existing && existing.organizationId !== organizationId) {
       throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
     }
-    if (normalizeHqUrl(existing.hqUrl) !== normalizeHqUrl(hqUrl)) {
+    if (existing && normalizeHqUrl(existing.hqUrl) !== normalizeHqUrl(hqUrl)) {
       throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
+    }
+    let registered: Array<{ organizationId?: unknown }> = [];
+    try {
+      const parsed = JSON.parse(await readFile(workspaceRegistryPath(), 'utf8')) as unknown;
+      if (!Array.isArray(parsed)) throw new Error('workspace registry must be an array');
+      registered = parsed as Array<{ organizationId?: unknown }>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(`Existing workspace registry could not be validated: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (registered.some((workspace) => workspace.organizationId !== organizationId)) {
+      throw new Error('This DHARMA_HOME contains workspaces from a different organization. Use a separate DHARMA_HOME for each organization.');
     }
   }
   let pending: PendingEnrollment;
