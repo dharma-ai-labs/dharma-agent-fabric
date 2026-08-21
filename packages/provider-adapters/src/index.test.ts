@@ -424,6 +424,7 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   assert.equal(observed.command, 'codex');
   assert.equal(observed.stdin, 'Fix the parser test.');
   assert.deepEqual((observed.argv as string[]).slice(0, 3), ['exec', '--ignore-user-config', '--json']);
+  assert.equal(observed.completeOnResultJson, true);
   assert.ok((observed.argv as string[]).includes('sandbox_workspace_write.network_access=false'));
   assert.deepEqual(observed.environment, {
     DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'decision-123',
@@ -649,6 +650,21 @@ test('provider runner completes on a terminal JSON result without a trailing new
   const result = await defaultProcessRunner({
     command: process.execPath,
     argv: ['-e', 'process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false}));setInterval(()=>{},1000)'],
+    cwd: root,
+    stdin: '',
+    timeoutMs: 5_000,
+    completeOnResultJson: true,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.signal, null);
+  assert.equal(result.timedOut, false);
+});
+
+test('provider runner completes a Codex task on turn.completed without waiting for the wrapper process', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-codex-terminal-'));
+  const result = await defaultProcessRunner({
+    command: process.execPath,
+    argv: ['-e', 'process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}));setInterval(()=>{},1000)'],
     cwd: root,
     stdin: '',
     timeoutMs: 5_000,
