@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.22';
+const VERSION = '0.2.23';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1411,12 +1411,29 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     browserCode: string;
     expiresAt: string;
   };
+  async function assertEnrollmentHomeCompatible(hqUrl: string, organizationId: string): Promise<void> {
+    let existing: DeviceConfig;
+    try {
+      existing = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw new Error(`Existing device enrollment could not be validated: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (existing.organizationId !== organizationId) {
+      throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
+    }
+    if (normalizeHqUrl(existing.hqUrl) !== normalizeHqUrl(hqUrl)) {
+      throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
+    }
+  }
   let pending: PendingEnrollment;
   if (flags.has('resume')) {
     pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
+    await assertEnrollmentHomeCompatible(pending.hqUrl, pending.organizationId);
   } else {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
+    await assertEnrollmentHomeCompatible(hqUrl, organizationId);
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
     const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });

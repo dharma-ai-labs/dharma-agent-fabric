@@ -75,6 +75,40 @@ test('uses the production B2B portal and keeps hq-url as a compatibility alias',
   ])), 'https://www.dharma-ai.io');
 });
 
+test('login fails closed before replacing an enrollment from another organization or portal', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-login-isolation-'));
+  const existing = {
+    schema: 'dharma.device-config/v1',
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_existing',
+    deviceId: 'device_existing',
+    deviceName: 'existing device',
+    platform: 'linux',
+    publicKeyEd25519: 'existing-public-key',
+    serverPublicKeyEd25519: 'existing-server-key',
+    relayUrl: 'wss://relay.dharma-ai.io',
+    enrolledAt: '2026-08-20T00:00:00.000Z',
+  };
+  await writeFile(join(home, 'device.json'), `${JSON.stringify(existing)}\n`);
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    await assert.rejects(
+      () => run(['login', '--organization-id', 'org_other', '--portal-url', 'https://www.dharma-ai.io', '--no-browser', '--no-wait']),
+      /enrolled to a different organization/,
+    );
+    await assert.rejects(
+      () => run(['login', '--organization-id', 'org_existing', '--portal-url', 'https://staging.dharma-ai.io', '--no-browser', '--no-wait']),
+      /enrolled to a different Dharma portal origin/,
+    );
+    assert.deepEqual(JSON.parse(await readFile(join(home, 'device.json'), 'utf8')), existing);
+    await assert.rejects(readFile(join(home, 'pending-enrollment.json'), 'utf8'), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
 test('posts action enforcement before a consequential task completion event', async () => {
   const events: string[] = [];
   const acknowledgement = {
