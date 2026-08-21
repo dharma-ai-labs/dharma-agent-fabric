@@ -675,6 +675,21 @@ test('provider runner completes a Codex task on turn.completed without waiting f
   assert.equal(result.timedOut, false);
 });
 
+test('provider runner force-terminates a Codex wrapper that ignores SIGTERM after turn.completed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-codex-terminal-escalation-'));
+  const result = await defaultProcessRunner({
+    command: process.execPath,
+    argv: ['-e', 'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,output_tokens:1}}));setInterval(()=>{},1000)'],
+    cwd: root,
+    stdin: '',
+    timeoutMs: 5_000,
+    completeOnResultJson: true,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.signal, null);
+  assert.equal(result.timedOut, false);
+});
+
 test('provider runner timeout terminates descendant processes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-tree-'));
   const childScript = 'setInterval(()=>{},1000)';

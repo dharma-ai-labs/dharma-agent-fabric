@@ -111,6 +111,7 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
   let stderrBytes = 0;
   let timedOut = false;
   let terminalResultCode: number | null = null;
+  let terminalEscalation: NodeJS.Timeout | undefined;
   let pendingJson = '';
   const collect = (target: Buffer[], chunk: Buffer, current: number) => {
     if (current < maximum) target.push(chunk.subarray(0, Math.max(0, maximum - current)));
@@ -131,6 +132,8 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
           ? 1
           : 0;
         terminateProcessTree(child, false);
+        terminalEscalation = setTimeout(() => terminateProcessTree(child, true), 1_000);
+        terminalEscalation.unref();
         return true;
       } catch {
         return false;
@@ -155,6 +158,7 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
   child.once('error', reject);
   child.once('close', (exitCode, signal) => {
     clearTimeout(timeout);
+    if (terminalEscalation) clearTimeout(terminalEscalation);
     if (escalation) clearTimeout(escalation);
     input.signal?.removeEventListener('abort', cancel);
     accept({
