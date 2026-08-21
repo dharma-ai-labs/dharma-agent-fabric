@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import {
-  AgentFabricClient,
+  AgentFabricClient, RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
   AgentFabricRequestError,
   beginEnrollment,
   deleteActiveSkillAuthorizationAnchor,
@@ -1144,4 +1144,8 @@ test('relay acknowledgement settles once when close emits another socket event',
       writable: true,
     });
   }
+});
+
+test('relay acknowledgement timeout accommodates managed runtime cold starts', () => {
+  assert.equal(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS, 90_000);
 });

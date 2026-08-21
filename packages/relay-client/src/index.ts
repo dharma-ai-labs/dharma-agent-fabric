@@ -905,7 +905,7 @@ export class AgentFabricClient {
       };
       const timeout = setTimeout(
         () => finish(() => reject(new Error('Relay response timed out.'))),
-        35_000,
+        RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
       );
       socket.addEventListener('open', () => socket.send(JSON.stringify({
         requestId: pending.headers['x-dharma-message-id'], method: pending.method,
@@ -939,6 +939,8 @@ export class AgentFabricClient {
     return atomicJson(this.#statePath, durableState);
   }
 }
+
+export const RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS = 90_000;
 
 export function isContentBearingPath(pathname: string): boolean {
   return pathname.endsWith('/agent-fabric/trajectories')
