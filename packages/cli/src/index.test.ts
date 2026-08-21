@@ -103,6 +103,16 @@ test('login fails closed before replacing an enrollment from another organizatio
     );
     assert.deepEqual(JSON.parse(await readFile(join(home, 'device.json'), 'utf8')), existing);
     await assert.rejects(readFile(join(home, 'pending-enrollment.json'), 'utf8'), { code: 'ENOENT' });
+    await unlink(join(home, 'device.json'));
+    await mkdir(join(home, 'registry'), { recursive: true });
+    await writeFile(join(home, 'registry', 'workspaces.json'), JSON.stringify([{
+      workspaceId: 'workspace_existing', organizationId: 'org_existing', path: '/redacted',
+    }]));
+    await assert.rejects(
+      () => run(['login', '--organization-id', 'org_other', '--portal-url', 'https://www.dharma-ai.io', '--no-browser', '--no-wait']),
+      /contains workspaces from a different organization/,
+    );
+    await assert.rejects(readFile(join(home, 'pending-enrollment.json'), 'utf8'), { code: 'ENOENT' });
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
