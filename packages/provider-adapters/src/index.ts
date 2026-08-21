@@ -123,8 +123,13 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
     const complete = (line: string): boolean => {
       try {
         const event = JSON.parse(line) as { type?: unknown; is_error?: unknown; subtype?: unknown };
-        if (event.type !== 'result') return false;
-        terminalResultCode = event.is_error === true || String(event.subtype || '').includes('error') ? 1 : 0;
+        const type = String(event.type || '');
+        if (!['result', 'turn.completed', 'turn.failed'].includes(type)) return false;
+        terminalResultCode = type === 'turn.failed'
+          || event.is_error === true
+          || String(event.subtype || '').includes('error')
+          ? 1
+          : 0;
         terminateProcessTree(child, false);
         return true;
       } catch {
@@ -250,7 +255,7 @@ export async function executeProviderTask(input: {
       command, argv, cwd: input.workspace, stdin,
       timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
       signal: input.signal,
-      completeOnResultJson: input.provider === 'claude',
+      completeOnResultJson: input.provider === 'claude' || input.provider === 'codex',
       environment: {
         ...(input.externalIdempotencyKey ? { DHARMA_EXTERNAL_IDEMPOTENCY_KEY: input.externalIdempotencyKey } : {}),
         ...(input.actionDigest ? { DHARMA_ACTION_DIGEST: input.actionDigest } : {}),
