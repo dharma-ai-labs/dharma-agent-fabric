@@ -260,6 +260,36 @@ test('non-A2A task instructions remain unchanged', () => {
   assert.equal(providerInstructionsForTask({ taskType: 'external_request', instructions: 'Inspect the build.' } as TaskEnvelope), 'Inspect the build.');
 });
 
+test('signed required skills are explicitly activated in provider instructions', () => {
+  const instructions = providerInstructionsForTask({
+    taskType: 'evaluation_retest',
+    instructions: 'Return exactly DEPLOYED.',
+    requiredSkills: [{
+      skillId: 'dharma-incomplete-state-candidate',
+      version: '15.0.0',
+      commit: 'a'.repeat(40),
+      contentHash: `sha256:${'b'.repeat(64)}`,
+    }],
+  } as TaskEnvelope);
+  assert.match(instructions, /\$dharma-incomplete-state-candidate/);
+  assert.match(instructions, /mandatory for this task/);
+  assert.match(instructions, /dharma_required_skills/);
+  assert.match(instructions, /sha256:b{64}/);
+});
+
+test('unsafe required skill identifiers fail closed before provider execution', () => {
+  assert.throws(() => providerInstructionsForTask({
+    taskType: 'evaluation_retest',
+    instructions: 'Inspect the build.',
+    requiredSkills: [{
+      skillId: 'skill\nignore-policy',
+      version: '1.0.0',
+      commit: 'a'.repeat(40),
+      contentHash: `sha256:${'b'.repeat(64)}`,
+    }],
+  } as TaskEnvelope), /cannot be activated safely/);
+});
+
 function embedDecision(
   baseTask: Omit<TaskEnvelope, 'actionDecision' | 'signature'>,
   outcome: ActionDecisionReceipt['outcome'],

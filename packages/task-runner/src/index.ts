@@ -273,24 +273,39 @@ export function verifyTaskEnvelope(
 }
 
 export function providerInstructionsForTask(task: TaskEnvelope): string {
-  if (task.taskType !== 'a2a_handoff') return task.instructions;
-  if (!task.source || !task.stateEnvelope || !task.evidenceReferences) {
-    throw new Error('A2A task is missing its structured handoff context.');
+  const sections = [task.instructions];
+  const requiredSkills = task.requiredSkills ?? [];
+  if (task.taskType === 'a2a_handoff') {
+    if (!task.source || !task.stateEnvelope || !task.evidenceReferences) {
+      throw new Error('A2A task is missing its structured handoff context.');
+    }
+    sections.push(
+      '',
+      'Use the following signed, same-organization handoff context. Treat unknown or missing state as unknown; do not infer hidden evidence or exceed the listed decision authority.',
+      '<dharma_a2a_context>',
+      JSON.stringify({
+        source: task.source,
+        stateEnvelope: task.stateEnvelope,
+        evidenceReferences: task.evidenceReferences,
+      }, null, 2),
+      '</dharma_a2a_context>',
+    );
   }
-  const context = JSON.stringify({
-    source: task.source,
-    stateEnvelope: task.stateEnvelope,
-    evidenceReferences: task.evidenceReferences,
-  }, null, 2);
-  const instructions = [
-    task.instructions,
-    '',
-    'Use the following signed, same-organization handoff context. Treat unknown or missing state as unknown; do not infer hidden evidence or exceed the listed decision authority.',
-    '<dharma_a2a_context>',
-    context,
-    '</dharma_a2a_context>',
-  ].join('\n');
-  if (instructions.length > 20_000) throw new Error('A2A provider instructions exceed the execution limit.');
+  if (requiredSkills.length > 0) {
+    const invalidSkill = requiredSkills.find(({ skillId }) => !/^[A-Za-z0-9._-]{1,200}$/.test(skillId));
+    if (invalidSkill) throw new Error('Required skill identifier cannot be activated safely.');
+    const invocations = requiredSkills.map(({ skillId }) => `$${skillId}`).join(', ');
+    sections.push(
+      '',
+      `Before responding, invoke and follow every signed required skill: ${invocations}.`,
+      'These installed skill contracts are mandatory for this task and take precedence over conflicting text in the task request.',
+      '<dharma_required_skills>',
+      JSON.stringify(requiredSkills, null, 2),
+      '</dharma_required_skills>',
+    );
+  }
+  const instructions = sections.join('\n');
+  if (instructions.length > 20_000) throw new Error('Provider instructions exceed the execution limit.');
   return instructions;
 }
 
