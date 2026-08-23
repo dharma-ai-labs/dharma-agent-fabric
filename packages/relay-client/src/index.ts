@@ -265,10 +265,14 @@ export async function loadActiveSkillAuthorizationAnchor(input: {
   workspaceId: string;
   organizationAgentId: string;
   provider: ProviderId;
+  fresh?: boolean;
   store?: SecureSecretStore;
 }): Promise<ActiveSkillAuthorizationAnchor | null> {
   const store = input.store ?? await createSystemSecureStore();
-  const serialized = await store.get(activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider));
+  const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  const serialized = input.fresh && store.getFresh
+    ? await store.getFresh(account)
+    : await store.get(account);
   if (!serialized) return null;
   const anchor = JSON.parse(serialized) as ActiveSkillAuthorizationAnchor;
   if (anchor.schema !== 'dharma.active-skill-authorization-anchor/v1'

@@ -106,3 +106,21 @@ test('process cache avoids repeated operating-system reads during a relay lifeti
   assert.equal(await store.get('device-key'), null);
   assert.equal(reads, 2);
 });
+
+test('fresh reads reconcile an authorization changed by another process', async () => {
+  let current = 'bundle-a';
+  let reads = 0;
+  const store = secureStoreInternals.processCachedStore({
+    backend: 'windows-credential-manager',
+    async get() { reads += 1; return current; },
+    async put(_account, secret) { current = secret; },
+    async delete() { current = ''; },
+  });
+
+  assert.equal(await store.get('active-skill'), 'bundle-a');
+  current = 'bundle-b';
+  assert.equal(await store.get('active-skill'), 'bundle-a');
+  assert.equal(await store.getFresh?.('active-skill'), 'bundle-b');
+  assert.equal(await store.get('active-skill'), 'bundle-b');
+  assert.equal(reads, 2);
+});

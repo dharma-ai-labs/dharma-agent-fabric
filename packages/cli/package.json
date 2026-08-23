@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "description": "Local-first CLI for connecting coding agents to Dharma evaluation, orchestration, and signed Skill delivery",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/cli#readme",
@@ -38,7 +38,7 @@
     "@dharma-ai-labs/agent-fabric-local-vault": "0.1.14",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.4",
     "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.16",
-    "@dharma-ai-labs/agent-fabric-relay-client": "0.2.13",
+    "@dharma-ai-labs/agent-fabric-relay-client": "0.2.14",
     "@dharma-ai-labs/agent-fabric-sdk": "0.1.9",
     "@dharma-ai-labs/agent-fabric-skill-manager": "0.2.5",
     "@dharma-ai-labs/agent-fabric-task-runner": "0.1.17"
