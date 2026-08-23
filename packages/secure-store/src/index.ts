@@ -8,6 +8,35 @@ export interface SecureSecretStore {
   delete(account: string): Promise<void>;
 }
 
+function processCachedStore(store: SecureSecretStore): SecureSecretStore {
+  const values = new Map<string, string>();
+  const pending = new Map<string, Promise<string | null>>();
+  return {
+    backend: store.backend,
+    async get(account) {
+      if (values.has(account)) return values.get(account)!;
+      const current = pending.get(account);
+      if (current) return current;
+      const request = store.get(account).then((value) => {
+        if (value !== null) values.set(account, value);
+        return value;
+      }).finally(() => pending.delete(account));
+      pending.set(account, request);
+      return request;
+    },
+    async put(account, secret) {
+      await store.put(account, secret);
+      values.set(account, secret);
+    },
+    async delete(account) {
+      await store.delete(account);
+      values.delete(account);
+    },
+  };
+}
+
+let systemStore: SecureSecretStore | null = null;
+
 interface ProcessResult { code: number | null; stdout: string; stderr: string; timedOut?: boolean }
 
 function run(command: string, argv: string[], input?: string, timeoutMs = 10_000): Promise<ProcessResult> {
@@ -193,10 +222,12 @@ async function isWsl(): Promise<boolean> {
 }
 
 export async function createSystemSecureStore(): Promise<SecureSecretStore> {
-  if (process.platform === 'win32') return windowsStore();
-  if (process.platform === 'darwin') return macosStore();
-  if (await isWsl()) return windowsStore();
-  if (process.platform === 'linux') return linuxStore();
+  if (systemStore) return systemStore;
+  if (process.platform === 'win32') systemStore = processCachedStore(windowsStore());
+  else if (process.platform === 'darwin') systemStore = processCachedStore(macosStore());
+  else if (await isWsl()) systemStore = processCachedStore(windowsStore());
+  else if (process.platform === 'linux') systemStore = processCachedStore(linuxStore());
+  if (systemStore) return systemStore;
   throw new Error(`No supported secure secret store for ${process.platform}.`);
 }
 
@@ -205,6 +236,7 @@ export const secureStoreInternals = {
   windowsCommandSpec,
   isTransientWindowsInteropFailure,
   withTransientWindowsRetry,
+  processCachedStore,
   windowsStore,
   linuxStore,
   macosStore,
