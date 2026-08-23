@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 export interface SecureSecretStore {
   backend: 'windows-credential-manager' | 'macos-keychain' | 'linux-secret-service';
   get(account: string): Promise<string | null>;
+  getFresh?(account: string): Promise<string | null>;
   put(account: string, secret: string): Promise<void>;
   delete(account: string): Promise<void>;
 }
@@ -23,6 +24,12 @@ function processCachedStore(store: SecureSecretStore): SecureSecretStore {
       }).finally(() => pending.delete(account));
       pending.set(account, request);
       return request;
+    },
+    async getFresh(account) {
+      const value = await store.get(account);
+      if (value === null) values.delete(account);
+      else values.set(account, value);
+      return value;
     },
     async put(account, secret) {
       await store.put(account, secret);

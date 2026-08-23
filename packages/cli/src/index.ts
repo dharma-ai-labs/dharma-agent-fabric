@@ -33,7 +33,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.27';
+const VERSION = '0.2.28';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2083,7 +2083,7 @@ async function activeSkillAuthorization(
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
     throw new Error('Active skill device identity does not match secure enrollment state.');
   }
-  return getActiveSkillBundleAuthorization({
+  const authorizationInput = (expectedReceiptHash: string) => ({
     nativeSkillDirectory: root,
     workspaceId,
     provider,
@@ -2098,8 +2098,19 @@ async function activeSkillAuthorization(
       key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 },
       format: 'jwk',
     }),
-    expectedReceiptHash: active.receiptHash,
+    expectedReceiptHash,
   });
+  try {
+    return await getActiveSkillBundleAuthorization(authorizationInput(active.receiptHash));
+  } catch (error) {
+    if (!(error instanceof Error)
+      || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
+    const refreshed = await loadActiveSkillAuthorizationAnchor({
+      config, workspaceId, organizationAgentId, provider, fresh: true,
+    });
+    if (!refreshed) throw error;
+    return getActiveSkillBundleAuthorization(authorizationInput(refreshed.receiptHash));
+  }
 }
 
 async function expiredSkillAuthorizationForReplacement(
@@ -2119,7 +2130,7 @@ async function expiredSkillAuthorizationForReplacement(
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
     throw new Error('Active skill device identity does not match secure enrollment state.');
   }
-  return getExpiredSkillBundleAuthorizationForReplacement({
+  const authorizationInput = (expectedReceiptHash: string) => ({
     nativeSkillDirectory: root,
     workspaceId,
     provider,
@@ -2134,8 +2145,19 @@ async function expiredSkillAuthorizationForReplacement(
       key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 },
       format: 'jwk',
     }),
-    expectedReceiptHash: active.receiptHash,
+    expectedReceiptHash,
   });
+  try {
+    return await getExpiredSkillBundleAuthorizationForReplacement(authorizationInput(active.receiptHash));
+  } catch (error) {
+    if (!(error instanceof Error)
+      || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
+    const refreshed = await loadActiveSkillAuthorizationAnchor({
+      config, workspaceId, organizationAgentId, provider, fresh: true,
+    });
+    if (!refreshed) throw error;
+    return getExpiredSkillBundleAuthorizationForReplacement(authorizationInput(refreshed.receiptHash));
+  }
 }
 
 async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
