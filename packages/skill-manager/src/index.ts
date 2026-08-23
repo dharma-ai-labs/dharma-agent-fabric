@@ -168,6 +168,7 @@ async function readActiveBundlePointer(root: string): Promise<string | null> {
     throw error;
   }
   if (!bundleId) return null;
+  await recoverRejectedActivation(root, bundleId);
   let manifest: { bundleId?: unknown };
   try {
     manifest = JSON.parse(await readFile(resolve(root, 'active', 'BUNDLE.json'), 'utf8')) as {
@@ -183,6 +184,39 @@ async function readActiveBundlePointer(root: string): Promise<string | null> {
     throw new Error('Active bundle pointer does not match the installed release manifest.');
   }
   return bundleId;
+}
+
+async function readBundleManifestId(path: string): Promise<string | null> {
+  try {
+    const manifest = JSON.parse(await readFile(path, 'utf8')) as { bundleId?: unknown };
+    return typeof manifest.bundleId === 'string' ? manifest.bundleId : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function recoverRejectedActivation(root: string, bundleId: string): Promise<void> {
+  const active = resolve(root, 'active');
+  const rollback = resolve(root, 'rollback');
+  const activeBundleId = await readBundleManifestId(resolve(active, 'BUNDLE.json'));
+  if (activeBundleId === bundleId) return;
+
+  const rollbackBundleId = await readBundleManifestId(resolve(rollback, 'BUNDLE.json'));
+  if (rollbackBundleId !== bundleId) return;
+
+  const rejected = resolve(root, '.rejected-activation');
+  await rm(rejected, { recursive: true, force: true });
+  try {
+    await rename(active, rejected);
+    await rename(rollback, active);
+    await rm(rejected, { recursive: true, force: true });
+  } catch (error) {
+    if (await pathExists(rejected) && !await pathExists(active)) {
+      await rename(rejected, active);
+    }
+    throw error;
+  }
 }
 
 function verifyInstallReceipt(
