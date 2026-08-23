@@ -350,15 +350,27 @@ async function activateNativeSkills(input: {
   removeSkillIds: string[];
 }) {
   const affectedSkillIds = [...new Set([...input.removeSkillIds, ...input.skillIds])];
+  const sharedActiveSkillIds = new Set<string>();
   await mkdir(input.nativeSkillDirectory, { recursive: true, mode: 0o700 });
   for (const skillId of affectedSkillIds) {
     const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
     if (await pathExists(target)) {
       const marker = resolve(target, '.dharma-agent-fabric.json');
       if (!await pathExists(marker)) throw new Error(`Refusing to replace unmanaged provider skill: ${skillId}`);
-      const ownership = JSON.parse(await readFile(marker, 'utf8')) as { workspaceId?: unknown };
+      const ownership = JSON.parse(await readFile(marker, 'utf8')) as {
+        bundleId?: unknown;
+        skillId?: unknown;
+        workspaceId?: unknown;
+      };
       if (typeof ownership.workspaceId === 'string' && ownership.workspaceId !== input.workspaceId) {
-        throw new Error(`Refusing to replace a provider skill managed by another workspace: ${skillId}`);
+        if (ownership.bundleId === input.bundleId
+          && ownership.skillId === skillId
+          && input.skillIds.includes(skillId)
+          && !input.removeSkillIds.includes(skillId)) {
+          sharedActiveSkillIds.add(skillId);
+        } else {
+          throw new Error(`Refusing to replace a provider skill managed by another workspace: ${skillId}`);
+        }
       }
     }
   }
@@ -375,6 +387,7 @@ async function activateNativeSkills(input: {
   await mkdir(backupRoot, { recursive: true, mode: 0o700 });
   try {
     for (const skillId of input.skillIds) {
+      if (sharedActiveSkillIds.has(skillId)) continue;
       const source = assertContained(input.release, resolve(input.release, skillId));
       const staged = assertContained(stagedRoot, resolve(stagedRoot, skillId));
       await cp(source, staged, { recursive: true, errorOnExist: true, force: false });
@@ -385,12 +398,14 @@ async function activateNativeSkills(input: {
       );
     }
     for (const skillId of affectedSkillIds) {
+      if (sharedActiveSkillIds.has(skillId)) continue;
       const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
       if (!await pathExists(target)) continue;
       await rename(target, assertContained(backupRoot, resolve(backupRoot, skillId)));
       backedUp.push(skillId);
     }
     for (const skillId of input.skillIds) {
+      if (sharedActiveSkillIds.has(skillId)) continue;
       const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
       await rename(assertContained(stagedRoot, resolve(stagedRoot, skillId)), target);
       activated.push(skillId);
