@@ -1,18 +1,34 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-skill-manager",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Signed Skill bundle verification, activation, receipts, and rollback for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/skill-manager#readme",
-  "bugs": { "url": "https://github.com/dharma-ai-labs/dharma-agent-fabric/issues" },
+  "bugs": {
+    "url": "https://github.com/dharma-ai-labs/dharma-agent-fabric/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/skill-manager" },
-  "exports": { ".": "./dist/index.js" },
-  "files": ["dist", "README.md"],
-  "publishConfig": { "access": "public", "provenance": true },
-  "scripts": { "test": "node --test dist/*.test.js" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git",
+    "directory": "packages/skill-manager"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test dist/*.test.js"
+  },
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.10",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.4"

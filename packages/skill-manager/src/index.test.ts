@@ -659,3 +659,38 @@ test('two repository workspaces retain independent active bundles and native ski
   assert.match(await readFile(resolve(native, 'garment-boundary/SKILL.md'), 'utf8'), /Garment/);
   assert.match(await readFile(resolve(native, 'support-boundary/SKILL.md'), 'utf8'), /Support/);
 });
+
+test('the same signed bundle is shared safely across workspaces for one logical agent', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-shared-agent-skill-'));
+  const native = resolve(root, 'native');
+  const sourceRoot = resolve(root, 'source');
+  const source = resolve(sourceRoot, 'skill');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Shared repository-agent boundary\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceA = randomUUID();
+  const workspaceB = randomUUID();
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey, 'shared-boundary');
+
+  const first = await installSkillBundle({
+    bundle, sourceDirectory: sourceRoot, nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, organizationAgentId, workspaceId: workspaceA, provider: 'codex',
+  });
+  const second = await installSkillBundle({
+    bundle, sourceDirectory: sourceRoot, nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, organizationAgentId, workspaceId: workspaceB, provider: 'codex',
+  });
+
+  assert.equal(first.status, 'active');
+  assert.equal(second.status, 'active');
+  assert.equal((await activeBundle(native, workspaceA, server.publicKey, device.publicKey, deviceId))?.bundleId, bundle.bundleId);
+  assert.equal((await activeBundle(native, workspaceB, server.publicKey, device.publicKey, deviceId))?.bundleId, bundle.bundleId);
+  assert.deepEqual(
+    JSON.parse(await readFile(resolve(native, 'shared-boundary/.dharma-agent-fabric.json'), 'utf8')),
+    { bundleId: bundle.bundleId, skillId: 'shared-boundary', workspaceId: workspaceA },
+  );
+});
