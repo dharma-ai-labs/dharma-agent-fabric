@@ -505,6 +505,40 @@ test('active bundle identity must match the installed release manifest', async (
   );
 });
 
+test('a rejected activation is recovered when rollback matches the durable pointer', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-rejected-activation-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  await mkdir(source, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Prior durable release\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceId = randomUUID();
+  const prior = await signedBundle(source, randomUUID(), server.privateKey);
+  await installSkillBundle({
+    bundle: prior, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId,
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+
+  await writeFile(resolve(source, 'SKILL.md'), '# Rejected candidate release\n');
+  const candidate = await signedBundle(source, randomUUID(), server.privateKey);
+  const managed = resolve(native, '.dharma-managed', 'workspaces', workspaceId);
+  await cp(resolve(managed, 'active'), resolve(managed, 'rollback'), { recursive: true });
+  await rm(resolve(managed, 'active'), { recursive: true });
+  await mkdir(resolve(managed, 'active'), { recursive: true });
+  await writeFile(
+    resolve(managed, 'active/BUNDLE.json'),
+    JSON.stringify({ bundleId: candidate.bundleId, workspaceId, skillIds: ['dharma-boundary'] }),
+  );
+
+  assert.equal(await getInstalledSkillBundleIdForRecovery({ nativeSkillDirectory: native, workspaceId }), prior.bundleId);
+  assert.match(await readFile(resolve(managed, 'active/dharma-boundary/SKILL.md'), 'utf8'), /Prior durable release/);
+  assert.match(await readFile(resolve(native, 'dharma-boundary/SKILL.md'), 'utf8'), /Prior durable release/);
+  await assert.rejects(readFile(resolve(managed, '.rejected-activation/BUNDLE.json')), /ENOENT/);
+});
+
 test('an active bundle pointer fails closed when its release manifest is missing', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-skill-missing-manifest-'));
   const native = resolve(root, 'native');
