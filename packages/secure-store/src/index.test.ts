@@ -79,3 +79,30 @@ test('secure-store does not retry permanent failures', async () => {
   assert.equal(calls, 1);
   assert.equal(result.code, 1);
 });
+
+test('process cache avoids repeated operating-system reads during a relay lifetime', async () => {
+  let reads = 0;
+  const values = new Map([['device-key', 'secret']]);
+  const store = secureStoreInternals.processCachedStore({
+    backend: 'windows-credential-manager',
+    async get(account) {
+      reads += 1;
+      await new Promise((accept) => setTimeout(accept, 5));
+      return values.get(account) ?? null;
+    },
+    async put(account, secret) { values.set(account, secret); },
+    async delete(account) { values.delete(account); },
+  });
+
+  assert.deepEqual(await Promise.all([store.get('device-key'), store.get('device-key')]), ['secret', 'secret']);
+  assert.equal(await store.get('device-key'), 'secret');
+  assert.equal(reads, 1);
+
+  await store.put('device-key', 'rotated');
+  assert.equal(await store.get('device-key'), 'rotated');
+  assert.equal(reads, 1);
+
+  await store.delete('device-key');
+  assert.equal(await store.get('device-key'), null);
+  assert.equal(reads, 2);
+});
