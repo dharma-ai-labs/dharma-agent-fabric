@@ -599,14 +599,25 @@ export async function installSkillBundle(input: {
   try { await rename(active, rollback); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   await cp(release, active, { recursive: true, errorOnExist: true, force: false });
-  await activateNativeSkills({
-    nativeSkillDirectory: input.nativeSkillDirectory,
-    release,
-    bundleId: input.bundle.bundleId,
-    workspaceId: input.workspaceId,
-    skillIds,
-    removeSkillIds: previousSkillIds,
-  });
+  try {
+    await activateNativeSkills({
+      nativeSkillDirectory: input.nativeSkillDirectory,
+      release,
+      bundleId: input.bundle.bundleId,
+      workspaceId: input.workspaceId,
+      skillIds,
+      removeSkillIds: previousSkillIds,
+    });
+  } catch (error) {
+    await rm(active, { recursive: true, force: true });
+    try { await rename(rollback, active); }
+    catch (restoreError) {
+      if ((restoreError as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new AggregateError([error, restoreError], 'Native skill activation failed and the prior managed release could not be restored.');
+      }
+    }
+    throw error;
+  }
   let status: InstallReceipt['status'] = 'active';
   const restorePreviousBundle = async (): Promise<InstallReceipt['status']> => {
     await rm(active, { recursive: true, force: true });

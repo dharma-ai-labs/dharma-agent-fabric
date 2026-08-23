@@ -694,3 +694,53 @@ test('the same signed bundle is shared safely across workspaces for one logical 
     { bundleId: bundle.bundleId, skillId: 'shared-boundary', workspaceId: workspaceA },
   );
 });
+
+test('a rejected native activation restores the prior managed release atomically', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-native-activation-rollback-'));
+  const native = resolve(root, 'native');
+  const sharedSourceRoot = resolve(root, 'shared-source');
+  const sharedSource = resolve(sharedSourceRoot, 'skill');
+  const baselineSourceRoot = resolve(root, 'baseline-source');
+  const baselineSource = resolve(baselineSourceRoot, 'skill');
+  await mkdir(sharedSource, { recursive: true });
+  await mkdir(baselineSource, { recursive: true });
+  await writeFile(resolve(sharedSource, 'SKILL.md'), '# Workspace A boundary\n');
+  await writeFile(resolve(baselineSource, 'SKILL.md'), '# Workspace B baseline\n');
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const deviceId = randomUUID();
+  const workspaceA = randomUUID();
+  const workspaceB = randomUUID();
+  const workspaceABundle = await signedBundle(sharedSource, randomUUID(), server.privateKey, 'shared-boundary');
+  const baselineBundle = await signedBundle(baselineSource, randomUUID(), server.privateKey, 'workspace-b-baseline');
+
+  await installSkillBundle({
+    bundle: workspaceABundle, sourceDirectory: sharedSourceRoot, nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, organizationAgentId, workspaceId: workspaceA, provider: 'codex',
+  });
+  await installSkillBundle({
+    bundle: baselineBundle, sourceDirectory: baselineSourceRoot, nativeSkillDirectory: native,
+    policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+    deviceId, organizationAgentId, workspaceId: workspaceB, provider: 'codex',
+  });
+
+  await writeFile(resolve(sharedSource, 'SKILL.md'), '# Conflicting Workspace B boundary\n');
+  const conflictingBundle = await signedBundle(sharedSource, randomUUID(), server.privateKey, 'shared-boundary');
+  await assert.rejects(
+    installSkillBundle({
+      bundle: conflictingBundle, sourceDirectory: sharedSourceRoot, nativeSkillDirectory: native,
+      policy, serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey,
+      deviceId, organizationAgentId, workspaceId: workspaceB, provider: 'codex',
+    }),
+    /managed by another workspace/,
+  );
+
+  assert.equal(
+    (await readFile(resolve(native, '.dharma-managed', 'workspaces', workspaceB, 'ACTIVE_BUNDLE'), 'utf8')).trim(),
+    baselineBundle.bundleId,
+  );
+  assert.equal((await activeBundle(native, workspaceB, server.publicKey, device.publicKey, deviceId))?.bundleId, baselineBundle.bundleId);
+  assert.match(await readFile(resolve(native, 'shared-boundary/SKILL.md'), 'utf8'), /Workspace A/);
+  assert.match(await readFile(resolve(native, 'workspace-b-baseline/SKILL.md'), 'utf8'), /Workspace B baseline/);
+});
