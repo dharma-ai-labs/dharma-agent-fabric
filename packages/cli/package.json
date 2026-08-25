@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric",
-  "version": "0.2.32",
+  "version": "0.2.33",
   "description": "Local-first CLI for connecting coding agents to Dharma evaluation, orchestration, and signed Skill delivery",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/cli#readme",

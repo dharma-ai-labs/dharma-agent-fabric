@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.32';
+const VERSION = '0.2.33';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1159,6 +1159,36 @@ async function organizationApi(flags: Map<string, string | boolean>) {
   });
 }
 
+const BOOTSTRAP_ONBOARD_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000] as const;
+
+export function isTransientBootstrapError(error: unknown): boolean {
+  const candidate = error as { code?: unknown; message?: unknown; cause?: unknown } | null;
+  const code = String(candidate?.code || (candidate?.cause as { code?: unknown } | null)?.code || '').toUpperCase();
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) return true;
+  const message = String(candidate?.message || error || '');
+  return /(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|network error|relay request was rejected|\b50[234]\b)/i.test(message);
+}
+
+export async function retryBootstrapOnboarding<T>(
+  operation: () => Promise<T>,
+  options: {
+    delaysMs?: readonly number[];
+    wait?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<T> {
+  const delaysMs = options.delaysMs || BOOTSTRAP_ONBOARD_RETRY_DELAYS_MS;
+  const wait = options.wait || ((delayMs: number) => new Promise<void>((resolveWait) => setTimeout(resolveWait, delayMs)));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const delayMs = delaysMs[attempt];
+      if (!isTransientBootstrapError(error) || delayMs === undefined) throw error;
+      await wait(delayMs);
+    }
+  }
+}
+
 async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> {
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
@@ -1215,7 +1245,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   onboardFlags.set('organization-id', organizationId);
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
-  const onboarded = await onboard(onboardFlags) as Record<string, unknown>;
+  const onboarded = await retryBootstrapOnboarding(
+    async () => await onboard(onboardFlags) as Record<string, unknown>,
+  );
   return {
     ok: true,
     stage: onboarded.stage,
