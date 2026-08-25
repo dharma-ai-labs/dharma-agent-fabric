@@ -6,9 +6,38 @@ discovers provider capabilities, keeps full trajectories in an encrypted local
 vault, syncs policy-qualified evidence, executes bounded signed tasks, and
 installs signed Skill releases with receipts and rollback ancestry.
 
-## Start
+## Autonomous organization setup
 
-Requires Node.js 22.20 or later.
+Requires Node.js 22.20.0 through 24.x.
+
+An organization administrator can create a one-time setup from **Portal → Agent
+Fabric → Instructions**. Paste the complete copied runbook into a coding agent
+while its working directory is the intended source repository. The runbook uses:
+
+```bash
+dharma bootstrap \
+  --portal-url https://www.dharma-ai.io \
+  --organization-id <organization-id> \
+  --grant <single-use-grant> \
+  --workspace . \
+  --policy-revision <dashboard-policy-revision>
+```
+
+`bootstrap` does not open a browser. It redeems the short-lived grant into an
+Ed25519 device identity and a revocable, device-scoped organization API token,
+stores both in the operating-system credential store, connects only the current
+repository, obtains its signed policy, and installs supported native skills.
+The grant is usable only until its displayed expiry and is never stored by HQ
+in plaintext. Device revocation also revokes the linked organization token.
+
+Use the separate teammate action in the Instructions tab to send a Clerk
+organization invitation and copy a distinct one-time setup for that teammate.
+The agent connection can complete before the teammate accepts portal access.
+
+## Manual enrollment
+
+Manual browser-confirmed enrollment remains available when no one-time grant is
+issued:
 
 ```bash
 npm install --global @dharma-ai-labs/agent-fabric

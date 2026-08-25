@@ -17,9 +17,12 @@ import {
   recoverDeviceEnrollmentConsistency,
   normalizeHqUrl,
   normalizeRelayUrl,
+  redeemBootstrapGrant,
   saveDeviceConfig,
   saveActiveSkillAuthorizationAnchor,
   saveDeviceEnrollmentAnchor,
+  loadOrganizationApiToken,
+  saveOrganizationApiToken,
 } from './index.js';
 import {
   signCanonicalObject,
@@ -105,6 +108,52 @@ test('device identity remains stable in the OS secret store', async () => {
   const second = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
   assert.equal(first.publicKeyEd25519, second.publicKeyEd25519);
   assert.ok(first.privateJwk.d);
+});
+
+test('bootstrap redemption is credential-free on the URL and returns device plus organization authority', async () => {
+  const requests: Request[] = [];
+  const result = await redeemBootstrapGrant({
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_a',
+    bootstrapToken: `dhab_${'a'.repeat(43)}`,
+    name: 'Test device',
+    platform: 'wsl',
+    publicKeyEd25519: 'device-public-key',
+    fetcher: async (url, init) => {
+      requests.push(new Request(url, init));
+      return new Response(JSON.stringify({
+        ok: true,
+        status: 'approved',
+        organizationId: 'org_a',
+        deviceId: '11111111-1111-4111-8111-111111111111',
+        relayUrl: 'wss://relay.dharma-ai.io',
+        serverPublicKeyEd25519: 'server-public-key',
+        organizationApiToken: `dharma_org_${'b'.repeat(43)}`,
+        organizationApiTokenScopes: ['agents:read'],
+      }), { status: 201, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  assert.equal(result.status, 'approved');
+  assert.equal(new URL(requests[0]!.url).pathname, '/api/v1/agent-fabric/bootstrap');
+  assert.equal(new URL(requests[0]!.url).search, '');
+  const body = JSON.parse(await requests[0]!.text());
+  assert.equal(body.bootstrapToken, `dhab_${'a'.repeat(43)}`);
+  assert.equal(requests[0]!.headers.get('authorization'), null);
+});
+
+test('organization API tokens are stored and loaded only through the secure store', async () => {
+  const store = memoryStore();
+  const token = `dharma_org_${'c'.repeat(43)}`;
+  await saveOrganizationApiToken({
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a', token, store,
+  });
+  assert.equal(await loadOrganizationApiToken({
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a', store,
+  }), token);
+  await assert.rejects(
+    () => saveOrganizationApiToken({ hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a', token: 'invalid', store }),
+    /invalid/,
+  );
 });
 
 test('action enforcement acknowledgement uses the device-signed decision route', async () => {

@@ -19,7 +19,8 @@ import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
-  saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore,
+  loadOrganizationApiToken, redeemBootstrapGrant, saveDeviceConfig, saveDeviceEnrollmentAnchor,
+  saveOrganizationApiToken, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
 import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
@@ -33,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.31';
+const VERSION = '0.2.32';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1145,13 +1146,88 @@ async function organizationApi(flags: Map<string, string | boolean>) {
   try { enrolled = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; } catch {}
   const organizationId = String(flags.get('organization-id') || enrolled?.organizationId || '').trim();
   if (!organizationId) throw new Error('Organization command requires --organization-id or an enrolled device.');
-  const token = String(process.env.DHARMA_ORG_API_TOKEN || '').trim();
-  if (!token) throw new Error('Organization command requires DHARMA_ORG_API_TOKEN. Tokens are not accepted on the command line.');
+  const token = String(process.env.DHARMA_ORG_API_TOKEN || '').trim()
+    || await loadOrganizationApiToken({
+      hqUrl: enrolled?.hqUrl || portalUrl(flags),
+      organizationId,
+    }) || '';
+  if (!token) throw new Error('Organization command requires a token in the OS credential store or DHARMA_ORG_API_TOKEN. Tokens are not accepted on the command line.');
   return new AgentFabricApiClient({
     organizationId,
     token,
     baseUrl: portalUrl(flags, enrolled?.hqUrl || 'https://www.dharma-ai.io'),
   });
+}
+
+async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> {
+  const hqUrl = normalizeHqUrl(portalUrl(flags));
+  const organizationId = required(flags, 'organization-id');
+  const bootstrapToken = required(flags, 'grant');
+  const workspace = await realpath(String(flags.get('workspace') || '.'));
+  const policyRevision = required(flags, 'policy-revision');
+  const existing = await readDeviceConfig();
+  if (existing && (existing.organizationId !== organizationId || existing.hqUrl !== hqUrl)) {
+    throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
+  }
+  const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
+  const devicePlatform = await platform();
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });
+  const redeemed = await redeemBootstrapGrant({
+    hqUrl,
+    organizationId,
+    bootstrapToken,
+    name,
+    platform: devicePlatform,
+    publicKeyEd25519: identity.publicKeyEd25519,
+  });
+  const config: DeviceConfig = existing || {
+    schema: 'dharma.device-config/v1',
+    hqUrl,
+    organizationId,
+    deviceId: redeemed.deviceId,
+    deviceName: name,
+    platform: devicePlatform,
+    publicKeyEd25519: identity.publicKeyEd25519,
+    serverPublicKeyEd25519: redeemed.serverPublicKeyEd25519,
+    relayUrl: redeemed.relayUrl,
+    enrolledAt: new Date().toISOString(),
+  };
+  if (config.deviceId !== redeemed.deviceId
+    || config.publicKeyEd25519 !== identity.publicKeyEd25519
+    || config.serverPublicKeyEd25519 !== redeemed.serverPublicKeyEd25519) {
+    throw new Error('Bootstrap replay does not match the enrolled device identity.');
+  }
+  if (redeemed.serverSigningKeyset) {
+    const verification = verifyInitialServerSigningKeyset(
+      redeemed.serverSigningKeyset,
+      createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: redeemed.serverPublicKeyEd25519 }, format: 'jwk' }),
+      organizationId,
+    );
+    if (!verification.ok) throw new Error(`Bootstrap signing keyset was rejected: ${verification.reason}.`);
+    config.serverSigningKeyset = redeemed.serverSigningKeyset;
+  }
+  await saveDeviceConfig(configPath(), config);
+  await saveDeviceEnrollmentAnchor({ config });
+  await saveOrganizationApiToken({ hqUrl, organizationId, token: redeemed.organizationApiToken });
+  const onboardFlags = new Map(flags);
+  onboardFlags.delete('grant');
+  onboardFlags.set('portal-url', hqUrl);
+  onboardFlags.set('organization-id', organizationId);
+  onboardFlags.set('workspace', workspace);
+  onboardFlags.set('policy-revision', policyRevision);
+  const onboarded = await onboard(onboardFlags) as Record<string, unknown>;
+  return {
+    ok: true,
+    stage: onboarded.stage,
+    enrollment: {
+      organizationId,
+      deviceId: config.deviceId,
+      status: 'approved',
+      organizationApiTokenStored: true,
+      scopes: redeemed.organizationApiTokenScopes,
+    },
+    repository: onboarded,
+  };
 }
 
 async function commandJsonBody(flags: Map<string, string | boolean>) {
@@ -3948,6 +4024,7 @@ export async function run(argv: string[]): Promise<Output> {
   const [command, subcommand] = positional;
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
+  if (command === 'bootstrap') return bootstrap(flags);
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return {
