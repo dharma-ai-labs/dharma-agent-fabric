@@ -94,6 +94,19 @@ export interface EnrollmentResult {
   expiresInSeconds: number;
 }
 
+export interface BootstrapEnrollmentResult {
+  ok: true;
+  status: 'approved';
+  organizationId: string;
+  deviceId: string;
+  relayUrl: string;
+  serverPublicKeyEd25519: string;
+  serverSigningKeyset?: TrustedServerSigningKeyset;
+  organizationApiToken: string;
+  organizationApiTokenScopes: string[];
+  correlationId?: string;
+}
+
 function sha256(value: string | Uint8Array) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -133,6 +146,38 @@ function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId
 
 function enrollmentAnchorAccountFor(hqUrl: string, organizationId: string) {
   return `device-enrollment-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+function organizationApiTokenAccountFor(hqUrl: string, organizationId: string) {
+  return `organization-api-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+export async function saveOrganizationApiToken(input: {
+  hqUrl: string;
+  organizationId: string;
+  token: string;
+  store?: SecureSecretStore;
+}): Promise<void> {
+  if (!/^dharma_org_[A-Za-z0-9_-]{40,120}$/.test(input.token)) {
+    throw new Error('Organization API token is invalid.');
+  }
+  const store = input.store ?? await createSystemSecureStore();
+  const account = organizationApiTokenAccountFor(input.hqUrl, input.organizationId);
+  await store.put(account, input.token);
+  if (await store.get(account) !== input.token) throw new Error('Secure store did not confirm the organization API token write.');
+}
+
+export async function loadOrganizationApiToken(input: {
+  hqUrl: string;
+  organizationId: string;
+  store?: SecureSecretStore;
+}): Promise<string | null> {
+  const store = input.store ?? await createSystemSecureStore();
+  const token = await store.get(organizationApiTokenAccountFor(input.hqUrl, input.organizationId));
+  if (token && !/^dharma_org_[A-Za-z0-9_-]{40,120}$/.test(token)) {
+    throw new Error('Organization API token in the secure store is corrupt.');
+  }
+  return token;
 }
 
 function activeSkillAnchorAccountFor(
@@ -425,6 +470,35 @@ export async function beginEnrollment(input: {
   });
   const body = await response.json() as EnrollmentResult & { error?: unknown };
   if (!response.ok) throw new Error(errorMessage(body, response.status));
+  return body;
+}
+
+export async function redeemBootstrapGrant(input: {
+  hqUrl: string;
+  organizationId: string;
+  bootstrapToken: string;
+  name: string;
+  platform: DeviceConfig['platform'];
+  publicKeyEd25519: string;
+  fetcher?: typeof fetch;
+}): Promise<BootstrapEnrollmentResult> {
+  const response = await (input.fetcher || fetch)(`${normalizeHqUrl(input.hqUrl)}/api/v1/agent-fabric/bootstrap`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      organizationId: input.organizationId,
+      bootstrapToken: input.bootstrapToken,
+      name: input.name,
+      platform: input.platform,
+      publicKeyEd25519: input.publicKeyEd25519,
+    }),
+  });
+  const body = await response.json() as BootstrapEnrollmentResult & { error?: unknown };
+  if (!response.ok) throw new Error(errorMessage(body, response.status));
+  if (body.status !== 'approved' || body.organizationId !== input.organizationId
+    || !body.deviceId || !body.relayUrl || !body.serverPublicKeyEd25519 || !body.organizationApiToken) {
+    throw new Error('Bootstrap response did not contain a complete enrollment.');
+  }
   return body;
 }
 
