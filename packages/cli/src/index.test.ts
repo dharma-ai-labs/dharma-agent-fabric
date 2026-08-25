@@ -22,6 +22,7 @@ import {
   installNativeAgentFabricBootstrap,
   installRepositoryAgentFabricSkill,
   isDirectExecution,
+  isTransientBootstrapError,
   materializeWorkspacePolicy,
   applyServerEvidencePolicy,
   materializeInlineSkillFiles,
@@ -33,6 +34,7 @@ import {
   pathExistsOrThrow,
   portalUrl,
   rawLocalRetentionDays,
+  retryBootstrapOnboarding,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
   installedBundleIdForSkillPollAfterAuthorizationFailure,
   recoveredTaskPolicyWasSuperseded,
@@ -65,6 +67,38 @@ import {
 } from './runtime-bootstrap.js';
 
 const execFileAsync = promisify(execFile);
+
+test('bootstrap retries transient relay failures without retrying validation failures', async () => {
+  const waits: number[] = [];
+  let attempts = 0;
+  const result = await retryBootstrapOnboarding(async () => {
+    attempts += 1;
+    if (attempts < 3) {
+      const error = new Error('read ECONNRESET: Relay request was rejected.') as Error & { code?: string };
+      error.code = 'ECONNRESET';
+      throw error;
+    }
+    return 'connected';
+  }, {
+    delaysMs: [1, 2, 3],
+    wait: async (delayMs) => { waits.push(delayMs); },
+  });
+  assert.equal(result, 'connected');
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [1, 2]);
+
+  let validationAttempts = 0;
+  await assert.rejects(
+    () => retryBootstrapOnboarding(async () => {
+      validationAttempts += 1;
+      throw new Error('Workspace policy is invalid.');
+    }, { wait: async () => undefined }),
+    /Workspace policy is invalid/,
+  );
+  assert.equal(validationAttempts, 1);
+  assert.equal(isTransientBootstrapError(new Error('HTTP 503 from relay')), true);
+  assert.equal(isTransientBootstrapError(new Error('Permission denied')), false);
+});
 
 test('uses the production B2B portal and keeps hq-url as a compatibility alias', () => {
   assert.equal(portalUrl(new Map()), 'https://www.dharma-ai.io');
