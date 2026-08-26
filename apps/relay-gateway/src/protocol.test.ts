@@ -33,6 +33,19 @@ test('relay permits the repository-agent control operation', () => {
   assert.equal(parsed.pathname.endsWith('/repository-agents'), true);
 });
 
+test('relay permits only the bounded trajectory-head reconciliation route', () => {
+  assert.doesNotThrow(() => parseRelayRequest({
+    ...request,
+    pathname: '/api/v1/orgs/org_customer/agent-fabric/trajectories/head',
+  }));
+  for (const pathname of [
+    '/api/v1/orgs/org_customer/agent-fabric/trajectories/all/head',
+    '/api/v1/orgs/org_customer/agent-fabric/trajectories/head/raw',
+  ]) {
+    assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);
+  }
+});
+
 test('relay permits only the bounded control-agent read and chat surface', () => {
   const sessionId = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
   for (const pathname of [

@@ -312,6 +312,41 @@ export class LocalVault {
     return JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as T;
   }
 
+  async discardCapsuleRevisionsAfter(trajectoryId: string, acceptedRevision: number): Promise<number> {
+    if (!Number.isSafeInteger(acceptedRevision) || acceptedRevision < 0) {
+      throw new Error('Accepted trajectory revision must be a non-negative integer.');
+    }
+    const rows = this.#database.prepare(`
+      select revision, blob_content_id from capsules
+      where trajectory_id = ? and revision > ? order by revision asc
+    `).all(trajectoryId, acceptedRevision) as Array<{ revision: number; blob_content_id: string }>;
+    if (rows.length === 0) return 0;
+    this.#database.exec('begin immediate');
+    try {
+      this.#database.prepare('delete from capsule_sync_queue where trajectory_id = ? and revision > ?')
+        .run(trajectoryId, acceptedRevision);
+      this.#database.prepare('delete from capsule_sync_failures where trajectory_id = ? and revision > ?')
+        .run(trajectoryId, acceptedRevision);
+      this.#database.prepare('delete from capsule_content_refs where trajectory_id = ? and revision > ?')
+        .run(trajectoryId, acceptedRevision);
+      this.#database.prepare('delete from capsules where trajectory_id = ? and revision > ?')
+        .run(trajectoryId, acceptedRevision);
+      this.#database.exec('commit');
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      throw error;
+    }
+    for (const row of rows) {
+      const referenced = this.#database.prepare('select 1 from capsules where blob_content_id = ? limit 1')
+        .get(row.blob_content_id);
+      if (referenced) continue;
+      this.#database.prepare('delete from blobs where content_id = ? and kind = ?')
+        .run(row.blob_content_id, 'trajectory-capsule');
+      await rm(this.#blobPath(row.blob_content_id), { force: true });
+    }
+    return rows.length;
+  }
+
   async listPendingCapsuleSyncs<T = Record<string, unknown>>(limit = 100, offset = 0): Promise<Array<{
     trajectoryId: string;
     revision: number;

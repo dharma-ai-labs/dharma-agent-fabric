@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.41';
+const VERSION = '0.2.42';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1904,6 +1904,27 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   throw new Error(`Enrollment timed out. Approve it at ${pending.verificationUri}`);
 }
 
+type AcceptedTrajectoryHead = { revision: number; capsuleHash: string } | null;
+
+export function acceptedTrajectoryHead(value: unknown, trajectoryId: string): AcceptedTrajectoryHead {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Trajectory head response is invalid.');
+  }
+  const response = value as Record<string, unknown>;
+  if (response.trajectoryId !== trajectoryId) throw new Error('Trajectory head response does not match the requested trajectory.');
+  if (response.head === null) return null;
+  if (!response.head || typeof response.head !== 'object' || Array.isArray(response.head)) {
+    throw new Error('Trajectory head response is invalid.');
+  }
+  const head = response.head as Record<string, unknown>;
+  const revision = Number(head.revision);
+  const capsuleHash = String(head.capsuleHash || '');
+  if (!Number.isSafeInteger(revision) || revision < 1 || !/^sha256:[a-f0-9]{64}$/.test(capsuleHash)) {
+    throw new Error('Trajectory head response is invalid.');
+  }
+  return { revision, capsuleHash };
+}
+
 async function capture(flags: Map<string, string | boolean>, batch = false): Promise<Output> {
   const sessionIds = await readSessionAllowlist(flags);
   if (batch && !sessionIds && !flags.has('maximum-sessions')) {
@@ -1946,7 +1967,11 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   });
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const fabric = flags.has('sync') ? await client() : null;
+  const fabric = flags.has('sync')
+    ? await client() as AgentFabricClient & {
+      getTrajectoryHead(body: { trajectoryId: string; workspaceId: string }): Promise<Record<string, unknown>>;
+    }
+    : null;
   if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
@@ -1965,6 +1990,15 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
         session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
         captureProvenance: captureProvenance(selected.endedAt),
       });
+      const serverHead = fabric
+        ? acceptedTrajectoryHead(await fabric.getTrajectoryHead({
+          trajectoryId: firstRevision.trajectoryId,
+          workspaceId: registered.workspaceId,
+        }), firstRevision.trajectoryId)
+        : null;
+      if (fabric) {
+        await vault.discardCapsuleRevisionsAfter(firstRevision.trajectoryId, serverHead?.revision || 0);
+      }
       const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
         ? await vault.getLatestCapsule<ReturnType<typeof buildTrajectoryCapsule>>(firstRevision.trajectoryId)
@@ -1973,13 +2007,22 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
         const { revision: _revision, previousRevisionHash: _previous, capsuleHash: _hash, ...evidence } = value;
         return sha256(canonicalize(evidence));
       };
-      const capsule = latestCapsule && evidenceHash(latestCapsule) === evidenceHash(firstRevision)
+      const localRevisionCanBeRetried = !fabric || Boolean(latestCapsule && (
+        serverHead
+          ? latestCapsule.capsuleHash === serverHead.capsuleHash
+            || (latestCapsule.revision === serverHead.revision + 1
+              && latestCapsule.previousRevisionHash === serverHead.capsuleHash)
+          : latestCapsule.revision === 1 && latestCapsule.previousRevisionHash === null
+      ));
+      const capsule = latestCapsule && localRevisionCanBeRetried
+        && evidenceHash(latestCapsule) === evidenceHash(firstRevision)
         ? latestCapsule
-        : latestMetadata
+        : (fabric ? serverHead : latestMetadata)
           ? buildTrajectoryCapsule({
             organizationId: device.organizationId, deviceId: device.deviceId, workspaceId: registered.workspaceId,
             session: selected, policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
-            revision: latestMetadata.revision + 1, previousRevisionHash: latestMetadata.capsuleHash,
+            revision: (fabric ? serverHead!.revision : latestMetadata!.revision) + 1,
+            previousRevisionHash: fabric ? serverHead!.capsuleHash : latestMetadata!.capsuleHash,
             captureProvenance: captureProvenance(selected.endedAt),
           })
           : firstRevision;
@@ -2000,10 +2043,12 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       }
       capsules.push(capsule);
       if (fabric) {
+        vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
         await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
         // An unknown delivery outcome retains the local advisory reservation.
         // HQ performs the authoritative, idempotent organization/day charge.
         syncResults.push(await fabric.syncTrajectory(capsule));
+        vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
       }
     }
     const output = flags.get('output');
