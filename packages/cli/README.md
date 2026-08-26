@@ -10,9 +10,10 @@ installs signed Skill releases with receipts and rollback ancestry.
 
 Requires Node.js 22.20.0 through 24.x.
 
-An organization administrator can create a one-time setup from **Portal → Agent
-Fabric → Instructions**. Paste the complete copied runbook into a coding agent
-while its working directory is the intended source repository. The runbook uses:
+An organization administrator creates a two-stage setup from **Portal → Agent
+Fabric → Instructions**. Run the downloaded secure bootstrap command yourself
+in the intended source repository. Never paste that command or its grant into a
+model prompt, chat, ticket, shell history, or source file. The secure stage uses:
 
 ```bash
 dharma bootstrap \
@@ -29,6 +30,15 @@ stores both in the operating-system credential store, connects only the current
 repository, obtains its signed policy, and installs supported native skills.
 The grant is usable only until its displayed expiry and is never stored by HQ
 in plaintext. Device revocation also revokes the linked organization token.
+
+After the secure command exits successfully, copy the separate secret-free
+completion instruction into the coding agent. For Claude Code, bootstrap also
+merges a project-local allowlist for the exact read-only verification commands
+into `.claude/settings.local.json`. Existing settings and deny rules are
+preserved. The allowlist does not permit enrollment, trajectory synchronization,
+task dispatch, source writes, paid operations, release, rollout, or rollback.
+Use `dharma relay probe` for a bounded authenticated connectivity check; unlike
+`relay start --once`, it never polls or leases work.
 
 Use the separate teammate action in the Instructions tab to send a Clerk
 organization invitation and copy a distinct one-time setup for that teammate.
