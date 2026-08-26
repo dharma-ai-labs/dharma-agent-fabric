@@ -597,8 +597,10 @@ test('identical source sessions produce an identical capsule revision hash', () 
   };
   const first = buildTrajectoryCapsule(input);
   const second = buildTrajectoryCapsule(input);
+  const otherWorkspace = buildTrajectoryCapsule({ ...input, workspaceId: 'workspace_other' });
   assert.equal(first.createdAt, session.endedAt);
   assert.equal(second.capsuleHash, first.capsuleHash);
+  assert.notEqual(otherWorkspace.trajectoryId, first.trajectoryId);
 });
 
 test('a changed session can produce a hash-linked next revision', () => {
