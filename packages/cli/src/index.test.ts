@@ -8,6 +8,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
+  acceptedTrajectoryHead,
   activateAgyPlugin,
   attestAgySkillActivation,
   attestHermesSkillBundleActivation,
@@ -1496,13 +1497,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.41');
+      assert.equal(version, '0.2.42');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.41',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.42',
   });
 });
 
@@ -1905,6 +1906,17 @@ test('evidence preview counts native turns without disclosing paths or prompt bo
   });
   assert.equal(encoded.includes(root), false);
   assert.equal(encoded.includes('private prompt body'), false);
+});
+
+test('accepted trajectory head validates the exact requested immutable revision', () => {
+  const trajectoryId = '11111111-1111-4111-8111-111111111111';
+  assert.deepEqual(acceptedTrajectoryHead({
+    trajectoryId,
+    head: { revision: 7, capsuleHash: `sha256:${'a'.repeat(64)}` },
+  }, trajectoryId), { revision: 7, capsuleHash: `sha256:${'a'.repeat(64)}` });
+  assert.equal(acceptedTrajectoryHead({ trajectoryId, head: null }, trajectoryId), null);
+  assert.throws(() => acceptedTrajectoryHead({ trajectoryId: 'other', head: null }, trajectoryId), /does not match/);
+  assert.throws(() => acceptedTrajectoryHead({ trajectoryId, head: { revision: 0, capsuleHash: 'bad' } }, trajectoryId), /invalid/);
 });
 
 test('task response preview extracts the final agent message and removes secrets', () => {

@@ -763,6 +763,44 @@ test('content-bearing trajectory outbox is discarded before a new session can re
   assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
 });
 
+test('trajectory head lookup is device signed without becoming a content-bearing replay', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-trajectory-head-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  let observedBody = '';
+  const client = await AgentFabricClient.open({
+    configPath, statePath, store,
+    fetcher: async (url, init) => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname.endsWith('/agent-fabric/sessions')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 201 });
+      }
+      observedBody = String(init?.body || '');
+      assert.match(pathname, /\/agent-fabric\/trajectories\/head$/);
+      return new Response(JSON.stringify({
+        ok: true,
+        head: { revision: 3, capsuleHash: `sha256:${'a'.repeat(64)}` },
+      }), { status: 200 });
+    },
+  });
+  await client.openSession();
+  const response = await client.getTrajectoryHead({
+    trajectoryId: '11111111-1111-4111-8111-111111111111',
+    workspaceId: '22222222-2222-4222-8222-222222222222',
+  });
+  assert.deepEqual(response.head, { revision: 3, capsuleHash: `sha256:${'a'.repeat(64)}` });
+  assert.match(observedBody, /trajectoryId/);
+});
+
 test('accepted task completion replay preserves the server receipt until the CLI acknowledges it', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-task-completion-retry-'));

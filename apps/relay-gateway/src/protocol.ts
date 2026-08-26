@@ -1,7 +1,7 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const MAX_RELAY_BODY_BYTES = 2_100_000;
 export const MAX_RELAY_MESSAGE_BYTES = 4_500_000;
-const AGENT_FABRIC_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(sessions|repository-agents|workspaces|trajectories|evidence-requests\/poll|evidence-requests\/[0-9a-f-]{36}\/responses|tasks\/poll|tasks\/[0-9a-f-]{36}\/events|decisions\/[0-9a-f-]{36}\/enforcements|skills\/poll|skills\/[0-9a-f-]{36}\/receipts)$/i;
+const AGENT_FABRIC_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(sessions|repository-agents|workspaces|trajectories(?:\/head)?|evidence-requests\/poll|evidence-requests\/[0-9a-f-]{36}\/responses|tasks\/poll|tasks\/[0-9a-f-]{36}\/events|decisions\/[0-9a-f-]{36}\/enforcements|skills\/poll|skills\/[0-9a-f-]{36}\/receipts)$/i;
 const CONTROL_AGENT_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions|sessions\/[0-9a-f-]{36}\/messages)$/i;
 const CONTROL_AGENT_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions(?:\?sessionId=[0-9a-f-]{36})?|sessions\/[0-9a-f-]{36}\/events(?:\?afterSequence=\d+)?)$/i;
 const FORWARDED_HEADERS = new Set([

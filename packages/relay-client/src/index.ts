@@ -713,6 +713,9 @@ export class AgentFabricClient {
     return response;
   }
   connectRepositoryAgent(body: unknown) { return this.signedPost('/agent-fabric/repository-agents', body); }
+  getTrajectoryHead(body: { trajectoryId: string; workspaceId: string }) {
+    return this.signedPost('/agent-fabric/trajectories/head', body);
+  }
   syncTrajectory(body: unknown) { return this.signedPost('/agent-fabric/trajectories', body); }
   pollEvidence(body: { workspaceId: string }) { return this.signedPost('/agent-fabric/evidence-requests/poll', body); }
   postEvidenceResponse(requestId: string, body: unknown) {
