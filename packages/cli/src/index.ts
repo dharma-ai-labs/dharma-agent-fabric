@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.38';
+const VERSION = '0.2.39';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1314,20 +1314,50 @@ async function installStableRepositoryLauncher(workspace: string) {
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
 }
 
-async function startRelayDaemon(policyPath: string) {
-  if (await relayProcessState() === 'running') return { started: false, state: 'running' as const };
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
-    cwd: dirname(dirname(policyPath)),
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
-  child.unref();
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-    if (await relayProcessState() === 'running') return { started: true, state: 'running' as const };
+export async function waitForRelayReadiness(options: {
+  processState?: () => Promise<'running' | 'stopped' | 'unknown'>;
+  probe?: () => Promise<Awaited<ReturnType<typeof probeRelayConnection>>>;
+  attempts?: number;
+  delayMs?: number;
+  wait?: (delayMs: number) => Promise<void>;
+} = {}) {
+  const processState = options.processState || relayProcessState;
+  const probe = options.probe || probeRelayConnection;
+  const attempts = options.attempts || 80;
+  const delayMs = options.delayMs ?? 250;
+  const wait = options.wait || ((durationMs: number) => new Promise<void>((resolveWait) => setTimeout(resolveWait, durationMs)));
+  let lastState: 'running' | 'stopped' | 'unknown' = 'unknown';
+  let acknowledgementPending = false;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    lastState = await processState();
+    if (lastState === 'running') {
+      try {
+        return { state: 'running' as const, probe: await probe() };
+      } catch {
+        acknowledgementPending = true;
+      }
+    }
+    if (attempt < attempts - 1) await wait(delayMs);
   }
-  throw new Error('The outbound relay did not reach running state after bootstrap.');
+
+  const reason = acknowledgementPending ? 'relay_session_unacknowledged' : `relay_process_${lastState}`;
+  throw new Error(`The outbound relay did not become ready after bootstrap (${reason}).`);
+}
+
+async function startRelayDaemon(policyPath: string) {
+  const alreadyRunning = await relayProcessState() === 'running';
+  if (!alreadyRunning) {
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
+      cwd: dirname(dirname(policyPath)),
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    });
+    child.unref();
+  }
+  const readiness = await waitForRelayReadiness();
+  return { started: !alreadyRunning, ...readiness };
 }
 
 export function providerHintFromEnvironment(env: NodeJS.ProcessEnv = process.env): ProviderId | null {
@@ -1476,9 +1506,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       async () => await capture(evidenceFlags, true) as { captured: number; synced: number },
     );
   }
-  const relayProbe = await probeRelayConnection();
   const relay = flags.has('no-relay-daemon')
-    ? { started: false, state: await relayProcessState() }
+    ? { started: false, ...(await waitForRelayReadiness()) }
     : await startRelayDaemon(policyPath);
   const apiFlags = new Map<string, string | boolean>([
     ['organization-id', organizationId], ['portal-url', hqUrl],
@@ -1512,7 +1541,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       synchronized,
       automaticDisclosure: preview.automaticDisclosure,
     },
-    relayProbe,
+    relayProbe: relay.probe,
     relay,
     organizationApi: {
       ready: true,

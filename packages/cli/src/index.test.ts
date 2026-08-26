@@ -57,6 +57,7 @@ import {
   taskReceiptSession,
   taskSkillPinFailureCode,
   verifyAgentFabricSkillInstallation,
+  waitForRelayReadiness,
   withWorkspacePolicyRefreshLock,
   withWorkspaceSkillActivationLock,
 } from './index.js';
@@ -106,6 +107,46 @@ test('bootstrap retries transient relay failures without retrying validation fai
   assert.equal(isTransientBootstrapError(new Error('Permission denied')), false);
 });
 
+test('bootstrap waits for both relay process state and signed session acknowledgement', async () => {
+  const states: Array<'running' | 'stopped'> = ['stopped', 'running', 'running'];
+  let probeAttempts = 0;
+  const waits: number[] = [];
+  const readiness = await waitForRelayReadiness({
+    processState: async () => states.shift() || 'running',
+    probe: async () => {
+      probeAttempts += 1;
+      if (probeAttempts === 1) throw new Error('Relay session acknowledgement timed out.');
+      return {
+        ok: true,
+        connected: true,
+        organizationId: 'org_test',
+        deviceId: 'device_test',
+        relayVersion: '0.2.39',
+      };
+    },
+    attempts: 4,
+    delayMs: 25,
+    wait: async (delayMs) => { waits.push(delayMs); },
+  });
+  assert.equal(readiness.state, 'running');
+  assert.equal(readiness.probe.connected, true);
+  assert.equal(probeAttempts, 2);
+  assert.deepEqual(waits, [25, 25]);
+});
+
+test('bootstrap relay readiness fails closed when acknowledgement never arrives', async () => {
+  await assert.rejects(
+    () => waitForRelayReadiness({
+      processState: async () => 'running',
+      probe: async () => { throw new Error('connection pending'); },
+      attempts: 2,
+      delayMs: 1,
+      wait: async () => undefined,
+    }),
+    /relay_session_unacknowledged/,
+  );
+});
+
 test('bootstrap defers policy-rejected evidence without weakening the disclosure boundary', async () => {
   const result = await synchronizeBootstrapEvidence(async () => {
     throw new Error('local_path_disclosure_forbidden: capsule event contains a local path');
@@ -147,14 +188,14 @@ test('bootstrap provider detection uses host signals without changing the portal
 });
 
 test('repository launchers stay version-pinned without depending on the npm-exec cache path', () => {
-  const launcher = stableRepositoryLauncherContents('0.2.38');
+  const launcher = stableRepositoryLauncherContents('0.2.39');
   assert.equal(
     launcher.shell,
-    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.38 -- dharma "$@"\n',
+    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.39 -- dharma "$@"\n',
   );
   assert.equal(
     launcher.windows,
-    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.38 -- dharma %*\r\n',
+    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.39 -- dharma %*\r\n',
   );
   assert.equal(launcher.shell.includes('/_npx/'), false);
   assert.equal(launcher.windows.includes('node_modules'), false);
@@ -1455,13 +1496,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.38');
+      assert.equal(version, '0.2.39');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.38',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.39',
   });
 });
 
