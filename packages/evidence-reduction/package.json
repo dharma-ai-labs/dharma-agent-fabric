@@ -1,6 +1,6 @@
 {
   "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "Policy-bound local trajectory reduction and deterministic analysis for Dharma Agent Fabric",
   "license": "MIT",
   "homepage": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/evidence-reduction#readme",
