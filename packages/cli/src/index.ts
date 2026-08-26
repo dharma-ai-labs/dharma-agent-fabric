@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.43';
+const VERSION = '0.2.44';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1536,6 +1536,16 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     runOrganizationCommand('usage', 'list', apiFlags),
   ]);
   requireCompletedBootstrapEvidence(synchronized, Number(preview.trajectoryCount || 0));
+  const organizationApi = summarizeBootstrapOrganizationApi({
+    organizationId,
+    organization,
+    agents,
+    experiments,
+    failures,
+    remediations,
+    skills,
+    usage,
+  });
   return {
     ok: true,
     stage: 'complete',
@@ -1558,17 +1568,38 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     },
     relayProbe: relay.probe,
     relay,
-    organizationApi: {
-      ready: true,
-      organization,
-      counts: {
-        agents: Array.isArray((agents as Record<string, unknown>)?.agents) ? ((agents as Record<string, unknown>).agents as unknown[]).length : null,
-        experiments: Array.isArray((experiments as Record<string, unknown>)?.windows) ? ((experiments as Record<string, unknown>).windows as unknown[]).length : null,
-        failures: Array.isArray((failures as Record<string, unknown>)?.failures) ? ((failures as Record<string, unknown>).failures as unknown[]).length : null,
-        remediations: Array.isArray((remediations as Record<string, unknown>)?.remediations) ? ((remediations as Record<string, unknown>).remediations as unknown[]).length : null,
-        skills: Array.isArray((skills as Record<string, unknown>)?.skills) ? ((skills as Record<string, unknown>).skills as unknown[]).length : null,
-        usage: Array.isArray((usage as Record<string, unknown>)?.events) ? ((usage as Record<string, unknown>).events as unknown[]).length : null,
-      },
+    organizationApi,
+  };
+}
+
+export function summarizeBootstrapOrganizationApi(input: {
+  organizationId: string;
+  organization: unknown;
+  agents: unknown;
+  experiments: unknown;
+  failures: unknown;
+  remediations: unknown;
+  skills: unknown;
+  usage: unknown;
+}) {
+  if (!input.organization || typeof input.organization !== 'object' || Array.isArray(input.organization)) {
+    throw new Error('Organization API readiness response was invalid.');
+  }
+  const count = (value: unknown, key: string) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const collection = (value as Record<string, unknown>)[key];
+    return Array.isArray(collection) ? collection.length : null;
+  };
+  return {
+    ready: true,
+    organizationId: input.organizationId,
+    counts: {
+      agents: count(input.agents, 'agents'),
+      experiments: count(input.experiments, 'windows'),
+      failures: count(input.failures, 'failures'),
+      remediations: count(input.remediations, 'remediations'),
+      skills: count(input.skills, 'skills'),
+      usage: count(input.usage, 'events'),
     },
   };
 }
