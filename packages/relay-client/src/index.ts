@@ -144,8 +144,12 @@ function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId
   return `evidence-quota-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
 }
 
-function enrollmentAnchorAccountFor(hqUrl: string, organizationId: string) {
+function legacyEnrollmentAnchorAccountFor(hqUrl: string, organizationId: string) {
   return `device-enrollment-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+}
+
+function enrollmentAnchorAccountFor(hqUrl: string, organizationId: string, deviceId: string) {
+  return `device-enrollment-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
 }
 
 function organizationApiTokenAccountFor(hqUrl: string, organizationId: string) {
@@ -245,7 +249,7 @@ export async function saveDeviceEnrollmentAnchor(input: {
   const store = input.store ?? await createSystemSecureStore();
   const anchor = enrollmentAnchorFromConfig(input.config);
   const serialized = JSON.stringify(anchor);
-  const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId);
+  const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId, anchor.deviceId);
   await store.put(account, serialized);
   if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
   return anchor;
@@ -256,14 +260,27 @@ export async function loadDeviceEnrollmentAnchor(input: {
   store?: SecureSecretStore;
 }): Promise<DeviceEnrollmentAnchor> {
   const store = input.store ?? await createSystemSecureStore();
-  const account = enrollmentAnchorAccountFor(input.config.hqUrl, input.config.organizationId);
-  const serialized = await store.get(account);
+  const account = enrollmentAnchorAccountFor(
+    input.config.hqUrl,
+    input.config.organizationId,
+    input.config.deviceId,
+  );
+  let serialized = await store.get(account);
+  let migratedLegacy = false;
+  if (!serialized) {
+    serialized = await store.get(legacyEnrollmentAnchorAccountFor(input.config.hqUrl, input.config.organizationId));
+    migratedLegacy = Boolean(serialized);
+  }
   if (!serialized) throw new Error('Device enrollment is not anchored in secure storage. Run dharma login again.');
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
   if (!enrollmentAnchorHasBaseIdentity(anchor, input.config)
     || JSON.stringify(anchor.serverSigningKeyset ?? null) !== JSON.stringify(input.config.serverSigningKeyset ?? null)
   ) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
+  }
+  if (migratedLegacy) {
+    await store.put(account, serialized);
+    if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
   return anchor;
 }
@@ -540,11 +557,21 @@ export async function recoverDeviceEnrollmentConsistency(input: {
 }): Promise<DeviceConfig> {
   const config = await loadDeviceConfig(input.configPath);
   const store = input.store ?? await createSystemSecureStore();
-  const serialized = await store.get(enrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
+  const account = enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId);
+  let serialized = await store.get(account);
+  let migratedLegacy = false;
+  if (!serialized) {
+    serialized = await store.get(legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
+    migratedLegacy = Boolean(serialized);
+  }
   if (!serialized) return config;
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
   if (!enrollmentAnchorHasBaseIdentity(anchor, config)) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
+  }
+  if (migratedLegacy) {
+    await store.put(account, serialized);
+    if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
   if (canonicalize(anchor.serverSigningKeyset ?? null) === canonicalize(config.serverSigningKeyset ?? null)) {
     return config;

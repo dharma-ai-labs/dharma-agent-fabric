@@ -121,7 +121,7 @@ test('bootstrap waits for both relay process state and signed session acknowledg
         connected: true,
         organizationId: 'org_test',
         deviceId: 'device_test',
-        relayVersion: '0.2.39',
+        relayVersion: '0.2.40',
       };
     },
     attempts: 4,
@@ -188,14 +188,14 @@ test('bootstrap provider detection uses host signals without changing the portal
 });
 
 test('repository launchers stay version-pinned without depending on the npm-exec cache path', () => {
-  const launcher = stableRepositoryLauncherContents('0.2.39');
+  const launcher = stableRepositoryLauncherContents('0.2.40');
   assert.equal(
     launcher.shell,
-    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.39 -- dharma "$@"\n',
+    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.40 -- dharma "$@"\n',
   );
   assert.equal(
     launcher.windows,
-    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.39 -- dharma %*\r\n',
+    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.40 -- dharma %*\r\n',
   );
   assert.equal(launcher.shell.includes('/_npx/'), false);
   assert.equal(launcher.windows.includes('node_modules'), false);
@@ -1496,13 +1496,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.39');
+      assert.equal(version, '0.2.40');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.39',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.40',
   });
 });
 

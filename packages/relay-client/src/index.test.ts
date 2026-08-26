@@ -470,6 +470,28 @@ test('secure enrollment anchor rejects mutable device configuration substitution
   );
 });
 
+test('secure enrollment anchors coexist for multiple devices in one organization', async () => {
+  const store = memoryStore();
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const base = {
+    schema: 'dharma.device-config/v1' as const,
+    hqUrl: 'https://hq.example',
+    organizationId: 'org_a',
+    deviceName: 'Test',
+    platform: 'linux' as const,
+    publicKeyEd25519: identity.publicKeyEd25519,
+    serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example',
+    enrolledAt: new Date().toISOString(),
+  };
+  const first = { ...base, deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915' };
+  const second = { ...base, deviceId: 'd83d8f24-f531-4af8-b929-d18f7f0e1026' };
+  await saveDeviceEnrollmentAnchor({ config: first, store });
+  await saveDeviceEnrollmentAnchor({ config: second, store });
+  assert.equal((await loadDeviceEnrollmentAnchor({ config: first, store })).deviceId, first.deviceId);
+  assert.equal((await loadDeviceEnrollmentAnchor({ config: second, store })).deviceId, second.deviceId);
+});
+
 test('legacy production enrollment requires explicit re-login without contacting mutable relay metadata', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-legacy-anchor-'));
