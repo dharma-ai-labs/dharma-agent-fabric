@@ -500,7 +500,7 @@ export function buildTrajectoryCapsule(input: {
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
   };
-  const trajectoryId = deterministicUuid(`${input.organizationId}:${input.deviceId}:${input.session.provider}:${input.session.sessionId}`);
+  const trajectoryId = deterministicUuid(`${input.organizationId}:${input.deviceId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`);
   const pseudonymousSessionId = sha256(`${input.organizationId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`);
   const seen = new Set<string>();
   const events: AgentEvent[] = [];
