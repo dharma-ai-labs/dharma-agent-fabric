@@ -1365,7 +1365,7 @@ test('Claude bootstrap merges only bounded read-only project permissions', async
   assert.deepEqual(settings.permissions.deny, ['Bash(rm:*)']);
   assert.ok(settings.permissions.allow.includes('Bash(git status)'));
   assert.ok(settings.permissions.allow.includes(
-    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.35 -- dharma relay probe)',
+    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.36 -- dharma relay probe)',
   ));
   assert.equal(settings.permissions.allow.includes('Bash'), false);
   assert.equal(settings.permissions.allow.some((rule) => /bootstrap|login|capture-batch|sync|dispatch|rollout|rollback/.test(rule)), false);
@@ -1398,13 +1398,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.35');
+      assert.equal(version, '0.2.36');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.35',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.36',
   });
 });
 
@@ -1446,6 +1446,10 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
     },
   });
   assert.equal(installed.verified, true);
+  const installedSkill = await readFile(installed.skillPath, 'utf8');
+  assert.match(installedSkill, /supports both first-time repository onboarding and operation after connection/);
+  assert.match(installedSkill, /native action-time approval/);
+  assert.doesNotMatch(installedSkill, /Use this skill only inside a repository containing/);
   assert.deepEqual(calls[0], {
     executable: 'hermes',
     argv: ['skills', 'trust', canonicalWorkspace],
@@ -1553,7 +1557,7 @@ test('native Claude bootstrap installs the bounded project completion policy', a
     permissions: { allow: string[] };
   };
   assert.ok(settings.permissions.allow.includes(
-    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.35 -- dharma evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)',
+    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.36 -- dharma evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)',
   ));
 });
 

@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.35';
+const VERSION = '0.2.36';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3395,7 +3395,10 @@ description: Connect the current repository to Dharma Agent Fabric for signed ta
 
 # Dharma Agent Fabric
 
-Use this skill only inside a repository containing \`.dharma/agent-fabric.json\` and \`.dharma/approved-policy.json\`.
+This skill supports both first-time repository onboarding and operation after connection.
+
+- If \`.dharma/agent-fabric.json\` and \`.dharma/approved-policy.json\` are absent, do not treat that as an error or claim that onboarding is out of scope. A production portal instruction may guide first-time bootstrap. Verify the pinned package and repository, then request the coding harness's native action-time approval before the first command that installs code, stores a device credential, registers a repository, or opens a relay. After that trust approval, complete the remaining bounded setup without asking the user to type commands.
+- If both manifests exist, use them as the authoritative organization and disclosure contract and continue autonomously within their signed authority.
 
 1. Run \`dharma status\` and \`dharma skills verify --provider ${input.provider} --workspace .\` before accepting work.
 2. Start \`dharma relay start --policy .dharma/approved-policy.json\` for signed task, evidence, and skill delivery.
