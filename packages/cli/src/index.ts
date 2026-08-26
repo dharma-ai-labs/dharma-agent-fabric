@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.42';
+const VERSION = '0.2.43';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1252,6 +1252,18 @@ export async function synchronizeBootstrapEvidence(
   }
 }
 
+export function requireCompletedBootstrapEvidence(
+  result: BootstrapEvidenceSynchronization,
+  discovered: number,
+): void {
+  if (discovered <= 0 || result.state === 'synchronized') return;
+  const detail = [result.reason, result.errorCode].filter(Boolean).join(':');
+  throw new Error(
+    `Bootstrap evidence synchronization did not complete${detail ? ` (${detail})` : ''}. `
+    + 'Enrollment and repository setup were preserved; rerun bounded evidence synchronization after the service is available.',
+  );
+}
+
 async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
   const pidPath = resolve(dharmaHome(), 'relay', 'relay.pid');
   let relayPid = 0;
@@ -1503,7 +1515,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     && (preview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
     evidenceFlags.set('sync', true);
     synchronized = await synchronizeBootstrapEvidence(
-      async () => await capture(evidenceFlags, true) as { captured: number; synced: number },
+      async () => await retryBootstrapOnboarding(
+        async () => await capture(evidenceFlags, true) as { captured: number; synced: number },
+      ),
     );
   }
   const relay = flags.has('no-relay-daemon')
@@ -1521,6 +1535,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     runOrganizationCommand('skills', 'list', apiFlags),
     runOrganizationCommand('usage', 'list', apiFlags),
   ]);
+  requireCompletedBootstrapEvidence(synchronized, Number(preview.trajectoryCount || 0));
   return {
     ok: true,
     stage: 'complete',

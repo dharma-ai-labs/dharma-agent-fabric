@@ -39,6 +39,7 @@ import {
   probeRelayConnection,
   preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
+  requireCompletedBootstrapEvidence,
   retryBootstrapOnboarding,
   synchronizeBootstrapEvidence,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
@@ -178,6 +179,34 @@ test('bootstrap reports non-policy evidence failures without returning sensitive
 test('bootstrap records successful evidence synchronization', async () => {
   const result = await synchronizeBootstrapEvidence(async () => ({ captured: 2, synced: 2 }));
   assert.deepEqual(result, { state: 'synchronized', captured: 2, synced: 2 });
+});
+
+test('complete bootstrap rejects discovered evidence without a synchronization receipt', () => {
+  assert.throws(
+    () => requireCompletedBootstrapEvidence({
+      state: 'deferred',
+      captured: 0,
+      synced: 0,
+      reason: 'capture_unavailable',
+      errorCode: 'route_not_allowed',
+    }, 1),
+    /capture_unavailable:route_not_allowed/,
+  );
+});
+
+test('complete bootstrap accepts an empty discovery set or synchronized evidence', () => {
+  assert.doesNotThrow(() => requireCompletedBootstrapEvidence({
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'capture_unavailable',
+    errorCode: 'capture_unavailable',
+  }, 0));
+  assert.doesNotThrow(() => requireCompletedBootstrapEvidence({
+    state: 'synchronized',
+    captured: 2,
+    synced: 2,
+  }, 2));
 });
 
 test('bootstrap provider detection uses host signals without changing the portal instruction', () => {
@@ -1497,13 +1526,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.42');
+      assert.equal(version, '0.2.43');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.42',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.43',
   });
 });
 
