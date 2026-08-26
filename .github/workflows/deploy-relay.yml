@@ -43,6 +43,35 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/main"
           test "${{ github.event.repository.full_name }}" = "dharma-ai-labs/dharma-agent-fabric"
 
+      - name: Verify GitHub OIDC claims
+        shell: bash
+        env:
+          EXPECTED_AUDIENCE: //iam.googleapis.com/projects/277740833625/locations/global/workloadIdentityPools/dharma-agent-fabric/providers/github-public-edge
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$EXPECTED_AUDIENCE")"
+          token="$(jq --exit-status --raw-output '.value' <<<"$response")"
+          payload="$(cut -d. -f2 <<<"$token" | tr '_-' '/+')"
+          case $((${#payload} % 4)) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
+          esac
+          claims="$(printf '%s' "$payload" | base64 --decode)"
+          jq --exit-status \
+            '.repository == "dharma-ai-labs/dharma-agent-fabric"
+             and .repository_owner == "dharma-ai-labs"
+             and .ref == "refs/heads/main"
+             and .event_name == "workflow_dispatch"' \
+            <<<"$claims" >/dev/null
+          {
+            printf '%s\n\n' '## GitHub OIDC source claims'
+            jq --raw-output \
+              '"- Repository: `\(.repository)`\n- Owner: `\(.repository_owner)`\n- Ref: `\(.ref)`\n- Event: `\(.event_name)`\n- Workflow: `\(.workflow_ref)`"' \
+              <<<"$claims"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - id: auth
         name: Authenticate to Google Cloud with GitHub OIDC
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
