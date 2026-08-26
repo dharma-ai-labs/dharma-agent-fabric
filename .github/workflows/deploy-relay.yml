@@ -1,0 +1,157 @@
+name: Deploy Agent Fabric Relay
+
+on:
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: Type PROMOTE to deploy the reviewed main commit through staging and production
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agent-fabric-relay-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ardent-fastness-503107-i5
+  REGION: us-central1
+  IMAGE_REPOSITORY: us-central1-docker.pkg.dev/ardent-fastness-503107-i5/dharma-agent-fabric/relay
+  STAGING_SERVICE: dharma-agent-fabric-relay-staging
+  PRODUCTION_SERVICE: dharma-agent-fabric-relay
+
+jobs:
+  deploy:
+    name: Staging verification and production promotion
+    if: github.ref == 'refs/heads/main' && inputs.promote == 'PROMOTE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out reviewed main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+
+      - name: Verify immutable source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "${{ github.event.repository.full_name }}" = "dharma-ai-labs/dharma-agent-fabric"
+
+      - id: auth
+        name: Authenticate to Google Cloud with GitHub OIDC
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: projects/277740833625/locations/global/workloadIdentityPools/dharma-agent-fabric/providers/github-public-edge
+          service_account: agent-fabric-deployer@ardent-fastness-503107-i5.iam.gserviceaccount.com
+          token_format: access_token
+
+      - name: Configure Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Build and push immutable relay image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          image_tag="$IMAGE_REPOSITORY:$GITHUB_SHA"
+          docker build --file apps/relay-gateway/Dockerfile --tag "$image_tag" .
+          docker push "$image_tag"
+          digest=""
+          for attempt in 1 2 3 4 5; do
+            digest="$(gcloud artifacts docker images describe "$image_tag" \
+              --project "$PROJECT_ID" \
+              --format='value(image_summary.digest)' 2>/dev/null || true)"
+            if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              break
+            fi
+            sleep $((attempt * 2))
+          done
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="$IMAGE_REPOSITORY@$digest"
+          echo "uri=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy and verify staging
+        id: staging
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+        run: |
+          set -euo pipefail
+          gcloud run services update "$STAGING_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --image "$IMAGE" \
+            --update-env-vars "AGENT_FABRIC_RELEASE_IMAGE=$IMAGE" \
+            --quiet
+          uri="$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(status.url)')"
+          revision="$(gcloud run services describe "$STAGING_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(status.latestReadyRevisionName)')"
+          curl --fail --silent --show-error \
+            --retry 30 --retry-all-errors --retry-delay 5 \
+            "$uri/health" > "$RUNNER_TEMP/staging-health.json"
+          jq --exit-status \
+            '.ok == true and .service == "dharma-agent-fabric-relay" and .presence == "ready"' \
+            "$RUNNER_TEMP/staging-health.json"
+          echo "uri=$uri" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Promote identical digest and verify production
+        id: production
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+        run: |
+          set -euo pipefail
+          gcloud run services update "$PRODUCTION_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --image "$IMAGE" \
+            --update-env-vars "AGENT_FABRIC_RELEASE_IMAGE=$IMAGE" \
+            --quiet
+          uri="$(gcloud run services describe "$PRODUCTION_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(status.url)')"
+          revision="$(gcloud run services describe "$PRODUCTION_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(status.latestReadyRevisionName)')"
+          deployed_image="$(gcloud run services describe "$PRODUCTION_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(spec.template.spec.containers[0].image)')"
+          test "$deployed_image" = "$IMAGE"
+          curl --fail --silent --show-error \
+            --retry 30 --retry-all-errors --retry-delay 5 \
+            "$uri/health" > "$RUNNER_TEMP/production-health.json"
+          jq --exit-status \
+            '.ok == true and .service == "dharma-agent-fabric-relay" and .presence == "ready"' \
+            "$RUNNER_TEMP/production-health.json"
+          echo "uri=$uri" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Record deployment receipt
+        shell: bash
+        run: |
+          {
+            printf '%s\n\n' '## Agent Fabric relay deployment'
+            printf -- '- Source: `%s`\n' "$GITHUB_SHA"
+            printf -- '- Image: `%s`\n' '${{ steps.image.outputs.uri }}'
+            printf -- '- Staging revision: `%s`\n' '${{ steps.staging.outputs.revision }}'
+            printf -- '- Staging URL: `%s`\n' '${{ steps.staging.outputs.uri }}'
+            printf -- '- Production revision: `%s`\n' '${{ steps.production.outputs.revision }}'
+            printf -- '- Production URL: `%s`\n' '${{ steps.production.outputs.uri }}'
+          } >> "$GITHUB_STEP_SUMMARY"
