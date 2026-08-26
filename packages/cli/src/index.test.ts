@@ -36,6 +36,7 @@ import {
   pathExistsOrThrow,
   portalUrl,
   providerHintFromEnvironment,
+  providerHintFromProcessArgv,
   probeRelayConnection,
   preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
@@ -247,6 +248,15 @@ test('bootstrap provider detection uses host signals without changing the portal
   assert.equal(providerHintFromEnvironment({ AGY_CONFIG_DIR: '/tmp/agy' }), 'agy');
   assert.equal(providerHintFromEnvironment({ HERMES_HOME: '/tmp/hermes' }), 'hermes');
   assert.equal(providerHintFromEnvironment({}), null);
+  assert.equal(providerHintFromProcessArgv([
+    ['/usr/bin/npm', 'exec'],
+    ['/bin/bash', '-lc', 'npm exec -- dharma bootstrap'],
+    ['/home/developer/.local/bin/agy', '--dangerously-skip-permissions'],
+  ]), 'agy');
+  assert.equal(providerHintFromProcessArgv([
+    ['/usr/bin/node', '/tmp/agy-helper.js'],
+    ['/bin/bash', '-lc', 'cat /tmp/hermes-notes'],
+  ]), null);
 });
 
 test('repository launchers stay version-pinned without depending on the npm-exec cache path', () => {
@@ -1558,13 +1568,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.45');
+      assert.equal(version, '0.2.46');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.45',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.46',
   });
 });
 
