@@ -52,6 +52,7 @@ import {
   runAssistantCommand,
   sourceRepositoryFingerprint,
   stableRepositoryLauncherContents,
+  summarizeBootstrapOrganizationApi,
   ensureAgyReadOnlyAttestationPermission,
   attestAgySkillBundleActivation,
   responseTextFromEvent,
@@ -207,6 +208,37 @@ test('complete bootstrap accepts an empty discovery set or synchronized evidence
     captured: 2,
     synced: 2,
   }, 2));
+});
+
+test('complete bootstrap emits a compact organization API receipt', () => {
+  const receipt = summarizeBootstrapOrganizationApi({
+    organizationId: 'org_test',
+    organization: {
+      organizationId: 'org_test',
+      codingAgentInstructions: 'large organization-specific runbook',
+      runtimeCandidates: [{ runtimeBindingId: 'binding-1' }],
+    },
+    agents: { agents: [{}, {}] },
+    experiments: { windows: [{}] },
+    failures: { failures: [{}, {}, {}] },
+    remediations: { remediations: [] },
+    skills: { skills: [{}, {}, {}, {}] },
+    usage: { events: [{}] },
+  });
+  assert.deepEqual(receipt, {
+    ready: true,
+    organizationId: 'org_test',
+    counts: {
+      agents: 2,
+      experiments: 1,
+      failures: 3,
+      remediations: 0,
+      skills: 4,
+      usage: 1,
+    },
+  });
+  assert.equal(JSON.stringify(receipt).includes('codingAgentInstructions'), false);
+  assert.equal(JSON.stringify(receipt).includes('runtimeBindingId'), false);
 });
 
 test('bootstrap provider detection uses host signals without changing the portal instruction', () => {
@@ -1526,13 +1558,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.43');
+      assert.equal(version, '0.2.44');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.43',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.44',
   });
 });
 
