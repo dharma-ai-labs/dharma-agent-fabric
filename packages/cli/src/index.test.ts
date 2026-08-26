@@ -33,6 +33,7 @@ import {
   parseSelectedProviderIds,
   pathExistsOrThrow,
   portalUrl,
+  preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
   retryBootstrapOnboarding,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
@@ -98,6 +99,23 @@ test('bootstrap retries transient relay failures without retrying validation fai
   assert.equal(validationAttempts, 1);
   assert.equal(isTransientBootstrapError(new Error('HTTP 503 from relay')), true);
   assert.equal(isTransientBootstrapError(new Error('Permission denied')), false);
+});
+
+test('bootstrap validates stable repository identity before grant redemption', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-bootstrap-preflight-'));
+  await execFileAsync('git', ['init', root]);
+
+  await assert.rejects(
+    preflightBootstrapWorkspaceIdentity(root),
+    /no hosted Git remote/,
+  );
+  const explicit = await preflightBootstrapWorkspaceIdentity(root, 'customer/repository-a');
+  assert.equal(explicit.source, 'explicit_key');
+
+  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/dharma-ai-labs/repository-a.git']);
+  const hosted = await preflightBootstrapWorkspaceIdentity(root);
+  assert.equal(hosted.source, 'remote');
+  assert.match(hosted.fingerprint, /^sha256:[a-f0-9]{64}$/);
 });
 
 test('uses the production B2B portal and keeps hq-url as a compatibility alias', () => {

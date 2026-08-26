@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.33';
+const VERSION = '0.2.34';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1034,6 +1034,16 @@ export function sourceRepositoryFingerprint(remote: string | null, explicitKey?:
   return { fingerprint: `sha256:${createHash('sha256').update(identity).digest('hex')}`, source };
 }
 
+export async function preflightBootstrapWorkspaceIdentity(
+  workspace: string,
+  explicitKey?: string | null,
+): Promise<ReturnType<typeof sourceRepositoryFingerprint>> {
+  const gitRoot = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
+  if (!gitRoot) throw new Error('Bootstrap workspace must be a Git repository.');
+  const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+  return sourceRepositoryFingerprint(remote, explicitKey);
+}
+
 export function responseTextFromEvent(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const event = value as Record<string, unknown>;
@@ -1195,6 +1205,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const bootstrapToken = required(flags, 'grant');
   const workspace = await realpath(String(flags.get('workspace') || '.'));
   const policyRevision = required(flags, 'policy-revision');
+  await preflightBootstrapWorkspaceIdentity(
+    workspace,
+    typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
+  );
   const existing = await readDeviceConfig();
   if (existing && (existing.organizationId !== organizationId || existing.hqUrl !== hqUrl)) {
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
