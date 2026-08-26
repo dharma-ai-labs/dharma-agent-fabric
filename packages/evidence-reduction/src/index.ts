@@ -174,7 +174,7 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
 const LOCAL_PATH_PATTERNS = [
   /\bfile:\/{2,3}(?:[^\s"'<>|,}\]]*[A-Za-z0-9_~@%+=/-])?/gi,
   /(?<![:/])\/(?!api(?:\/|\b)|help(?:\b|\/))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._~@%+=:,-]*[A-Za-z0-9_~@%+=-])+/g,
-  /\b[A-Za-z]:\\{1,}[^\s"'<>|,}\]]+/g,
+  /\b[A-Za-z]:[\\/]+[^\s"'<>|,}\]]+/g,
   /\\{2,}(?:wsl(?:\.localhost)?\\{1,})?[^\s"'<>|,}\]]+/gi,
 ];
 

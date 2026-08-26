@@ -540,6 +540,7 @@ test('bounded expansion redacts file URIs and local paths while preserving web U
   const raw = [
     'Review /home/alice/company/private-repo before release.',
     'Review C:\\\\Users\\\\alice\\\\company\\\\private-repo before release.',
+    'Review C:/Users/alice/company/private-repo before release.',
     'Review \\\\wsl.localhost\\Ubuntu\\home\\alice\\private-repo before release.',
     'Do not publish file:///home/alice/company/private-repo or file:// by mistake.',
     'Keep https://dharma-ai.io/docs and vscode://settings intact.',
@@ -547,13 +548,14 @@ test('bounded expansion redacts file URIs and local paths while preserving web U
   const redacted = String(redactValue(raw, stats, '', { pseudonymizeIdentity: true }));
   assert.equal(redacted.includes('/home/alice'), false);
   assert.equal(redacted.includes('C:\\\\Users'), false);
+  assert.equal(redacted.includes('C:/Users'), false);
   assert.equal(redacted.includes('wsl.localhost'), false);
   assert.equal(redacted.includes('file://'), false);
   assert.equal(redacted.includes('Review [REDACTED:local_path] before release.'), true);
   assert.equal(redacted.includes('https://dharma-ai.io/docs'), true);
   assert.equal(redacted.includes('vscode://settings'), true);
   assert.equal(stats.classes.has('local_path'), true);
-  assert.equal(stats.redactedValues, 5);
+  assert.equal(stats.redactedValues, 7);
 });
 
 test('customer-authorized content never discloses local paths when identity pseudonymization is disabled', async () => {
@@ -561,10 +563,14 @@ test('customer-authorized content never discloses local paths when identity pseu
   const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
   const redacted = redactValue({
     cwd: '/home/alice/company/private-repo',
-    arguments: JSON.stringify({ command: 'cat /home/alice/company/private-repo/src/app.ts' }),
+    arguments: JSON.stringify({
+      command: 'cat /home/alice/company/private-repo/src/app.ts',
+      windowsCommand: 'Get-Content C:/Users/alice/company/private-repo/src/app.ts',
+    }),
   }, stats, '', { pseudonymizeIdentity: false });
   const encoded = JSON.stringify(redacted);
   assert.equal(encoded.includes('/home/alice'), false);
+  assert.equal(encoded.includes('C:/Users/alice'), false);
   assert.equal(encoded.includes('[REDACTED:local_path]'), true);
   assert.equal(stats.classes.has('local_path'), true);
 });
