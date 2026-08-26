@@ -39,6 +39,7 @@ import {
   preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
   retryBootstrapOnboarding,
+  synchronizeBootstrapEvidence,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
   installedBundleIdForSkillPollAfterAuthorizationFailure,
   recoveredTaskPolicyWasSuperseded,
@@ -105,6 +106,38 @@ test('bootstrap retries transient relay failures without retrying validation fai
   assert.equal(isTransientBootstrapError(new Error('Permission denied')), false);
 });
 
+test('bootstrap defers policy-rejected evidence without weakening the disclosure boundary', async () => {
+  const result = await synchronizeBootstrapEvidence(async () => {
+    throw new Error('local_path_disclosure_forbidden: capsule event contains a local path');
+  });
+  assert.deepEqual(result, {
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'policy_boundary',
+    errorCode: 'local_path_disclosure_forbidden',
+  });
+});
+
+test('bootstrap reports non-policy evidence failures without returning sensitive error text', async () => {
+  const result = await synchronizeBootstrapEvidence(async () => {
+    throw new Error('fetch failed for C:/Users/customer/private-session.json');
+  });
+  assert.deepEqual(result, {
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'capture_unavailable',
+    errorCode: 'evidence_capture_failed',
+  });
+  assert.equal(JSON.stringify(result).includes('C:/Users'), false);
+});
+
+test('bootstrap records successful evidence synchronization', async () => {
+  const result = await synchronizeBootstrapEvidence(async () => ({ captured: 2, synced: 2 }));
+  assert.deepEqual(result, { state: 'synchronized', captured: 2, synced: 2 });
+});
+
 test('bootstrap provider detection uses host signals without changing the portal instruction', () => {
   assert.equal(providerHintFromEnvironment({ CLAUDECODE: '1' }), 'claude');
   assert.equal(providerHintFromEnvironment({ CODEX_THREAD_ID: 'thread-1' }), 'codex');
@@ -114,14 +147,14 @@ test('bootstrap provider detection uses host signals without changing the portal
 });
 
 test('repository launchers stay version-pinned without depending on the npm-exec cache path', () => {
-  const launcher = stableRepositoryLauncherContents('0.2.37');
+  const launcher = stableRepositoryLauncherContents('0.2.38');
   assert.equal(
     launcher.shell,
-    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.37 -- dharma "$@"\n',
+    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.38 -- dharma "$@"\n',
   );
   assert.equal(
     launcher.windows,
-    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.37 -- dharma %*\r\n',
+    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.38 -- dharma %*\r\n',
   );
   assert.equal(launcher.shell.includes('/_npx/'), false);
   assert.equal(launcher.windows.includes('node_modules'), false);
@@ -1422,13 +1455,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.37');
+      assert.equal(version, '0.2.38');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.37',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.38',
   });
 });
 

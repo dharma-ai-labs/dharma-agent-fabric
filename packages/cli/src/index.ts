@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.37';
+const VERSION = '0.2.38';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1219,6 +1219,39 @@ export async function retryBootstrapOnboarding<T>(
   }
 }
 
+type BootstrapEvidenceSynchronization = {
+  state: 'synchronized' | 'deferred';
+  captured: number;
+  synced: number;
+  reason?: 'policy_boundary' | 'capture_unavailable';
+  errorCode?: string;
+};
+
+function bootstrapEvidenceErrorCode(error: unknown): string {
+  const message = String((error as { message?: unknown } | null)?.message || error || '');
+  const candidate = message.match(/(?:^|\n)([a-z][a-z0-9_]{2,80})(?=:)/)?.[1];
+  return candidate || 'evidence_capture_failed';
+}
+
+export async function synchronizeBootstrapEvidence(
+  operation: () => Promise<{ captured: number; synced: number }>,
+): Promise<BootstrapEvidenceSynchronization> {
+  try {
+    const result = await operation();
+    return { state: 'synchronized', ...result };
+  } catch (error) {
+    const errorCode = bootstrapEvidenceErrorCode(error);
+    const policyBoundary = /(?:forbidden|redaction|disclosure|policy)/.test(errorCode);
+    return {
+      state: 'deferred',
+      captured: 0,
+      synced: 0,
+      reason: policyBoundary ? 'policy_boundary' : 'capture_unavailable',
+      errorCode,
+    };
+  }
+}
+
 async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
   const pidPath = resolve(dharmaHome(), 'relay', 'relay.pid');
   let relayPid = 0;
@@ -1435,11 +1468,13 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     ['workspace', workspace], ['provider', provider], ['policy', policyPath], ['maximum-sessions', '20'],
   ]);
   const preview = await evidencePreview(evidenceFlags) as Record<string, unknown>;
-  let synchronized = { captured: 0, synced: 0 };
+  let synchronized: BootstrapEvidenceSynchronization = { state: 'synchronized', captured: 0, synced: 0 };
   if (Number(preview.trajectoryCount || 0) > 0
     && (preview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
     evidenceFlags.set('sync', true);
-    synchronized = await capture(evidenceFlags, true) as { captured: number; synced: number };
+    synchronized = await synchronizeBootstrapEvidence(
+      async () => await capture(evidenceFlags, true) as { captured: number; synced: number },
+    );
   }
   const relayProbe = await probeRelayConnection();
   const relay = flags.has('no-relay-daemon')
