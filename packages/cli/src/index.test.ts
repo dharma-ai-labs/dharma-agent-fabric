@@ -34,6 +34,7 @@ import {
   parseSelectedProviderIds,
   pathExistsOrThrow,
   portalUrl,
+  providerHintFromEnvironment,
   probeRelayConnection,
   preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
@@ -47,6 +48,7 @@ import {
   run,
   runAssistantCommand,
   sourceRepositoryFingerprint,
+  stableRepositoryLauncherContents,
   ensureAgyReadOnlyAttestationPermission,
   attestAgySkillBundleActivation,
   responseTextFromEvent,
@@ -101,6 +103,28 @@ test('bootstrap retries transient relay failures without retrying validation fai
   assert.equal(validationAttempts, 1);
   assert.equal(isTransientBootstrapError(new Error('HTTP 503 from relay')), true);
   assert.equal(isTransientBootstrapError(new Error('Permission denied')), false);
+});
+
+test('bootstrap provider detection uses host signals without changing the portal instruction', () => {
+  assert.equal(providerHintFromEnvironment({ CLAUDECODE: '1' }), 'claude');
+  assert.equal(providerHintFromEnvironment({ CODEX_THREAD_ID: 'thread-1' }), 'codex');
+  assert.equal(providerHintFromEnvironment({ AGY_CONFIG_DIR: '/tmp/agy' }), 'agy');
+  assert.equal(providerHintFromEnvironment({ HERMES_HOME: '/tmp/hermes' }), 'hermes');
+  assert.equal(providerHintFromEnvironment({}), null);
+});
+
+test('repository launchers stay version-pinned without depending on the npm-exec cache path', () => {
+  const launcher = stableRepositoryLauncherContents('0.2.37');
+  assert.equal(
+    launcher.shell,
+    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.37 -- dharma "$@"\n',
+  );
+  assert.equal(
+    launcher.windows,
+    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.37 -- dharma %*\r\n',
+  );
+  assert.equal(launcher.shell.includes('/_npx/'), false);
+  assert.equal(launcher.windows.includes('node_modules'), false);
 });
 
 test('bootstrap validates stable repository identity before grant redemption', async () => {
@@ -1365,7 +1389,7 @@ test('Claude bootstrap merges only bounded read-only project permissions', async
   assert.deepEqual(settings.permissions.deny, ['Bash(rm:*)']);
   assert.ok(settings.permissions.allow.includes('Bash(git status)'));
   assert.ok(settings.permissions.allow.includes(
-    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.36 -- dharma relay probe)',
+    'Bash(./.dharma/bin/dharma relay probe)',
   ));
   assert.equal(settings.permissions.allow.includes('Bash'), false);
   assert.equal(settings.permissions.allow.some((rule) => /bootstrap|login|capture-batch|sync|dispatch|rollout|rollback/.test(rule)), false);
@@ -1398,13 +1422,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.36');
+      assert.equal(version, '0.2.37');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.36',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.37',
   });
 });
 
@@ -1557,7 +1581,7 @@ test('native Claude bootstrap installs the bounded project completion policy', a
     permissions: { allow: string[] };
   };
   assert.ok(settings.permissions.allow.includes(
-    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.36 -- dharma evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)',
+    'Bash(./.dharma/bin/dharma evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)',
   ));
 });
 

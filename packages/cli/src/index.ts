@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, link, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.36';
+const VERSION = '0.2.37';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1219,6 +1219,119 @@ export async function retryBootstrapOnboarding<T>(
   }
 }
 
+async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
+  const pidPath = resolve(dharmaHome(), 'relay', 'relay.pid');
+  let relayPid = 0;
+  try { relayPid = Number((await readFile(pidPath, 'utf8')).trim()); } catch {}
+  if (Number.isSafeInteger(relayPid) && relayPid > 0) {
+    try { process.kill(relayPid, 'SIGTERM'); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try { process.kill(relayPid, 0); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') break;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    try {
+      process.kill(relayPid, 0);
+      throw new Error('The previous organization relay did not stop; enrollment was not changed.');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  }
+
+  const backupId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${createHash('sha256')
+    .update(`${existing.hqUrl}\0${existing.organizationId}`)
+    .digest('hex').slice(0, 12)}`;
+  const backupRoot = resolve(dirname(dharmaHome()), '.dharma-rebind-backups', backupId);
+  await mkdir(backupRoot, { recursive: true, mode: 0o700 });
+  for (const relativePath of ['device.json', 'pending-enrollment.json', 'registry', 'relay', 'vault']) {
+    const source = resolve(dharmaHome(), relativePath);
+    if (!await pathExists(source)) continue;
+    await rename(source, resolve(backupRoot, relativePath));
+  }
+  await writeJsonAtomic(resolve(backupRoot, 'RECEIPT.json'), {
+    schema: 'dharma.local-enrollment-rebind-backup/v1',
+    previousOrganizationId: existing.organizationId,
+    previousPortalOrigin: existing.hqUrl,
+    createdAt: new Date().toISOString(),
+  });
+  return { changed: true, backupId, previousOrganizationId: existing.organizationId };
+}
+
+export function stableRepositoryLauncherContents(version = VERSION) {
+  const invocation = `npm exec --yes --package=@dharma-ai-labs/agent-fabric@${version} -- dharma`;
+  return {
+    shell: `#!/bin/sh\nexec ${invocation} "$@"\n`,
+    windows: `@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@${version} -- dharma %*\r\n`,
+  };
+}
+
+async function installStableRepositoryLauncher(workspace: string) {
+  const launcherRoot = resolve(workspace, '.dharma', 'bin');
+  await mkdir(launcherRoot, { recursive: true, mode: 0o700 });
+  const shellPath = resolve(launcherRoot, 'dharma');
+  const cmdPath = resolve(launcherRoot, 'dharma.cmd');
+  const contents = stableRepositoryLauncherContents();
+  await writeFile(shellPath, contents.shell, { mode: 0o700 });
+  await chmod(shellPath, 0o700);
+  await writeFile(cmdPath, contents.windows, { mode: 0o600 });
+  return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
+}
+
+async function startRelayDaemon(policyPath: string) {
+  if (await relayProcessState() === 'running') return { started: false, state: 'running' as const };
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
+    cwd: dirname(dirname(policyPath)),
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  });
+  child.unref();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    if (await relayProcessState() === 'running') return { started: true, state: 'running' as const };
+  }
+  throw new Error('The outbound relay did not reach running state after bootstrap.');
+}
+
+export function providerHintFromEnvironment(env: NodeJS.ProcessEnv = process.env): ProviderId | null {
+  if (env.CLAUDECODE === '1' || env.CLAUDE_CODE === '1') return 'claude';
+  if (env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || env.CODEX_SANDBOX) return 'codex';
+  if (env.AGY_CONFIG_DIR || env.ANTIGRAVITY_CLI === '1') return 'agy';
+  if (env.HERMES_HOME || env.HERMES_AGENT === '1') return 'hermes';
+  return null;
+}
+
+async function detectBootstrapProvider(workspace: string): Promise<ProviderId> {
+  const hinted = providerHintFromEnvironment();
+  if (hinted) return hinted;
+  const candidates = (await Promise.all(providerAdapters.map(async (adapter) => {
+    try {
+      const sessions = await adapter.discover({
+        workspace,
+        maximumSessions: 1,
+        maximumBytesPerSession: 1_000_000,
+        maximumRecordBytes: 250_000,
+      });
+      const latest = sessions
+        .map((session) => Date.parse(session.endedAt))
+        .filter(Number.isFinite)
+        .sort((left, right) => right - left)[0];
+      return latest === undefined ? null : { provider: adapter.providerId, latest };
+    } catch {
+      return null;
+    }
+  }))).filter((candidate): candidate is { provider: ProviderId; latest: number } => candidate !== null)
+    .sort((left, right) => right.latest - left.latest);
+  if (!candidates[0]) {
+    throw new Error('Could not detect the active coding harness from this process or a workspace-qualified native session. Run the same command from inside the coding agent.');
+  }
+  return candidates[0].provider;
+}
+
 async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> {
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
@@ -1229,8 +1342,17 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     workspace,
     typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
   );
-  const existing = await readDeviceConfig();
-  if (existing && (existing.organizationId !== organizationId || existing.hqUrl !== hqUrl)) {
+  const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+  const provider = requestedProvider === 'auto'
+    ? await detectBootstrapProvider(workspace)
+    : requestedProvider;
+  if (!isLocalProviderId(provider)) {
+    throw new Error('Bootstrap provider must be auto, codex, claude, agy, or hermes.');
+  }
+  let existing = await readDeviceConfig();
+  const enrollmentMismatch = Boolean(existing
+    && (existing.organizationId !== organizationId || normalizeHqUrl(existing.hqUrl) !== hqUrl));
+  if (enrollmentMismatch && !flags.has('replace-existing-enrollment')) {
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
   }
   const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
@@ -1244,6 +1366,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     platform: devicePlatform,
     publicKeyEd25519: identity.publicKeyEd25519,
   });
+  const rebind = enrollmentMismatch && existing
+    ? await archiveEnrollmentForAuthorizedRebind(existing)
+    : { changed: false, backupId: null, previousOrganizationId: null };
+  if (rebind.changed) existing = null;
   const config: DeviceConfig = existing || {
     schema: 'dharma.device-config/v1',
     hqUrl,
@@ -1279,20 +1405,92 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   onboardFlags.set('organization-id', organizationId);
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
+  onboardFlags.set('provider', provider);
   const onboarded = await retryBootstrapOnboarding(
     async () => await onboard(onboardFlags) as Record<string, unknown>,
   );
+  const launcher = await installStableRepositoryLauncher(workspace);
+  const completionRequested = flags.has('complete');
+  if (!completionRequested) {
+    return {
+      ok: true,
+      stage: onboarded.stage,
+      enrollment: {
+        organizationId,
+        deviceId: config.deviceId,
+        status: 'approved',
+        organizationApiTokenStored: true,
+        scopes: redeemed.organizationApiTokenScopes,
+        rebind,
+      },
+      repository: onboarded,
+      launcher,
+    };
+  }
+
+  const skill = await verifyAgentFabricSkillInstallation({ provider, workspace });
+  if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
+  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
+  const evidenceFlags = new Map<string, string | boolean>([
+    ['workspace', workspace], ['provider', provider], ['policy', policyPath], ['maximum-sessions', '20'],
+  ]);
+  const preview = await evidencePreview(evidenceFlags) as Record<string, unknown>;
+  let synchronized = { captured: 0, synced: 0 };
+  if (Number(preview.trajectoryCount || 0) > 0
+    && (preview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
+    evidenceFlags.set('sync', true);
+    synchronized = await capture(evidenceFlags, true) as { captured: number; synced: number };
+  }
+  const relayProbe = await probeRelayConnection();
+  const relay = flags.has('no-relay-daemon')
+    ? { started: false, state: await relayProcessState() }
+    : await startRelayDaemon(policyPath);
+  const apiFlags = new Map<string, string | boolean>([
+    ['organization-id', organizationId], ['portal-url', hqUrl],
+  ]);
+  const [organization, agents, experiments, failures, remediations, skills, usage] = await Promise.all([
+    runOrganizationCommand('organization', 'status', apiFlags),
+    runOrganizationCommand('agents', 'list', apiFlags),
+    runOrganizationCommand('experiments', 'list', apiFlags),
+    runOrganizationCommand('failures', 'list', apiFlags),
+    runOrganizationCommand('remediations', 'list', apiFlags),
+    runOrganizationCommand('skills', 'list', apiFlags),
+    runOrganizationCommand('usage', 'list', apiFlags),
+  ]);
   return {
     ok: true,
-    stage: onboarded.stage,
+    stage: 'complete',
     enrollment: {
       organizationId,
       deviceId: config.deviceId,
       status: 'approved',
       organizationApiTokenStored: true,
       scopes: redeemed.organizationApiTokenScopes,
+      rebind,
     },
     repository: onboarded,
+    launcher,
+    provider,
+    skill,
+    evidence: {
+      discovered: Number(preview.trajectoryCount || 0),
+      synchronized,
+      automaticDisclosure: preview.automaticDisclosure,
+    },
+    relayProbe,
+    relay,
+    organizationApi: {
+      ready: true,
+      organization,
+      counts: {
+        agents: Array.isArray((agents as Record<string, unknown>)?.agents) ? ((agents as Record<string, unknown>).agents as unknown[]).length : null,
+        experiments: Array.isArray((experiments as Record<string, unknown>)?.windows) ? ((experiments as Record<string, unknown>).windows as unknown[]).length : null,
+        failures: Array.isArray((failures as Record<string, unknown>)?.failures) ? ((failures as Record<string, unknown>).failures as unknown[]).length : null,
+        remediations: Array.isArray((remediations as Record<string, unknown>)?.remediations) ? ((remediations as Record<string, unknown>).remediations as unknown[]).length : null,
+        skills: Array.isArray((skills as Record<string, unknown>)?.skills) ? ((skills as Record<string, unknown>).skills as unknown[]).length : null,
+        usage: Array.isArray((usage as Record<string, unknown>)?.events) ? ((usage as Record<string, unknown>).events as unknown[]).length : null,
+      },
+    },
   };
 }
 
@@ -3287,26 +3485,26 @@ export function nativeSkillDirectory(
 }
 
 function claudeReadOnlyCommandRules() {
-  const pinned = `npm exec --yes --package=@dharma-ai-labs/agent-fabric@${VERSION} -- dharma`;
+  const launcher = './.dharma/bin/dharma';
   return [
     'Bash(git rev-parse --is-inside-work-tree)',
     'Bash(git remote get-url origin)',
     'Bash(node --version)',
-    `Bash(${pinned} --version)`,
-    `Bash(${pinned} --help)`,
-    `Bash(${pinned} status --diagnostic)`,
-    `Bash(${pinned} repositories status --repo . --json)`,
-    `Bash(${pinned} providers list)`,
-    `Bash(${pinned} skills verify --provider claude --workspace .)`,
-    `Bash(${pinned} evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)`,
-    `Bash(${pinned} relay probe)`,
-    `Bash(${pinned} organization status --json)`,
-    `Bash(${pinned} agents list --json)`,
-    `Bash(${pinned} experiments list --json)`,
-    `Bash(${pinned} failures list --json)`,
-    `Bash(${pinned} remediations list --json)`,
-    `Bash(${pinned} skills list --json)`,
-    `Bash(${pinned} usage list --json)`,
+    `Bash(${launcher} --version)`,
+    `Bash(${launcher} --help)`,
+    `Bash(${launcher} status --diagnostic)`,
+    `Bash(${launcher} repositories status --repo . --json)`,
+    `Bash(${launcher} providers list)`,
+    `Bash(${launcher} skills verify --provider claude --workspace .)`,
+    `Bash(${launcher} evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)`,
+    `Bash(${launcher} relay probe)`,
+    `Bash(${launcher} organization status --json)`,
+    `Bash(${launcher} agents list --json)`,
+    `Bash(${launcher} experiments list --json)`,
+    `Bash(${launcher} failures list --json)`,
+    `Bash(${launcher} remediations list --json)`,
+    `Bash(${launcher} skills list --json)`,
+    `Bash(${launcher} usage list --json)`,
   ];
 }
 
