@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.45';
+const VERSION = '0.2.46';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1380,9 +1380,54 @@ export function providerHintFromEnvironment(env: NodeJS.ProcessEnv = process.env
   return null;
 }
 
+export function providerHintFromProcessArgv(lineage: string[][]): ProviderId | null {
+  const executables: Record<string, ProviderId> = {
+    agy: 'agy',
+    'agy.exe': 'agy',
+    claude: 'claude',
+    'claude.exe': 'claude',
+    codex: 'codex',
+    'codex.exe': 'codex',
+    hermes: 'hermes',
+    'hermes.exe': 'hermes',
+  };
+  for (const argv of lineage) {
+    for (const argument of argv) {
+      const provider = executables[basename(argument).toLowerCase()];
+      if (provider) return provider;
+    }
+  }
+  return null;
+}
+
+async function providerHintFromProcessAncestry(startPid = process.ppid): Promise<ProviderId | null> {
+  if (process.platform !== 'linux') return null;
+  const lineage: string[][] = [];
+  const visited = new Set<number>();
+  let pid = startPid;
+  for (let depth = 0; depth < 12 && pid > 1 && !visited.has(pid); depth += 1) {
+    visited.add(pid);
+    try {
+      const [cmdline, stat] = await Promise.all([
+        readFile(`/proc/${pid}/cmdline`, 'utf8'),
+        readFile(`/proc/${pid}/stat`, 'utf8'),
+      ]);
+      lineage.push(cmdline.split('\0').filter(Boolean));
+      const parentMatch = stat.match(/^\d+\s+\(.+\)\s+\S\s+(\d+)/);
+      if (!parentMatch) break;
+      pid = Number(parentMatch[1]);
+    } catch {
+      break;
+    }
+  }
+  return providerHintFromProcessArgv(lineage);
+}
+
 async function detectBootstrapProvider(workspace: string): Promise<ProviderId> {
   const hinted = providerHintFromEnvironment();
   if (hinted) return hinted;
+  const processHint = await providerHintFromProcessAncestry();
+  if (processHint) return processHint;
   const candidates = (await Promise.all(providerAdapters.map(async (adapter) => {
     try {
       const sessions = await adapter.discover({
