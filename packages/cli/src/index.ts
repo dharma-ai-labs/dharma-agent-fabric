@@ -34,7 +34,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.34';
+const VERSION = '0.2.35';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1149,6 +1149,26 @@ async function client() {
   const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath() });
   await instance.openSession(VERSION);
   return instance;
+}
+
+type RelayProbeClient = Pick<AgentFabricClient, 'config' | 'openSession'>;
+
+export async function probeRelayConnection(
+  openClient: () => Promise<RelayProbeClient> = async () => AgentFabricClient.open({
+    configPath: configPath(),
+    statePath: protocolStatePath(),
+  }),
+) {
+  const instance = await openClient();
+  const acknowledgement = await instance.openSession(VERSION) as Record<string, unknown>;
+  if (acknowledgement.ok !== true) throw new Error('Relay session acknowledgement was not successful.');
+  return {
+    ok: true,
+    connected: true,
+    organizationId: instance.config.organizationId,
+    deviceId: instance.config.deviceId,
+    relayVersion: VERSION,
+  };
 }
 
 async function organizationApi(flags: Map<string, string | boolean>) {
@@ -3266,6 +3286,68 @@ export function nativeSkillDirectory(
   return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
 }
 
+function claudeReadOnlyCommandRules() {
+  const pinned = `npm exec --yes --package=@dharma-ai-labs/agent-fabric@${VERSION} -- dharma`;
+  return [
+    'Bash(git rev-parse --is-inside-work-tree)',
+    'Bash(git remote get-url origin)',
+    'Bash(node --version)',
+    `Bash(${pinned} --version)`,
+    `Bash(${pinned} --help)`,
+    `Bash(${pinned} status --diagnostic)`,
+    `Bash(${pinned} repositories status --repo . --json)`,
+    `Bash(${pinned} providers list)`,
+    `Bash(${pinned} skills verify --provider claude --workspace .)`,
+    `Bash(${pinned} evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)`,
+    `Bash(${pinned} relay probe)`,
+    `Bash(${pinned} organization status --json)`,
+    `Bash(${pinned} agents list --json)`,
+    `Bash(${pinned} experiments list --json)`,
+    `Bash(${pinned} failures list --json)`,
+    `Bash(${pinned} remediations list --json)`,
+    `Bash(${pinned} skills list --json)`,
+    `Bash(${pinned} usage list --json)`,
+  ];
+}
+
+export async function installClaudeReadOnlyProjectPermissions(workspaceInput: string) {
+  const workspace = await realpath(workspaceInput);
+  const settingsPath = resolve(workspace, '.claude', 'settings.local.json');
+  let settings: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await readFile(settingsPath, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Claude project settings must be a JSON object.');
+    }
+    settings = parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const existingPermissions = settings.permissions;
+  if (existingPermissions !== undefined
+    && (!existingPermissions || typeof existingPermissions !== 'object' || Array.isArray(existingPermissions))) {
+    throw new Error('Claude project permissions must be a JSON object.');
+  }
+  const permissions = (existingPermissions || {}) as Record<string, unknown>;
+  if (permissions.allow !== undefined
+    && (!Array.isArray(permissions.allow) || permissions.allow.some((rule) => typeof rule !== 'string'))) {
+    throw new Error('Claude project permission allow rules must be a string array.');
+  }
+  const existingAllow = (permissions.allow || []) as string[];
+  const requiredAllow = claudeReadOnlyCommandRules();
+  const allow = [...new Set([...existingAllow, ...requiredAllow])];
+  await writeJsonAtomic(settingsPath, {
+    ...settings,
+    permissions: { ...permissions, allow },
+  });
+  return {
+    path: '.claude/settings.local.json',
+    addedRules: requiredAllow.filter((rule) => !existingAllow.includes(rule)).length,
+    totalRules: allow.length,
+    scope: 'read_only_agent_fabric_completion',
+  };
+}
+
 type HermesSkillExecutor = (
   executable: string,
   argv: string[],
@@ -3303,6 +3385,9 @@ export async function installNativeAgentFabricBootstrap(input: {
   if (await pathExists(skillRoot) && !await pathExists(marker)) {
     throw new Error(`Refusing to replace an unmanaged ${input.provider} skill at ${skillRoot}.`);
   }
+  const projectPermissions = input.provider === 'claude'
+    ? await installClaudeReadOnlyProjectPermissions(input.workspace)
+    : null;
   const skill = `---
 name: dharma-agent-fabric
 description: Connect the current repository to Dharma Agent Fabric for signed tasks, bounded evidence, and verified skill releases.
@@ -3343,6 +3428,7 @@ The repository-local skill and connection manifest are authoritative for the act
     skillPath: resolve(skillRoot, 'SKILL.md'),
     activation: input.provider === 'agy' ? 'manual_invocation_required' : 'next_session',
     verified: await pathExists(resolve(skillRoot, 'SKILL.md')) && await pathExists(marker),
+    projectPermissions,
   };
 }
 
@@ -4130,6 +4216,7 @@ export async function run(argv: string[]): Promise<Output> {
     if (result) return result;
   }
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
+  if (command === 'relay' && subcommand === 'probe') return probeRelayConnection();
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
   if (command === 'skills' && subcommand === 'status') {

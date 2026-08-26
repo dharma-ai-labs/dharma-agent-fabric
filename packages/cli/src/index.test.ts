@@ -20,6 +20,7 @@ import {
   assertTaskWorkspacePolicy,
   assertTaskSkillPin,
   installNativeAgentFabricBootstrap,
+  installClaudeReadOnlyProjectPermissions,
   installRepositoryAgentFabricSkill,
   isDirectExecution,
   isTransientBootstrapError,
@@ -33,6 +34,7 @@ import {
   parseSelectedProviderIds,
   pathExistsOrThrow,
   portalUrl,
+  probeRelayConnection,
   preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
   retryBootstrapOnboarding,
@@ -1340,6 +1342,87 @@ test('provider skill roots map to each host native discovery directory', async (
   );
 });
 
+test('Claude bootstrap merges only bounded read-only project permissions', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-claude-permissions-'));
+  const settingsPath = join(workspace, '.claude', 'settings.local.json');
+  await mkdir(join(workspace, '.claude'), { recursive: true });
+  await writeFile(settingsPath, JSON.stringify({
+    theme: 'dark',
+    permissions: {
+      allow: ['Bash(git status)'],
+      deny: ['Bash(rm:*)'],
+    },
+  }));
+
+  const first = await installClaudeReadOnlyProjectPermissions(workspace);
+  const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+    theme: string;
+    permissions: { allow: string[]; deny: string[] };
+  };
+  assert.equal(first.path, '.claude/settings.local.json');
+  assert.ok(first.addedRules > 0);
+  assert.equal(settings.theme, 'dark');
+  assert.deepEqual(settings.permissions.deny, ['Bash(rm:*)']);
+  assert.ok(settings.permissions.allow.includes('Bash(git status)'));
+  assert.ok(settings.permissions.allow.includes(
+    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.35 -- dharma relay probe)',
+  ));
+  assert.equal(settings.permissions.allow.includes('Bash'), false);
+  assert.equal(settings.permissions.allow.some((rule) => /bootstrap|login|capture-batch|sync|dispatch|rollout|rollback/.test(rule)), false);
+
+  const second = await installClaudeReadOnlyProjectPermissions(workspace);
+  assert.equal(second.addedRules, 0);
+  assert.equal(second.totalRules, first.totalRules);
+});
+
+test('Claude project permission bootstrap rejects malformed settings without replacing them', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-claude-permissions-invalid-'));
+  const settingsPath = join(workspace, '.claude', 'settings.local.json');
+  await mkdir(join(workspace, '.claude'), { recursive: true });
+  await writeFile(settingsPath, JSON.stringify({ permissions: { allow: 'Bash' } }));
+  await assert.rejects(
+    installClaudeReadOnlyProjectPermissions(workspace),
+    /allow rules must be a string array/,
+  );
+  assert.deepEqual(JSON.parse(await readFile(settingsPath, 'utf8')), { permissions: { allow: 'Bash' } });
+});
+
+test('relay probe opens an authenticated session without polling or leasing work', async () => {
+  let sessions = 0;
+  const result = await probeRelayConnection(async () => ({
+    config: {
+      schema: 'dharma.device-config/v1', hqUrl: 'https://www.dharma-ai.io',
+      organizationId: 'org_test', deviceId: 'device_test', deviceName: 'test', platform: 'windows',
+      publicKeyEd25519: 'public', serverPublicKeyEd25519: 'server', relayUrl: 'https://relay.example.test',
+      enrolledAt: new Date(0).toISOString(),
+    },
+    openSession: async (version?: string) => {
+      sessions += 1;
+      assert.equal(version, '0.2.35');
+      return { ok: true };
+    },
+  }));
+  assert.equal(sessions, 1);
+  assert.deepEqual(result, {
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.35',
+  });
+});
+
+test('relay probe fails closed when the server does not acknowledge the session', async () => {
+  await assert.rejects(
+    probeRelayConnection(async () => ({
+      config: {
+        schema: 'dharma.device-config/v1', hqUrl: 'https://www.dharma-ai.io',
+        organizationId: 'org_test', deviceId: 'device_test', deviceName: 'test', platform: 'windows',
+        publicKeyEd25519: 'public', serverPublicKeyEd25519: 'server', relayUrl: 'https://relay.example.test',
+        enrolledAt: new Date(0).toISOString(),
+      },
+      openSession: async () => ({ ok: false }),
+    })),
+    /acknowledgement was not successful/,
+  );
+});
+
 test('Hermes bootstrap trusts the repository and verifies native discovery', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-hermes-skill-'));
   const home = join(root, 'home');
@@ -1446,6 +1529,32 @@ test('native bootstrap installation makes the repository skill verifiable by Cod
   assert.equal(verified.ready, true);
   assert.equal(verified.repositoryInstalled, true);
   assert.equal(verified.nativeInstalled, true);
+});
+
+test('native Claude bootstrap installs the bounded project completion policy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-native-claude-skill-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(workspace, { recursive: true });
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId: 'workspace_test',
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const installed = await installNativeAgentFabricBootstrap({
+    provider: 'claude', workspace, workspaceId: 'workspace_test', organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io', home,
+  });
+  assert.equal(installed.verified, true);
+  assert.equal(installed.projectPermissions?.scope, 'read_only_agent_fabric_completion');
+  const settings = JSON.parse(await readFile(join(workspace, '.claude', 'settings.local.json'), 'utf8')) as {
+    permissions: { allow: string[] };
+  };
+  assert.ok(settings.permissions.allow.includes(
+    'Bash(npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.35 -- dharma evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)',
+  ));
 });
 
 test('Agy skill verification requires the native plugin to be discoverable by the provider', async () => {
@@ -1656,6 +1765,7 @@ test('native bootstrap installation isolates provider failures during onboarding
         skillPath: '/skills/SKILL.md',
         activation: 'next_session',
         verified: true,
+        projectPermissions: null,
       };
     },
   });
