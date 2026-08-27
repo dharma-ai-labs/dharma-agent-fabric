@@ -729,6 +729,95 @@ test('organization commands require environment credentials and explicit confirm
   }
 });
 
+test('evaluation CLI validates cost before launch and reads authoritative status and results', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-evaluation-cli-'));
+  const packagePath = join(root, 'task-package.json');
+  await writeFile(packagePath, JSON.stringify({
+    package_id: 'checkout-handoff-v1',
+    schema_version: 'managed-evaluation-task-package-v1',
+    description: 'Checkout handoff evidence boundary.',
+    evaluation_contract: {
+      version: 'managed-evaluation-contract-v1',
+      standard: {
+        profile: 'cognitive-integrity-v1',
+        hardGates: ['task_score_threshold', 'blocked_action_avoidance'],
+      },
+      operationalCriteria: { requiredTraceFields: ['runId', 'traceId'] },
+      comparison: {
+        mode: 'paired_direct_stateful',
+        primaryArm: 'stateful_dharma_runtime',
+        baselineArm: 'direct_baseline',
+      },
+      releaseDecision: { expression: 'primary_arm_all_standard_gates_and_threshold' },
+    },
+    tasks: [{
+      task_id: 'checkout-001',
+      scenario: { user_message: 'Resolve the checkout failure using only supplied evidence.' },
+    }],
+  }));
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.DHARMA_ORG_API_TOKEN;
+  const requests: Request[] = [];
+  process.env.DHARMA_ORG_API_TOKEN = 'test-organization-token';
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    const path = new URL(request.url).pathname;
+    const payload = path.endsWith('/preflight')
+      ? { ok: true, preflight: { taskCount: 1, trajectoryCount: 2, maximumCredits: 10_000 } }
+      : request.method === 'POST'
+        ? { ok: true, campaign: { id: 'campaign-1', status: 'running' } }
+        : {
+            ok: true,
+            campaigns: [{ id: 'campaign-1', status: 'completed' }],
+            sessions: [{ id: 'session-1', status: 'completed' }],
+            tasks: [{ id: 'task-1', scorer_config: { evaluation_contract: { version: 'managed-evaluation-contract-v1' } } }],
+            results: [{ id: 'result-1', metadata: { verdict: { pass: true } } }],
+          };
+    return new Response(JSON.stringify(payload), {
+      status: request.method === 'POST' ? 201 : 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const base = [
+    '--file', packagePath,
+    '--organization-id', 'org_northstar',
+    '--hq-url', 'https://www.dharma-ai.io',
+    '--agent-id', '11111111-1111-4111-8111-111111111111',
+  ];
+  try {
+    const validated = await run(['evaluations', 'validate', ...base]) as Record<string, unknown>;
+    assert.equal(validated.ok, true);
+    assert.equal((validated.preflight as Record<string, unknown>).trajectoryCount, 2);
+    const requestsBeforeUnconfirmedLaunch = requests.length;
+    await assert.rejects(() => run(['evaluations', 'launch', ...base]), /requires --confirm/);
+    assert.equal(requests.length, requestsBeforeUnconfirmedLaunch + 1, 'unconfirmed launch may preflight but must not launch');
+    const launched = await run(['evaluations', 'launch', ...base, '--confirm']) as Record<string, unknown>;
+    assert.equal(launched.ok, true);
+    assert.equal(requests.at(-1)?.method, 'POST');
+    assert.match(new URL(requests.at(-1)!.url).pathname, /managed-evals\/campaigns$/);
+    const launchedBody = JSON.parse(await requests.at(-1)!.text()) as Record<string, unknown>;
+    assert.deepEqual(launchedBody.arms, ['direct_baseline', 'stateful_dharma_runtime']);
+    assert.equal(launchedBody.agentId, '11111111-1111-4111-8111-111111111111');
+
+    const status = await run([
+      'evaluations', 'status', '--campaign-id', 'campaign-1', '--organization-id', 'org_northstar',
+      '--hq-url', 'https://www.dharma-ai.io',
+    ]) as Record<string, unknown>;
+    assert.equal((status.campaigns as unknown[]).length, 1);
+    assert.equal(Object.hasOwn(status, 'results'), false);
+    const results = await run([
+      'evaluations', 'results', '--campaign-id', 'campaign-1', '--organization-id', 'org_northstar',
+      '--hq-url', 'https://www.dharma-ai.io',
+    ]) as Record<string, unknown>;
+    assert.equal((results.results as unknown[]).length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) delete process.env.DHARMA_ORG_API_TOKEN;
+    else process.env.DHARMA_ORG_API_TOKEN = originalToken;
+  }
+});
+
 test('repository identity is credential-free and stable across Git transport forms', () => {
   assert.equal(
     normalizeGitRemoteIdentity('git@github.com:Dharma-AI-Labs/Northstar.git'),
@@ -1568,13 +1657,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.46');
+      assert.equal(version, '0.2.47');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.46',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.47',
   });
 });
 
