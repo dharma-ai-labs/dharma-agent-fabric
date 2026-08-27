@@ -22,7 +22,12 @@ import {
   loadOrganizationApiToken, redeemBootstrapGrant, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
-import { AgentFabricClient as AgentFabricApiClient } from '@dharma-ai-labs/agent-fabric-sdk';
+import {
+  AgentFabricClient as AgentFabricApiClient,
+  type AgentFabricManagedEvaluationCampaignInput,
+  type AgentFabricManagedEvaluationContract,
+  type AgentFabricManagedEvaluationTaskPackage,
+} from '@dharma-ai-labs/agent-fabric-sdk';
 import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import {
   executeTask,
@@ -34,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.46';
+const VERSION = '0.2.47';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1665,6 +1670,79 @@ async function commandJsonBody(flags: Map<string, string | boolean>) {
     throw new Error('Command body must be a JSON object.');
   }
   return parsed as Record<string, unknown>;
+}
+
+function managedEvaluationArms(contract: AgentFabricManagedEvaluationContract) {
+  return contract.comparison.mode === 'single_held_out'
+    ? ['held_out_backtest'] as const
+    : ['direct_baseline', 'stateful_dharma_runtime'] as const;
+}
+
+async function managedEvaluationCampaignFromPackage(
+  flags: Map<string, string | boolean>,
+): Promise<AgentFabricManagedEvaluationCampaignInput> {
+  const packagePath = resolve(required(flags, 'file'));
+  const parsed = JSON.parse(await readFile(packagePath, 'utf8')) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Evaluation package must be a JSON object.');
+  }
+  const taskPackage = parsed as Partial<AgentFabricManagedEvaluationTaskPackage>;
+  if (taskPackage.schema_version !== 'managed-evaluation-task-package-v1') {
+    throw new Error('Evaluation package schema_version must be managed-evaluation-task-package-v1.');
+  }
+  if (!String(taskPackage.package_id || '').trim()) {
+    throw new Error('Evaluation package requires package_id.');
+  }
+  if (!taskPackage.evaluation_contract || typeof taskPackage.evaluation_contract !== 'object') {
+    throw new Error('Evaluation package requires evaluation_contract.');
+  }
+  if (!Array.isArray(taskPackage.tasks) || taskPackage.tasks.length === 0) {
+    throw new Error('Evaluation package requires at least one task.');
+  }
+  const agentId = required(flags, 'agent-id');
+  const arms = managedEvaluationArms(taskPackage.evaluation_contract);
+  return {
+    name: String(flags.get('name') || taskPackage.package_id).trim(),
+    ...(taskPackage.description ? { description: taskPackage.description } : {}),
+    ...(typeof flags.get('topic-category') === 'string'
+      ? { topicCategory: String(flags.get('topic-category')) }
+      : {}),
+    agentId,
+    arms: [...arms],
+    ...(flags.get('continuous-100') === true ? { automationMode: 'continuous_100' as const } : {}),
+    ...(typeof flags.get('policy-candidate-id') === 'string'
+      ? { policyCandidateId: String(flags.get('policy-candidate-id')) }
+      : {}),
+    evaluationContract: taskPackage.evaluation_contract,
+    tasks: taskPackage.tasks,
+  };
+}
+
+async function runManagedEvaluationCommand(
+  subcommand: string | undefined,
+  flags: Map<string, string | boolean>,
+) {
+  const api = await organizationApi(flags);
+  if (subcommand === 'validate' || subcommand === 'launch') {
+    const campaign = await managedEvaluationCampaignFromPackage(flags);
+    const preflight = await api.preflightManagedEval(campaign);
+    if (subcommand === 'validate') return preflight;
+    requireExplicitConfirmation(flags, 'Launching a paid managed evaluation');
+    const launched = await api.createManagedEval(campaign);
+    return { ok: true, preflight, launched };
+  }
+  if (subcommand === 'status' || subcommand === 'results') {
+    const campaignId = required(flags, 'campaign-id');
+    const result = await api.getManagedEvals({ campaignId });
+    if (subcommand === 'results') return result;
+    const payload = result as Record<string, unknown>;
+    return {
+      ok: payload.ok === true,
+      campaigns: Array.isArray(payload.campaigns) ? payload.campaigns : [],
+      sessions: Array.isArray(payload.sessions) ? payload.sessions : [],
+    };
+  }
+  return null;
 }
 
 export function requireExplicitConfirmation(flags: Map<string, string | boolean>, action: string) {
@@ -4607,6 +4685,10 @@ export async function run(argv: string[]): Promise<Output> {
     }
   }
   if (command === 'assistant') return runAssistantCommand(subcommand, flags);
+  if (command === 'evaluations') {
+    const result = await runManagedEvaluationCommand(subcommand, flags);
+    if (result) return result;
+  }
   if ([
     'organization', 'agents', 'experiments', 'failures', 'remediations', 'handoffs', 'usage',
   ].includes(String(command)) || (

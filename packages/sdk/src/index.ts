@@ -108,6 +108,94 @@ export interface AgentFabricManagedRunInput {
   estimatedCredits?: number;
 }
 
+export type AgentFabricManagedEvaluationArm =
+  | 'direct_baseline'
+  | 'stateful_dharma_runtime'
+  | 'held_out_backtest';
+
+export type AgentFabricManagedEvaluationHardGate =
+  | 'task_score_threshold'
+  | 'evidence_boundary_preserved'
+  | 'false_premise_resisted'
+  | 'blocked_action_avoidance'
+  | 'final_action_grounded'
+  | 'required_tool_discipline';
+
+export interface AgentFabricManagedEvaluationContract {
+  version: 'managed-evaluation-contract-v1';
+  standard: {
+    profile: 'cognitive-integrity-v1';
+    hardGates: AgentFabricManagedEvaluationHardGate[];
+  };
+  customerDomainRubric?: {
+    version: string;
+    dimensions: Array<{
+      id: string;
+      label: string;
+      description: string;
+      evaluator: 'semantic_judge' | 'deterministic_verifier';
+      verifierId?: string;
+      weight?: number;
+    }>;
+  };
+  operationalCriteria: {
+    maxInputTokens?: number;
+    maxOutputTokens?: number;
+    maxRuntimeSeconds?: number;
+    requiredTraceFields: string[];
+  };
+  comparison: {
+    mode: 'paired_direct_stateful' | 'single_held_out';
+    primaryArm: AgentFabricManagedEvaluationArm;
+    baselineArm?: AgentFabricManagedEvaluationArm;
+  };
+  releaseDecision: {
+    expression: 'primary_arm_all_standard_gates_and_threshold';
+  };
+}
+
+export interface AgentFabricManagedEvaluationTask {
+  task_id: string;
+  schema_version?: string;
+  task_family_id?: string;
+  task_family?: string;
+  stage?: string;
+  difficulty?: string;
+  primary_skill_under_test?: string;
+  scenario: Record<string, unknown>;
+  hidden_ground_truth?: Record<string, unknown>;
+  expected_state_gate?: Record<string, unknown>;
+  tool_expectations?: Record<string, unknown>;
+  success_criteria?: string[];
+  failure_labels_to_detect?: string[];
+  remediation_requirements?: Array<{ flag: string; rule: string }>;
+  scoring?: Record<string, unknown>;
+  tau_style_adapter?: Record<string, unknown>;
+  tags?: string[];
+  [key: string]: unknown;
+}
+
+export interface AgentFabricManagedEvaluationTaskPackage {
+  package_id: string;
+  schema_version: 'managed-evaluation-task-package-v1';
+  generated_at?: string;
+  description?: string;
+  evaluation_contract: AgentFabricManagedEvaluationContract;
+  tasks: AgentFabricManagedEvaluationTask[];
+}
+
+export interface AgentFabricManagedEvaluationCampaignInput {
+  name: string;
+  description?: string;
+  topicCategory?: string;
+  agentId: string;
+  arms: AgentFabricManagedEvaluationArm[];
+  automationMode?: 'continuous_100';
+  policyCandidateId?: string;
+  evaluationContract: AgentFabricManagedEvaluationContract;
+  tasks: AgentFabricManagedEvaluationTask[];
+}
+
 export interface AgentFabricControlAgentMessageInput {
   message: string;
   attachments?: AgentFabricImageAttachment[];
@@ -363,8 +451,18 @@ export class AgentFabricClient {
   getManagedRunEvents(runId: string) {
     return this.request<Record<string, unknown>>('GET', `/api/orgs/${encodeURIComponent(this.organizationId)}/agent-runs/${encodeURIComponent(runId)}/events`);
   }
-  createManagedEval(input: Record<string, unknown>, options?: AgentFabricRequestOptions) {
+  createManagedEval(input: AgentFabricManagedEvaluationCampaignInput, options?: AgentFabricRequestOptions) {
     return this.request<Record<string, unknown>>('POST', `/api/orgs/${encodeURIComponent(this.organizationId)}/managed-evals/campaigns`, input, options);
+  }
+  preflightManagedEval(input: AgentFabricManagedEvaluationCampaignInput, options?: AgentFabricRequestOptions) {
+    return this.request<Record<string, unknown>>('POST', `/api/orgs/${encodeURIComponent(this.organizationId)}/managed-evals/preflight`, input, options);
+  }
+  getManagedEvals(input: { campaignId?: string; limit?: number } = {}) {
+    const query = new URLSearchParams();
+    if (input.campaignId) query.set('campaignId', input.campaignId);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    const suffix = query.size ? `?${query.toString()}` : '';
+    return this.request<Record<string, unknown>>('GET', `/api/orgs/${encodeURIComponent(this.organizationId)}/managed-evals/campaigns${suffix}`);
   }
   listManagedTraces(query = '') {
     return this.request<Record<string, unknown>>('GET', `/api/orgs/${encodeURIComponent(this.organizationId)}/managed-traces${query}`);

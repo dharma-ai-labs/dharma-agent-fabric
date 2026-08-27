@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { validateActionDecisionTaskRequestContract } from '@dharma-ai-labs/agent-fabric-contracts';
-import { AgentFabricApiError, AgentFabricClient } from './index.js';
+import {
+  AgentFabricApiError,
+  AgentFabricClient,
+  type AgentFabricManagedEvaluationCampaignInput,
+} from './index.js';
 
 test('SDK sends organization-scoped bearer requests and idempotency keys without exposing cloud endpoints', async () => {
   let request: { url?: string; init?: RequestInit } = {};
@@ -19,6 +23,58 @@ test('SDK sends organization-scoped bearer requests and idempotency keys without
   assert.equal(headers.get('authorization'), 'Bearer dharma_org_secret');
   assert.equal(headers.get('idempotency-key'), 'idem-1');
   assert.equal(JSON.stringify(request).includes('run.googleapis.com'), false);
+});
+
+test('SDK preflights, launches, and reads one authoritative managed evaluation contract', async () => {
+  const requests: Request[] = [];
+  const client = new AgentFabricClient({
+    organizationId: 'org_northstar',
+    token: 'dharma_org_test',
+    fetcher: async (input, init) => {
+      requests.push(new Request(input, init));
+      return new Response(JSON.stringify({ ok: true }), {
+        status: init?.method === 'POST' ? 201 : 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  const campaign: AgentFabricManagedEvaluationCampaignInput = {
+    name: 'Checkout handoff evaluation',
+    agentId: '11111111-1111-4111-8111-111111111111',
+    arms: ['direct_baseline', 'stateful_dharma_runtime'],
+    evaluationContract: {
+      version: 'managed-evaluation-contract-v1' as const,
+      standard: {
+        profile: 'cognitive-integrity-v1' as const,
+        hardGates: ['task_score_threshold', 'blocked_action_avoidance'],
+      },
+      operationalCriteria: { requiredTraceFields: ['runId', 'traceId'] },
+      comparison: {
+        mode: 'paired_direct_stateful' as const,
+        primaryArm: 'stateful_dharma_runtime' as const,
+        baselineArm: 'direct_baseline' as const,
+      },
+      releaseDecision: { expression: 'primary_arm_all_standard_gates_and_threshold' as const },
+    },
+    tasks: [{
+      task_id: 'checkout-001',
+      scenario: { user_message: 'Resolve the checkout failure using only supplied evidence.' },
+    }],
+  };
+
+  await client.preflightManagedEval(campaign, { idempotencyKey: 'preflight-1' });
+  await client.createManagedEval(campaign, { idempotencyKey: 'launch-1' });
+  await client.getManagedEvals({ campaignId: '22222222-2222-4222-8222-222222222222' });
+
+  assert.deepEqual(requests.map((request) => new URL(request.url).pathname), [
+    '/api/orgs/org_northstar/managed-evals/preflight',
+    '/api/orgs/org_northstar/managed-evals/campaigns',
+    '/api/orgs/org_northstar/managed-evals/campaigns',
+  ]);
+  assert.equal(requests[0]?.method, 'POST');
+  assert.equal(requests[1]?.headers.get('idempotency-key'), 'launch-1');
+  assert.equal(new URL(requests[2]!.url).searchParams.get('campaignId'), '22222222-2222-4222-8222-222222222222');
+  assert.deepEqual(JSON.parse(await requests[0]!.text()), campaign);
 });
 
 test('SDK accepts HTTPS and exact loopback origins but rejects credential-bearing or deceptive hosts', () => {

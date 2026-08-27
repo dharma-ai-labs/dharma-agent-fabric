@@ -105,6 +105,43 @@ Local metadata analysis is operational triage, not semantic Cognitive Integrity
 evaluation. Nuanced scoring and remediation require approved, redacted evidence;
 missing evidence must produce `insufficient_evidence`.
 
+## Managed evaluation workflow
+
+Download the versioned task-package template and JSON Schema from the production
+documentation, replace the example task with customer evidence, and validate the
+exact contract and maximum credit charge before launching:
+
+```bash
+curl -fsSLO https://www.dharma-ai.io/templates/managed-evaluation-task-package-v1.json
+
+dharma evaluations validate \
+  --file managed-evaluation-task-package-v1.json \
+  --agent-id <active-managed-agent-id> \
+  --organization-id <organization-id>
+
+dharma evaluations launch \
+  --file managed-evaluation-task-package-v1.json \
+  --agent-id <active-managed-agent-id> \
+  --organization-id <organization-id> \
+  --confirm
+```
+
+`validate` is read-only. It returns task count, trajectory count, configured
+standard hard gates, maximum credits, and invoice-equivalent value without
+running a model or debiting credits. `launch` repeats server validation and
+requires explicit confirmation before creating the paid campaign. The package
+always applies the standard Cognitive Integrity profile; an optional versioned
+customer-domain rubric adds governed semantic or registered deterministic
+dimensions without executing customer-supplied code.
+
+```bash
+dharma evaluations status --campaign-id <campaign-id> --organization-id <organization-id>
+dharma evaluations results --campaign-id <campaign-id> --organization-id <organization-id>
+```
+
+`results` returns the persisted authoritative verdict used by the portal and
+Control Agent. Scorer-only hidden truth is never returned by the read API.
+
 After a candidate pull request exists, an organization admin first authorizes
 the candidate on one exact local endpoint. This is an evaluation-only canary,
 not release approval:
@@ -142,6 +179,7 @@ UUIDs for that repository agent. HQ rejects source, older, cross-agent, deleted,
 or unavailable evidence.
 
 - [Dharma AI](https://www.dharma-ai.io)
+- [Evaluation task package and API](https://www.dharma-ai.io/docs/evaluations)
 - [Source and issue tracker](https://github.com/dharma-ai-labs/dharma-agent-fabric)
 - [Customer onboarding guide](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/onboarding/customer-guide.md)
 - [CLI command contract](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/22-cli-command-contract.md)
