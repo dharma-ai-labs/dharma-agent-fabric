@@ -15,7 +15,7 @@ The adapter permits read-only tasks only after Hermes reports a configured
 inference provider. Skill discovery and activation do not imply that model
 execution is configured.
 
-- [Provider and host plan](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/13-host-adapter-plan.md)
+- [Released host capability evidence](https://github.com/dharma-ai-labs/dharma-agent-fabric#initial-host-support)
 - [Customer onboarding](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/onboarding/customer-guide.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/provider-adapters)
 - [Dharma AI](https://www.dharma-ai.io)

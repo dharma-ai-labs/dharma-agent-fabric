@@ -6,7 +6,7 @@ the repository notices. This package does not promote evidence-only adapters to
 task execution or Skill activation support.
 
 - [Upstream and open-source strategy](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/15-open-source-and-upstream-strategy.md)
-- [Provider plan](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/13-host-adapter-plan.md)
+- [Source basis and architectural differences](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/21-source-basis-and-differences.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/better-harness-bridge)
 - [Dharma AI](https://www.dharma-ai.io)
 

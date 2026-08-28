@@ -9,7 +9,7 @@ These signals select sessions for deeper review. They cannot determine factual
 grounding, inference validity, sycophancy, or a semantic remediation without
 approved content evidence.
 
-- [Adaptive evidence design](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/04-adaptive-deep-trajectory-sync.md)
+- [Evidence boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric#cognitive-integrity-evidence-ladder)
 - [Security and privacy](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/10-security-privacy-and-threat-model.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/evidence-reduction)
 - [Dharma AI](https://www.dharma-ai.io)

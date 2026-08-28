@@ -21,7 +21,7 @@ the HQ enforcement payload with an `executed`, `contained`, or `unknown`
 disposition. The acknowledgement is returned inside the existing signed device
 protocol channel.
 
-- [Architecture](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/01-system-architecture.md)
+- [API and event contracts](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/12-api-and-event-contracts.md)
 - [API and event contracts](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/12-api-and-event-contracts.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/contracts)
 - [Dharma AI](https://www.dharma-ai.io)

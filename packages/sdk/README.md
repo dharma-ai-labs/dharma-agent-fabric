@@ -69,7 +69,7 @@ Control Agent without exposing scorer-only hidden truth.
 
 - [OpenAPI contract](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/openapi/agent-fabric.openapi.json)
 - [Managed evaluation task package](https://www.dharma-ai.io/docs/evaluations)
-- [Managed runtime, BYOK, and billing](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/09-managed-runtime-byok-and-billing.md)
+- [Customer onboarding and runtime choices](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/onboarding/customer-guide.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/sdk)
 - [Dharma AI](https://www.dharma-ai.io)
 
