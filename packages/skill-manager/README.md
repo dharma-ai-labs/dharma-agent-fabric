@@ -6,7 +6,7 @@ receipts, switches active versions only after verification, and preserves a
 rollback ancestor.
 
 - [Skill supply chain](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/07-skill-supply-chain.md)
-- [Evaluation and remediation](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/08-evaluation-remediation-and-failure-atlas.md)
+- [Customer onboarding and governed releases](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/onboarding/customer-guide.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/skill-manager)
 - [Dharma AI](https://www.dharma-ai.io)
 

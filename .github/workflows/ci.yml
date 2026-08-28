@@ -41,6 +41,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Enforce public content boundary
+        env:
+          DHARMA_PUBLIC_CONTENT_DENYLIST: ${{ secrets.DHARMA_PUBLIC_CONTENT_DENYLIST }}
+        run: npm run public:content:check
+
       - name: Run package validation
         run: npm run check
 

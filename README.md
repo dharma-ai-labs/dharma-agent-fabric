@@ -52,7 +52,7 @@ that task execution, continuation, or Skill activation works for that host.
 
 ## Customer onboarding
 
-The reusable company flow is documented in [the customer guide](docs/onboarding/customer-guide.md). The first production reference procedure, including exact BidStitch CLI, SDK, analysis, remediation, and rollback steps, is in [the BidStitch first-GA guide](docs/onboarding/bidstitch-first-ga.md).
+The reusable company flow is documented in [the customer guide](docs/onboarding/customer-guide.md). Customer-specific launch procedures, organization identifiers, infrastructure receipts, and operating runbooks are maintained in private customer workspaces and are never published from this repository.
 
 An organization starts at `https://www.dharma-ai.io/subscribe` with a local-agent
 trial, a paid package, or an explicitly sponsored canary. Dharma creates one
@@ -166,6 +166,12 @@ mise exec node@22 -- npm run load:relay
 
 The `dharma` CLI is built from `packages/cli`. Use `--json` for parser-safe
 output; diagnostics are written to stderr.
+
+Public contributions must pass the [documentation boundary](docs/PUBLIC_DOCUMENTATION_POLICY.md):
+
+```bash
+npm run public:content:check
+```
 
 `load:relay` starts an isolated mock HQ and local relay, then proves 1,000
 concurrent device connections, 10,000 relayed request envelopes, and a
