@@ -60,30 +60,39 @@ private control repository under `dharma-ai-labs` and invites the customer's
 GitHub account. Each selected source repository becomes one logical agent and
 one permanent `agents/<slug>-<hash8>` branch in that control repository.
 
-Install and enroll the CLI, then select repositories explicitly:
+For the normal company path, open the intended source repository in a supported
+coding agent. In **Portal -> Agent Fabric -> Instructions**, select **Copy setup
+instructions for my coding agent**, paste the complete instruction into that
+agent, and approve the single pinned command if the host asks. The instruction
+contains a short-lived, one-use organization grant and runs the released CLI
+without a machine-wide install:
 
 ```bash
-npm install --global @dharma-ai-labs/agent-fabric
-dharma login \
+npm exec --yes --package=@dharma-ai-labs/agent-fabric@<version> -- dharma bootstrap \
   --portal-url https://www.dharma-ai.io \
-  --organization-id <organization-id>
-dharma repositories discover --root "$HOME/work"
-dharma repositories connect \
-  --repo "$PWD" \
   --organization-id <organization-id> \
-  --policy-revision <dashboard-policy-revision>
+  --grant <single-use-grant> \
+  --workspace . \
+  --policy-revision <dashboard-policy-revision> \
+  --provider auto \
+  --complete
 ```
 
-Browser approval enrolls an Ed25519 device identity. Repository identity comes
-from a credential-free normalized Git remote hash or an explicit stable key,
+The atomic bootstrap exchanges the expiring grant for a revocable Ed25519
+device identity, connects only the current hosted Git repository, obtains its
+signed policy, detects the active provider, installs and verifies the native
+Skill, starts the outbound relay, and verifies read-only organization access.
+Repository identity comes from a credential-free normalized Git remote hash,
 never an absolute path. Connecting the same repository from another machine or
-provider reuses the logical agent and adds an endpoint. The CLI installs the
-repository-scoped Agent Fabric Skill and a managed bootstrap Skill in every
-detected provider's native Skill directory. It never writes a bearer token,
-provider key, or runtime identity into the repository.
+provider reuses the logical agent and adds an endpoint. The CLI never writes a
+bearer token, provider key, or runtime identity into the repository.
 
-The command waits for browser approval and completes without a second resume
-command. Verify Codex installation immediately afterwards:
+Success is one terminal JSON receipt with `ok: true`, `stage: "complete"`, a
+ready Skill, a running relay, and ready organization API reads. Manual
+browser-confirmed enrollment remains a fallback for administrators who do not
+issue a one-use instruction; see the customer guide and CLI command contract.
+
+Verify Codex installation immediately afterwards:
 
 ```bash
 dharma skills verify --provider codex --workspace .
