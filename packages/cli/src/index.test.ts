@@ -2122,6 +2122,22 @@ test('task response preview exposes bounded Agy success output', () => {
   assert.ok((preview?.redactedValues || 0) >= 1);
 });
 
+test('task response preview exposes bounded Hermes plain-text output', () => {
+  const receipt = {
+    taskId: 'task', status: 'completed' as const, worktree: '/private/worktree', branch: 'dharma/task/task',
+    startedAt: '2026-08-16T00:00:00Z', completedAt: '2026-08-16T00:00:01Z',
+    commandResults: [{
+      commandId: 'provider.hermes', exitCode: 0, signal: null, timedOut: false,
+      stdout: 'Hermes recommendation. api_key=secret-secret-secret\n',
+      stderr: '', stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+    }],
+  };
+  const preview = taskResponsePreview(receipt);
+  assert.match(preview?.text || '', /Hermes recommendation/);
+  assert.equal(preview?.text.includes('secret-secret-secret'), false);
+  assert.ok((preview?.redactedValues || 0) >= 1);
+});
+
 test('signed task receipt becomes a deterministic provider session for candidate evidence', () => {
   const task = {
     schema: 'dharma.task/v1' as const,
