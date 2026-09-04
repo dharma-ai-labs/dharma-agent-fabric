@@ -179,6 +179,19 @@ test('bootstrap reports non-policy evidence failures without returning sensitive
   assert.equal(JSON.stringify(result).includes('C:/Users'), false);
 });
 
+test('bootstrap identifies unavailable retention without weakening other capture failures', async () => {
+  const result = await synchronizeBootstrapEvidence(async () => {
+    throw new Error('agent_fabric_retention_not_ready: Content synchronization is unavailable until retention is enabled.');
+  });
+  assert.deepEqual(result, {
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'retention_not_ready',
+    errorCode: 'agent_fabric_retention_not_ready',
+  });
+});
+
 test('bootstrap records successful evidence synchronization', async () => {
   const result = await synchronizeBootstrapEvidence(async () => ({ captured: 2, synced: 2 }));
   assert.deepEqual(result, { state: 'synchronized', captured: 2, synced: 2 });
@@ -227,6 +240,20 @@ test('complete bootstrap accepts an empty discovery set or synchronized evidence
     captured: 2,
     synced: 2,
   }, 2));
+  assert.doesNotThrow(() => requireCompletedBootstrapEvidence({
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'retention_not_ready',
+    errorCode: 'agent_fabric_retention_not_ready',
+  }, 2));
+  assert.throws(() => requireCompletedBootstrapEvidence({
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'retention_not_ready',
+    errorCode: 'route_not_allowed',
+  }, 2), /retention_not_ready:route_not_allowed/);
 });
 
 test('complete bootstrap emits a compact organization API receipt', () => {
@@ -1675,13 +1702,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.48-rc.0');
+      assert.equal(version, '0.2.48-rc.1');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.48-rc.0',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.48-rc.1',
   });
 });
 

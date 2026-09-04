@@ -39,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.48-rc.0';
+const VERSION = '0.2.48-rc.1';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1228,7 +1228,7 @@ type BootstrapEvidenceSynchronization = {
   state: 'synchronized' | 'deferred';
   captured: number;
   synced: number;
-  reason?: 'policy_boundary' | 'capture_unavailable';
+  reason?: 'policy_boundary' | 'capture_unavailable' | 'retention_not_ready';
   errorCode?: string;
 };
 
@@ -1247,11 +1247,12 @@ export async function synchronizeBootstrapEvidence(
   } catch (error) {
     const errorCode = bootstrapEvidenceErrorCode(error);
     const policyBoundary = /(?:forbidden|redaction|disclosure|policy)/.test(errorCode);
+    const retentionNotReady = errorCode === 'agent_fabric_retention_not_ready';
     return {
       state: 'deferred',
       captured: 0,
       synced: 0,
-      reason: policyBoundary ? 'policy_boundary' : 'capture_unavailable',
+      reason: retentionNotReady ? 'retention_not_ready' : policyBoundary ? 'policy_boundary' : 'capture_unavailable',
       errorCode,
     };
   }
@@ -1275,7 +1276,8 @@ export function requireCompletedBootstrapEvidence(
   result: BootstrapEvidenceSynchronization,
   discovered: number,
 ): void {
-  if (discovered <= 0 || result.state === 'synchronized') return;
+  if (discovered <= 0 || result.state === 'synchronized'
+    || (result.reason === 'retention_not_ready' && result.errorCode === 'agent_fabric_retention_not_ready')) return;
   const detail = [result.reason, result.errorCode].filter(Boolean).join(':');
   throw new Error(
     `Bootstrap evidence synchronization did not complete${detail ? ` (${detail})` : ''}. `
