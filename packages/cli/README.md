@@ -17,7 +17,7 @@ command. The coding harness may show one native approval for that exact command;
 after approval, no additional terminal steps or provider selection are required.
 
 ```bash
-npm exec --yes --package=@dharma-ai-labs/agent-fabric@<version> -- dharma bootstrap \
+npm exec --yes -- @dharma-ai-labs/agent-fabric@<version> bootstrap \
   --portal-url https://www.dharma-ai.io \
   --organization-id <organization-id> \
   --grant <single-use-grant> \

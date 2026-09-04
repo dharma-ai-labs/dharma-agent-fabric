@@ -39,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.47';
+const VERSION = '0.2.48-rc.1';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1228,7 +1228,7 @@ type BootstrapEvidenceSynchronization = {
   state: 'synchronized' | 'deferred';
   captured: number;
   synced: number;
-  reason?: 'policy_boundary' | 'capture_unavailable';
+  reason?: 'policy_boundary' | 'capture_unavailable' | 'retention_not_ready';
   errorCode?: string;
 };
 
@@ -1247,13 +1247,28 @@ export async function synchronizeBootstrapEvidence(
   } catch (error) {
     const errorCode = bootstrapEvidenceErrorCode(error);
     const policyBoundary = /(?:forbidden|redaction|disclosure|policy)/.test(errorCode);
+    const retentionNotReady = errorCode === 'agent_fabric_retention_not_ready';
     return {
       state: 'deferred',
       captured: 0,
       synced: 0,
-      reason: policyBoundary ? 'policy_boundary' : 'capture_unavailable',
+      reason: retentionNotReady ? 'retention_not_ready' : policyBoundary ? 'policy_boundary' : 'capture_unavailable',
       errorCode,
     };
+  }
+}
+
+export async function deferUnavailableRelayRetention<T>(
+  operation: () => Promise<T>,
+): Promise<{ state: 'completed'; value: T } | { state: 'deferred'; reason: 'retention_not_ready' }> {
+  try {
+    return { state: 'completed', value: await operation() };
+  } catch (error) {
+    const message = String((error as { message?: unknown } | null)?.message || error || '');
+    if (/^agent_fabric_retention_not_ready:/.test(message)) {
+      return { state: 'deferred', reason: 'retention_not_ready' };
+    }
+    throw error;
   }
 }
 
@@ -1261,7 +1276,8 @@ export function requireCompletedBootstrapEvidence(
   result: BootstrapEvidenceSynchronization,
   discovered: number,
 ): void {
-  if (discovered <= 0 || result.state === 'synchronized') return;
+  if (discovered <= 0 || result.state === 'synchronized'
+    || (result.reason === 'retention_not_ready' && result.errorCode === 'agent_fabric_retention_not_ready')) return;
   const detail = [result.reason, result.errorCode].filter(Boolean).join(':');
   throw new Error(
     `Bootstrap evidence synchronization did not complete${detail ? ` (${detail})` : ''}. `
@@ -1312,10 +1328,10 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 }
 
 export function stableRepositoryLauncherContents(version = VERSION) {
-  const invocation = `npm exec --yes --package=@dharma-ai-labs/agent-fabric@${version} -- dharma`;
+  const invocation = `npm exec --yes -- @dharma-ai-labs/agent-fabric@${version}`;
   return {
     shell: `#!/bin/sh\nexec ${invocation} "$@"\n`,
-    windows: `@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@${version} -- dharma %*\r\n`,
+    windows: `@echo off\r\n${invocation} %*\r\n`,
   };
 }
 
@@ -4586,10 +4602,13 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
-    taskTrajectoriesRecovered += (await finalizeRecoveredSignedTaskTrajectories(
+    const recoveredTaskTrajectories = await deferUnavailableRelayRetention(async () => finalizeRecoveredSignedTaskTrajectories(
       fabric,
       policy,
-    )).length;
+    ));
+    if (recoveredTaskTrajectories.state === 'completed') {
+      taskTrajectoriesRecovered += recoveredTaskTrajectories.value.length;
+    }
     do {
       if (Date.now() >= nextPolicyRefreshAt) {
         try {
@@ -4603,15 +4622,26 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh) {
-        trajectorySyncsCompleted += await syncPendingRetentionCapsules(
-          vault,
-          fabric,
-          policy,
-          canonicalWorkspace.workspaceId,
-        );
-        const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
-        evidenceRequestId = typeof evidence.requestId === 'string' ? evidence.requestId : undefined;
-        if (evidenceRequestId) evidenceResponsesCompleted += 1;
+        const evidenceCycle = await deferUnavailableRelayRetention(async () => {
+          const synced = await syncPendingRetentionCapsules(
+            vault,
+            fabric,
+            policy,
+            canonicalWorkspace.workspaceId,
+          );
+          const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
+          return {
+            synced,
+            evidenceRequestId: typeof evidence.requestId === 'string' ? evidence.requestId : undefined,
+          };
+        });
+        if (evidenceCycle.state === 'deferred') {
+          evidencePolicyFresh = false;
+        } else {
+          trajectorySyncsCompleted += evidenceCycle.value.synced;
+          evidenceRequestId = evidenceCycle.value.evidenceRequestId;
+          if (evidenceRequestId) evidenceResponsesCompleted += 1;
+        }
       }
       const result = await executeOneTask(fabric, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;

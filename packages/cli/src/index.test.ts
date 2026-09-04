@@ -43,6 +43,7 @@ import {
   requireCompletedBootstrapEvidence,
   retryBootstrapOnboarding,
   synchronizeBootstrapEvidence,
+  deferUnavailableRelayRetention,
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
   installedBundleIdForSkillPollAfterAuthorizationFailure,
   recoveredTaskPolicyWasSuperseded,
@@ -178,9 +179,39 @@ test('bootstrap reports non-policy evidence failures without returning sensitive
   assert.equal(JSON.stringify(result).includes('C:/Users'), false);
 });
 
+test('bootstrap identifies unavailable retention without weakening other capture failures', async () => {
+  const result = await synchronizeBootstrapEvidence(async () => {
+    throw new Error('agent_fabric_retention_not_ready: Content synchronization is unavailable until retention is enabled.');
+  });
+  assert.deepEqual(result, {
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'retention_not_ready',
+    errorCode: 'agent_fabric_retention_not_ready',
+  });
+});
+
 test('bootstrap records successful evidence synchronization', async () => {
   const result = await synchronizeBootstrapEvidence(async () => ({ captured: 2, synced: 2 }));
   assert.deepEqual(result, { state: 'synchronized', captured: 2, synced: 2 });
+});
+
+test('relay defers unavailable retention without stopping signed task polling', async () => {
+  const result = await deferUnavailableRelayRetention(async () => {
+    throw new Error('agent_fabric_retention_not_ready: Content synchronization is unavailable until retention is enabled.');
+  });
+  assert.deepEqual(result, { state: 'deferred', reason: 'retention_not_ready' });
+});
+
+test('relay does not suppress unrelated retention synchronization failures', async () => {
+  await assert.rejects(
+    () => deferUnavailableRelayRetention(async () => {
+      throw new Error('agent_fabric_policy_invalid: Current workspace policy is invalid.');
+    }),
+    /agent_fabric_policy_invalid/,
+  );
+  assert.deepEqual(await deferUnavailableRelayRetention(async () => 3), { state: 'completed', value: 3 });
 });
 
 test('complete bootstrap rejects discovered evidence without a synchronization receipt', () => {
@@ -209,6 +240,20 @@ test('complete bootstrap accepts an empty discovery set or synchronized evidence
     captured: 2,
     synced: 2,
   }, 2));
+  assert.doesNotThrow(() => requireCompletedBootstrapEvidence({
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'retention_not_ready',
+    errorCode: 'agent_fabric_retention_not_ready',
+  }, 2));
+  assert.throws(() => requireCompletedBootstrapEvidence({
+    state: 'deferred',
+    captured: 0,
+    synced: 0,
+    reason: 'retention_not_ready',
+    errorCode: 'route_not_allowed',
+  }, 2), /retention_not_ready:route_not_allowed/);
 });
 
 test('complete bootstrap emits a compact organization API receipt', () => {
@@ -263,11 +308,11 @@ test('repository launchers stay version-pinned without depending on the npm-exec
   const launcher = stableRepositoryLauncherContents('0.2.40');
   assert.equal(
     launcher.shell,
-    '#!/bin/sh\nexec npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.40 -- dharma "$@"\n',
+    '#!/bin/sh\nexec npm exec --yes -- @dharma-ai-labs/agent-fabric@0.2.40 "$@"\n',
   );
   assert.equal(
     launcher.windows,
-    '@echo off\r\nnpm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.40 -- dharma %*\r\n',
+    '@echo off\r\nnpm exec --yes -- @dharma-ai-labs/agent-fabric@0.2.40 %*\r\n',
   );
   assert.equal(launcher.shell.includes('/_npx/'), false);
   assert.equal(launcher.windows.includes('node_modules'), false);
@@ -1657,13 +1702,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.47');
+      assert.equal(version, '0.2.48-rc.1');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.47',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.48-rc.1',
   });
 });
 

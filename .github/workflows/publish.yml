@@ -73,8 +73,12 @@ jobs:
             if package_exists "${package}"; then
               echo "${name}@${version} already exists; preserving immutable release."
             else
+              dist_tag="latest"
+              if [[ "${version}" == *-* ]]; then
+                dist_tag="next"
+              fi
               set +e
-              publish_output=$(npm publish --workspace "${workspace}" 2>&1)
+              publish_output=$(npm publish --workspace "${workspace}" --tag "${dist_tag}" 2>&1)
               publish_status=$?
               set -e
               if [ "${publish_status}" -eq 0 ]; then
