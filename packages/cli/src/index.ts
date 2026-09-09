@@ -39,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 
-const VERSION = '0.2.48';
+const VERSION = '0.2.49';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4385,6 +4385,25 @@ export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoo
   return true;
 }
 
+export function validateSkillBundleSources(bundle: SkillBundle) {
+  if (bundle.operation === 'clear') return { inlineRequired: false, singleSource: true };
+  for (const skill of bundle.skills) {
+    if (!/^[a-f0-9]{40,64}$/i.test(skill.commit)) {
+      throw new Error('Every skill bundle source must pin one full Git commit.');
+    }
+    if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(skill.repository)) {
+      throw new Error('Every skill bundle source must pin one credential-free GitHub repository.');
+    }
+  }
+  const commits = new Set(bundle.skills.map((skill) => skill.commit));
+  const repositories = new Set(bundle.skills.map((skill) => skill.repository));
+  const singleSource = commits.size === 1 && repositories.size === 1;
+  if (!singleSource && !bundle.skills.every((skill) => Array.isArray(skill.files) && skill.files.length > 0)) {
+    throw new Error('Multi-source skill bundles require signed inline files for every skill.');
+  }
+  return { inlineRequired: !singleSource, singleSource };
+}
+
 export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
@@ -4453,14 +4472,9 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     || (bundle.operation === 'clear' && bundle.skills.length !== 0)) {
     throw new Error('Skill bundle does not match local organization policy.');
   }
+  const sources = validateSkillBundleSources(bundle);
   const commits = [...new Set(bundle.skills.map((skill) => skill.commit))];
   const repositories = [...new Set(bundle.skills.map((skill) => skill.repository))];
-  if (bundle.operation === 'install') {
-    if (commits.length !== 1 || !/^[a-f0-9]{40,64}$/i.test(commits[0]!)) throw new Error('Skill bundle must pin one full Git commit.');
-    if (repositories.length !== 1 || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repositories[0]!)) {
-      throw new Error('Skill bundle must pin one credential-free GitHub repository.');
-    }
-  }
   const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
   verifySkillBundle(bundle, createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }));
   await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
@@ -4468,6 +4482,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   await mkdir(sourceRoot, { recursive: true, mode: 0o700 });
   const materializedInline = await materializeInlineSkillFiles(bundle, sourceRoot);
   if (bundle.operation === 'install' && !materializedInline) {
+    if (!sources.singleSource) throw new Error('Multi-source skill bundles require signed inline files for every skill.');
     await rm(sourceRoot, { recursive: true, force: true });
     await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
     await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });

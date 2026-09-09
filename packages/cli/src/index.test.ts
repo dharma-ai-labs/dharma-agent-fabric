@@ -28,6 +28,7 @@ import {
   materializeWorkspacePolicy,
   applyServerEvidencePolicy,
   materializeInlineSkillFiles,
+  validateSkillBundleSources,
   nativeSkillDirectory,
   normalizeGitRemoteIdentity,
   postTaskOutcome,
@@ -1625,6 +1626,31 @@ test('materializes signed inline files without repository credentials and reject
   );
 });
 
+test('accepts distinct immutable sources only when every skill has signed inline files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-inline-multi-source-'));
+  const content = '# Bound correction\n';
+  const file = { path: 'SKILL.md', contentBase64: Buffer.from(content).toString('base64'),
+    sha256: `sha256:${createHash('sha256').update(content).digest('hex')}` };
+  const bundle = { operation: 'install', skills: [
+    { skillId: 'current', path: 'skills/current', commit: 'a'.repeat(40),
+      repository: 'https://github.com/dharma-ai-labs/current.git', files: [file] },
+    { skillId: 'retained', path: 'skills/retained', commit: 'b'.repeat(40),
+      repository: 'https://github.com/dharma-ai-labs/retained.git', files: [file] },
+  ] } as unknown as SkillBundle;
+  assert.deepEqual(validateSkillBundleSources(bundle), { inlineRequired: true, singleSource: false });
+  assert.equal(await materializeInlineSkillFiles(bundle, root), true);
+  assert.equal(await readFile(join(root, 'skills/current/SKILL.md'), 'utf8'), content);
+  assert.equal(await readFile(join(root, 'skills/retained/SKILL.md'), 'utf8'), content);
+  assert.throws(() => validateSkillBundleSources({ ...bundle,
+    skills: bundle.skills.map((skill) => ({ ...skill, files: undefined })) } as SkillBundle),
+  /Multi-source skill bundles require signed inline files/);
+  assert.throws(() => validateSkillBundleSources({ ...bundle,
+    skills: [{ ...bundle.skills[0]!, commit: 'short' }] } as SkillBundle), /full Git commit/);
+  assert.throws(() => validateSkillBundleSources({ ...bundle,
+    skills: [{ ...bundle.skills[0]!, repository: 'https:\/\/example.com\/private.git' }] } as SkillBundle),
+  /credential-free GitHub repository/);
+});
+
 test('provider skill roots map to each host native discovery directory', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-provider-skills-'));
   assert.equal(nativeSkillDirectory('codex', {}, home), join(home, '.codex', 'skills'));
@@ -1702,13 +1728,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.48');
+      assert.equal(version, '0.2.49');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.48',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.49',
   });
 });
 
