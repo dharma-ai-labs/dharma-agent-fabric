@@ -26,7 +26,7 @@ flowchart LR
   C --> D[Private control repo and collaborator invite]
   D --> E[Choose managed, GCP BYOK, or local BYOK]
   E --> F[Create scoped API key]
-  F --> G[Run dharma onboard]
+  F --> G[Copy one-shot instruction]
   G --> H[Outbound relay and reduced trajectories]
   H --> I[Exact 100-trajectory window]
   I --> J[Rubrics and Failure Atlas]
@@ -37,12 +37,16 @@ flowchart LR
   M -->|failed| O[Automatic rollback]
 ```
 
-Two steps require customer action:
+Two organization steps always require customer action:
 
 1. the company admin accepts the collaborator invitation to the private control repository;
 2. for GCP BYOK only, a company cloud admin applies the generated Workload Identity Federation IAM bindings.
 
-The dashboard performs or monitors the remaining work.
+On a new local machine, the coding harness may also require one native approval
+for the exact pinned bootstrap command. After that approval, the atomic command
+performs and verifies the remaining local connection work without another
+terminal command, provider choice, or manual resume step. The dashboard performs
+or monitors the remaining server-side work.
 
 ## 1. Purchase and sign in
 
@@ -123,51 +127,71 @@ Prerequisites:
 - Git;
 - one supported provider installed and authenticated locally;
 - a clean source repository;
-- browser access to the signed-in Clerk organization.
+- an organization administrator who can open the authenticated Instructions tab.
 
-Install the public CLI:
+Open the intended source repository in the coding agent. In **Portal -> Agent
+Fabric -> Instructions**, select **Copy setup instructions for my coding agent**
+and paste the complete instruction into that agent. The instruction authorizes
+one exact, pinned command of this form:
+
+```bash
+npm exec --yes --package=@dharma-ai-labs/agent-fabric@<version> -- dharma bootstrap \
+  --portal-url https://www.dharma-ai.io \
+  --organization-id <organization-id> \
+  --grant <single-use-grant> \
+  --workspace . \
+  --policy-revision <dashboard-policy-revision> \
+  --provider auto \
+  --complete
+```
+
+The portal produces the exact release version, organization ID, grant, and
+policy revision. Do not construct or reuse the placeholder command. The grant
+expires after the displayed time, is accepted once, and is never stored in
+plaintext by HQ. The coding harness may show one native approval for this exact
+command. After approval, the coding agent waits for the terminal JSON receipt;
+it must not split the command, add provenance checks, ask the customer to choose
+a provider, or request follow-up terminal work.
+
+The dashboard offers the instruction only after the exact CLI version is
+available from npm and its signed GitHub Release. A **CLI release gate pending**
+notice means the customer installation path is not released and onboarding must
+not be described as available.
+
+For the current repository, the atomic bootstrap:
+
+1. validates Node, Git, the hosted credential-free remote, the one-use grant, organization, and policy revision;
+2. creates an Ed25519 device identity sealed by the operating-system credential store;
+3. derives a credential-free normalized Git remote fingerprint and connects only the current repository;
+4. reuses the existing logical agent when the repository is already connected;
+5. registers the current device, workspace, and detected provider as endpoints of that agent;
+6. obtains the permanent control branch, signed evidence policy, and agent identity from HQ;
+7. installs and verifies the repository and provider-native Dharma Skills;
+8. starts the outbound relay and verifies read-only organization API access;
+9. returns one terminal JSON receipt containing the non-secret device, workspace, logical agent, branch, Skill, policy, relay, and API readiness fields;
+10. reports evidence, task, continuation, Skill installation, activation, and rollback capabilities separately.
+
+Report the connection complete only when the receipt contains `ok: true`,
+`stage: "complete"`, `skill.ready: true`, `relay.state: "running"`, and
+`organizationApi.ready: true`.
+
+### Manual enrollment fallback
+
+Manual browser-confirmed enrollment is a fallback when an administrator chooses
+not to issue a one-use instruction. It is not the default company flow:
 
 ```bash
 npm install --global @dharma-ai-labs/agent-fabric
-dharma --version
-```
-
-The dashboard shows this install command only after the exact version is available from npm and its signed GitHub Release. A **CLI release gate pending** notice means the operator proof may use a reviewed source checkout, but the customer installation path is not yet released and onboarding must not be described as GA.
-
-Copy the organization-specific login command from the dashboard:
-
-```bash
-dharma login \
-  --portal-url https://www.dharma-ai.io \
-  --organization-id <organization-id>
-```
-
-The CLI opens a short-lived browser approval page. After the company user approves the device, select repositories only from roots the user names:
-
-```bash
+dharma login --portal-url https://www.dharma-ai.io --organization-id <organization-id>
 dharma repositories discover --root ~/work --json
 dharma repositories connect \
   --repo ~/work/checkout-api \
   --organization-id <organization-id> \
-  --policy-revision agent-fabric-policy-v1
-dharma repositories list --json
-dharma repositories status --repo ~/work/checkout-api --json
+  --policy-revision <dashboard-policy-revision>
 ```
 
-For CI or coding-agent setup, repeat `--repo` or pass `--repository-key` for a repository without a Git remote. Absolute paths never become repository identity, and discovery never scans outside the approved roots.
-
-For each selected repository, the CLI:
-
-1. creates an Ed25519 device identity sealed by the operating-system credential store;
-2. derives a credential-free normalized Git remote fingerprint, or uses the explicit stable repository key;
-3. reuses the existing logical agent when the repository is already connected;
-4. registers the current device, workspace, and provider as endpoints of that agent;
-5. obtains the permanent control branch and agent identity from HQ;
-6. writes the repository bootstrap without storing the source path or Git credential;
-7. detects Codex, Claude Code, Agy, and Hermes Agent independently;
-8. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill only for detected providers that report Skill installation as available;
-9. waits for browser approval and continues automatically without a manual resume command;
-10. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.
+Absolute paths never become repository identity, and discovery never scans
+outside roots named by the user.
 
 Verify the Codex installation before capturing evidence:
 

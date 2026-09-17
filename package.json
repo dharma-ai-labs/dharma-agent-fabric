@@ -35,7 +35,8 @@
     "proof:relay": "node scripts/proof-live-relay.mjs",
     "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
     "public:content:check": "node scripts/check-public-content.mjs",
-    "check": "npm run public:content:check && npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify && npm run openapi:verify"
+    "docs:onboarding:verify": "node scripts/verify-onboarding-documentation.mjs",
+    "check": "npm run public:content:check && npm run docs:onboarding:verify && npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify && npm run openapi:verify"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",
