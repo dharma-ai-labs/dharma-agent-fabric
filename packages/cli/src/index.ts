@@ -1081,7 +1081,10 @@ export function taskResponsePreview(receipt: TaskReceipt) {
       if (response?.trim()) candidates.push(response.trim());
     } catch {}
   }
-  const selected = candidates.at(-1);
+  const selected = candidates.at(-1)
+    || (provider.commandId === 'provider.hermes' && provider.exitCode === 0
+      ? provider.stdout.trim()
+      : null);
   if (!selected) return null;
   const stats: RedactionStats = { classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
   const redacted = String(redactValue(selected, stats));

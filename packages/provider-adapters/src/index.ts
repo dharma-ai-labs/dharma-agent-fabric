@@ -192,6 +192,7 @@ export async function executeProviderTask(input: {
   let stdin = input.instructions;
   let temporaryDirectory: string | null = null;
   let agyLogPath: string | null = null;
+  let providerEnvironment: Record<string, string> = {};
   if (input.provider === 'codex') {
     command = 'codex';
     argv = input.allowWrites
@@ -247,11 +248,36 @@ export async function executeProviderTask(input: {
     command = 'hermes';
     temporaryDirectory = await mkdtemp(resolve(tmpdir(), 'dharma-hermes-task-'));
     const usagePath = resolve(temporaryDirectory, 'usage.json');
+    const configuredProvider = (process.env.DHARMA_HERMES_PROVIDER || '').trim();
+    const configuredModel = (process.env.DHARMA_HERMES_MODEL || '').trim();
+    const configuredVertexProject = (process.env.DHARMA_HERMES_VERTEX_PROJECT_ID || '').trim();
+    const configuredVertexRegion = (process.env.DHARMA_HERMES_VERTEX_REGION || '').trim();
+    if (configuredProvider && !/^[a-z0-9][a-z0-9-]{0,63}$/.test(configuredProvider)) {
+      throw new Error('DHARMA_HERMES_PROVIDER is invalid.');
+    }
+    if (configuredModel && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/.test(configuredModel)) {
+      throw new Error('DHARMA_HERMES_MODEL is invalid.');
+    }
+    if (configuredVertexProject && !/^[a-z][a-z0-9-]{4,62}$/.test(configuredVertexProject)) {
+      throw new Error('DHARMA_HERMES_VERTEX_PROJECT_ID is invalid.');
+    }
+    if (configuredVertexRegion && !/^(?:global|[a-z]+-[a-z]+[0-9])$/.test(configuredVertexRegion)) {
+      throw new Error('DHARMA_HERMES_VERTEX_REGION is invalid.');
+    }
+    providerEnvironment = {
+      ...(configuredVertexProject ? { VERTEX_PROJECT_ID: configuredVertexProject } : {}),
+      ...(configuredVertexRegion ? { VERTEX_REGION: configuredVertexRegion } : {}),
+    };
     const guardedInstructions = [
       'Operate only inside the current repository. Remain in safe mode. Read files only. Do not modify files, run shell commands, use the network, or inspect parent or sibling directories.',
       input.instructions,
     ].join('\n\n');
-    argv = ['--ignore-user-config', '--safe-mode', '--usage-file', usagePath, '--oneshot', guardedInstructions];
+    argv = [
+      '--ignore-user-config', '--safe-mode', '--usage-file', usagePath,
+      ...(configuredProvider ? ['--provider', configuredProvider] : []),
+      ...(configuredModel ? ['--model', configuredModel] : []),
+      '--oneshot', guardedInstructions,
+    ];
     stdin = '';
   }
   try {
@@ -261,6 +287,7 @@ export async function executeProviderTask(input: {
       signal: input.signal,
       completeOnResultJson: input.provider === 'claude' || input.provider === 'codex',
       environment: {
+        ...providerEnvironment,
         ...(input.externalIdempotencyKey ? { DHARMA_EXTERNAL_IDEMPOTENCY_KEY: input.externalIdempotencyKey } : {}),
         ...(input.actionDigest ? { DHARMA_ACTION_DIGEST: input.actionDigest } : {}),
       },
@@ -285,9 +312,15 @@ export async function executeProviderTask(input: {
         exitCode = 1;
         stderr = `${stderr}${stderr ? '\n' : ''}Agy authentication or execution failed. Run agy interactively to authenticate this device.`;
       }
-    } else if (input.provider === 'hermes' && result.exitCode === 0 && !result.stdout.toString('utf8').trim()) {
-      exitCode = 1;
-      stderr = `${stderr}${stderr ? '\n' : ''}Hermes returned no task result. Configure an inference provider with hermes model.`;
+    } else if (input.provider === 'hermes' && result.exitCode === 0) {
+      const stdout = result.stdout.toString('utf8').trim();
+      const providerFailure = /API call failed after \d+ retries|Parameter validation failed|Invalid length for parameter modelId|configure an inference provider/i.test(stdout);
+      if (!stdout || providerFailure) {
+        exitCode = 1;
+        stderr = `${stderr}${stderr ? '\n' : ''}${providerFailure
+          ? 'Hermes inference failed before returning a task result.'
+          : 'Hermes returned no task result. Configure an inference provider with hermes model.'}`;
+      }
     }
     const stderrBuffer = Buffer.from(stderr, 'utf8');
     return {

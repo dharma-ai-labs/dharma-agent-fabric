@@ -584,6 +584,55 @@ test('Hermes tasks use safe-mode one-shot execution and fail closed for effects 
   });
   assert.equal(missing.exitCode, 1);
   assert.match(missing.stderr, /Configure an inference provider/);
+
+  const providerFailure = await executeProviderTask({
+    provider: 'hermes', workspace: root, instructions: 'Read only.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({
+      exitCode: 0, signal: null, timedOut: false,
+      stdout: Buffer.from('API call failed after 3 retries: Parameter validation failed'), stderr: Buffer.alloc(0),
+    }),
+  });
+  assert.equal(providerFailure.exitCode, 1);
+  assert.match(providerFailure.stderr, /inference failed/);
+});
+
+test('Hermes task execution pins validated provider and model routing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-hermes-model-'));
+  const previousProvider = process.env.DHARMA_HERMES_PROVIDER;
+  const previousModel = process.env.DHARMA_HERMES_MODEL;
+  const previousProject = process.env.DHARMA_HERMES_VERTEX_PROJECT_ID;
+  const previousRegion = process.env.DHARMA_HERMES_VERTEX_REGION;
+  let argv: string[] = [];
+  let environment: Record<string, string> = {};
+  process.env.DHARMA_HERMES_PROVIDER = 'vertex';
+  process.env.DHARMA_HERMES_MODEL = 'google/gemini-3.7-flash';
+  process.env.DHARMA_HERMES_VERTEX_PROJECT_ID = 'dharma-staging-byok-f6f29e';
+  process.env.DHARMA_HERMES_VERTEX_REGION = 'global';
+  try {
+    await executeProviderTask({
+      provider: 'hermes', workspace: root, instructions: 'Read package.json.', timeoutSeconds: 30,
+      allowedCommandArgv: [], allowWrites: false,
+      runner: async (input) => {
+        argv = input.argv;
+        environment = input.environment || {};
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('Bounded summary'), stderr: Buffer.alloc(0) };
+      },
+    });
+  } finally {
+    if (previousProvider === undefined) delete process.env.DHARMA_HERMES_PROVIDER;
+    else process.env.DHARMA_HERMES_PROVIDER = previousProvider;
+    if (previousModel === undefined) delete process.env.DHARMA_HERMES_MODEL;
+    else process.env.DHARMA_HERMES_MODEL = previousModel;
+    if (previousProject === undefined) delete process.env.DHARMA_HERMES_VERTEX_PROJECT_ID;
+    else process.env.DHARMA_HERMES_VERTEX_PROJECT_ID = previousProject;
+    if (previousRegion === undefined) delete process.env.DHARMA_HERMES_VERTEX_REGION;
+    else process.env.DHARMA_HERMES_VERTEX_REGION = previousRegion;
+  }
+  assert.deepEqual(argv.slice(argv.indexOf('--provider'), argv.indexOf('--provider') + 2), ['--provider', 'vertex']);
+  assert.deepEqual(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2), ['--model', 'google/gemini-3.7-flash']);
+  assert.equal(environment.VERTEX_PROJECT_ID, 'dharma-staging-byok-f6f29e');
+  assert.equal(environment.VERTEX_REGION, 'global');
 });
 
 test('Claude task execution pins a validated configured model', async () => {
