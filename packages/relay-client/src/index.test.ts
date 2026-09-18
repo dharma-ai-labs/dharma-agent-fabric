@@ -715,17 +715,83 @@ test('signed outbox retries the exact message after an unknown network outcome',
   const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await client.openSession();
   failAfterAccept = true;
-  await assert.rejects(client.registerWorkspace({ workspaceId: 'workspace' }), /socket closed/);
+  await assert.rejects(client.registerWorkspace({ workspaceId: 'workspace', name: 'Work' }), /socket closed/);
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   state.pending.headers['x-dharma-timestamp'] = '2026-01-01T00:00:00.000Z';
   await writeFile(statePath, JSON.stringify(state));
   const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
-  await resumed.registerWorkspace({ workspaceId: 'ignored-until-pending-is-acked' });
+  await resumed.registerWorkspace({ name: 'Work', workspaceId: 'workspace' });
   assert.equal(messageIds.at(-2), messageIds.at(-1));
   assert.equal(idempotencyKeys.at(-2), messageIds.at(-2));
   assert.equal(idempotencyKeys.at(-1), messageIds.at(-1));
   assert.notEqual(timestamps.at(-2), timestamps.at(-1));
 });
+
+for (const scenario of [
+  { name: 'workspace body', oldMethod: 'POST', oldRoute: '/agent-fabric/skills/poll', oldBody: { workspaceId: 'first', provider: 'codex' }, method: 'POST', route: '/agent-fabric/skills/poll', body: { workspaceId: 'second', provider: 'codex' } },
+  { name: 'route', oldMethod: 'POST', oldRoute: '/agent-fabric/tasks/poll', oldBody: {}, method: 'POST', route: '/agent-fabric/skills/poll', body: {} },
+  { name: 'method', oldMethod: 'GET', oldRoute: '/agent-fabric/workspaces', oldBody: undefined, method: 'POST', route: '/agent-fabric/workspaces', body: {} },
+  { name: 'query', oldMethod: 'GET', oldRoute: '/control-agent/sessions?sessionId=first', oldBody: undefined, method: 'GET', route: '/control-agent/sessions?sessionId=second', body: undefined },
+] as const) {
+  test(`signed outbox recovery binds the current ${scenario.name}`, async () => {
+    const store = memoryStore();
+    const root = await mkdtemp(resolve(tmpdir(), 'fabric-request-binding-'));
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+    const configPath = resolve(root, 'device.json');
+    const statePath = resolve(root, 'state.json');
+    await saveDeviceConfig(configPath, {
+      schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+      deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+      publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+      relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+    });
+    await anchorConfig(configPath, store);
+    const calls: Array<{ method: string; route: string; body: string; messageId: string | null; sequence: number }> = [];
+    let failures = 0;
+    const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      const parsed = new URL(String(url));
+      const call = { method: init?.method || 'GET', route: parsed.pathname.replace('/api/v1/orgs/org_a', '') + parsed.search,
+        body: String(init?.body || ''), messageId: headers.get('x-dharma-message-id'), sequence: Number(headers.get('x-dharma-sequence')) };
+      calls.push(call);
+      if (failures > 0) { failures -= 1; throw new Error('unknown delivery outcome'); }
+      return new Response(JSON.stringify({ ok: true, organizationId: 'org_a', rollout: null, observed: call }), { status: 200 });
+    };
+    let client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+    await client.openSession();
+    const send = (method: string, route: string, body: unknown) => method === 'GET' ? client.signedGet(route) : client.signedPost(route, body);
+    failures = 1;
+    await assert.rejects(send(scenario.oldMethod, scenario.oldRoute, scenario.oldBody), /unknown delivery/);
+    const original = calls.at(-1)!;
+    client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+    const pendingBytes = await readFile(statePath, 'utf8');
+    const count = calls.length;
+    const invalid: Record<string, unknown> = {};
+    invalid.circular = invalid;
+    await assert.rejects(client.signedPost('/agent-fabric/skills/poll', invalid));
+    assert.equal(calls.length, count);
+    assert.equal(await readFile(statePath, 'utf8'), pendingBytes);
+    failures = 1;
+    await assert.rejects(send(scenario.method, scenario.route, scenario.body), /unknown delivery/);
+    assert.equal(calls.at(-1)?.messageId, original.messageId);
+    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending.pathname, `/api/v1/orgs/org_a${scenario.oldRoute}`);
+    const [current, next] = await Promise.all([
+      send(scenario.method, scenario.route, scenario.body),
+      client.signedGet('/control-agent/sessions?sessionId=third'),
+    ]);
+    assert.deepEqual(calls.at(-3), original);
+    const dispatched = calls.at(-2)!;
+    assert.equal(dispatched.route, scenario.route);
+    assert.equal(dispatched.method, scenario.method);
+    assert.deepEqual(dispatched.body ? JSON.parse(dispatched.body) : undefined, scenario.body);
+    assert.notEqual(dispatched.messageId, original.messageId);
+    assert.equal(dispatched.sequence, original.sequence + 1);
+    assert.deepEqual(current.observed, dispatched);
+    assert.deepEqual(next.observed, calls.at(-1));
+    assert.equal(calls.at(-1)?.route, '/control-agent/sessions?sessionId=third');
+    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+  });
+}
 
 test('content-bearing trajectory outbox is discarded before a new session can replay it', async () => {
   const store = memoryStore();
