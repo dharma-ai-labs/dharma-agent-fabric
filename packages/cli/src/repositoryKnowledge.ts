@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises';
-import { isAbsolute, parse, relative, resolve, sep } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 const SKILL_ROOT = '.agents/skills/dharma-agent-fabric';
 const KNOWLEDGE_ROOT = `${SKILL_ROOT}/knowledge`;
@@ -132,13 +132,10 @@ async function workspaceRoot(input: RepositoryKnowledgeInput) {
   validateIdentity(input);
   if (typeof input.workspace !== 'string' || !input.workspace || input.workspace.includes('\0')) throw new Error('Invalid knowledge workspace.');
   const absolute = resolve(input.workspace);
-  let current = parse(absolute).root;
-  for (const component of absolute.slice(current.length).split(sep).filter(Boolean)) {
-    current = resolve(current, component);
-    const metadata = await lstat(current);
-    if (metadata.isSymbolicLink()) throw new Error('Repository knowledge workspace symlink is forbidden.');
-    if (!metadata.isDirectory()) throw new Error('Invalid repository knowledge workspace.');
-  }
+  // OS ancestors can be aliases; the workspace and all managed descendants cannot.
+  const metadata = await lstat(absolute);
+  if (metadata.isSymbolicLink()) throw new Error('Repository knowledge workspace symlink is forbidden.');
+  if (!metadata.isDirectory()) throw new Error('Invalid repository knowledge workspace.');
   return realpath(absolute);
 }
 async function checkedPath(workspace: string, path: string): Promise<string | null> {

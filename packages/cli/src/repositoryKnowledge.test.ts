@@ -34,6 +34,23 @@ function rehash<T extends { catalogHash: string }>(catalog: T): T {
   return { ...content, catalogHash: `sha256:${createHash('sha256').update(canonical(content)).digest('hex')}` } as T;
 }
 
+test('knowledge initialization and reads permit system ancestor aliases but not workspace aliases', async t => {
+  const f = await fixture(t);
+  const parent = await mkdtemp(resolve(tmpdir(), 'knowledge-system-alias-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const alias = resolve(parent, 'system-alias');
+  await symlink(dirname(f.workspace), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const workspace = resolve(alias, f.workspace.slice(dirname(f.workspace).length + 1));
+  const first = await initializeRepositoryKnowledge({ ...f, workspace });
+  assert.equal(first.disposition, 'initialized');
+  assert.deepEqual(await readRepositoryKnowledge({ ...f, workspace }), await readRepositoryKnowledge(f));
+  assert.equal((await initializeRepositoryKnowledge(f)).disposition, 'reused');
+  const linkedWorkspace = resolve(parent, 'workspace-alias');
+  await symlink(f.workspace, linkedWorkspace, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(initializeRepositoryKnowledge({ ...f, workspace: linkedWorkspace }), /symlink/);
+  await assert.rejects(readRepositoryKnowledge({ ...f, workspace: linkedWorkspace }), /symlink/);
+});
+
 test('initializes only local unsigned empty knowledge with deterministic shared repository identity', async t => {
   const a = await fixture(t);
   const b = await fixture(t);
