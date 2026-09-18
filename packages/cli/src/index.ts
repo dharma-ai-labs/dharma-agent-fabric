@@ -824,7 +824,17 @@ async function assertWorkspaceAuthorizationCurrent(
   const statePath = workspaceAuthorizationStatePath(workspaceId);
   type AuthorizationState = { issuedAt: string; signature: string };
   let previous: AuthorizationState | null = null;
-  try { previous = JSON.parse(await readFile(statePath, 'utf8')) as AuthorizationState; }
+  try {
+    const parsed: unknown = JSON.parse(await readFile(statePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+      || typeof (parsed as AuthorizationState).issuedAt !== 'string'
+      || !Number.isFinite(Date.parse((parsed as AuthorizationState).issuedAt))
+      || typeof (parsed as AuthorizationState).signature !== 'string'
+      || !(parsed as AuthorizationState).signature) {
+      throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+    }
+    previous = parsed as AuthorizationState;
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
     throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
@@ -4454,18 +4464,46 @@ export async function installedBundleIdForSkillPollAfterAuthorizationFailure(inp
   return recoverLegacySkillBundleIdAfterAuthorizationFailure(input);
 }
 
+export async function loadSkillSynchronizationPolicy(
+  policyPath: string,
+  workspaceId: string,
+  secureStore?: SecureSecretStore,
+) {
+  const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
+  if (!workspace) throw new Error('Skill workspace is not registered locally.');
+  const [providedPath, canonicalPath] = await Promise.all([
+    canonicalFilesystemPath(resolve(policyPath)),
+    canonicalFilesystemPath(resolve(workspace.path, '.dharma', 'approved-policy.json')),
+  ]);
+  if (providedPath !== canonicalPath) {
+    throw new Error('Skill synchronization requires the canonical registered workspace policy path.');
+  }
+  const policy = await loadOrganizationPolicy(policyPath);
+  const config = await readDeviceConfig();
+  if (!config || config.organizationId !== workspace.organizationId || policy.organizationId !== workspace.organizationId
+    || workspace.status !== 'active') {
+    throw new Error('Skill policy does not match the enrolled organization and workspace.');
+  }
+  verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: config.serverPublicKeyEd25519,
+    organizationId: config.organizationId, workspaceId });
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, store: secureStore });
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+  verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: config.organizationId, workspaceId });
+  return { workspace, policy, config, enrollment };
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
   if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
   const provider = providerValue as ProviderId;
   return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
-  const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
-  if (!workspace) throw new Error('Skill workspace is not registered locally.');
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const policyPath = required(flags, 'policy');
+  const { workspace, policy, config } = await loadSkillSynchronizationPolicy(policyPath, workspaceId);
   const destination = nativeSkillDirectory(provider);
   const fabric = await client();
-  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   let activeBundleId: string | null;
   let legacyBaselineMigrationRequested = false;
   try {
@@ -4525,6 +4563,12 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       provider,
     });
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
+    const current = await loadSkillSynchronizationPolicy(policyPath, workspaceId);
+    if (canonicalize(current.policy) !== canonicalize(policy)
+      || canonicalize(current.workspace) !== canonicalize(workspace)
+      || canonicalize(current.config) !== canonicalize(config)) {
+      throw new Error('Skill synchronization scope or policy changed before activation; retry with current authorization.');
+    }
     const receipt = await installSkillBundle({
       bundle,
       sourceDirectory: sourceRoot,
