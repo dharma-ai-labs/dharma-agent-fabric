@@ -4494,6 +4494,21 @@ export async function loadSkillSynchronizationPolicy(
   return { workspace, policy, config, enrollment };
 }
 
+export function parseSkillRolloutResponse(response: unknown, organizationId: string): { id: string; bundle: unknown; repositoryPackage?: unknown } | null {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) throw new Error('Skill rollout response is invalid.');
+  const value = response as Record<string, unknown>;
+  if (value.ok !== true || value.organizationId !== organizationId || !Object.hasOwn(value, 'rollout')) {
+    throw new Error('Skill rollout response does not match the authenticated organization contract.');
+  }
+  const rollout = value.rollout;
+  if (rollout === null) return null;
+  if (!rollout || typeof rollout !== 'object' || Array.isArray(rollout)) throw new Error('Skill rollout response is invalid.');
+  const candidate = rollout as Record<string, unknown>;
+  if (typeof candidate.id !== 'string' || !candidate.id.trim() || !candidate.bundle
+    || typeof candidate.bundle !== 'object' || Array.isArray(candidate.bundle)) throw new Error('Skill rollout response is invalid.');
+  return rollout as { id: string; bundle: unknown; repositoryPackage?: unknown };
+}
+
 async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
@@ -4530,9 +4545,8 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
     installedBundleId: activeBundleId,
     legacyBaselineMigrationRequested,
   });
-  const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
+  const rollout = parseSkillRolloutResponse(response, config.organizationId);
   if (!rollout) return { ok: true, rollout: null, changed: false };
-  if (typeof rollout.id !== 'string' || !rollout.bundle || typeof rollout.bundle !== 'object') throw new Error('Skill rollout response is invalid.');
   const bundle = rollout.bundle as SkillBundle;
   if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills)
     || (bundle.operation === 'install' && bundle.skills.length === 0)
