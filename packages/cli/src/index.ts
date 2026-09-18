@@ -38,6 +38,9 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
+import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 
 const VERSION = '0.2.49';
 const USAGE = CLI_USAGE;
@@ -2827,13 +2830,7 @@ export async function installRepositoryAgentFabricSkill(input: {
   controlBranch?: string | null;
 }) {
   const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
-  const marker = resolve(skillRoot, '.dharma-agent-fabric.json');
-  let skillRootExists = true;
-  try { await access(skillRoot); } catch { skillRootExists = false; }
-  if (skillRootExists) {
-    try { await access(marker); }
-    catch { throw new Error('Refusing to replace an unmanaged repository skill at .agents/skills/dharma-agent-fabric.'); }
-  }
+  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
   await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
   await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
   const skill = `---
@@ -2896,16 +2893,46 @@ The CLI enrolls this device through browser-confirmed Clerk organization consent
     controlBranch: input.controlBranch || null,
     workspaceId: input.workspaceId,
   };
-  await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
-  await writeFile(resolve(skillRoot, 'references', 'organization.md'), reference, { mode: 0o600 });
-  await writeFile(marker, `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`, { mode: 0o600 });
-  await writeFile(resolve(input.workspace, '.dharma', 'agent-fabric.json'), `${JSON.stringify(connection, null, 2)}\n`, { mode: 0o600 });
-  await writeFile(resolve(input.workspace, '.dharma', 'repository-agent.json'), `${JSON.stringify(repositoryAgent, null, 2)}\n`, { mode: 0o600 });
+  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md', skill);
+  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/references/organization.md', reference);
+  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json',
+    `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`);
+  const knowledge = input.repositoryAgentId ? await initializeRepositoryKnowledge({
+    workspace: input.workspace, organizationId: input.organizationId, repositoryAgentId: input.repositoryAgentId,
+  }) : null;
+  const repositoryPackage = await writeRepositoryPackageSnapshot({
+    workspace: input.workspace, snapshot: await inventoryRepositoryPackage(input),
+  });
+  await writeRepositoryInstallerFile(input.workspace, '.dharma/agent-fabric.json', `${JSON.stringify(connection, null, 2)}\n`);
+  await writeRepositoryInstallerFile(input.workspace, '.dharma/repository-agent.json', `${JSON.stringify(repositoryAgent, null, 2)}\n`);
   return {
     skillPath: '.agents/skills/dharma-agent-fabric/SKILL.md',
     connectionPath: '.dharma/agent-fabric.json',
     repositoryAgentPath: '.dharma/repository-agent.json',
+    repositoryPackage,
+    knowledge,
   };
+}
+
+async function repositorySnapshotCommand(flags: Map<string, string | boolean>, outputs: Array<string | boolean>) {
+  if (flags.has('apply') && flags.has('dry-run')) throw new Error('Choose --apply or --dry-run, not both.');
+  if (outputs.some(value => typeof value !== 'string')) throw new Error('--approved-output requires a workspace-relative file path.');
+  const workspace = String(flags.get('workspace') || '.');
+  const apply = flags.get('apply') === true;
+  if (apply) {
+    await access(resolve(workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json')).catch(() => {
+      throw new Error('Snapshot --apply requires an installed managed repository skill; use --dry-run before onboarding.');
+    });
+  }
+  const snapshot = await inventoryRepositoryPackage({
+    workspace, organizationId: required(flags, 'organization-id'), workspaceId: required(flags, 'workspace-id'),
+    repositoryAgentId: (await registry()).find(record => record.path === resolve(workspace)
+      && record.organizationId === flags.get('organization-id') && record.workspaceId === flags.get('workspace-id'))?.repositoryAgentId,
+    approvedOutputs: outputs as string[],
+  });
+  const persisted = apply ? await writeRepositoryPackageSnapshot({ workspace, snapshot }) : null;
+  return { ok: true, dryRun: !apply, localMutation: apply, serverMutation: false,
+    authority: 'local_inventory_not_signed', snapshot, persisted };
 }
 
 async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
@@ -4699,6 +4726,9 @@ export async function run(argv: string[]): Promise<Output> {
     );
   }
   if (command === 'repositories' && subcommand === 'list') return repositoriesList(flags);
+  if (command === 'repositories' && subcommand === 'snapshot') {
+    return repositorySnapshotCommand(flags, repeated.get('approved-output') || []);
+  }
   if (command === 'repositories' && subcommand === 'status') {
     const listed = await repositoriesList(flags) as Record<string, unknown>;
     return {
