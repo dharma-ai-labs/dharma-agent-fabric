@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { link, mkdir, mkdtemp, readFile, rename, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, readdir, rename, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
@@ -291,17 +291,37 @@ test('concurrent persistence publishes complete CAS objects and preserves unmana
   assert.equal(await readFile(resolve(unmanaged.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md'), 'utf8'), '# User owned');
 });
 
-test('case-sensitive paths remain distinct and Windows traversal and protected paths are rejected', async () => {
+test('filesystem case semantics are preserved and Windows traversal and protected paths are rejected', async () => {
   const f = await fixture();
   await f.put('skills/Review/SKILL.md', '# Uppercase');
   await f.put('skills/review/SKILL.md', '# Lowercase');
   await f.put('skills/review/.ENV.local', 'password=must-not-appear');
   const snapshot = await inventoryRepositoryPackage(f);
-  assert.deepEqual(snapshot.manifest.skills.map(skill => skill.path), ['skills/Review', 'skills/review']);
+  const directories = (await readdir(resolve(f.workspace, 'skills'))).sort();
+  assert.deepEqual(snapshot.manifest.skills.map(skill => skill.path), directories.map(path => `skills/${path}`));
+  assert.equal(directories.length, await readFile(resolve(f.workspace, 'skills/Review/SKILL.md'), 'utf8') === '# Uppercase' ? 2 : 1);
   assert.ok(!snapshot.manifest.files.some(file => file.path.includes('.ENV')));
   for (const path of ['skills\\review\\SKILL.md', '//outside/file.md', 'skills/../outside.md', '.env', 'skills/review/.ENV.local']) {
     await assert.rejects(inventoryRepositoryPackage({ ...f, approvedOutputs: [path] }));
   }
+});
+
+test('installer permits an operating-system ancestor alias but rejects an aliased workspace', async () => {
+  const f = await fixture();
+  const parent = await mkdtemp(resolve(tmpdir(), 'repository-alias-'));
+  const alias = resolve(parent, 'system-alias');
+  await symlink(dirname(f.workspace), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const workspace = resolve(alias, f.workspace.slice(dirname(f.workspace).length + 1));
+  await f.put('skills/review/SKILL.md', '# Safe');
+  const result = await installRepositoryAgentFabricSkill({ ...f, workspace, repositoryAgentId: 'repo_agent_fixture',
+    hqUrl: 'https://example.invalid', policyRevision: '1' });
+  assert.equal((JSON.parse(await readFile(resolve(workspace, result.repositoryPackage.manifestPath), 'utf8')) as {
+    skills: unknown[] }).skills.length, 1);
+  assert.equal(result.knowledge?.disposition, 'initialized');
+  const linkedWorkspace = resolve(parent, 'workspace-alias');
+  await symlink(f.workspace, linkedWorkspace, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(installRepositoryAgentFabricSkill({ ...f, workspace: linkedWorkspace,
+    hqUrl: 'https://example.invalid', policyRevision: '1' }), /symlink/);
 });
 
 test('explicit snapshot apply refreshes only an installed managed root and rejects conflicting modes', async () => {

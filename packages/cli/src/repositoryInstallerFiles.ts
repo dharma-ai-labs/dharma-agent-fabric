@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const MARKER = `${ROOT}/.dharma-agent-fabric.json`;
@@ -9,9 +9,14 @@ const FILES = [MARKER, `${ROOT}/SKILL.md`, `${ROOT}/references/organization.md`,
   '.dharma/agent-fabric.json', '.dharma/repository-agent.json'] as const;
 type InstallerFile = typeof FILES[number];
 
-async function checkedPath(path: string, leaf: 'file' | 'directory') {
+async function checkedPath(workspace: string, path: string, leaf: 'file' | 'directory') {
+  const boundary = resolve(workspace), within = relative(boundary, path);
+  if (isAbsolute(within) || within === '..' || within.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
+    throw new Error('Repository installer path escapes the workspace.');
+  }
   const components = [path];
-  while (dirname(components[0]!) !== components[0]) components.unshift(dirname(components[0]!));
+  // System ancestors may be aliases (for example macOS /var); owned paths may not.
+  while (components[0] !== boundary) components.unshift(dirname(components[0]!));
   let exists = false;
   for (const [index, component] of components.entries()) {
     let metadata;
@@ -31,12 +36,12 @@ async function checkedPath(path: string, leaf: 'file' | 'directory') {
 }
 
 export async function assertRepositoryInstallerOwnership(workspace: string, workspaceId: string) {
-  if (!await checkedPath(resolve(workspace), 'directory')) throw new Error('Repository installer workspace is missing.');
-  const rootExists = await checkedPath(resolve(workspace, ROOT), 'directory');
-  for (const path of FILES) await checkedPath(resolve(workspace, path), 'file');
+  if (!await checkedPath(workspace, resolve(workspace), 'directory')) throw new Error('Repository installer workspace is missing.');
+  const rootExists = await checkedPath(workspace, resolve(workspace, ROOT), 'directory');
+  for (const path of FILES) await checkedPath(workspace, resolve(workspace, path), 'file');
   if (!rootExists) return;
   const markerPath = resolve(workspace, MARKER);
-  if (!await checkedPath(markerPath, 'file')) {
+  if (!await checkedPath(workspace, markerPath, 'file')) {
     throw new Error('Refusing to replace an unmanaged repository skill at .agents/skills/dharma-agent-fabric.');
   }
   const handle = await open(markerPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
@@ -65,8 +70,8 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
 export async function writeRepositoryInstallerFile(workspace: string, path: InstallerFile, content: string) {
   if (!(FILES as readonly string[]).includes(path)) throw new Error('Unsupported repository installer file.');
   const target = resolve(workspace, path);
-  await checkedPath(dirname(target), 'directory');
-  await checkedPath(target, 'file');
+  await checkedPath(workspace, dirname(target), 'directory');
+  await checkedPath(workspace, target, 'file');
   const temporary = `${target}.staging-${randomUUID()}`;
   const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
     | (constants.O_NOFOLLOW || 0), 0o600);
@@ -76,11 +81,11 @@ export async function writeRepositoryInstallerFile(workspace: string, path: Inst
       await handle.writeFile(content);
       await handle.sync();
     } finally { await handle.close(); }
-    await checkedPath(dirname(target), 'directory');
-    await checkedPath(target, 'file');
+    await checkedPath(workspace, dirname(target), 'directory');
+    await checkedPath(workspace, target, 'file');
     await rename(temporary, target);
     published = true;
   } finally {
-    if (!published && await checkedPath(temporary, 'file')) await unlink(temporary);
+    if (!published && await checkedPath(workspace, temporary, 'file')) await unlink(temporary);
   }
 }

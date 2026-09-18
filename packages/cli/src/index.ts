@@ -2829,8 +2829,10 @@ export async function installRepositoryAgentFabricSkill(input: {
   repositoryAgentKey?: string | null;
   controlBranch?: string | null;
 }) {
-  const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
   await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
+  input = { ...input, workspace: await realpath(input.workspace) };
+  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
+  const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
   await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
   await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
   const skill = `---
