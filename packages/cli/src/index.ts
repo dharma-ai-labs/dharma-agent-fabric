@@ -55,7 +55,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.56';
+const VERSION = '0.2.57';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4300,17 +4300,40 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const connectionPath = resolve(workspace, '.dharma', 'agent-fabric.json');
   const nativeRoot = nativeSkillDirectory(input.provider, input.env, input.home);
   const nativeSkillPath = resolve(nativeRoot, 'dharma-agent-fabric', 'SKILL.md');
-  const nativeMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
+  const nativeBootstrapMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
+  const nativeSignedMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric.json');
   const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
-  let nativeManaged = false;
-  if (await pathExists(nativeSkillPath) && await pathExists(nativeMarkerPath)) {
+  let workspaceId: string | undefined;
+  let organizationAgentId: string | undefined;
+  try {
+    const connection = JSON.parse(await readFile(connectionPath, 'utf8')) as { workspaceId?: unknown };
+    if (typeof connection.workspaceId === 'string') {
+      workspaceId = connection.workspaceId;
+      organizationAgentId = (await registry()).find((item) => item.workspaceId === workspaceId)?.repositoryAgentId || undefined;
+    }
+  } catch {}
+  let bootstrapManaged = false;
+  if (await pathExists(nativeSkillPath) && await pathExists(nativeBootstrapMarkerPath)) {
     try {
-      const marker = JSON.parse(await readFile(nativeMarkerPath, 'utf8')) as Record<string, unknown>;
-      nativeManaged = marker.managedBy === 'dharma-agent-fabric'
+      const marker = JSON.parse(await readFile(nativeBootstrapMarkerPath, 'utf8')) as Record<string, unknown>;
+      bootstrapManaged = marker.managedBy === 'dharma-agent-fabric'
         && marker.provider === input.provider
         && ['dharma.native-skill-bootstrap/v1', 'dharma.native-skill-bootstrap/v2'].includes(String(marker.schema));
     } catch {}
   }
+  let signedMarkerBundleId: string | null = null;
+  if (workspaceId && await pathExists(nativeSkillPath) && await pathExists(nativeSignedMarkerPath)) {
+    try {
+      const marker = JSON.parse(await readFile(nativeSignedMarkerPath, 'utf8')) as Record<string, unknown>;
+      if (marker.skillId === 'dharma-agent-fabric'
+        && marker.workspaceId === workspaceId
+        && typeof marker.bundleId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(marker.bundleId)) {
+        signedMarkerBundleId = marker.bundleId;
+      }
+    } catch {}
+  }
+  const nativeManaged = bootstrapManaged || Boolean(signedMarkerBundleId);
   const nativeInstalled = nativeManaged;
   let nativeDiscovered = ['agy', 'hermes'].includes(input.provider) ? false : nativeInstalled;
   if (input.provider === 'agy' && nativeInstalled) {
@@ -4348,15 +4371,6 @@ export async function verifyAgentFabricSkillInstallation(input: {
     } catch {}
   }
   const bootstrapReady = repositoryInstalled && nativeInstalled && nativeDiscovered;
-  let workspaceId: string | undefined;
-  let organizationAgentId: string | undefined;
-  try {
-    const connection = JSON.parse(await readFile(connectionPath, 'utf8')) as { workspaceId?: unknown };
-    if (typeof connection.workspaceId === 'string') {
-      workspaceId = connection.workspaceId;
-      organizationAgentId = (await registry()).find((item) => item.workspaceId === workspaceId)?.repositoryAgentId || undefined;
-    }
-  } catch {}
   const config = await readDeviceConfig();
   const activeBundleId = workspaceId && organizationAgentId && config
     ? (await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config))?.bundleId ?? null
@@ -4379,11 +4393,15 @@ export async function verifyAgentFabricSkillInstallation(input: {
       ));
     } catch {}
   }
-  const signedLifecycleReady = bootstrapReady && activationAttested && Boolean(activeBundleId);
+  const signedOwnershipMatchesActive = !signedMarkerBundleId || signedMarkerBundleId === activeBundleId;
+  const signedLifecycleReady = bootstrapReady
+    && activationAttested
+    && Boolean(activeBundleId)
+    && signedOwnershipMatchesActive;
   return {
     provider: input.provider,
     ready: bootstrapReady,
-    verificationScope: 'generic_bootstrap',
+    verificationScope: signedLifecycleReady ? 'signed_lifecycle' : 'generic_bootstrap',
     bootstrapReady,
     signedLifecycleReady,
     repositoryInstalled,

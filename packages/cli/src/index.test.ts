@@ -1728,13 +1728,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.56');
+      assert.equal(version, '0.2.57');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.56',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.57',
   });
 });
 
@@ -1863,6 +1863,63 @@ test('native bootstrap installation makes the repository skill verifiable by Cod
   assert.equal(verified.ready, true);
   assert.equal(verified.repositoryInstalled, true);
   assert.equal(verified.nativeInstalled, true);
+});
+
+test('signed native ownership remains installed after bootstrap replacement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-signed-native-skill-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  const workspaceId = 'workspace_test';
+  await mkdir(workspace, { recursive: true });
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId,
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const skillRoot = join(nativeSkillDirectory('codex', {}, home), 'dharma-agent-fabric');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(join(skillRoot, 'SKILL.md'), '# Signed managed skill\n');
+  await writeFile(join(skillRoot, '.dharma-agent-fabric.json'), JSON.stringify({
+    bundleId: '11111111-1111-4111-8111-111111111111',
+    skillId: 'dharma-agent-fabric',
+    workspaceId,
+  }));
+
+  const verified = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace, home });
+  assert.equal(verified.ready, true);
+  assert.equal(verified.nativeInstalled, true);
+  assert.equal(verified.nativeManaged, true);
+  assert.equal(verified.nativeDiscovered, true);
+  assert.equal(verified.signedLifecycleReady, false);
+});
+
+test('signed native ownership rejects a foreign workspace marker', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-foreign-signed-native-skill-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(workspace, { recursive: true });
+  await installRepositoryAgentFabricSkill({
+    workspace,
+    hqUrl: 'https://www.dharma-ai.io',
+    organizationId: 'org_test',
+    workspaceId: 'workspace_test',
+    policyRevision: 'agent-fabric-policy-v1',
+  });
+  const skillRoot = join(nativeSkillDirectory('codex', {}, home), 'dharma-agent-fabric');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(join(skillRoot, 'SKILL.md'), '# Foreign managed skill\n');
+  await writeFile(join(skillRoot, '.dharma-agent-fabric.json'), JSON.stringify({
+    bundleId: '11111111-1111-4111-8111-111111111111',
+    skillId: 'dharma-agent-fabric',
+    workspaceId: 'workspace_foreign',
+  }));
+
+  const verified = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace, home });
+  assert.equal(verified.ready, false);
+  assert.equal(verified.nativeInstalled, false);
+  assert.equal(verified.nativeManaged, false);
 });
 
 test('native Claude bootstrap installs the bounded project completion policy', async () => {
