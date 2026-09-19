@@ -50,13 +50,13 @@ async function privateDirectory(path: string): Promise<Stat> {
   return stat;
 }
 
-async function privateFile(path: string, limit: number) {
+async function privateFile(path: string, limit: number, writable = false) {
   const initial = await lstat(path);
   if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink !== 1 || initial.size > limit) {
     throw new Error('Invalid preparation cache file.');
   }
   await assertPrivatePath(path, initial);
-  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  const file = await open(path, (writable ? constants.O_RDWR : constants.O_RDONLY) | (constants.O_NOFOLLOW || 0));
   try {
     const held = await file.stat();
     if (!held.isFile() || held.nlink !== 1 || !sameIdentity(initial, held)) throw new Error('Preparation cache file changed.');
@@ -126,7 +126,7 @@ export async function publishSkillPreparationCache(input: SkillPreparationCacheP
       input.assertCurrent();
     }
   };
-  const metadata = await privateFile(resolve(sourceRoot, 'PREPARED.json'), METADATA_LIMIT);
+  const metadata = await privateFile(resolve(sourceRoot, 'PREPARED.json'), METADATA_LIMIT, true);
   const pointerPath = resolve(scopeRoot, 'CURRENT.json');
   const temporary = resolve(scopeRoot, `.CURRENT-${randomUUID()}.json`);
   let pointerWriter: Awaited<ReturnType<typeof open>> | undefined;
