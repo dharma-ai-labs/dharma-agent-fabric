@@ -87,7 +87,7 @@ test('installation identity is durable per DHARMA_HOME and rejects corrupt state
   const second = await loadOrCreateInstallationId(path);
   assert.match(first, /^[0-9a-f-]{36}$/i);
   assert.equal(second, first);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
   await writeFile(path, '{"schema":"dharma.installation-identity/v1","installationId":"invalid"}\n');
   await assert.rejects(loadOrCreateInstallationId(path), /Installation identity is invalid/);
 });
