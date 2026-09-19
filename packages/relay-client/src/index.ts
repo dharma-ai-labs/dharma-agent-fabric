@@ -18,6 +18,7 @@ export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
   hqUrl: string;
   organizationId: string;
+  installationId?: string;
   deviceId: string;
   deviceName: string;
   platform: 'windows' | 'wsl' | 'macos' | 'linux';
@@ -157,8 +158,18 @@ export function normalizeRelayUrl(value: string) {
   return url.origin;
 }
 
-function accountFor(hqUrl: string, organizationId: string) {
-  return `device-key-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+function assertInstallationId(installationId: string | undefined): void {
+  if (installationId !== undefined && !UUID_PATTERN.test(installationId)) {
+    throw new Error('Installation identity is invalid.');
+  }
+}
+
+function accountFor(hqUrl: string, organizationId: string, installationId?: string) {
+  assertInstallationId(installationId);
+  const scope = installationId
+    ? `${normalizeHqUrl(hqUrl)}:${organizationId}:${installationId}`
+    : `${normalizeHqUrl(hqUrl)}:${organizationId}`;
+  return `device-key-${sha256(scope).slice(0, 32)}`;
 }
 
 function evidenceQuotaAccountFor(hqUrl: string, organizationId: string, deviceId: string) {
@@ -173,13 +184,18 @@ function enrollmentAnchorAccountFor(hqUrl: string, organizationId: string, devic
   return `device-enrollment-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}:${deviceId}`).slice(0, 32)}`;
 }
 
-function organizationApiTokenAccountFor(hqUrl: string, organizationId: string) {
-  return `organization-api-${sha256(`${normalizeHqUrl(hqUrl)}:${organizationId}`).slice(0, 32)}`;
+function organizationApiTokenAccountFor(hqUrl: string, organizationId: string, installationId?: string) {
+  assertInstallationId(installationId);
+  const scope = installationId
+    ? `${normalizeHqUrl(hqUrl)}:${organizationId}:${installationId}`
+    : `${normalizeHqUrl(hqUrl)}:${organizationId}`;
+  return `organization-api-${sha256(scope).slice(0, 32)}`;
 }
 
 export async function saveOrganizationApiToken(input: {
   hqUrl: string;
   organizationId: string;
+  installationId?: string;
   token: string;
   store?: SecureSecretStore;
 }): Promise<void> {
@@ -187,7 +203,7 @@ export async function saveOrganizationApiToken(input: {
     throw new Error('Organization API token is invalid.');
   }
   const store = input.store ?? await createSystemSecureStore();
-  const account = organizationApiTokenAccountFor(input.hqUrl, input.organizationId);
+  const account = organizationApiTokenAccountFor(input.hqUrl, input.organizationId, input.installationId);
   await store.put(account, input.token);
   if (await store.get(account) !== input.token) throw new Error('Secure store did not confirm the organization API token write.');
 }
@@ -195,10 +211,11 @@ export async function saveOrganizationApiToken(input: {
 export async function loadOrganizationApiToken(input: {
   hqUrl: string;
   organizationId: string;
+  installationId?: string;
   store?: SecureSecretStore;
 }): Promise<string | null> {
   const store = input.store ?? await createSystemSecureStore();
-  const token = await store.get(organizationApiTokenAccountFor(input.hqUrl, input.organizationId));
+  const token = await store.get(organizationApiTokenAccountFor(input.hqUrl, input.organizationId, input.installationId));
   if (token && !/^dharma_org_[A-Za-z0-9_-]{40,120}$/.test(token)) {
     throw new Error('Organization API token in the secure store is corrupt.');
   }
@@ -473,10 +490,11 @@ export function isDefinitiveAgentFabricRejection(error: unknown): boolean {
 export async function loadOrCreateDeviceIdentity(input: {
   hqUrl: string;
   organizationId: string;
+  installationId?: string;
   store?: SecureSecretStore;
 }) {
   const store = input.store ?? await createSystemSecureStore();
-  const account = accountFor(input.hqUrl, input.organizationId);
+  const account = accountFor(input.hqUrl, input.organizationId, input.installationId);
   const current = await store.get(account);
   let privateJwk: JsonWebKey;
   if (current) {
@@ -724,6 +742,7 @@ export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
   if (config.schema !== 'dharma.device-config/v1' || !config.deviceId || !config.organizationId || !config.hqUrl) {
     throw new Error('Device is not enrolled. Run dharma login.');
   }
+  assertInstallationId(config.installationId);
   return { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) };
 }
 
@@ -755,7 +774,12 @@ export class AgentFabricClient {
   static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch }) {
     const store = input.store ?? await createSystemSecureStore();
     const config = await recoverDeviceEnrollmentConsistency({ configPath: input.configPath, store });
-    const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId, store });
+    const identity = await loadOrCreateDeviceIdentity({
+      hqUrl: config.hqUrl,
+      organizationId: config.organizationId,
+      installationId: config.installationId,
+      store,
+    });
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
     try {
       await loadDeviceEnrollmentAnchor({ config, store });

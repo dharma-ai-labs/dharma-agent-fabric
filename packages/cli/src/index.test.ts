@@ -25,6 +25,7 @@ import {
   installRepositoryAgentFabricSkill,
   isDirectExecution,
   isTransientBootstrapError,
+  loadOrCreateInstallationId,
   materializeWorkspacePolicy,
   applyServerEvidencePolicy,
   materializeInlineSkillFiles,
@@ -78,6 +79,18 @@ import {
   nodeRuntimeCandidates,
   runtimeBootstrapHint,
 } from './runtime-bootstrap.js';
+
+test('installation identity is durable per DHARMA_HOME and rejects corrupt state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-installation-identity-'));
+  const path = join(root, 'installation.json');
+  const first = await loadOrCreateInstallationId(path);
+  const second = await loadOrCreateInstallationId(path);
+  assert.match(first, /^[0-9a-f-]{36}$/i);
+  assert.equal(second, first);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  await writeFile(path, '{"schema":"dharma.installation-identity/v1","installationId":"invalid"}\n');
+  await assert.rejects(loadOrCreateInstallationId(path), /Installation identity is invalid/);
+});
 
 const execFileAsync = promisify(execFile);
 
@@ -1728,13 +1741,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.57');
+      assert.equal(version, '0.2.58');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.57',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.58',
   });
 });
 
