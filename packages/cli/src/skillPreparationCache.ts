@@ -1,6 +1,6 @@
 import { constants, fstatSync, lstatSync, readSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { lstat, open, rename, rm } from 'node:fs/promises';
+import { lstat, open, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, parse, relative, resolve, sep } from 'node:path';
 import { canonicalize, sha256, validateContract, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
@@ -86,6 +86,10 @@ async function privateFile(path: string, limit: number) {
 }
 
 async function syncDirectory(path: string, expected: Stat) {
+  if (process.platform === 'win32') {
+    if (!sameIdentity(expected, await privateDirectory(path))) throw new Error('Preparation cache directory changed.');
+    return;
+  }
   const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
   try {
     const held = await file.stat();
@@ -100,10 +104,9 @@ async function syncDirectory(path: string, expected: Stat) {
 // onCommitted must synchronously, non-throwingly transfer root ownership to the caller.
 export async function publishSkillPreparationCache(input: SkillPreparationCachePublication): Promise<void> {
   input.assertCurrent();
-  if (process.platform === 'win32') throw new Error('Durable Windows preparation directory sync is not qualified.');
-  const home = resolve(input.home);
+  const home = await realpath(resolve(input.home));
   const scopeRoot = skillPreparationScopeRoot(home, input.workspaceId, input.provider);
-  const sourceRoot = resolve(input.sourceRoot);
+  const sourceRoot = await realpath(resolve(input.sourceRoot));
   if (dirname(sourceRoot) !== scopeRoot || !ATTEMPT.test(basename(sourceRoot))) throw new Error('Preparation cache scope mismatch.');
   if (Buffer.byteLength(input.recordBytes) > METADATA_LIMIT) throw new Error('Preparation metadata exceeds its limit.');
   let ancestor = parse(home).root;
@@ -209,8 +212,17 @@ export async function publishSkillPreparationCache(input: SkillPreparationCacheP
     await rename(temporary, pointerPath);
     committed = true;
     input.onCommitted();
-    // Post-commit failure is durability-uncertain, not permission to delete the root.
+    // The cache is recoverable staging, never activation authority. Windows does
+    // not expose a portable directory fsync, so verify the committed file there;
+    // a lost directory entry only causes safe re-preparation after restart.
     await syncDirectory(scopeRoot, directories.get(scopeRoot)!);
+    if (process.platform === 'win32') {
+      const committedPointer = await privateFile(pointerPath, 65536);
+      try {
+        if (!committedPointer.rawBytes.equals(pointerBytes)) throw new Error('Preparation cache pointer bytes changed.');
+        await committedPointer.assertStable();
+      } finally { await committedPointer.file.close(); }
+    }
     input.assertCurrent();
   } finally {
     try {

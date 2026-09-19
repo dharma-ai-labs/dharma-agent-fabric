@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, lstatSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { lstat, mkdir, open } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -23,6 +23,29 @@ const ACL_SCRIPT = `$ErrorActionPreference='Stop';
     daclPresent=(($descriptor.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0);
     daclNull=($null -eq $descriptor.DiscretionaryAcl)} |
     ConvertTo-Json -Depth 4 -Compress`;
+const PRIVATE_DIRECTORY_ACL_SCRIPT = `$ErrorActionPreference='Stop';
+  $path=[Environment]::GetEnvironmentVariable('DHARMA_PREPARATION_ACL_PATH');
+  $current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;
+  $acl=[System.Security.AccessControl.DirectorySecurity]::new();
+  $acl.SetOwner($current);
+  $acl.SetAccessRuleProtection($true,$false);
+  $inherit=[System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+    [System.Security.AccessControl.InheritanceFlags]::ObjectInherit;
+  $propagation=[System.Security.AccessControl.PropagationFlags]::None;
+  foreach($sid in @($current,[System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+      [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){
+    $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,$inherit,$propagation,
+      [System.Security.AccessControl.AccessControlType]::Allow);
+    [void]$acl.AddAccessRule($rule);
+  }
+  Set-Acl -LiteralPath $path -AclObject $acl`;
+
+function powershellEnvironment(path: string): NodeJS.ProcessEnv {
+  return { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH,
+    TEMP: process.env.TEMP, TMP: process.env.TMP, PSModulePath: process.env.PSModulePath,
+    DHARMA_PREPARATION_ACL_PATH: path };
+}
 
 export function assertWindowsSkillPreparationAcl(value: unknown): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Windows preparation ACL.');
@@ -59,11 +82,31 @@ export async function assertPrivatePath(path: string, stat: Awaited<ReturnType<t
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ACL_SCRIPT], {
       windowsHide: true, timeout: 5000, maxBuffer: 65536,
-      env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH,
-        TEMP: process.env.TEMP, TMP: process.env.TMP, DHARMA_PREPARATION_ACL_PATH: path },
+      env: powershellEnvironment(path),
     });
     assertWindowsSkillPreparationAcl(JSON.parse(stdout.replace(/^\uFEFF/, '')));
   } catch { throw new Error('Windows preparation private access could not be verified.'); }
+}
+
+async function hardenWindowsPrivateDirectory(path: string): Promise<void> {
+  if (process.platform !== 'win32') return;
+  try {
+    await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', PRIVATE_DIRECTORY_ACL_SCRIPT], {
+      windowsHide: true, timeout: 5000, maxBuffer: 65536, env: powershellEnvironment(path),
+    });
+  } catch { throw new Error('Windows preparation private access could not be established.'); }
+}
+
+function canonicalExistingHome(path: string): string {
+  const resolved = resolve(path);
+  try {
+    const stat = lstatSync(resolved);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return resolved;
+    return realpathSync.native(resolved);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return resolved;
+    throw error;
+  }
 }
 
 async function preflightAncestors(path: string): Promise<void> {
@@ -82,13 +125,14 @@ export function skillPreparationScopeRoot(home: string, workspaceId: string, pro
     throw new Error('Skill preparation requires a canonical workspace and supported provider.');
   }
   const key = sha256(canonicalize({ schema: 'dharma.skill-preparation-scope/v1', workspaceId, provider })).slice(7);
-  return resolve(home, 'relay', 'skill-pending-sources', key);
+  return resolve(canonicalExistingHome(home), 'relay', 'skill-pending-sources', key);
 }
 
 async function ensureDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Skill preparation directory is not an owned real directory.');
+  await hardenWindowsPrivateDirectory(path);
   await assertPrivatePath(path, stat);
 }
 
@@ -99,13 +143,14 @@ export async function withSkillPreparationTransaction<T>(input: {
   assertCurrent: () => void;
   timeoutMs?: number;
 }, operation: (scopeRoot: string) => Promise<T>): Promise<T> {
-  const root = skillPreparationScopeRoot(input.home, input.workspaceId, input.provider);
+  const home = canonicalExistingHome(input.home);
+  const root = skillPreparationScopeRoot(home, input.workspaceId, input.provider);
   const timeout = input.timeoutMs ?? 30000;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30000) throw new Error('Invalid skill preparation lock wait.');
   input.assertCurrent();
-  await preflightAncestors(input.home);
+  await preflightAncestors(home);
   input.assertCurrent();
-  for (const path of [resolve(input.home), resolve(input.home, 'relay'), resolve(input.home, 'relay', 'skill-pending-sources'), root]) {
+  for (const path of [home, resolve(home, 'relay'), resolve(home, 'relay', 'skill-pending-sources'), root]) {
     await ensureDirectory(path);
     input.assertCurrent();
   }

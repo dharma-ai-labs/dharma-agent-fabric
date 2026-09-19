@@ -11,7 +11,7 @@ import ts from 'typescript';
 import { canonicalize, sha256, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { calculateBundleHash, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
-import { skillPreparationScopeRoot } from './skillPreparationTransaction.js';
+import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
@@ -31,9 +31,9 @@ async function taker() {
 }
 async function fixture(writePrepared = true) {
   const home = await mkdtemp(join(tmpdir(), 'af-cache-pointer-'));
+  const sourceRoot = await withSkillPreparationTransaction({ home, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {} },
+    scopeRoot => mkdtemp(join(scopeRoot, 'attempt-')));
   const scopeRoot = skillPreparationScopeRoot(home, WORKSPACE, 'codex');
-  await mkdir(scopeRoot, { recursive: true, mode: 0o700 });
-  const sourceRoot = await mkdtemp(join(scopeRoot, 'attempt-'));
   const keys = generateKeyPairSync('ed25519');
   const unsigned = { schema: 'dharma.skill-bundle/v2', bundleId: '44444444-4444-4444-8444-444444444444',
     organizationId: 'org_test', version: 'fixture', operation: 'clear', skills: [], riskClass: 'R0',
