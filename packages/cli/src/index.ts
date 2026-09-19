@@ -2,7 +2,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, chmod, link, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,7 @@ import {
   type AgentFabricManagedEvaluationContract,
   type AgentFabricManagedEvaluationTaskPackage,
 } from '@dharma-ai-labs/agent-fabric-sdk';
-import { getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { contentHash, getActiveSkillBundleAuthorization, getExpiredSkillBundleAuthorizationForReplacement, getLegacySkillBundleIdForUpgrade, installSkillBundle, readVerifiedRepositoryKnowledge, rollbackUnconfirmedSkillBundle, verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import {
   executeTask,
   FileActionExecutionJournal,
@@ -38,8 +38,24 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
+import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
+import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
+import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
+import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
+import { prepareProvidersIndependently, startSkillPreparationPump } from './skillPreparationPump.js';
+import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
+import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
+import { publishSkillPreparationCache, takeSkillPreparationCache } from './skillPreparationCache.js';
+import { adoptRepositoryCandidate, pollRepositoryCandidate, synchronizeRepositoryCandidate,
+  type RepositoryCandidateReceipt } from './repositoryCandidateSync.js';
+import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type RepositoryRoleScope } from './repositoryRoleMetadata.js';
+import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
+import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.49';
+const VERSION = '0.2.50';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -59,6 +75,18 @@ interface WorkspaceRecord {
   repositoryIdentityVersion?: 'normalized-v1' | 'legacy-v0';
   repositoryAgentId?: string | null;
   repositoryBindingId?: string | null;
+  endpointId?: string | null;
+  repositoryPackage?: {
+    state: 'absent' | 'accepted' | 'processing' | 'published' | 'blocked';
+    candidateId: string | null;
+    operationId: string | null;
+    snapshotHash: string | null;
+    sourceManifestHash: string | null;
+    releaseId: string | null;
+    generation: number;
+    consolidationMode: 'initial_repository' | 'repository_update' | null;
+  };
+  repositoryRole?: { revision: number; profileHash: string } | null;
   repositoryAgentKey?: string | null;
   controlBranch?: string | null;
   defaultBranch: string | null;
@@ -821,7 +849,17 @@ async function assertWorkspaceAuthorizationCurrent(
   const statePath = workspaceAuthorizationStatePath(workspaceId);
   type AuthorizationState = { issuedAt: string; signature: string };
   let previous: AuthorizationState | null = null;
-  try { previous = JSON.parse(await readFile(statePath, 'utf8')) as AuthorizationState; }
+  try {
+    const parsed: unknown = JSON.parse(await readFile(statePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+      || typeof (parsed as AuthorizationState).issuedAt !== 'string'
+      || !Number.isFinite(Date.parse((parsed as AuthorizationState).issuedAt))
+      || typeof (parsed as AuthorizationState).signature !== 'string'
+      || !(parsed as AuthorizationState).signature) {
+      throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+    }
+    previous = parsed as AuthorizationState;
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
     throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
@@ -1550,12 +1588,32 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const onboarded = await retryBootstrapOnboarding(
     async () => await onboard(onboardFlags) as Record<string, unknown>,
   );
+  if (onboarded.ok !== true || onboarded.stage === 'approve_device') {
+    return {
+      ok: onboarded.ok === true,
+      stage: onboarded.stage,
+      code: onboarded.code,
+      sharedRepositoryReady: false,
+      enrollment: {
+        organizationId,
+        deviceId: config.deviceId,
+        status: 'approved',
+        organizationApiTokenStored: true,
+        scopes: redeemed.organizationApiTokenScopes,
+        rebind,
+      },
+      repository: onboarded,
+    };
+  }
   const launcher = await installStableRepositoryLauncher(workspace);
+  const sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
     return {
       ok: true,
-      stage: onboarded.stage,
+      stage: sharedRepositoryReady ? onboarded.stage : 'shared_repository_pending',
+      localStage: onboarded.localStage ?? onboarded.stage,
+      sharedRepositoryReady,
       enrollment: {
         organizationId,
         deviceId: config.deviceId,
@@ -1614,7 +1672,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   });
   return {
     ok: true,
-    stage: 'complete',
+    stage: sharedRepositoryReady ? 'complete' : 'shared_repository_pending',
+    localStage: 'complete',
+    sharedRepositoryReady,
     enrollment: {
       organizationId,
       deviceId: config.deviceId,
@@ -2499,7 +2559,24 @@ async function repositoriesConnect(
     results.push(result);
     if ((result as Record<string, unknown>)?.stage === 'approve_device') break;
   }
-  return { ok: true, requested: unique.length, connected: results.length, repositories: results };
+  const states = results.map(result => result as Record<string, unknown>);
+  const blocked = states.filter(result => result.ok !== true).length;
+  const connected = states.filter(result => result.ok === true && result.sharedRepositoryReady === true).length;
+  const locallyReady = states.filter(result => result.ok === true && (
+    ['ready', 'ready_with_provider_actions', 'complete'].includes(String(result.localStage))
+    || ['ready', 'ready_with_provider_actions', 'complete'].includes(String(result.stage))
+  )).length;
+  return {
+    ok: blocked === 0,
+    requested: unique.length,
+    attempted: results.length,
+    locallyReady,
+    connected,
+    blocked,
+    pending: states.length - blocked - connected,
+    sharedRepositoryReady: connected === unique.length,
+    repositories: results,
+  };
 }
 
 export function parseSelectedProviderIds(values: Array<string | boolean>): ProviderId[] | null {
@@ -2586,22 +2663,69 @@ export async function receiptAwareProviderCapabilities(
 
 async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
   const verbose = flags.has('verbose') || flags.has('diagnostic');
+  const items = await registry();
   return {
     ok: true,
-    repositories: (await registry()).map((item) => ({
+    repositories: await Promise.all(items.map(async (item) => ({
       workspaceId: item.workspaceId,
       name: item.name,
       repositoryAgentId: item.repositoryAgentId || null,
       repositoryAgentKey: item.repositoryAgentKey || null,
       controlBranch: item.controlBranch || null,
       connected: Boolean(item.repositoryAgentId && item.controlBranch),
+      repositoryPackageState: item.repositoryPackage?.state || 'unknown',
+      sharedRepositoryReady: await repositorySharedReady(item),
       ...(verbose ? { localPath: item.path, sourceFingerprint: item.repositoryRemoteHash } : {}),
-    })),
+    }))),
   };
 }
 
+async function repositorySharedReady(item: WorkspaceRecord) {
+  if (item.repositoryPackage?.state !== 'published' || !item.repositoryPackage.releaseId) return false;
+  try { return Boolean(await installedRepositoryKnowledge(item)); }
+  catch { return false; }
+}
+
+export function canonicalRepositoryPackage(value: unknown): NonNullable<WorkspaceRecord['repositoryPackage']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Dharma HQ did not return canonical repository package state.');
+  }
+  const row = value as Record<string, unknown>;
+  const keys = ['state', 'candidateId', 'operationId', 'snapshotHash', 'sourceManifestHash', 'releaseId', 'generation', 'consolidationMode'];
+  if (!keys.every(key => Object.hasOwn(row, key)) || Object.keys(row).some(key => !keys.includes(key))
+    || !['absent', 'accepted', 'processing', 'published', 'blocked'].includes(String(row.state))
+    || !Number.isSafeInteger(row.generation) || Number(row.generation) < 0) {
+    throw new Error('Dharma HQ returned invalid canonical repository package state.');
+  }
+  const nullableUuid = (candidate: unknown) => candidate === null || typeof candidate === 'string' && UUID_PATTERN.test(candidate);
+  const nullableHash = (candidate: unknown) => candidate === null || typeof candidate === 'string' && /^sha256:[a-f0-9]{64}$/.test(candidate);
+  const absent = row.state === 'absent';
+  if (![row.candidateId, row.releaseId].every(nullableUuid)
+    || ![row.operationId, row.snapshotHash, row.sourceManifestHash].every(nullableHash)
+    || ![null, 'initial_repository', 'repository_update'].includes(row.consolidationMode as null | string)
+    || absent !== (row.candidateId === null && row.operationId === null && row.snapshotHash === null
+      && row.sourceManifestHash === null && row.releaseId === null && row.consolidationMode === null && row.generation === 0)
+    || (row.state === 'published') !== (row.releaseId !== null)
+    || (!absent && (row.candidateId === null || row.operationId === null || row.snapshotHash === null
+      || row.sourceManifestHash === null || row.consolidationMode === null))) {
+    throw new Error('Dharma HQ returned inconsistent canonical repository package state.');
+  }
+  return row as NonNullable<WorkspaceRecord['repositoryPackage']>;
+}
+
+export function canonicalEndpointRole(value: unknown): WorkspaceRecord['repositoryRole'] {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Dharma HQ returned invalid endpoint role state.');
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).sort().join(',') !== 'profileHash,revision'
+    || !Number.isSafeInteger(row.revision) || Number(row.revision) < 1
+    || typeof row.profileHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(row.profileHash)) {
+    throw new Error('Dharma HQ returned invalid endpoint role state.');
+  }
+  return { revision: Number(row.revision), profileHash: row.profileHash };
+}
+
 async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRecord): Promise<WorkspaceRecord> {
-  if (item.repositoryAgentId && item.repositoryBindingId && item.repositoryAgentKey && item.controlBranch) return item;
   const remote = await gitValue(item.path, ['config', '--get', 'remote.origin.url']);
   const currentIdentity = item.repositoryIdentityVersion === 'normalized-v1'
     ? item.repositoryRemoteHash
@@ -2622,23 +2746,60 @@ async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRec
   const branch = repositoryAgent?.branch && typeof repositoryAgent.branch === 'object'
     ? repositoryAgent.branch as Record<string, unknown>
     : null;
+  const endpoint = response.endpoint && typeof response.endpoint === 'object' && !Array.isArray(response.endpoint)
+    ? response.endpoint as Record<string, unknown>
+    : null;
   const updated: WorkspaceRecord = {
     ...item,
     repositoryRemoteHash: currentIdentity,
     repositoryIdentityVersion: 'normalized-v1',
     repositoryAgentId: String(repositoryAgent?.organization_agent_id || ''),
     repositoryBindingId: String(repositoryAgent?.id || ''),
+    endpointId: typeof response.endpointId === 'string' ? response.endpointId
+      : typeof endpoint?.id === 'string' ? endpoint.id : item.endpointId || null,
+    repositoryPackage: canonicalRepositoryPackage(response.repositoryPackage),
+    repositoryRole: canonicalEndpointRole(response.endpointRole),
     repositoryAgentKey: String(repositoryAgent?.agent_key || ''),
     controlBranch: String(repositoryAgent?.control_branch || branch?.branch || ''),
   };
   if (!/^[0-9a-f-]{36}$/i.test(updated.repositoryAgentId || '')
     || !/^[0-9a-f-]{36}$/i.test(updated.repositoryBindingId || '')
+    || !UUID_PATTERN.test(updated.endpointId || '')
     || !/^repo:[a-f0-9]{24}$/.test(updated.repositoryAgentKey || '')
     || !/^agents\/[a-z0-9][a-z0-9._-]*-[a-f0-9]{8}$/.test(updated.controlBranch || '')) {
     throw new Error('Dharma HQ returned an invalid repository-agent binding.');
   }
   await saveWorkspaceRecord(updated);
   return updated;
+}
+
+function repositoryRoleScope(item: WorkspaceRecord): RepositoryRoleScope {
+  if (!item.repositoryAgentId || !item.repositoryBindingId || !item.endpointId || !item.repositoryRemoteHash) {
+    throw new Error('Repository role operations require a complete signed endpoint and repository binding.');
+  }
+  return { organizationId: item.organizationId, workspaceId: item.workspaceId,
+    repositoryBindingId: item.repositoryBindingId, repositoryAgentId: item.repositoryAgentId,
+    endpointId: item.endpointId, sourceFingerprint: item.repositoryRemoteHash };
+}
+
+async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | 'reply', flags: Map<string, string | boolean>) {
+  const workspaceId = required(flags, 'workspace-id');
+  const item = (await registry()).find(candidate => candidate.workspaceId === workspaceId);
+  if (!item) throw new Error('Repository role workspace is not registered locally.');
+  const scope = repositoryRoleScope(item), transport = await client();
+  if (action === 'register') {
+    const categories = required(flags, 'question-categories').split(',').map(value => value.trim()).filter(Boolean);
+    return registerRepositoryRoleMetadata(transport, scope, { expectedRevision: Number(flags.get('expected-revision') || 0),
+      roleName: required(flags, 'role-name'), questionCategories: categories,
+      description: required(flags, 'role-description') });
+  }
+  if (action === 'discover') {
+    const category = typeof flags.get('category') === 'string' ? String(flags.get('category')) : undefined;
+    return discoverRepositoryRoleMetadata(transport, scope, category);
+  }
+  if (action === 'ask') return askRepositoryRoleQuestion({ transport, scope,
+    category: required(flags, 'category'), question: required(flags, 'question') });
+  return readRepositoryRoleReply({ transport, scope, questionId: required(flags, 'question-id') });
 }
 
 async function workspaceSync(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
@@ -2823,17 +2984,17 @@ export async function installRepositoryAgentFabricSkill(input: {
   workspaceId: string;
   policyRevision: string;
   repositoryAgentId?: string | null;
+  repositoryBindingId?: string | null;
+  sourceAuthorization?: unknown;
   repositoryAgentKey?: string | null;
   controlBranch?: string | null;
 }) {
+  if (input.sourceAuthorization !== undefined) input = { ...input,
+    sourceAuthorization: validateRepositorySourceAuthorization(input.sourceAuthorization, input, new Date()) };
+  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
+  input = { ...input, workspace: await realpath(input.workspace) };
+  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
   const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
-  const marker = resolve(skillRoot, '.dharma-agent-fabric.json');
-  let skillRootExists = true;
-  try { await access(skillRoot); } catch { skillRootExists = false; }
-  if (skillRootExists) {
-    try { await access(marker); }
-    catch { throw new Error('Refusing to replace an unmanaged repository skill at .agents/skills/dharma-agent-fabric.'); }
-  }
   await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
   await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
   const skill = `---
@@ -2896,16 +3057,46 @@ The CLI enrolls this device through browser-confirmed Clerk organization consent
     controlBranch: input.controlBranch || null,
     workspaceId: input.workspaceId,
   };
-  await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
-  await writeFile(resolve(skillRoot, 'references', 'organization.md'), reference, { mode: 0o600 });
-  await writeFile(marker, `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`, { mode: 0o600 });
-  await writeFile(resolve(input.workspace, '.dharma', 'agent-fabric.json'), `${JSON.stringify(connection, null, 2)}\n`, { mode: 0o600 });
-  await writeFile(resolve(input.workspace, '.dharma', 'repository-agent.json'), `${JSON.stringify(repositoryAgent, null, 2)}\n`, { mode: 0o600 });
+  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md', skill);
+  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/references/organization.md', reference);
+  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json',
+    `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`);
+  const knowledge = input.repositoryAgentId ? await initializeRepositoryKnowledge({
+    workspace: input.workspace, organizationId: input.organizationId, repositoryAgentId: input.repositoryAgentId,
+  }) : null;
+  const repositoryPackage = await writeRepositoryPackageSnapshot({
+    workspace: input.workspace, snapshot: await inventoryRepositoryPackage(input),
+  });
+  await writeRepositoryInstallerFile(input.workspace, '.dharma/agent-fabric.json', `${JSON.stringify(connection, null, 2)}\n`);
+  await writeRepositoryInstallerFile(input.workspace, '.dharma/repository-agent.json', `${JSON.stringify(repositoryAgent, null, 2)}\n`);
   return {
     skillPath: '.agents/skills/dharma-agent-fabric/SKILL.md',
     connectionPath: '.dharma/agent-fabric.json',
     repositoryAgentPath: '.dharma/repository-agent.json',
+    repositoryPackage,
+    knowledge,
   };
+}
+
+async function repositorySnapshotCommand(flags: Map<string, string | boolean>, outputs: Array<string | boolean>) {
+  if (flags.has('apply') && flags.has('dry-run')) throw new Error('Choose --apply or --dry-run, not both.');
+  if (outputs.some(value => typeof value !== 'string')) throw new Error('--approved-output requires a workspace-relative file path.');
+  const workspace = String(flags.get('workspace') || '.');
+  const apply = flags.get('apply') === true;
+  if (apply) {
+    await access(resolve(workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json')).catch(() => {
+      throw new Error('Snapshot --apply requires an installed managed repository skill; use --dry-run before onboarding.');
+    });
+  }
+  const snapshot = await inventoryRepositoryPackage({
+    workspace, organizationId: required(flags, 'organization-id'), workspaceId: required(flags, 'workspace-id'),
+    repositoryAgentId: (await registry()).find(record => record.path === resolve(workspace)
+      && record.organizationId === flags.get('organization-id') && record.workspaceId === flags.get('workspace-id'))?.repositoryAgentId,
+    approvedOutputs: outputs as string[],
+  });
+  const persisted = apply ? await writeRepositoryPackageSnapshot({ workspace, snapshot }) : null;
+  return { ok: true, dryRun: !apply, localMutation: apply, serverMutation: false,
+    authority: 'local_inventory_not_signed', snapshot, persisted };
 }
 
 async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
@@ -2962,19 +3153,101 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
   const generatedPolicy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);
+  if (!registered.repositoryBindingId || !registered.repositoryAgentId) {
+    throw new Error('Repository onboarding requires the canonical repository binding and logical agent.');
+  }
+  let sourceAuthorization;
+  try {
+    sourceAuthorization = await fetchRepositorySourceAuthorization(fabric, {
+      organizationId, workspaceId: registered.workspaceId,
+      repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId,
+    });
+  } catch {
+    return { ok: false, stage: 'repository_source_authorization_required', organizationId,
+      workspaceId: registered.workspaceId, code: 'repository_source_policy_unavailable',
+      sharedRepositoryReady: false, localInventoryFallback: false };
+  }
   const installed = await installRepositoryAgentFabricSkill({
     workspace,
     hqUrl,
     organizationId,
     workspaceId: registered.workspaceId,
     repositoryAgentId: registered.repositoryAgentId,
+    repositoryBindingId: registered.repositoryBindingId,
+    sourceAuthorization,
     repositoryAgentKey: registered.repositoryAgentKey,
     controlBranch: registered.controlBranch,
     policyRevision: authoritativeRevision,
   });
+  const onboardingProvider = providerIds?.[0] || 'codex';
+  const onboardingEvidenceFlags = new Map<string, string | boolean>([
+    ['workspace', workspace], ['provider', onboardingProvider],
+    ['policy', resolve(workspace, '.dharma', 'approved-policy.json')], ['maximum-sessions', '20'],
+  ]);
+  const onboardingEvidencePreview = await evidencePreview(onboardingEvidenceFlags) as Record<string, unknown>;
+  let onboardingEvidence: BootstrapEvidenceSynchronization = { state: 'synchronized', captured: 0, synced: 0 };
+  if (Number(onboardingEvidencePreview.trajectoryCount || 0) > 0
+    && (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
+    onboardingEvidenceFlags.set('sync', true);
+    onboardingEvidence = await synchronizeBootstrapEvidence(
+      async () => await retryBootstrapOnboarding(
+        async () => await capture(onboardingEvidenceFlags, true) as { captured: number; synced: number },
+      ),
+    );
+    requireCompletedBootstrapEvidence(onboardingEvidence, Number(onboardingEvidencePreview.trajectoryCount || 0));
+  }
+  const initialSnapshot = await inventoryRepositoryPackage({ workspace, organizationId,
+    workspaceId: registered.workspaceId, repositoryAgentId: registered.repositoryAgentId,
+    repositoryBindingId: registered.repositoryBindingId, sourceAuthorization });
+  const candidateScope = { organizationId, workspaceId: registered.workspaceId,
+    repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId };
+  const outboxRoot = resolve(dharmaHome(), 'relay', 'repository-candidates');
+  const canonicalPackage = registered.repositoryPackage!;
+  const candidate = canonicalPackage.state === 'absent'
+    ? await synchronizeRepositoryCandidate({ transport: fabric, outboxRoot, scope: candidateScope,
+      snapshot: initialSnapshot, initialRepository: true })
+    : await adoptRepositoryCandidate({ outboxRoot, scope: candidateScope,
+      sourceManifestHash: canonicalPackage.sourceManifestHash!,
+      consolidationMode: canonicalPackage.consolidationMode!, candidate: {
+        candidateId: canonicalPackage.candidateId!, operationId: canonicalPackage.operationId!,
+        snapshotHash: canonicalPackage.snapshotHash!, state: canonicalPackage.state,
+        releaseId: canonicalPackage.releaseId,
+      } });
+  registered = { ...registered, repositoryPackage: {
+    state: candidate.state, candidateId: candidate.candidateId, operationId: candidate.operationId,
+    snapshotHash: candidate.snapshotHash,
+    sourceManifestHash: canonicalPackage.state === 'absent'
+      ? sha256(canonicalize(initialSnapshot.manifest)) : canonicalPackage.sourceManifestHash,
+    releaseId: candidate.releaseId,
+    generation: candidate.state === 'published' ? Math.max(1, canonicalPackage.generation) : canonicalPackage.generation,
+    consolidationMode: canonicalPackage.state === 'absent' ? 'initial_repository' : canonicalPackage.consolidationMode,
+  } };
+  await saveWorkspaceRecord(registered);
   const providers = await receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
   );
+  const roleRequested = ['role-name', 'question-categories', 'role-description'].some(key => flags.has(key));
+  if (roleRequested && !['role-name', 'question-categories', 'role-description'].every(key => flags.has(key))) {
+    throw new Error('Repository role overrides require --role-name, --question-categories, and --role-description together.');
+  }
+  const derivedRole = deriveRepositoryRole({ snapshot: initialSnapshot,
+    providers: providers.map(provider => provider.provider).filter(isLocalProviderId) });
+  const roleInput = roleRequested ? {
+    roleName: required(flags, 'role-name'),
+      questionCategories: required(flags, 'question-categories').split(',').map(value => value.trim()).filter(Boolean),
+      description: required(flags, 'role-description'),
+  } : derivedRole;
+  const profileHash = sha256(canonicalize(roleInput));
+  let role: unknown = registered.repositoryRole?.profileHash === profileHash
+    ? { stage: 'repository_role_observed', reused: true, role: { ...roleInput, revision: registered.repositoryRole.revision } }
+    : await registerRepositoryRoleMetadata(fabric, repositoryRoleScope(registered), {
+      expectedRevision: registered.repositoryRole?.revision || Number(flags.get('role-revision') || 0), ...roleInput });
+  if (registered.repositoryRole?.profileHash !== profileHash) {
+    const revision = Number(((role as Record<string, unknown>).role as Record<string, unknown> | undefined)?.revision);
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Repository role registration returned no durable revision.');
+    registered = { ...registered, repositoryRole: { revision, profileHash } };
+    await saveWorkspaceRecord(registered);
+  }
   const nativeSkillResult = await installAvailableNativeAgentFabricBootstraps({
     providers,
     workspace,
@@ -2983,9 +3256,17 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     hqUrl,
   });
   const primaryProvider = providers[0]?.provider || 'codex';
+  const relay = flags.has('no-relay-daemon')
+    ? { started: false, state: 'not_started' }
+    : await startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json'));
+  const sharedRepositoryReady = await repositorySharedReady(registered);
   return {
     ok: true,
-    stage: nativeSkillResult.failures.length ? 'ready_with_provider_actions' : 'ready',
+    stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
+    localStage: nativeSkillResult.failures.length ? 'ready_with_provider_actions' : 'ready',
+    sharedRepositoryReady,
+    sharedRepository: { authority: sharedRepositoryReady ? 'signed_repository_release' : 'local_inventory_not_signed',
+      publication: candidate.state, activation: sharedRepositoryReady },
     organizationId,
     workspaceId: registered.workspaceId,
     repositoryAgent: {
@@ -3004,6 +3285,14 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       writePaths: generatedPolicy.tasks.writePaths,
     },
     repositorySkill: installed,
+    repositoryCandidate: candidate,
+    firstLearningEvidence: {
+      discovered: Number(onboardingEvidencePreview.trajectoryCount || 0),
+      disclosureReady: (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true,
+      ...onboardingEvidence,
+    },
+    repositoryRole: role,
+    relay,
     nativeSkills: nativeSkillResult.installed,
     nativeSkillFailures: nativeSkillResult.failures,
     workspaceSync: synced,
@@ -4352,7 +4641,8 @@ function containedInlinePath(root: string, value: string) {
   return candidate;
 }
 
-export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoot: string) {
+export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoot: string, assertCurrent: () => void = () => {}) {
+  assertCurrent();
   if (bundle.operation === 'clear') return false;
   const inline = bundle.skills.map((skill) => skill.files);
   if (inline.every((files) => files === undefined)) return false;
@@ -4378,8 +4668,11 @@ export async function materializeInlineSkillFiles(bundle: SkillBundle, sourceRoo
       const digest = `sha256:${createHash('sha256').update(content).digest('hex')}`;
       if (digest !== file.sha256) throw new Error(`Inline skill file hash mismatch: ${file.path}`);
       const destination = containedInlinePath(skillRoot, file.path);
+      assertCurrent();
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      assertCurrent();
       await writeFile(destination, content, { mode: 0o600 });
+      assertCurrent();
     }
   }
   return true;
@@ -4425,20 +4718,72 @@ export async function installedBundleIdForSkillPollAfterAuthorizationFailure(inp
   return recoverLegacySkillBundleIdAfterAuthorizationFailure(input);
 }
 
-async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
-  const workspaceId = required(flags, 'workspace-id');
-  const providerValue = required(flags, 'provider');
-  if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
-  const provider = providerValue as ProviderId;
-  return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
+export async function loadSkillSynchronizationPolicy(
+  policyPath: string,
+  workspaceId: string,
+  secureStore?: SecureSecretStore,
+) {
   const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
   if (!workspace) throw new Error('Skill workspace is not registered locally.');
-  const policy = await loadOrganizationPolicy(required(flags, 'policy'));
+  const [providedPath, canonicalPath] = await Promise.all([
+    canonicalFilesystemPath(resolve(policyPath)),
+    canonicalFilesystemPath(resolve(workspace.path, '.dharma', 'approved-policy.json')),
+  ]);
+  if (providedPath !== canonicalPath) {
+    throw new Error('Skill synchronization requires the canonical registered workspace policy path.');
+  }
+  const policy = await loadOrganizationPolicy(policyPath);
+  const config = await readDeviceConfig();
+  if (!config || config.organizationId !== workspace.organizationId || policy.organizationId !== workspace.organizationId
+    || workspace.status !== 'active') {
+    throw new Error('Skill policy does not match the enrolled organization and workspace.');
+  }
+  verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: config.serverPublicKeyEd25519,
+    organizationId: config.organizationId, workspaceId });
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, store: secureStore });
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+  verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: config.organizationId, workspaceId });
+  return { workspace, policy, config, enrollment };
+}
+
+export function parseSkillRolloutResponse(response: unknown, organizationId: string): { id: string; bundle: unknown; repositoryPackage?: unknown } | null {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) throw new Error('Skill rollout response is invalid.');
+  const value = response as Record<string, unknown>;
+  if (value.ok !== true || value.organizationId !== organizationId || !Object.hasOwn(value, 'rollout')) {
+    throw new Error('Skill rollout response does not match the authenticated organization contract.');
+  }
+  const rollout = value.rollout;
+  if (rollout === null) return null;
+  if (!rollout || typeof rollout !== 'object' || Array.isArray(rollout)) throw new Error('Skill rollout response is invalid.');
+  const candidate = rollout as Record<string, unknown>;
+  if (typeof candidate.id !== 'string' || !candidate.id.trim() || !candidate.bundle
+    || typeof candidate.bundle !== 'object' || Array.isArray(candidate.bundle)) throw new Error('Skill rollout response is invalid.');
+  return rollout as { id: string; bundle: unknown; repositoryPackage?: unknown };
+}
+
+export async function prepareSkillUpdate(input: {
+  workspaceId: string; provider: ProviderId; policyPath: string;
+  fabric?: AgentFabricClient; store?: SecureSecretStore;
+  automatic?: boolean; assertRunning?: () => void;
+}) {
+  const { workspaceId, provider, policyPath } = input;
+  const assertRunning = input.assertRunning || (() => {});
+  assertRunning();
+  const context = await loadSkillSynchronizationPolicy(policyPath, workspaceId, input.store);
+  const { workspace, policy, config } = context;
+  assertRunning();
   const destination = nativeSkillDirectory(provider);
-  const fabric = await client();
-  const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  const fabric = input.fabric || await client();
+  assertRunning();
   let activeBundleId: string | null;
   let legacyBaselineMigrationRequested = false;
+  if (input.automatic) {
+    activeBundleId = (await loadActiveSkillAuthorizationAnchor({ config, workspaceId,
+      organizationAgentId: String(workspace.repositoryAgentId || ''), provider, store: input.store, fresh: true }))?.bundleId ?? null;
+    assertRunning();
+  } else {
   try {
     activeBundleId = (await activeSkillAuthorization(
       provider, workspaceId, String(workspace.repositoryAgentId || ''), config,
@@ -4457,16 +4802,20 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       legacyBaselineMigrationRequested = true;
     }
   }
-  const response = await fabric.pollSkill({
+  }
+  const pollRequest = {
     workspaceId,
     provider,
     installedBundleId: activeBundleId,
     legacyBaselineMigrationRequested,
-  });
-  const rollout = response.rollout as { id?: unknown; bundle?: unknown } | null | undefined;
-  if (!rollout) return { ok: true, rollout: null, changed: false };
-  if (typeof rollout.id !== 'string' || !rollout.bundle || typeof rollout.bundle !== 'object') throw new Error('Skill rollout response is invalid.');
-  const bundle = rollout.bundle as SkillBundle;
+    repositoryPackageProtocol: 'dharma.repository-package-envelope/v1',
+  };
+  assertRunning();
+  const response = await fabric.pollSkill(pollRequest);
+  assertRunning();
+  const rollout = parseSkillRolloutResponse(response, config.organizationId);
+  if (!rollout) return null;
+  let bundle = rollout.bundle as SkillBundle;
   if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills)
     || (bundle.operation === 'install' && bundle.skills.length === 0)
     || (bundle.operation === 'clear' && bundle.skills.length !== 0)) {
@@ -4475,19 +4824,103 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   const sources = validateSkillBundleSources(bundle);
   const commits = [...new Set(bundle.skills.map((skill) => skill.commit))];
   const repositories = [...new Set(bundle.skills.map((skill) => skill.repository))];
-  const sourceRoot = resolve(dharmaHome(), 'relay', 'skill-sources', bundle.bundleId);
-  verifySkillBundle(bundle, createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }));
-  await mkdir(resolve(dharmaHome(), 'relay', 'skill-sources'), { recursive: true, mode: 0o700 });
-  await rm(sourceRoot, { recursive: true, force: true });
-  await mkdir(sourceRoot, { recursive: true, mode: 0o700 });
-  const materializedInline = await materializeInlineSkillFiles(bundle, sourceRoot);
-  if (bundle.operation === 'install' && !materializedInline) {
-    if (!sources.singleSource) throw new Error('Multi-source skill bundles require signed inline files for every skill.');
-    await rm(sourceRoot, { recursive: true, force: true });
-    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
-    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
-    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
+  const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
+  verifySkillBundle(bundle, serverPublicKey);
+  for (const [selectors, value] of [[bundle.targetSelectors.organizationAgentIds, String(workspace.repositoryAgentId || '')],
+    [bundle.targetSelectors.deviceIds, config.deviceId], [bundle.targetSelectors.workspaceIds, workspaceId],
+    [bundle.targetSelectors.providers, provider]] as const) {
+    if (selectors.length && !selectors.includes(value as never)) throw new Error('Skill bundle does not target this enrolled endpoint.');
   }
+  let repositoryDelivery: Awaited<ReturnType<typeof receiveRepositoryPackageDelivery>> | undefined;
+  if (rollout.repositoryPackage !== undefined) {
+    if (workspace.organizationId !== config.organizationId || policy.organizationId !== config.organizationId
+      || !workspace.repositoryBindingId || !workspace.repositoryAgentId) {
+      throw new Error('Repository delivery requires the enrolled organization and complete repository binding.');
+    }
+    const query = new URLSearchParams({ rolloutId: rollout.id, workspaceId, provider });
+    const packageRoute = `/agent-fabric/skills/${encodeURIComponent(bundle.bundleId)}/repository-package`;
+    const readPackagePart = async (route: string, field: 'index' | 'chunk') => {
+      assertRunning();
+      const part = await fabric.signedGet(route);
+      assertRunning();
+      if (part.ok !== true || part.organizationId !== config.organizationId || !Object.hasOwn(part, field)) {
+        throw new Error('Repository delivery response does not match the authenticated route contract.');
+      }
+      return part[field];
+    };
+    repositoryDelivery = await receiveRepositoryPackageDelivery({
+      envelope: rollout.repositoryPackage, bundle, serverPublicKey,
+      scope: { organizationId: config.organizationId, repositoryBindingId: workspace.repositoryBindingId,
+        repositoryAgentId: workspace.repositoryAgentId, deviceId: config.deviceId, workspaceId, provider },
+      fetchIndex: () => readPackagePart(`${packageRoute}/index?${query}`, 'index'),
+      fetchChunk: (fileIndex, chunkIndex) => readPackagePart(`${packageRoute}/chunks?${query}&fileIndex=${fileIndex}&chunkIndex=${chunkIndex}`, 'chunk'),
+    });
+    assertRunning();
+    bundle = repositoryDelivery.bundle;
+  }
+  const assertCurrent = () => {
+    assertRunning();
+    verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: config.serverPublicKeyEd25519,
+      organizationId: config.organizationId, workspaceId });
+    verifySkillBundle(bundle, serverPublicKey);
+    repositoryDelivery?.assertCurrent();
+  };
+  assertCurrent();
+  const sourceParent = input.automatic ? skillPreparationScopeRoot(dharmaHome(), workspaceId, provider)
+    : resolve(dharmaHome(), 'relay', 'skill-sources');
+  await mkdir(sourceParent, { recursive: true, mode: 0o700 });
+  assertCurrent();
+  const sourceRoot = await mkdtemp(resolve(sourceParent, 'attempt-'));
+  try {
+  assertCurrent();
+  if (repositoryDelivery) {
+    for (const file of repositoryDelivery.files) {
+      assertCurrent();
+      const target = containedInlinePath(sourceRoot, file.path);
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      assertCurrent();
+      await writeFile(target, Buffer.from(file.contentBase64, 'base64'), { mode: 0o600, flag: 'wx' });
+      assertCurrent();
+    }
+  }
+  const materializedInline = repositoryDelivery ? false : await materializeInlineSkillFiles(bundle, sourceRoot, assertCurrent);
+  assertCurrent();
+  if (bundle.operation === 'install' && !materializedInline && !repositoryDelivery) {
+    if (!sources.singleSource) throw new Error('Multi-source skill bundles require signed inline files for every skill.');
+    if (input.automatic) throw new Error('Automatic preparation requires bounded inline files or an authenticated complete repository package.');
+    await rm(sourceRoot, { recursive: true, force: true });
+    assertCurrent();
+    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
+    assertCurrent();
+    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
+    assertCurrent();
+    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
+    assertCurrent();
+  }
+  for (const skill of bundle.skills) {
+    const actual = await contentHash(containedInlinePath(sourceRoot, skill.path));
+    assertCurrent();
+    if (actual !== skill.contentHash) throw new Error('Prepared skill tree does not match the signed content hash.');
+  }
+  const current = await loadSkillSynchronizationPolicy(policyPath, workspaceId, input.store);
+  assertCurrent();
+  if (canonicalize(current) !== canonicalize(context)) throw new Error('Skill preparation scope or policy changed; retry with current authorization.');
+  return { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery, assertCurrent };
+  } catch (error) {
+    await rm(sourceRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function activatePreparedSkillUpdate(input: {
+  prepared: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>>;
+  workspaceId: string;
+  provider: ProviderId;
+  policyPath: string;
+  flags: Map<string, string | boolean>;
+}): Promise<Output> {
+  const { prepared, workspaceId, provider, policyPath, flags } = input;
+  const { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery } = prepared;
   try {
     const previousAnchor = await loadActiveSkillAuthorizationAnchor({
       config,
@@ -4496,6 +4929,14 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
       provider,
     });
     const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
+    repositoryDelivery?.assertCurrent();
+    const current = await loadSkillSynchronizationPolicy(policyPath, workspaceId);
+    if (canonicalize(current.policy) !== canonicalize(policy)
+      || canonicalize(current.workspace) !== canonicalize(workspace)
+      || canonicalize(current.config) !== canonicalize(config)) {
+      throw new Error('Skill synchronization scope or policy changed before activation; retry with current authorization.');
+    }
+    repositoryDelivery?.assertCurrent();
     const receipt = await installSkillBundle({
       bundle,
       sourceDirectory: sourceRoot,
@@ -4586,13 +5027,94 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   } finally {
     await rm(sourceRoot, { recursive: true, force: true });
   }
+}
+
+async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
+  const workspaceId = required(flags, 'workspace-id');
+  const providerValue = required(flags, 'provider');
+  if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
+  const provider = providerValue as ProviderId;
+  return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
+    const policyPath = required(flags, 'policy');
+    const prepared = await prepareSkillUpdate({ workspaceId, provider, policyPath });
+    if (!prepared) return { ok: true, rollout: null, changed: false };
+    return activatePreparedSkillUpdate({ prepared, workspaceId, provider, policyPath, flags });
   });
+}
+
+async function installedRepositoryKnowledge(workspace: WorkspaceRecord) {
+  const config = await readDeviceConfig();
+  if (!config || config.organizationId !== workspace.organizationId || !workspace.repositoryBindingId || !workspace.repositoryAgentId) {
+    throw new Error('Installed repository knowledge requires current enrolled workspace scope.');
+  }
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
+  const enrollment = await loadDeviceEnrollmentAnchor({ config });
+  if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) throw new Error('Installed knowledge device identity mismatch.');
+  const organizationAgentId = workspace.repositoryAgentId;
+  return selectInstalledRepositoryKnowledge({ organizationId: config.organizationId,
+    repositoryBindingId: workspace.repositoryBindingId, repositoryAgentId: organizationAgentId,
+    loadProvider: async provider => {
+      const root = nativeSkillDirectory(provider);
+      if (!await pathExistsOrThrow(resolve(root, '.dharma-managed/workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE'))) return null;
+      const anchorInput = { config, workspaceId: workspace.workspaceId, organizationAgentId, provider };
+      const active = await loadActiveSkillAuthorizationAnchor(anchorInput);
+      if (!active) throw new Error('Installed knowledge release lacks a protected authorization anchor.');
+      const read = (expectedReceiptHash: string) => readVerifiedRepositoryKnowledge({
+        nativeSkillDirectory: root, workspaceId: workspace.workspaceId, provider,
+        organizationId: config.organizationId, organizationAgentId, deviceId: config.deviceId,
+        serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 }, format: 'jwk' }),
+        devicePublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 }, format: 'jwk' }), expectedReceiptHash,
+      });
+      try { return await read(active.receiptHash); }
+      catch (error) {
+        if (!(error instanceof Error) || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
+        const refreshed = await loadActiveSkillAuthorizationAnchor({ ...anchorInput, fresh: true });
+        if (!refreshed) throw error;
+        return read(refreshed.receiptHash);
+      }
+    } });
+}
+
+async function takeCachedSkillUpdate(input: {
+  workspaceId: string;
+  provider: ProviderId;
+  policyPath: string;
+  fabric: AgentFabricClient;
+}) {
+  const context = await loadSkillSynchronizationPolicy(input.policyPath, input.workspaceId);
+  const { workspace, policy, config } = context;
+  if (!workspace.repositoryAgentId) return null;
+  const cached = await takeSkillPreparationCache({ home: dharmaHome(), workspaceId: input.workspaceId,
+    provider: input.provider, organizationId: config.organizationId, deviceId: config.deviceId,
+    repositoryAgentId: workspace.repositoryAgentId, repositoryBindingId: workspace.repositoryBindingId ?? null,
+    policyHash: sha256(canonicalize(policy)), assertCurrent: () => {
+      verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: config.serverPublicKeyEd25519,
+        organizationId: config.organizationId, workspaceId: input.workspaceId });
+    } });
+  if (!cached) return null;
+  try {
+    const bundle = cached.record.bundle as SkillBundle;
+    const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
+    verifySkillBundle(bundle, serverPublicKey);
+    for (const skill of bundle.skills) {
+      if (await contentHash(containedInlinePath(cached.sourceRoot, skill.path)) !== skill.contentHash) {
+        throw new Error('Cached skill tree does not match the signed content hash.');
+      }
+    }
+    return { workspace, policy, config, destination: nativeSkillDirectory(input.provider), fabric: input.fabric,
+      rollout: { id: String(cached.record.rolloutId), bundle }, bundle, sourceRoot: cached.sourceRoot,
+      repositoryDelivery: undefined, assertCurrent: () => verifySkillBundle(bundle, serverPublicKey) };
+  } catch (error) {
+    await rm(cached.sourceRoot, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
   const policyPath = resolve(required(flags, 'policy'));
-  const canonicalWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
-  if (!canonicalWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  const selectedWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
+  if (!selectedWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  let canonicalWorkspace: WorkspaceRecord = selectedWorkspace;
   let policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
@@ -4601,7 +5123,8 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   await mkdir(resolve(dharmaHome(), 'relay'), { recursive: true, mode: 0o700 });
   await writeFile(pidPath, `${process.pid}\n`, { mode: 0o600 });
   let stopping = false;
-  const stop = () => { stopping = true; };
+  let stopPreparation: (() => void) | undefined;
+  const stop = () => { stopping = true; stopPreparation?.(); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
@@ -4610,12 +5133,72 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let trajectorySyncsCompleted = 0;
   let nextPolicyRefreshAt = 0;
   let evidencePolicyFresh = false;
+  const repositorySourceWatcher = new RepositorySourceWatcher();
+  let nextRepositorySourceScanAt = 0;
+  let repositorySourceCandidates = 0;
+  let repositorySourceFailures = 0;
+  let repositorySourceState = 'not_scanned';
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
     masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
+  let skillPreparationsCompleted = 0;
+  let skillPreparationFailures = 0;
+  let skillActivationsCompleted = 0;
+  let skillActivationFailures = 0;
+  let nextSkillActivationAt = 0;
+  const skillPreparationPump = startSkillPreparationPump({
+    prepare: async assertRunning => {
+      await prepareProvidersIndependently(providerAdapters, assertRunning, async adapter => {
+        assertRunning();
+        const capability = await adapter.capability();
+        assertRunning();
+        if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) return;
+        const provider = adapter.providerId;
+        await withSkillPreparationTransaction({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,
+          provider, assertCurrent: assertRunning }, async () => {
+          const prepared = await prepareSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
+            provider, policyPath, fabric, automatic: true, assertRunning });
+          if (!prepared) { assertRunning(); return; }
+          let retained = false;
+          try {
+            prepared.assertCurrent();
+            const repositoryAgentId = prepared.workspace.repositoryAgentId;
+            if (!repositoryAgentId) throw new Error('Preparation cache requires an enrolled repository agent.');
+            const pendingRecord = await serializeSkillPreparationRecord({
+              schema: 'dharma.skill-preparation/v1', organizationId: prepared.config.organizationId,
+              deviceId: prepared.config.deviceId, workspaceId: prepared.workspace.workspaceId,
+              repositoryAgentId,
+              repositoryBindingId: prepared.workspace.repositoryBindingId ?? null, provider,
+              policyHash: sha256(canonicalize(prepared.policy)), rolloutId: prepared.rollout.id,
+              bundle: prepared.bundle, repositoryPackage: prepared.repositoryDelivery
+                ? { envelope: prepared.repositoryDelivery.envelope, index: prepared.repositoryDelivery.index } : null,
+              preparedAt: new Date().toISOString(), activationAuthorized: false,
+            });
+            prepared.assertCurrent();
+            await writeFile(resolve(prepared.sourceRoot, 'PREPARED.json'), pendingRecord, { mode: 0o600, flag: 'wx' });
+            prepared.assertCurrent();
+            await publishSkillPreparationCache({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,
+              provider, sourceRoot: prepared.sourceRoot, recordBytes: pendingRecord, assertCurrent: prepared.assertCurrent,
+              expected: { organizationId: prepared.config.organizationId, deviceId: prepared.config.deviceId,
+                repositoryAgentId,
+                repositoryBindingId: prepared.workspace.repositoryBindingId ?? null,
+                policyHash: sha256(canonicalize(prepared.policy)), rolloutId: prepared.rollout.id,
+                bundleId: prepared.bundle.bundleId, bundleHash: prepared.bundle.bundleHash },
+              onCommitted: () => { retained = true; } });
+            skillPreparationsCompleted += 1;
+          } finally {
+            if (!retained) await rm(prepared.sourceRoot, { recursive: true, force: true });
+          }
+        });
+      }, () => { skillPreparationFailures += 1; });
+    },
+    onError: () => { skillPreparationFailures += 1; },
+  });
+  stopPreparation = skillPreparationPump.requestStop;
+  if (stopping) stopPreparation();
   try {
     const recoveredTaskTrajectories = await deferUnavailableRelayRetention(async () => finalizeRecoveredSignedTaskTrajectories(
       fabric,
@@ -4634,6 +5217,49 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
           evidencePolicyFresh = false;
         }
         nextPolicyRefreshAt = Date.now() + 60_000;
+      }
+      if (canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
+        try {
+          const current = await pollRepositoryCandidate({ transport: fabric,
+            outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
+            scope: { organizationId: canonicalWorkspace.organizationId, workspaceId: canonicalWorkspace.workspaceId,
+              repositoryBindingId: canonicalWorkspace.repositoryBindingId,
+              repositoryAgentId: canonicalWorkspace.repositoryAgentId } });
+          if (current && canonicalWorkspace.repositoryPackage) {
+            canonicalWorkspace = { ...canonicalWorkspace, repositoryPackage: { ...canonicalWorkspace.repositoryPackage,
+              state: current.state, candidateId: current.candidateId, operationId: current.operationId,
+              snapshotHash: current.snapshotHash, releaseId: current.releaseId,
+              generation: current.state === 'published' ? Math.max(1, canonicalWorkspace.repositoryPackage.generation) : canonicalWorkspace.repositoryPackage.generation } };
+            await saveWorkspaceRecord(canonicalWorkspace);
+          }
+        } catch { repositorySourceFailures += 1; }
+      }
+      if (performance.now() >= nextRepositorySourceScanAt) {
+        try {
+          if (!canonicalWorkspace.repositoryBindingId || !canonicalWorkspace.repositoryAgentId) {
+            throw new Error('Repository source synchronization requires a complete repository binding.');
+          }
+          const sourceCycle = await scanRepositorySourceChanges({
+            workspace: canonicalWorkspace.path, organizationId: canonicalWorkspace.organizationId,
+            workspaceId: canonicalWorkspace.workspaceId, repositoryBindingId: canonicalWorkspace.repositoryBindingId,
+            repositoryAgentId: canonicalWorkspace.repositoryAgentId, transport: fabric, watcher: repositorySourceWatcher,
+            loadRetainedKnowledge: () => installedRepositoryKnowledge(canonicalWorkspace),
+            submitCandidate: snapshot => synchronizeRepositoryCandidate({ transport: fabric,
+              outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
+              scope: { organizationId: canonicalWorkspace.organizationId,
+                workspaceId: canonicalWorkspace.workspaceId,
+                repositoryBindingId: canonicalWorkspace.repositoryBindingId!,
+                repositoryAgentId: canonicalWorkspace.repositoryAgentId! },
+              snapshot, initialRepository: false }),
+          });
+          repositorySourceState = sourceCycle.state;
+          if (sourceCycle.localMutation) repositorySourceCandidates += 1;
+        } catch {
+          repositorySourceWatcher.invalidate();
+          repositorySourceFailures += 1;
+          repositorySourceState = 'blocked';
+        }
+        nextRepositorySourceScanAt = performance.now() + 60_000;
       }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh) {
@@ -4660,10 +5286,35 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       }
       const result = await executeOneTask(fabric, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
+      if (!result.taskId && performance.now() >= nextSkillActivationAt) {
+        for (const adapter of providerAdapters) {
+          try {
+            const capability = await adapter.capability();
+            if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) continue;
+            const provider = adapter.providerId;
+            await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
+              await withSkillPreparationTransaction({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,
+                provider, assertCurrent: () => { if (stopping) throw new Error('Relay is stopping.'); } }, async () => {
+                const cached = await takeCachedSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
+                  provider, policyPath, fabric });
+                const prepared = cached || await prepareSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
+                  provider, policyPath, fabric, automatic: true });
+                if (!prepared) return;
+                if (!cached) skillPreparationsCompleted += 1;
+                await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
+                  provider, policyPath, flags: new Map() });
+                skillActivationsCompleted += 1;
+              });
+            });
+          } catch { skillActivationFailures += 1; }
+        }
+        nextSkillActivationAt = performance.now() + 60_000;
+      }
       if (flags.has('once')) break;
       if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
+    await skillPreparationPump.stop();
     vault.close();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
@@ -4672,6 +5323,9 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   return {
     ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
     evidenceResponsesCompleted, trajectorySyncsCompleted,
+    repositorySourceCandidates, repositorySourceFailures, repositorySourceState,
+    skillPreparationsCompleted, skillPreparationFailures, skillActivationsCompleted, skillActivationFailures,
+    sharedRepositoryReady: await repositorySharedReady(canonicalWorkspace),
   };
 }
 
@@ -4699,6 +5353,13 @@ export async function run(argv: string[]): Promise<Output> {
     );
   }
   if (command === 'repositories' && subcommand === 'list') return repositoriesList(flags);
+  if (command === 'repositories' && subcommand === 'snapshot') {
+    return repositorySnapshotCommand(flags, repeated.get('approved-output') || []);
+  }
+  if (command === 'repositories' && ['role-register', 'role-discover', 'ask', 'reply'].includes(String(subcommand))) {
+    const action = subcommand === 'role-register' ? 'register' : subcommand === 'role-discover' ? 'discover' : subcommand;
+    return repositoryRoleCommand(action as 'register' | 'discover' | 'ask' | 'reply', flags);
+  }
   if (command === 'repositories' && subcommand === 'status') {
     const listed = await repositoriesList(flags) as Record<string, unknown>;
     return {

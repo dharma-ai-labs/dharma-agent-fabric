@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/skill-preparation/v1",
+  "title": "Local Pending Skill Preparation",
+  "description": "Private staging cache only. Restart activation requires fresh authorization, expiry, integrity and session-boundary checks. Runtime validation additionally checks scope equality and a 3 MiB serialized metadata limit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "deviceId", "workspaceId", "repositoryAgentId", "repositoryBindingId", "provider", "policyHash", "rolloutId", "bundle", "repositoryPackage", "preparedAt", "activationAuthorized"],
+  "properties": {
+    "schema": { "const": "dharma.skill-preparation/v1" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}(?![\\s\\S])" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "repositoryAgentId": { "type": "string", "format": "uuid" },
+    "repositoryBindingId": { "anyOf": [{ "type": "null" }, { "type": "string", "format": "uuid" }] },
+    "provider": { "enum": ["codex", "claude", "agy", "hermes"] },
+    "policyHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "rolloutId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "bundle": { "$ref": "https://schemas.dharma-ai.io/skill-bundle/v2" },
+    "repositoryPackage": {
+      "anyOf": [{ "type": "null" }, {
+        "type": "object", "additionalProperties": false, "required": ["envelope", "index"],
+        "properties": {
+          "envelope": { "$ref": "https://schemas.dharma-ai.io/repository-package-envelope/v1" },
+          "index": { "$ref": "https://schemas.dharma-ai.io/repository-package-transfer/v2" }
+        }
+      }]
+    },
+    "preparedAt": { "type": "string", "format": "date-time", "maxLength": 24 },
+    "activationAuthorized": { "const": false }
+  }
+}

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
+import { constants } from 'node:fs';
 import { randomUUID, createHash, type KeyObject } from 'node:crypto';
-import { cp, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, open, opendir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
@@ -572,6 +573,109 @@ export async function getActiveSkillBundleAuthorization(input: {
     activatedAt: receipt.completedAt,
     expiresAt: bundle.expiresAt ?? null,
   };
+}
+
+// Collection reads the receipt-pinned release, never the mutable provider copy.
+export async function readVerifiedRepositoryKnowledge(input: Parameters<typeof getActiveSkillBundleAuthorization>[0]): Promise<{
+  catalogBytes: Buffer; manifestBytes: Buffer; authorization: ActiveSkillBundleAuthorization;
+} | null> {
+  const native = resolve(input.nativeSkillDirectory);
+  const root = workspaceManagedRoot(native, input.workspaceId);
+  const active = resolve(root, 'active');
+  const maximumFileBytes = 262144, maximumTotalBytes = 5242880;
+  async function checked(path: string) {
+    const within = relative(native, path);
+    if (within === '..' || within.startsWith('../') || within.startsWith('..\\') || isAbsolute(within)) throw new Error('Managed release path escapes its scope.');
+    let current = native;
+    for (const part of ['', ...within.split(/[\\/]/).filter(Boolean)]) {
+      if (part) current = resolve(current, part);
+      let stat;
+      try { stat = await lstat(current); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+      if (stat.isSymbolicLink()) throw new Error('Managed release symlink is forbidden.');
+      if (current !== path && !stat.isDirectory()) throw new Error('Invalid managed release directory.');
+      if (current === path) return stat;
+    }
+    throw new Error('Invalid managed release path.');
+  }
+  async function bytes(path: string, limit = maximumFileBytes) {
+    const stat = await checked(path);
+    if (!stat?.isFile() || stat.nlink !== 1) throw new Error('Managed release requires unlinked regular files.');
+    if (stat.size > limit) throw new Error('Managed release file byte limit exceeded.');
+    const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+    try {
+      const before = await handle.stat();
+      if (!before.isFile() || before.nlink !== 1 || before.size > limit || before.ino !== stat.ino || before.dev !== stat.dev) throw new Error('Managed release changed before read.');
+      const buffer = Buffer.alloc(before.size + 1);
+      let size = 0;
+      while (size < buffer.length) {
+        const result = await handle.read(buffer, size, buffer.length - size, size);
+        if (!result.bytesRead) break;
+        size += result.bytesRead;
+      }
+      const after = await handle.stat(), current = await checked(path);
+      if (size !== before.size || !current || current.nlink !== 1 || current.ino !== before.ino || current.dev !== before.dev
+        || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+        || current.mtimeMs !== after.mtimeMs || current.ctimeMs !== after.ctimeMs) throw new Error('Managed release changed during read.');
+      return buffer.subarray(0, size);
+    } finally { await handle.close(); }
+  }
+  if (!await checked(root)) return null;
+  const pointerPath = resolve(root, 'ACTIVE_BUNDLE');
+  if (!await checked(pointerPath)) return null;
+  const pointer = await bytes(pointerPath, 128), bundleId = pointer.toString('utf8').trim();
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(bundleId)) throw new Error('Invalid managed release identity.');
+  const authorizationPath = resolve(active, 'AUTHORIZATION.json'), receiptPath = resolve(active, 'INSTALL_RECEIPT.json');
+  const authorizationBytes = await bytes(authorizationPath, 1048576), receiptBytes = await bytes(receiptPath);
+  const bundle = JSON.parse(authorizationBytes.toString('utf8')) as SkillBundle;
+  const receipt = JSON.parse(receiptBytes.toString('utf8')) as InstallReceipt;
+  const validate = () => {
+    const now = input.now ?? new Date();
+    if (!Number.isFinite(now.getTime()) || bundle.bundleId !== bundleId || bundle.organizationId !== input.organizationId) throw new Error('Managed release organization scope conflict.');
+    verifySkillBundle(bundle, input.serverPublicKey, now);
+    assertBundleTargetsEndpoint(bundle, input);
+    verifyInstallReceipt(receipt, input.devicePublicKey, { bundleId, organizationId: input.organizationId,
+      deviceId: input.deviceId, workspaceId: input.workspaceId, provider: input.provider }, now);
+    if (receipt.receiptHash !== input.expectedReceiptHash) throw new Error('Active bundle receipt is not the current protected authorization.');
+  };
+  validate();
+  if (bundle.operation !== 'install' || bundle.skills.length !== 1 || bundle.skills[0]?.path !== '.agents/skills/dharma-agent-fabric') return null;
+  const skill = bundle.skills[0];
+  if (skill.skillId !== 'dharma-agent-fabric') throw new Error('Managed repository release skill identity conflict.');
+  const skillRoot = resolve(active, skill.skillId), hash = createHash('sha256');
+  let files = 0, entries = 0, totalBytes = 0;
+  let catalogBytes: Buffer | undefined, manifestBytes: Buffer | undefined;
+  async function visit(path: string, prefix: string, depth: number): Promise<void> {
+    if (++entries > 4096 || depth > 12) throw new Error('Managed release traversal limit exceeded.');
+    const stat = await checked(path);
+    if (!stat) throw new Error('Managed release file missing.');
+    if (stat.isDirectory()) {
+      const names: string[] = [], dir = await opendir(path);
+      for await (const entry of dir) {
+        if (names.length >= 4096) throw new Error('Managed release directory limit exceeded.');
+        names.push(entry.name);
+      }
+      for (const name of names.sort()) await visit(resolve(path, name), `${prefix}${name}/`, depth + 1);
+      const after = await checked(path);
+      if (!after || after.ino !== stat.ino || after.dev !== stat.dev || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error('Managed release tree changed.');
+      return;
+    }
+    if (++files > 516) throw new Error('Managed release file count limit exceeded.');
+    const content = await bytes(path);
+    totalBytes += content.length;
+    if (totalBytes > maximumTotalBytes) throw new Error('Managed release total byte limit exceeded.');
+    hash.update(prefix.slice(0, -1)); hash.update('\0'); hash.update(content); hash.update('\0');
+    if (prefix === 'dharma-agent-fabric/knowledge/CATALOG.json/') catalogBytes = content;
+    if (prefix === 'dharma-agent-fabric/MANIFEST.json/') manifestBytes = content;
+  }
+  await visit(skillRoot, 'dharma-agent-fabric/', 0);
+  if (`sha256:${hash.digest('hex')}` !== skill.contentHash) throw new Error('Managed repository release content hash mismatch.');
+  if (!catalogBytes || !manifestBytes) throw new Error('Managed repository release knowledge metadata missing.');
+  if (!pointer.equals(await bytes(pointerPath, 128)) || !authorizationBytes.equals(await bytes(authorizationPath, 1048576))
+    || !receiptBytes.equals(await bytes(receiptPath))) throw new Error('Managed release authorization changed during collection.');
+  validate();
+  return { catalogBytes, manifestBytes, authorization: { bundleId, bundleHash: bundle.bundleHash,
+    activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null } };
 }
 
 export async function installSkillBundle(input: {

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-package-chunk/v2",
+  "title": "Repository Package Transfer Chunk V2",
+  "description": "Byte chunk bound to an immutable transfer index. Runtime validates canonical Base64, exact length and the index-pinned chunk hash; this shape does not authorize retrieval or installation.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "indexHash", "fileIndex", "chunkIndex", "contentBase64"],
+  "properties": {
+    "schema": { "const": "dharma.repository-package-chunk/v2" },
+    "indexHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "fileIndex": { "type": "integer", "minimum": 0, "maximum": 515 },
+    "chunkIndex": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "contentBase64": { "type": "string", "maxLength": 87384, "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![\\s\\S])" }
+  }
+}

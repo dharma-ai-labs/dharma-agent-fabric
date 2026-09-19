@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-package-transfer/v2",
+  "title": "Repository Package Transfer Index V2",
+  "description": "Complete immutable byte inventory. Runtime validation also enforces portable NFC paths, path collisions, byte sums, chunk counts and the 1 MiB canonical index limit. A trusted signed delivery descriptor and current repository/policy authorization are required separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryBindingId", "repositoryAgentId", "releaseId", "generation", "gitCommit", "totalBytes", "files"],
+  "properties": {
+    "schema": { "const": "dharma.repository-package-transfer/v2" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}(?![\\s\\S])" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+    "releaseId": { "$ref": "#/$defs/uuid" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "gitCommit": { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})(?![\\s\\S])" },
+    "totalBytes": { "type": "integer", "minimum": 0, "maximum": 5242880 },
+    "files": {
+      "type": "array", "minItems": 1, "maxItems": 516,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "sha256", "sizeBytes", "chunkHashes"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 500, "description": "Runtime enforces portable relative paths and NFC normalization." },
+          "sha256": { "$ref": "#/$defs/hash" },
+          "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 262144 },
+          "chunkHashes": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/hash" } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}(?![\\s\\S])" },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/skill-preparation-pointer/v1",
+  "title": "Local Pending Skill Preparation Pointer",
+  "description": "Private cache locator only, never activation authority. Payload reuse additionally requires independently fresh protected context and verified server selection, signature/expiry/integrity checks and a safe activation boundary. No replay or GC authority is established by this pointer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "cacheId", "organizationId", "deviceId", "workspaceId", "repositoryAgentId", "repositoryBindingId", "provider", "policyHash", "rolloutId", "bundleId", "bundleHash", "metadataHash", "sourceDirectory", "preparedAt", "cachedAt", "activationAuthorized"],
+  "properties": {
+    "schema": { "const": "dharma.skill-preparation-pointer/v1" },
+    "cacheId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}(?![\\s\\S])" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "repositoryAgentId": { "type": "string", "format": "uuid" },
+    "repositoryBindingId": { "anyOf": [{ "type": "null" }, { "type": "string", "format": "uuid" }] },
+    "provider": { "enum": ["codex", "claude", "agy", "hermes"] },
+    "policyHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "rolloutId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "bundleId": { "type": "string", "format": "uuid" },
+    "bundleHash": { "type": "string", "pattern": "^(sha256|blake3):[A-Fa-f0-9]{32,128}(?![\\s\\S])" },
+    "metadataHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])" },
+    "sourceDirectory": { "type": "string", "pattern": "^attempt-[A-Za-z0-9]{6}(?![\\s\\S])" },
+    "preparedAt": { "type": "string", "format": "date-time", "maxLength": 24 },
+    "cachedAt": { "type": "string", "format": "date-time", "maxLength": 24 },
+    "activationAuthorized": { "const": false }
+  }
+}

@@ -785,6 +785,8 @@ export class AgentFabricClient {
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
+    const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
+    const serialized = method === 'GET' ? '' : canonicalize(body);
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
       // explicit caller must rebuild the capsule after rechecking disclosure
@@ -794,10 +796,13 @@ export class AgentFabricClient {
       this.#state.pending = null;
       await this.#persist();
     } else if (this.#state.pending) {
-      return this.#sendPending();
+      const sameRequest = this.#state.pending.method === method
+        && this.#state.pending.pathname === pathname
+        && this.#state.pending.body === serialized;
+      const recovered = await this.#sendPending();
+      // Recovery acknowledges only its original caller's request identity.
+      if (sameRequest) return recovered;
     }
-    const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
-    const serialized = method === 'GET' ? '' : canonicalize(body);
     const timestamp = new Date().toISOString();
     const messageId = randomUUID();
     const nonce = randomBytes(24).toString('base64url');
@@ -1052,5 +1057,6 @@ export const RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS = 90_000;
 
 export function isContentBearingPath(pathname: string): boolean {
   return pathname.endsWith('/agent-fabric/trajectories')
-    || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname);
+    || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname)
+    || /\/agent-fabric\/repository-agents\/[^/]+\/package-candidates$/.test(pathname);
 }

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-package-delivery/v1",
+  "title": "Authenticated Chunk Repository Package Delivery Descriptor",
+  "description": "Descriptor shape only. Authority requires inclusion in a verified signed envelope plus current repository, policy and rollout checks. No producer or recipient integration is implied. The copied-source 4 MiB bound is enforced separately. Runtime validation must additionally require expiresAt strictly after createdAt.",
+  "$comment": "Portable JSON Schema cannot compare timestamp properties. Enforce expiresAt > createdAt in the runtime contract; date-time format validation must be enabled for calendar validity. Transfer v2 is a distinct contract, not a renaming of the existing 512-file/4-MiB transfer v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "delivery", "transferSchema", "organizationId", "repositoryBindingId", "repositoryAgentId",
+    "releaseId", "generation", "gitCommit", "policyHash", "sourceSnapshotHash", "sourceManifestHash",
+    "sourceLocalCatalogHash", "catalogHash", "manifestHash", "transferIndexHash", "fileCount", "totalBytes",
+    "maximumFileBytes", "createdAt", "expiresAt"
+  ],
+  "properties": {
+    "schema": { "const": "dharma.repository-package-delivery/v1" },
+    "delivery": { "const": "authenticated_chunks" },
+    "transferSchema": { "const": "dharma.repository-package-transfer/v2" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}$(?![\\s\\S])" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+    "releaseId": { "$ref": "#/$defs/uuid" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "gitCommit": { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$(?![\\s\\S])" },
+    "policyHash": { "$ref": "#/$defs/hash" },
+    "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+    "sourceManifestHash": { "$ref": "#/$defs/hash" },
+    "sourceLocalCatalogHash": { "$ref": "#/$defs/hash" },
+    "catalogHash": { "$ref": "#/$defs/hash" },
+    "manifestHash": { "$ref": "#/$defs/hash" },
+    "transferIndexHash": { "$ref": "#/$defs/hash" },
+    "fileCount": { "type": "integer", "minimum": 1, "maximum": 516 },
+    "totalBytes": { "type": "integer", "minimum": 0, "maximum": 5242880 },
+    "maximumFileBytes": { "const": 262144 },
+    "createdAt": { "$ref": "#/$defs/timestamp" },
+    "expiresAt": { "$ref": "#/$defs/timestamp", "description": "Must be strictly later than createdAt; enforced by runtime validation." }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$(?![\\s\\S])"
+    }
+  }
+}

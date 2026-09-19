@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-release-manifest/v1",
+  "title": "Complete repository release inventory requiring verification",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryAgentId", "generation", "authority", "sourceManifestHash", "sourceSnapshotHash", "policyHash", "knowledgeBaseId", "atlasAssociationId", "sourceSkills", "files"],
+  "properties": {
+    "schema": { "const": "dharma.repository-release-manifest/v1" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}$(?![\\s\\S])" },
+    "repositoryAgentId": { "type": "string", "format": "uuid" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "authority": { "const": "requires_verified_release" },
+    "sourceManifestHash": { "$ref": "#/$defs/hash" },
+    "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+    "policyHash": { "$ref": "#/$defs/hash" },
+    "knowledgeBaseId": { "type": "string", "pattern": "^repository-kb:sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "atlasAssociationId": { "type": "string", "format": "uuid" },
+    "sourceSkills": { "type": "array", "maxItems": 256, "description": "Preserved source inventory JSON, not proof of observed native-agent use.", "items": {} },
+    "files": {
+      "type": "array", "minItems": 3, "maxItems": 515,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "sha256", "sizeBytes", "role"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "sha256": { "$ref": "#/$defs/hash" },
+          "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 262144 },
+          "role": { "enum": ["skill", "dependency", "onboarding_prompt", "knowledge"] }
+        }
+      }
+    }
+  },
+  "$defs": { "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" } }
+}
