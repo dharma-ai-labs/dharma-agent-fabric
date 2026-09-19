@@ -150,7 +150,18 @@ export async function synchronizeRepositoryCandidate(input: {
   const scope = checkedScope(input.scope);
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
   requireFact(Buffer.byteLength(serialized) <= 8_388_608, 'Repository candidate exceeds its upload byte limit.');
-  const snapshot = JSON.parse(serialized) as RepositoryPackageSnapshot;
+  requireFact(input.snapshot.schema === 'dharma.repository-package-snapshot/v1'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input.snapshot.capturedAt)
+    && Number.isFinite(Date.parse(input.snapshot.capturedAt))
+    && new Date(input.snapshot.capturedAt).toISOString() === input.snapshot.capturedAt,
+  'Repository candidate envelope metadata is invalid.');
+  const contentAddressed = JSON.parse(serialized) as Pick<RepositoryPackageSnapshot, 'manifest' | 'blobs'>;
+  const snapshot: RepositoryPackageSnapshot = {
+    schema: input.snapshot.schema,
+    capturedAt: input.snapshot.capturedAt,
+    manifest: contentAddressed.manifest,
+    blobs: contentAddressed.blobs,
+  };
   requireFact(snapshot.manifest.organizationId === scope.organizationId
     && snapshot.manifest.workspaceId === scope.workspaceId
     && snapshot.manifest.knowledge?.repositoryAgentId === scope.repositoryAgentId
