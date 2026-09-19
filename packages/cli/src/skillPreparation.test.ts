@@ -113,8 +113,10 @@ for (const scenario of ['success', 'foreign selector', 'tampered tree', 'stop af
         assert.ok(first && second);
         assert.notEqual(first.sourceRoot, second.sourceRoot);
         assert.equal(await readFile(join(first.sourceRoot, 'skills/verifier/SKILL.md'), 'utf8'), f.text);
-        assert.equal((await stat(first.sourceRoot)).mode & 0o777, 0o700);
-        assert.equal((await stat(join(first.sourceRoot, 'skills/verifier/SKILL.md'))).mode & 0o777, 0o600);
+        if (process.platform !== 'win32') {
+          assert.equal((await stat(first.sourceRoot)).mode & 0o777, 0o700);
+          assert.equal((await stat(join(first.sourceRoot, 'skills/verifier/SKILL.md'))).mode & 0o777, 0o600);
+        }
         await rm(first.sourceRoot, { recursive: true });
         assert.equal(await readFile(join(second.sourceRoot, 'skills/verifier/SKILL.md'), 'utf8'), f.text);
         await rm(second.sourceRoot, { recursive: true });

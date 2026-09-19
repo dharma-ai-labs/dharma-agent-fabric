@@ -12,7 +12,7 @@ const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 const ACL_SCRIPT = `$ErrorActionPreference='Stop';
   $path=[Environment]::GetEnvironmentVariable('DHARMA_PREPARATION_ACL_PATH');
-  $acl=Get-Acl -LiteralPath $path;
+  $acl=[System.IO.DirectoryInfo]::new($path).GetAccessControl();
   $descriptor=[System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(),0);
   $rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) |
     Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow } |
@@ -39,7 +39,7 @@ const PRIVATE_DIRECTORY_ACL_SCRIPT = `$ErrorActionPreference='Stop';
       [System.Security.AccessControl.AccessControlType]::Allow);
     [void]$acl.AddAccessRule($rule);
   }
-  Set-Acl -LiteralPath $path -AclObject $acl`;
+  [System.IO.DirectoryInfo]::new($path).SetAccessControl($acl)`;
 
 function powershellEnvironment(path: string): NodeJS.ProcessEnv {
   return { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH,
