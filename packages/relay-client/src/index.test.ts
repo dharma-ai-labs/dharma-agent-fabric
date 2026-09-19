@@ -12,6 +12,7 @@ import {
   loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity,
   isContentBearingPath,
+  isExplicitlyRebuiltPath,
   isDefinitiveAgentFabricRejection,
   installTrustedServerSigningKeyset,
   loadDeviceEnrollmentAnchor,
@@ -45,6 +46,51 @@ test('repository candidate uploads are content-bearing but status reads are not'
   const root = '/api/v1/orgs/org_a/agent-fabric/repository-agents/57f61652-a5eb-46e4-930c-9478cd4a9c31/package-candidates';
   assert.equal(isContentBearingPath(root), true);
   assert.equal(isContentBearingPath(`${root}/77f61652-a5eb-46e4-930c-9478cd4a9c31`), false);
+  assert.equal(isExplicitlyRebuiltPath('/api/v1/orgs/org_a/agent-fabric/repository-agents'), true);
+  assert.equal(isContentBearingPath('/api/v1/orgs/org_a/agent-fabric/repository-agents'), false);
+});
+
+test('repository connect is rebuilt after current workspace registration instead of replayed', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-repository-connect-rebuild-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  const statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+  const paths: string[] = [];
+  let failConnect = true;
+  const fetcher = async (url: string | URL | Request) => {
+    const pathname = new URL(String(url)).pathname;
+    paths.push(pathname);
+    if (failConnect && pathname.endsWith('/agent-fabric/repository-agents')) {
+      failConnect = false;
+      throw new Error('unknown repository connect outcome');
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 201 });
+  };
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await client.openSession();
+  await assert.rejects(
+    client.connectRepositoryAgent({ workspaceId: 'stale-workspace' }),
+    /unknown repository connect outcome/,
+  );
+  const durableState = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(durableState.pending, null);
+  assert.doesNotMatch(await readFile(statePath, 'utf8'), /stale-workspace/);
+
+  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  await resumed.openSession();
+  assert.equal(paths.filter((path) => path.endsWith('/agent-fabric/repository-agents')).length, 1);
+  await resumed.registerWorkspace({ workspaceId: 'current-workspace' });
+  await resumed.connectRepositoryAgent({ workspaceId: 'current-workspace' });
+  assert.deepEqual(paths.slice(-2).map((path) => path.split('/').at(-1)), ['workspaces', 'repository-agents']);
+  assert.equal(paths.filter((path) => path.endsWith('/agent-fabric/repository-agents')).length, 2);
 });
 
 async function anchorConfig(configPath: string, store: SecureSecretStore) {

@@ -33,6 +33,38 @@ test('relay permits the repository-agent control operation', () => {
   assert.equal(parsed.pathname.endsWith('/repository-agents'), true);
 });
 
+test('relay permits only bounded repository collaboration and package routes', () => {
+  const id = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
+  const other = '77f61652-a5eb-46e4-930c-9478cd4a9c31';
+  const operationId = `sha256%3A${'a'.repeat(64)}`;
+  for (const pathname of [
+    `/api/v1/orgs/org_customer/agent-fabric/repository-source-policy?workspaceId=${id}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates/${other}?workspaceId=${id}&operationId=${operationId}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}&category=release-safety`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-questions/${other}?workspaceId=${id}`,
+    `/api/v1/orgs/org_customer/agent-fabric/skills/${id}/repository-package/index?rolloutId=${other}&workspaceId=${id}&provider=codex`,
+    `/api/v1/orgs/org_customer/agent-fabric/skills/${id}/repository-package/chunks?rolloutId=${other}&workspaceId=${id}&provider=claude&fileIndex=2&chunkIndex=7`,
+  ]) {
+    assert.doesNotThrow(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }));
+  }
+  for (const pathname of [
+    `/api/v1/orgs/org_customer/agent-fabric/repository-source-policy?workspaceId=all`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}&admin=true`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-questions/all?workspaceId=${id}`,
+    `/api/v1/orgs/org_customer/agent-fabric/skills/${id}/repository-package/chunks?rolloutId=${other}&workspaceId=${id}&provider=codex&fileIndex=-1&chunkIndex=0`,
+  ]) {
+    assert.throws(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }), /route_not_allowed/);
+  }
+  for (const pathname of [
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates`,
+    '/api/v1/orgs/org_customer/agent-fabric/repository-roles',
+    '/api/v1/orgs/org_customer/agent-fabric/repository-questions',
+  ]) {
+    assert.doesNotThrow(() => parseRelayRequest({ ...request, pathname }));
+  }
+});
+
 test('relay permits only the bounded trajectory-head reconciliation route', () => {
   assert.doesNotThrow(() => parseRelayRequest({
     ...request,
