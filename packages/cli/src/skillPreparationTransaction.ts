@@ -10,6 +10,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-
 const PROVIDERS = ['codex', 'claude', 'agy', 'hermes'];
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
+const WINDOWS_ACL_TIMEOUT_MS = 15000;
 const ACL_SCRIPT = `$ErrorActionPreference='Stop';
   $path=[Environment]::GetEnvironmentVariable('DHARMA_PREPARATION_ACL_PATH');
   $acl=[System.IO.DirectoryInfo]::new($path).GetAccessControl();
@@ -81,7 +82,7 @@ export async function assertPrivatePath(path: string, stat: Awaited<ReturnType<t
   }
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ACL_SCRIPT], {
-      windowsHide: true, timeout: 5000, maxBuffer: 65536,
+      windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536,
       env: powershellEnvironment(path),
     });
     assertWindowsSkillPreparationAcl(JSON.parse(stdout.replace(/^\uFEFF/, '')));
@@ -92,7 +93,7 @@ async function hardenWindowsPrivateDirectory(path: string): Promise<void> {
   if (process.platform !== 'win32') return;
   try {
     await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', PRIVATE_DIRECTORY_ACL_SCRIPT], {
-      windowsHide: true, timeout: 5000, maxBuffer: 65536, env: powershellEnvironment(path),
+      windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536, env: powershellEnvironment(path),
     });
   } catch { throw new Error('Windows preparation private access could not be established.'); }
 }
@@ -132,7 +133,18 @@ async function ensureDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Skill preparation directory is not an owned real directory.');
-  await hardenWindowsPrivateDirectory(path);
+  if (process.platform === 'win32') {
+    try { await assertPrivatePath(path, stat); return; }
+    catch {
+      await hardenWindowsPrivateDirectory(path);
+      const hardened = await lstat(path);
+      if (!hardened.isDirectory() || hardened.isSymbolicLink()) {
+        throw new Error('Skill preparation directory is not an owned real directory.');
+      }
+      await assertPrivatePath(path, hardened);
+      return;
+    }
+  }
   await assertPrivatePath(path, stat);
 }
 
