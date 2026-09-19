@@ -174,8 +174,27 @@ export async function validateRepositoryReleaseMetadata(input: {
   requireFact(atlas.organizationId === scope.organizationId && atlas.repositoryAgentId === scope.repositoryAgentId
     && atlas.knowledgeBaseId === knowledgeBaseId && atlas.associationId === manifest.atlasAssociationId);
   const windows = atlas.sourceWindowIds as string[];
+  const lineageFields = ['selectionHash', 'priorTrajectoryCount', 'failureFamilies'];
+  const lineageFieldCount = lineageFields.filter(key => Object.hasOwn(atlas, key)).length;
+  requireFact(lineageFieldCount === 0 || lineageFieldCount === lineageFields.length);
+  const failureFamilies = (atlas.failureFamilies ?? []) as Row[];
+  const selectionHash = atlas.selectionHash ?? null;
+  const priorTrajectoryCount = atlas.priorTrajectoryCount ?? 0;
   requireFact(new Set(windows).size === windows.length
-    && (atlas.basis === 'repository_initialization' ? windows.length === 0 && atlas.analysisHash === null : windows.length > 0 && atlas.analysisHash !== null));
+    && (selectionHash === null || typeof selectionHash === 'string' && HASH.test(selectionHash))
+    && Number.isSafeInteger(priorTrajectoryCount) && Number(priorTrajectoryCount) >= 0
+    && Number(priorTrajectoryCount) <= 500 && Array.isArray(failureFamilies));
+  const familyKeys = new Set<string>();
+  for (const family of failureFamilies) {
+    const key = normalized(family.familyKey as string);
+    const trajectoryIds = family.trajectoryIds as string[];
+    requireFact(!familyKeys.has(key) && ordered(trajectoryIds) && new Set(trajectoryIds).size === trajectoryIds.length);
+    familyKeys.add(key);
+  }
+  requireFact(atlas.basis === 'repository_initialization'
+    ? windows.length === 0 && atlas.analysisHash === null && priorTrajectoryCount === 0 && failureFamilies.length === 0
+    : lineageFieldCount === lineageFields.length && windows.length > 0 && atlas.analysisHash !== null && selectionHash !== null
+      && Number(priorTrajectoryCount) > 0);
   const inventory = manifest.files as Row[];
   requireFact(inventory.length === files.size - 1 && ordered(inventory.map(file => file.path as string)));
   const inventoried = new Set<string>();
