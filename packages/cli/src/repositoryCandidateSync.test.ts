@@ -69,8 +69,27 @@ test('repository candidate upload persists an exact outbox and polls the same op
     const request = calls[0]?.body as Record<string, unknown>;
     assert.deepEqual(request.consolidation, { mode: 'initial_repository', includeApprovedOutputs: true,
       requireAtlasAssociation: true });
+    const uploadedSnapshot = request.snapshot as Record<string, unknown>;
+    assert.deepEqual(Object.keys(uploadedSnapshot).sort(), ['blobs', 'capturedAt', 'manifest', 'schema']);
+    assert.equal(uploadedSnapshot.schema, 'dharma.repository-package-snapshot/v1');
+    assert.equal(uploadedSnapshot.capturedAt, '2030-01-02T00:00:00.000Z');
     const stored = await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8');
     assert.doesNotMatch(stored, /contentBase64|Governed repository/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('repository candidate rejects non-canonical upload timestamps before transport', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-'));
+  let calls = 0;
+  try {
+    const candidateSnapshot = await snapshot(root);
+    candidateSnapshot.capturedAt = '2030-01-02T00:00:00Z';
+    await assert.rejects(() => synchronizeRepositoryCandidate({
+      outboxRoot: join(root, 'outbox'), scope: { organizationId: 'org_fixture', ...ids },
+      snapshot: candidateSnapshot, initialRepository: true,
+      transport: { signedGet: async () => ({}), signedPost: async () => { calls += 1; return {}; } },
+    }), /envelope metadata/);
+    assert.equal(calls, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
