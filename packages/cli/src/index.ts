@@ -55,7 +55,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.51';
+const VERSION = '0.2.52';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2831,7 +2831,8 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
   }
   const fabric = await client();
   const providerIds = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
-  return syncWorkspacePolicy(fabric, await bindRepositoryAgent(fabric, item), policyRevision, true, providerIds);
+  const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, item, policyRevision, providerIds);
+  return prepared.synchronized;
 }
 
 async function syncWorkspacePolicy(
@@ -2868,6 +2869,20 @@ async function syncWorkspacePolicy(
       applied: generated.applied,
     },
   };
+}
+
+async function registerWorkspaceBeforeRepositoryBind(
+  fabric: AgentFabricClient,
+  item: WorkspaceRecord,
+  policyRevision: string,
+  providerIds: ProviderId[] | null = null,
+) {
+  // Repository connect is fenced by a server-side workspace, provider capability,
+  // and signed device-session record. Register those facts before requesting the
+  // permanent repository binding and control branch.
+  const synchronized = await syncWorkspacePolicy(fabric, item, policyRevision, true, providerIds);
+  const registered = await bindRepositoryAgent(fabric, item);
+  return { registered, synchronized };
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
@@ -3164,8 +3179,9 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   }
   if (!registered) throw new Error('Workspace registration failed.');
   const fabric = await client();
-  registered = await bindRepositoryAgent(fabric, registered);
-  const synced = await syncWorkspacePolicy(fabric, registered, policyRevision, true, providerIds) as Record<string, unknown>;
+  const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
+  registered = prepared.registered;
+  const synced = prepared.synchronized as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
   const generatedPolicy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);

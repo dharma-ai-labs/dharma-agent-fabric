@@ -205,6 +205,38 @@ test('repository connect reports shared readiness only when every requested repo
   assert.equal(actual.sharedRepositoryReady, true);
 });
 
+test('repository onboarding registers the signed workspace before repository binding', async () => {
+  const calls: string[] = [];
+  const workspace = { workspaceId: 'workspace_fixture' };
+  const actual = await (await caller('registerWorkspaceBeforeRepositoryBind', {
+    syncWorkspacePolicy: async (_fabric: unknown, item: unknown, revision: string, apply: boolean, providers: string[]) => {
+      calls.push('register_workspace');
+      assert.equal(item, workspace);
+      assert.equal(revision, 'policy_fixture');
+      assert.equal(apply, true);
+      assert.deepEqual(providers, ['codex']);
+      return { ok: true, workspace: { id: 'workspace_fixture' } };
+    },
+    bindRepositoryAgent: async (_fabric: unknown, item: unknown) => {
+      calls.push('bind_repository');
+      assert.equal(item, workspace);
+      return { ...workspace, repositoryAgentId: 'agent_fixture' };
+    },
+  }))({}, workspace, 'policy_fixture', ['codex']);
+  assert.deepEqual(calls, ['register_workspace', 'bind_repository']);
+  assert.equal((actual.registered as Record<string, unknown>).repositoryAgentId, 'agent_fixture');
+  assert.equal((actual.synchronized as Record<string, unknown>).ok, true);
+});
+
+test('repository onboarding never binds when signed workspace registration fails', async () => {
+  let bound = false;
+  await assert.rejects(async () => (await caller('registerWorkspaceBeforeRepositoryBind', {
+    syncWorkspacePolicy: async () => { throw new Error('workspace registration denied'); },
+    bindRepositoryAgent: async () => { bound = true; return {}; },
+  }))({}, {}, 'policy_fixture', null), /workspace registration denied/);
+  assert.equal(bound, false);
+});
+
 test('truthy non-boolean onboarding readiness cannot imply shared readiness', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', sharedRepositoryReady: 'true' });
   const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
