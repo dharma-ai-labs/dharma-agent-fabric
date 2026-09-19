@@ -37,6 +37,8 @@ test('one prompt submits initial knowledge only for an absent package and derive
   assert.match(onboard, /const derivedRole = deriveRepositoryRole\(/);
   assert.match(onboard, /const roleInput = roleRequested \?/);
   assert.match(onboard, /await registerRepositoryRoleMetadata\(/);
+  assert.ok(onboard.indexOf('await evidencePreview(') < onboard.indexOf('await synchronizeRepositoryCandidate('));
+  assert.ok(onboard.indexOf('await capture(onboardingEvidenceFlags, true)') < onboard.indexOf('await synchronizeRepositoryCandidate('));
   assert.ok(onboard.indexOf('await synchronizeRepositoryCandidate(') < onboard.indexOf('await startRelayDaemon('));
 });
 

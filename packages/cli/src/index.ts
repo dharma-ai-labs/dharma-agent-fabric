@@ -3179,6 +3179,23 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     controlBranch: registered.controlBranch,
     policyRevision: authoritativeRevision,
   });
+  const onboardingProvider = providerIds?.[0] || 'codex';
+  const onboardingEvidenceFlags = new Map<string, string | boolean>([
+    ['workspace', workspace], ['provider', onboardingProvider],
+    ['policy', resolve(workspace, '.dharma', 'approved-policy.json')], ['maximum-sessions', '20'],
+  ]);
+  const onboardingEvidencePreview = await evidencePreview(onboardingEvidenceFlags) as Record<string, unknown>;
+  let onboardingEvidence: BootstrapEvidenceSynchronization = { state: 'synchronized', captured: 0, synced: 0 };
+  if (Number(onboardingEvidencePreview.trajectoryCount || 0) > 0
+    && (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
+    onboardingEvidenceFlags.set('sync', true);
+    onboardingEvidence = await synchronizeBootstrapEvidence(
+      async () => await retryBootstrapOnboarding(
+        async () => await capture(onboardingEvidenceFlags, true) as { captured: number; synced: number },
+      ),
+    );
+    requireCompletedBootstrapEvidence(onboardingEvidence, Number(onboardingEvidencePreview.trajectoryCount || 0));
+  }
   const initialSnapshot = await inventoryRepositoryPackage({ workspace, organizationId,
     workspaceId: registered.workspaceId, repositoryAgentId: registered.repositoryAgentId,
     repositoryBindingId: registered.repositoryBindingId, sourceAuthorization });
@@ -3269,6 +3286,11 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     },
     repositorySkill: installed,
     repositoryCandidate: candidate,
+    firstLearningEvidence: {
+      discovered: Number(onboardingEvidencePreview.trajectoryCount || 0),
+      disclosureReady: (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true,
+      ...onboardingEvidence,
+    },
     repositoryRole: role,
     relay,
     nativeSkills: nativeSkillResult.installed,
