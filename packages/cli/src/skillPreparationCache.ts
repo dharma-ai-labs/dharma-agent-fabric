@@ -43,6 +43,14 @@ function sameIdentity(left: Stat, right: Stat): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function privatelyOwnedStat(stat: Stat): boolean {
+  if (process.platform === 'win32') return true;
+  const getuid = process.getuid;
+  const uid = stat.uid; const mode = stat.mode;
+  return typeof getuid === 'function' && typeof uid === 'number' && typeof mode === 'number'
+    && uid === getuid() && (mode & 0o077) === 0;
+}
+
 async function privateDirectory(path: string): Promise<Stat> {
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Invalid preparation cache directory.');
@@ -194,7 +202,7 @@ export async function publishSkillPreparationCache(input: SkillPreparationCacheP
     // No callback or await may separate these final checks from rename invocation.
     for (const stat of [lstatSync(temporary), fstatSync(pointerWriter.fd), fstatSync(pointerCandidate.file.fd)]) {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !sameIdentity(pointerIdentity, stat)
-        || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0
+        || !privatelyOwnedStat(stat)
         || stat.size !== pointerBytes.length || stat.mtimeMs !== pointerIdentity.mtimeMs) throw new Error('Preparation cache pointer identity changed.');
     }
     const candidateBytes = Buffer.alloc(pointerBytes.length + 1); let length = 0;
@@ -206,7 +214,7 @@ export async function publishSkillPreparationCache(input: SkillPreparationCacheP
     if (!candidateBytes.subarray(0, length).equals(pointerBytes)) throw new Error('Preparation cache pointer bytes changed.');
     for (const stat of [lstatSync(temporary), fstatSync(pointerWriter.fd), fstatSync(pointerCandidate.file.fd)]) {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !sameIdentity(pointerIdentity, stat)
-        || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0
+        || !privatelyOwnedStat(stat)
         || stat.size !== pointerBytes.length || stat.mtimeMs !== pointerIdentity.mtimeMs) throw new Error('Preparation cache pointer identity changed.');
     }
     await rename(temporary, pointerPath);
