@@ -194,9 +194,13 @@ export async function executeProviderTask(input: {
   let agyLogPath: string | null = null;
   if (input.provider === 'codex') {
     command = 'codex';
+    const configuredModel = (process.env.DHARMA_CODEX_MODEL || '').trim();
+    if (configuredModel && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(configuredModel)) {
+      throw new Error('DHARMA_CODEX_MODEL is invalid.');
+    }
     argv = input.allowWrites
-      ? ['exec', '--ignore-user-config', '--json', '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
-      : ['exec', '--ignore-user-config', '--json', '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
+      ? ['exec', '--ignore-user-config', '--json', ...(configuredModel ? ['--model', configuredModel] : []), '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
+      : ['exec', '--ignore-user-config', '--json', ...(configuredModel ? ['--model', configuredModel] : []), '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
   } else if (input.provider === 'claude') {
     command = 'claude';
     const configuredModel = (process.env.DHARMA_CLAUDE_MODEL || '').trim();

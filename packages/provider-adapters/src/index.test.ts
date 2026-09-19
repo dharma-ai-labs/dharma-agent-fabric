@@ -433,6 +433,48 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   assert.equal(result.exitCode, 0);
 });
 
+test('Codex task execution pins a validated configured model', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
+  const previous = process.env.DHARMA_CODEX_MODEL;
+  let argv: string[] = [];
+  process.env.DHARMA_CODEX_MODEL = 'gpt-5.6-luna';
+  try {
+    await executeProviderTask({
+      provider: 'codex', workspace: root, instructions: 'Read package.json.', timeoutSeconds: 30,
+      allowedCommandArgv: [], allowWrites: false,
+      runner: async (input) => {
+        argv = input.argv;
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('{"type":"result"}\n'), stderr: Buffer.alloc(0) };
+      },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_CODEX_MODEL;
+    else process.env.DHARMA_CODEX_MODEL = previous;
+  }
+  assert.deepEqual(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2), ['--model', 'gpt-5.6-luna']);
+});
+
+test('Codex task execution rejects an unsafe model selector before dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
+  const previous = process.env.DHARMA_CODEX_MODEL;
+  let dispatched = false;
+  process.env.DHARMA_CODEX_MODEL = 'gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox';
+  try {
+    await assert.rejects(() => executeProviderTask({
+      provider: 'codex', workspace: root, instructions: 'Read package.json.', timeoutSeconds: 30,
+      allowedCommandArgv: [], allowWrites: false,
+      runner: async () => {
+        dispatched = true;
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    }), /DHARMA_CODEX_MODEL is invalid/);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_CODEX_MODEL;
+    else process.env.DHARMA_CODEX_MODEL = previous;
+  }
+  assert.equal(dispatched, false);
+});
+
 test('Claude task execution exposes only bounded edit tools and registered commands', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-'));
   let argv: string[] = [];
