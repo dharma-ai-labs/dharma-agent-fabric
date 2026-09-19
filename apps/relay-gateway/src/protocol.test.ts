@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MAX_RELAY_BODY_BYTES, parseRelayRequest } from './protocol.js';
+import {
+  MAX_RELAY_BODY_BYTES,
+  MAX_RELAY_MESSAGE_BYTES,
+  MAX_REPOSITORY_PACKAGE_CANDIDATE_BODY_BYTES,
+  parseRelayRequest,
+} from './protocol.js';
 
 const request = {
   requestId: '8eca231c-e9d2-40e5-bf9c-445ddfeee094', method: 'POST',
@@ -161,6 +166,33 @@ test('relay accepts the organization capsule ceiling and rejects larger bodies',
     ...request,
     body: 'x'.repeat(MAX_RELAY_BODY_BYTES + 1),
   }), /body_too_large/);
+});
+
+test('relay accepts a full authorized repository snapshot only on the package-candidate route', () => {
+  const repositoryAgentId = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
+  const pathname = `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${repositoryAgentId}/package-candidates`;
+  const body = 'x'.repeat(MAX_REPOSITORY_PACKAGE_CANDIDATE_BODY_BYTES);
+  assert.doesNotThrow(() => parseRelayRequest({
+    ...request,
+    pathname,
+    body,
+  }));
+  assert.throws(() => parseRelayRequest({
+    ...request,
+    pathname: '/api/v1/orgs/org_customer/agent-fabric/trajectories',
+    body,
+  }), /body_too_large/);
+  assert.throws(() => parseRelayRequest({
+    ...request,
+    pathname,
+    body: `${body}x`,
+  }), /body_too_large/);
+  const worstCaseEscapedEnvelope = JSON.stringify({
+    ...request,
+    pathname,
+    body: '\\'.repeat(MAX_REPOSITORY_PACKAGE_CANDIDATE_BODY_BYTES),
+  });
+  assert.ok(Buffer.byteLength(worstCaseEscapedEnvelope) <= MAX_RELAY_MESSAGE_BYTES);
 });
 
 test('relay rejects incomplete, stale, and mismatched signed envelopes', () => {
