@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { readdirSync, renameSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -30,7 +30,7 @@ async function taker() {
   }).takeSkillPreparationCache;
 }
 async function fixture(writePrepared = true) {
-  const home = await mkdtemp(join(tmpdir(), 'af-cache-pointer-'));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'af-cache-pointer-')));
   const sourceRoot = await withSkillPreparationTransaction({ home, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {} },
     scopeRoot => mkdtemp(join(scopeRoot, 'attempt-')));
   const scopeRoot = skillPreparationScopeRoot(home, WORKSPACE, 'codex');
