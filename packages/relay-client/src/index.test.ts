@@ -148,6 +148,128 @@ test('bootstrap redemption is credential-free on the URL and returns device plus
   assert.equal(requests[0]!.headers.get('authorization'), null);
 });
 
+function bootstrapApprovedBody() {
+  return {
+    ok: true,
+    status: 'approved',
+    organizationId: 'org_a',
+    deviceId: '11111111-1111-4111-8111-111111111111',
+    relayUrl: 'wss://relay.dharma-ai.io',
+    serverPublicKeyEd25519: 'server-public-key',
+    organizationApiToken: `dharma_org_${'b'.repeat(43)}`,
+    organizationApiTokenScopes: ['agents:read'],
+  };
+}
+
+function bootstrapApprovalBody(input: { expiresAt: string; publicKey?: string; origin?: string }) {
+  const origin = input.origin || 'https://www.dharma-ai.io';
+  const destination = new URL('/portal/agent-fabric/bootstrap-approval', origin);
+  destination.hash = new URLSearchParams({
+    organizationId: 'org_a',
+    publicKeyEd25519: input.publicKey || 'device-public-key',
+    bootstrapTokenHash: 'c'.repeat(64),
+  }).toString();
+  const approval = new URL('/login', origin);
+  approval.searchParams.set('redirect_url', destination.toString());
+  return {
+    ok: false,
+    status: 'recipient_approval_required',
+    organizationId: 'org_a',
+    error: { code: 'bootstrap_recipient_approval_required', retryable: true },
+    approval: {
+      url: approval.toString(),
+      expiresAt: input.expiresAt,
+      fingerprint: `sha256:${'d'.repeat(64)}`,
+    },
+  };
+}
+
+test('bootstrap opens one validated recipient approval and polls the immutable request to its original deadline', async () => {
+  let clock = Date.parse('2026-09-19T00:00:00.000Z');
+  const expiresAt = new Date(clock + 60_000).toISOString();
+  const requests: Request[] = [];
+  let attempt = 0;
+  const approvals: Array<{ url: string; expiresAt: string; fingerprint: string }> = [];
+  const result = await redeemBootstrapGrant({
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
+    bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'wsl',
+    publicKeyEd25519: 'device-public-key', now: () => clock,
+    sleep: async milliseconds => { clock += milliseconds; }, pollIntervalMs: 250,
+    onRecipientApprovalRequired: approval => { approvals.push(approval); },
+    fetcher: async (url, init) => {
+      requests.push(new Request(url, init));
+      attempt += 1;
+      const body = attempt < 3 ? bootstrapApprovalBody({ expiresAt }) : bootstrapApprovedBody();
+      return new Response(JSON.stringify(body), {
+        status: attempt < 3 ? 409 : 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  assert.equal(result.status, 'approved');
+  assert.equal(approvals.length, 1);
+  assert.equal(requests.length, 3);
+  const serializedRequests = await Promise.all(requests.map(request => request.text()));
+  assert.ok(serializedRequests.every(serialized => serialized === serializedRequests[0]));
+  assert.equal(approvals[0]!.expiresAt, expiresAt);
+  assert.equal(new URL(approvals[0]!.url).origin, 'https://www.dharma-ai.io');
+});
+
+test('bootstrap rejects changed approval context and terminal errors without further polling', async () => {
+  let clock = Date.parse('2026-09-19T00:00:00.000Z');
+  const firstDeadline = new Date(clock + 60_000).toISOString();
+  let attempt = 0;
+  await assert.rejects(() => redeemBootstrapGrant({
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
+    bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'linux',
+    publicKeyEd25519: 'device-public-key', now: () => clock,
+    sleep: async milliseconds => { clock += milliseconds; }, pollIntervalMs: 250,
+    onRecipientApprovalRequired: () => undefined,
+    fetcher: async () => {
+      attempt += 1;
+      return new Response(JSON.stringify(bootstrapApprovalBody({
+        expiresAt: new Date(Date.parse(firstDeadline) + (attempt === 1 ? 0 : 1_000)).toISOString(),
+      })), { status: 409, headers: { 'content-type': 'application/json' } });
+    },
+  }), /context changed/);
+  assert.equal(attempt, 2);
+
+  let terminalAttempts = 0;
+  await assert.rejects(() => redeemBootstrapGrant({
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
+    bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'linux',
+    publicKeyEd25519: 'device-public-key', onRecipientApprovalRequired: () => undefined,
+    fetcher: async () => {
+      terminalAttempts += 1;
+      return new Response(JSON.stringify({ error: { code: 'fabric_ownership_required', message: 'Denied.' } }), { status: 403 });
+    },
+  }), /fabric_ownership_required/);
+  assert.equal(terminalAttempts, 1);
+});
+
+test('bootstrap rejects deceptive or bearer-bearing recipient approval URLs before opening them', async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  for (const body of [
+    bootstrapApprovalBody({ expiresAt, origin: 'https://www.dharma-ai.io.evil.example' }),
+    (() => {
+      const value = bootstrapApprovalBody({ expiresAt });
+      value.approval.url += `&grant=dhab_${'a'.repeat(43)}`;
+      return value;
+    })(),
+    bootstrapApprovalBody({ expiresAt, publicKey: 'foreign-device-key' }),
+  ]) {
+    let opened = false;
+    await assert.rejects(() => redeemBootstrapGrant({
+      hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
+      bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'wsl',
+      publicKeyEd25519: 'device-public-key',
+      onRecipientApprovalRequired: () => { opened = true; },
+      fetcher: async () => new Response(JSON.stringify(body), { status: 409 }),
+    }), /HTTP 409|bootstrap_recipient_approval_required/);
+    assert.equal(opened, false);
+  }
+});
+
 test('organization API tokens are stored and loaded only through the secure store', async () => {
   const store = memoryStore();
   const token = `dharma_org_${'c'.repeat(43)}`;

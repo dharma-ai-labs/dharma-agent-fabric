@@ -107,6 +107,27 @@ export interface BootstrapEnrollmentResult {
   correlationId?: string;
 }
 
+export interface BootstrapRecipientApproval {
+  url: string;
+  expiresAt: string;
+  fingerprint: string;
+}
+
+export interface RedeemBootstrapGrantInput {
+  hqUrl: string;
+  organizationId: string;
+  bootstrapToken: string;
+  name: string;
+  platform: DeviceConfig['platform'];
+  publicKeyEd25519: string;
+  fetcher?: typeof fetch;
+  onRecipientApprovalRequired?: (approval: BootstrapRecipientApproval) => Promise<void> | void;
+  pollIntervalMs?: number;
+  maximumWaitMs?: number;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+}
+
 function sha256(value: string | Uint8Array) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -490,33 +511,115 @@ export async function beginEnrollment(input: {
   return body;
 }
 
-export async function redeemBootstrapGrant(input: {
-  hqUrl: string;
-  organizationId: string;
-  bootstrapToken: string;
-  name: string;
-  platform: DeviceConfig['platform'];
-  publicKeyEd25519: string;
-  fetcher?: typeof fetch;
-}): Promise<BootstrapEnrollmentResult> {
-  const response = await (input.fetcher || fetch)(`${normalizeHqUrl(input.hqUrl)}/api/v1/agent-fabric/bootstrap`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      organizationId: input.organizationId,
-      bootstrapToken: input.bootstrapToken,
-      name: input.name,
-      platform: input.platform,
-      publicKeyEd25519: input.publicKeyEd25519,
-    }),
-  });
-  const body = await response.json() as BootstrapEnrollmentResult & { error?: unknown };
-  if (!response.ok) throw new Error(errorMessage(body, response.status));
-  if (body.status !== 'approved' || body.organizationId !== input.organizationId
-    || !body.deviceId || !body.relayUrl || !body.serverPublicKeyEd25519 || !body.organizationApiToken) {
-    throw new Error('Bootstrap response did not contain a complete enrollment.');
+function parseBootstrapRecipientApproval(
+  body: unknown,
+  input: Pick<RedeemBootstrapGrantInput, 'hqUrl' | 'organizationId' | 'bootstrapToken' | 'publicKeyEd25519'>,
+): BootstrapRecipientApproval | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const record = body as Record<string, unknown>;
+  const error = record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+    ? record.error as Record<string, unknown>
+    : null;
+  const approval = record.approval && typeof record.approval === 'object' && !Array.isArray(record.approval)
+    ? record.approval as Record<string, unknown>
+    : null;
+  if (record.ok !== false || record.status !== 'recipient_approval_required'
+    || record.organizationId !== input.organizationId
+    || error?.code !== 'bootstrap_recipient_approval_required' || error.retryable !== true
+    || typeof approval?.url !== 'string' || typeof approval.expiresAt !== 'string'
+    || !/^sha256:[a-f0-9]{64}$/.test(String(approval.fingerprint || ''))) return null;
+
+  let approvalUrl: URL;
+  let destination: URL;
+  try {
+    const hqOrigin = normalizeHqUrl(input.hqUrl);
+    approvalUrl = new URL(approval.url);
+    if (approvalUrl.origin !== hqOrigin || approvalUrl.pathname !== '/login'
+      || approvalUrl.username || approvalUrl.password
+      || [...approvalUrl.searchParams.keys()].some(key => key !== 'redirect_url')
+      || approvalUrl.searchParams.getAll('redirect_url').length !== 1 || approvalUrl.hash) return null;
+    destination = new URL(approvalUrl.searchParams.get('redirect_url')!, hqOrigin);
+    if (destination.origin !== hqOrigin
+      || destination.pathname !== '/portal/agent-fabric/bootstrap-approval'
+      || destination.username || destination.password || destination.search) return null;
+  } catch {
+    return null;
   }
-  return body;
+  const fragment = new URLSearchParams(destination.hash.slice(1));
+  if (fragment.get('organizationId') !== input.organizationId
+    || fragment.get('publicKeyEd25519') !== input.publicKeyEd25519
+    || !/^[a-f0-9]{64}$/.test(fragment.get('bootstrapTokenHash') || '')
+    || ['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash']
+      .some(key => fragment.getAll(key).length !== 1)
+    || [...fragment.keys()].some(key => !['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash'].includes(key))) {
+    return null;
+  }
+  let decodedUrl = approvalUrl.toString();
+  try { decodedUrl = decodeURIComponent(decodedUrl); } catch {}
+  if (approvalUrl.toString().includes(input.bootstrapToken) || decodedUrl.includes(input.bootstrapToken)) return null;
+  return {
+    url: approvalUrl.toString(),
+    expiresAt: approval.expiresAt,
+    fingerprint: String(approval.fingerprint),
+  };
+}
+
+export async function redeemBootstrapGrant(input: RedeemBootstrapGrantInput): Promise<BootstrapEnrollmentResult> {
+  const hqUrl = normalizeHqUrl(input.hqUrl);
+  const endpoint = `${hqUrl}/api/v1/agent-fabric/bootstrap`;
+  const requestBody = JSON.stringify({
+    organizationId: input.organizationId,
+    bootstrapToken: input.bootstrapToken,
+    name: input.name,
+    platform: input.platform,
+    publicKeyEd25519: input.publicKeyEd25519,
+  });
+  const fetcher = input.fetcher || fetch;
+  const now = input.now || Date.now;
+  const sleep = input.sleep || ((milliseconds: number) => new Promise<void>(accept => setTimeout(accept, milliseconds)));
+  const pollIntervalMs = Math.min(Math.max(input.pollIntervalMs ?? 2_000, 250), 10_000);
+  const maximumWaitMs = Math.min(Math.max(input.maximumWaitMs ?? 15 * 60_000, 1_000), 15 * 60_000);
+  const startedAt = now();
+  let pending: BootstrapRecipientApproval | null = null;
+  let deadline = startedAt + maximumWaitMs;
+
+  while (true) {
+    const response = await fetcher(endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: requestBody,
+    });
+    let body: unknown;
+    try { body = await response.json(); }
+    catch { throw new Error(`Bootstrap response was not valid JSON (HTTP ${response.status}).`); }
+    if (response.ok) {
+      const approved = body as BootstrapEnrollmentResult;
+      if (approved.status !== 'approved' || approved.organizationId !== input.organizationId
+        || !approved.deviceId || !approved.relayUrl || !approved.serverPublicKeyEd25519
+        || !approved.organizationApiToken) {
+        throw new Error('Bootstrap response did not contain a complete enrollment.');
+      }
+      return approved;
+    }
+
+    const approval = response.status === 409 ? parseBootstrapRecipientApproval(body, input) : null;
+    if (!approval || !input.onRecipientApprovalRequired) {
+      throw new Error(errorMessage(body, response.status));
+    }
+    const serverDeadline = Date.parse(approval.expiresAt);
+    if (!Number.isFinite(serverDeadline) || serverDeadline <= now()) {
+      throw new Error('Bootstrap recipient approval deadline is invalid or expired.');
+    }
+    if (!pending) {
+      pending = approval;
+      deadline = Math.min(serverDeadline, startedAt + maximumWaitMs);
+      await input.onRecipientApprovalRequired(approval);
+    } else if (approval.url !== pending.url || approval.expiresAt !== pending.expiresAt
+      || approval.fingerprint !== pending.fingerprint) {
+      throw new Error('Bootstrap recipient approval context changed while polling.');
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) throw new Error('Bootstrap recipient approval timed out.');
+    await sleep(Math.min(pollIntervalMs, remaining));
+  }
 }
 
 export async function pollEnrollment(input: {
