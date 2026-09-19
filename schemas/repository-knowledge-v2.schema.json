@@ -27,7 +27,10 @@
         "repositoryAgentId": { "type": "string", "format": "uuid" },
         "basis": { "enum": ["repository_initialization", "semantic_analysis"] },
         "sourceWindowIds": { "type": "array", "maxItems": 500, "items": { "type": "string", "format": "uuid" } },
-        "analysisHash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
+        "analysisHash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "selectionHash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "priorTrajectoryCount": { "type": "integer", "minimum": 0, "maximum": 500 },
+        "failureFamilies": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/failureFamily" } }
       }
     },
     "concepts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/concept" } },
@@ -57,6 +60,17 @@
         "firstLine": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "lastLine": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "quote": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
+    "failureFamily": {
+      "type": "object", "additionalProperties": false,
+      "required": ["familyKey", "title", "causeClass", "severity", "trajectoryIds"],
+      "properties": {
+        "familyKey": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000-\\u001f]+$(?![\\s\\S])" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001f]+$(?![\\s\\S])" },
+        "causeClass": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000-\\u001f]+$(?![\\s\\S])" },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "trajectoryIds": { "type": "array", "maxItems": 500, "items": { "type": "string", "format": "uuid" } }
       }
     },
     "concept": {

@@ -43,7 +43,8 @@ function fixture(withConcept = false) {
     repositoryAgentId: agent, knowledgeBaseId: kb, generation: 1, authority: 'requires_verified_release',
     policyHash: pin('a'), sourceSnapshotHash: pin('b'), sourceLocalCatalogHash: pin('c'), projectionHash: hash(canonicalize(projection)),
     repoAtlas: { associationId: '244b5a90-3b7a-4a81-9503-c9f49be790c3', knowledgeBaseId: kb,
-      organizationId: org, repositoryAgentId: agent, basis: 'repository_initialization', sourceWindowIds: [], analysisHash: null },
+      organizationId: org, repositoryAgentId: agent, basis: 'repository_initialization', sourceWindowIds: [], analysisHash: null,
+      selectionHash: pin('d'), priorTrajectoryCount: 0, failureFamilies: [] },
     concepts, unresolved,
   };
   const copies = [
@@ -85,6 +86,19 @@ test('canonical release metadata preserves sourced concepts and unresolved defin
   assert.deepEqual(result.catalog?.concepts, expected.concepts);
   assert.deepEqual(result.catalog?.unresolved, expected.unresolved);
   assert.equal(result.sharedRepositoryReady, false);
+});
+
+test('canonical release metadata retains legacy initialization releases without manufacturing first-learning evidence', async () => {
+  const input = fixture();
+  editCatalog(input, value => {
+    delete value.repoAtlas.selectionHash;
+    delete value.repoAtlas.priorTrajectoryCount;
+    delete value.repoAtlas.failureFamilies;
+  });
+  const result = await validateRepositoryReleaseMetadata(input);
+  assert.equal(result.stage, 'repository_release_metadata_observed');
+  assert.equal(Object.hasOwn(result.catalog.repoAtlas as Record<string, unknown>, 'selectionHash'), false);
+  assert.equal(result.projectionVerified, false);
 });
 
 type Fixture = ReturnType<typeof fixture>;
@@ -168,7 +182,27 @@ const rejected: Array<[string, (input: Fixture) => void]> = [
   ['foreign Atlas association', input => { editCatalog(input, value => { value.repoAtlas.organizationId = 'org_foreign'; }); }],
   ['Atlas manifest mismatch', input => { editManifest(input, value => { value.atlasAssociationId = '344b5a90-3b7a-4a81-9503-c9f49be790c3'; }); }],
   ['fabricated initialized Atlas analysis', input => { editCatalog(input, value => { value.repoAtlas.analysisHash = pin('f'); }); }],
+  ['partial Atlas learning lineage', input => { editCatalog(input, value => { delete value.repoAtlas.failureFamilies; }); }],
+  ['initialized Atlas trajectory count', input => { editCatalog(input, value => { value.repoAtlas.priorTrajectoryCount = 1; }); }],
+  ['initialized Atlas failure family', input => { editCatalog(input, value => { value.repoAtlas.failureFamilies = [{ familyKey: 'invented',
+    title: 'Invented', causeClass: 'other', severity: 'medium', trajectoryIds: [] }]; }); }],
   ['semantic Atlas without windows', input => { editCatalog(input, value => { value.repoAtlas.basis = 'semantic_analysis'; value.repoAtlas.analysisHash = pin('f'); }); }],
+  ['semantic Atlas without selection lineage', input => { editCatalog(input, value => { value.repoAtlas.basis = 'semantic_analysis';
+    value.repoAtlas.sourceWindowIds = ['444b5a90-3b7a-4a81-9503-c9f49be790c3']; value.repoAtlas.analysisHash = pin('f');
+    value.repoAtlas.selectionHash = null; value.repoAtlas.priorTrajectoryCount = 1; }); }],
+  ['semantic Atlas without prior trajectories', input => { editCatalog(input, value => { value.repoAtlas.basis = 'semantic_analysis';
+    value.repoAtlas.sourceWindowIds = ['444b5a90-3b7a-4a81-9503-c9f49be790c3']; value.repoAtlas.analysisHash = pin('f');
+    value.repoAtlas.priorTrajectoryCount = 0; }); }],
+  ['duplicate Atlas family key', input => { editCatalog(input, value => { value.repoAtlas.basis = 'semantic_analysis';
+    value.repoAtlas.sourceWindowIds = ['444b5a90-3b7a-4a81-9503-c9f49be790c3']; value.repoAtlas.analysisHash = pin('f');
+    value.repoAtlas.priorTrajectoryCount = 1; value.repoAtlas.failureFamilies = [
+      { familyKey: 'Tool Discipline', title: 'One', causeClass: 'tool', severity: 'high', trajectoryIds: [] },
+      { familyKey: ' tool discipline ', title: 'Two', causeClass: 'tool', severity: 'medium', trajectoryIds: [] }]; }); }],
+  ['duplicate Atlas trajectory', input => { editCatalog(input, value => { value.repoAtlas.basis = 'semantic_analysis';
+    value.repoAtlas.sourceWindowIds = ['444b5a90-3b7a-4a81-9503-c9f49be790c3']; value.repoAtlas.analysisHash = pin('f');
+    value.repoAtlas.priorTrajectoryCount = 1; value.repoAtlas.failureFamilies = [{ familyKey: 'tool', title: 'Tool',
+      causeClass: 'tool', severity: 'high', trajectoryIds: ['544b5a90-3b7a-4a81-9503-c9f49be790c3',
+        '544b5a90-3b7a-4a81-9503-c9f49be790c3'] }]; }); }],
   ['invented accepted catalog authority', input => { editCatalog(input, value => { value.authority = 'accepted'; }); }],
   ['unknown catalog field', input => { editCatalog(input, value => { value.accepted = true; }); }],
   ['local-v1 catalog coercion', input => { editCatalog(input, value => { value.schema = 'dharma.repository-knowledge/v1'; }); }],
@@ -221,12 +255,18 @@ test('canonical release metadata preserves semantic Atlas provenance without cla
     value.repoAtlas.basis = 'semantic_analysis';
     value.repoAtlas.sourceWindowIds = ['444b5a90-3b7a-4a81-9503-c9f49be790c3'];
     value.repoAtlas.analysisHash = pin('f');
+    value.repoAtlas.selectionHash = pin('e');
+    value.repoAtlas.priorTrajectoryCount = 1;
+    value.repoAtlas.failureFamilies = [{ familyKey: 'tool-discipline', title: 'Tool discipline', causeClass: 'tool_discipline',
+      severity: 'high', trajectoryIds: ['544b5a90-3b7a-4a81-9503-c9f49be790c3'] }];
   });
   const result = await validateRepositoryReleaseMetadata(input);
   assert.equal(result.stage, 'repository_release_metadata_observed');
   assert.equal(result.projectionVerified, false);
   assert.equal(result.signatureVerified, false);
   assert.equal(result.repositoryBindingVerified, false);
+  assert.deepEqual((result.catalog.repoAtlas as Record<string, unknown>).failureFamilies, [{ familyKey: 'tool-discipline', title: 'Tool discipline',
+    causeClass: 'tool_discipline', severity: 'high', trajectoryIds: ['544b5a90-3b7a-4a81-9503-c9f49be790c3'] }]);
 });
 
 test('canonical release metadata retains more than 32 companion files without truncating the canonical inventory', async () => {
