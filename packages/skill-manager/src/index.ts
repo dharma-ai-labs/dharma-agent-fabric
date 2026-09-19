@@ -381,6 +381,7 @@ async function activateNativeSkills(input: {
   release: string;
   bundleId: string;
   workspaceId: string;
+  bootstrapProvider?: ProviderId;
   skillIds: string[];
   removeSkillIds: string[];
 }) {
@@ -391,7 +392,25 @@ async function activateNativeSkills(input: {
     const target = assertContained(input.nativeSkillDirectory, resolve(input.nativeSkillDirectory, skillId));
     if (await pathExists(target)) {
       const marker = resolve(target, '.dharma-agent-fabric.json');
-      if (!await pathExists(marker)) throw new Error(`Refusing to replace unmanaged provider skill: ${skillId}`);
+      if (!await pathExists(marker)) {
+        const bootstrapMarker = resolve(target, '.dharma-agent-fabric-bootstrap.json');
+        if (skillId !== 'dharma-agent-fabric'
+          || !input.bootstrapProvider
+          || !await pathExists(bootstrapMarker)) {
+          throw new Error(`Refusing to replace unmanaged provider skill: ${skillId}`);
+        }
+        const bootstrap = JSON.parse(await readFile(bootstrapMarker, 'utf8')) as {
+          schema?: unknown;
+          managedBy?: unknown;
+          provider?: unknown;
+        };
+        if (bootstrap.schema !== 'dharma.native-skill-bootstrap/v2'
+          || bootstrap.managedBy !== 'dharma-agent-fabric'
+          || bootstrap.provider !== input.bootstrapProvider) {
+          throw new Error(`Refusing to replace an invalid provider bootstrap skill: ${skillId}`);
+        }
+        continue;
+      }
       const ownership = JSON.parse(await readFile(marker, 'utf8')) as {
         bundleId?: unknown;
         skillId?: unknown;
@@ -743,6 +762,7 @@ export async function installSkillBundle(input: {
       release,
       bundleId: input.bundle.bundleId,
       workspaceId: input.workspaceId,
+      bootstrapProvider: input.provider,
       skillIds,
       removeSkillIds: previousSkillIds,
     });

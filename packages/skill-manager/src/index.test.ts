@@ -200,6 +200,70 @@ test('verified skill activates and a failed canary restores the prior bundle', a
   assert.equal((await readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8')).trim(), firstBundleId);
 });
 
+test('signed Agent Fabric skill replaces only its matching native bootstrap', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-bootstrap-upgrade-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  const bootstrap = resolve(native, 'dharma-agent-fabric');
+  await mkdir(source, { recursive: true });
+  await mkdir(bootstrap, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Signed Agent Fabric\n');
+  await writeFile(resolve(bootstrap, 'SKILL.md'), '# Native bootstrap\n');
+  await writeFile(resolve(bootstrap, '.dharma-agent-fabric-bootstrap.json'), JSON.stringify({
+    schema: 'dharma.native-skill-bootstrap/v2',
+    managedBy: 'dharma-agent-fabric',
+    provider: 'codex',
+  }));
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const workspaceId = randomUUID();
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey, 'dharma-agent-fabric');
+
+  const receipt = await installSkillBundle({
+    bundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: randomUUID(),
+    organizationAgentId, workspaceId, provider: 'codex',
+  });
+
+  assert.equal(receipt.status, 'active');
+  assert.match(await readFile(resolve(bootstrap, 'SKILL.md'), 'utf8'), /Signed Agent Fabric/);
+  const ownership = JSON.parse(await readFile(resolve(bootstrap, '.dharma-agent-fabric.json'), 'utf8')) as {
+    bundleId?: string;
+    skillId?: string;
+    workspaceId?: string;
+  };
+  assert.equal(ownership.bundleId, bundle.bundleId);
+  assert.equal(ownership.skillId, 'dharma-agent-fabric');
+  assert.equal(ownership.workspaceId, workspaceId);
+  await assert.rejects(readFile(resolve(bootstrap, '.dharma-agent-fabric-bootstrap.json')), /ENOENT/);
+});
+
+test('native bootstrap replacement fails closed for a provider mismatch', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-bootstrap-provider-mismatch-'));
+  const source = resolve(root, 'source', 'skill');
+  const native = resolve(root, 'native');
+  const bootstrap = resolve(native, 'dharma-agent-fabric');
+  await mkdir(source, { recursive: true });
+  await mkdir(bootstrap, { recursive: true });
+  await writeFile(resolve(source, 'SKILL.md'), '# Signed Agent Fabric\n');
+  await writeFile(resolve(bootstrap, 'SKILL.md'), '# Native bootstrap\n');
+  await writeFile(resolve(bootstrap, '.dharma-agent-fabric-bootstrap.json'), JSON.stringify({
+    schema: 'dharma.native-skill-bootstrap/v2',
+    managedBy: 'dharma-agent-fabric',
+    provider: 'claude',
+  }));
+  const server = generateKeyPairSync('ed25519');
+  const device = generateKeyPairSync('ed25519');
+  const bundle = await signedBundle(source, randomUUID(), server.privateKey, 'dharma-agent-fabric');
+
+  await assert.rejects(installSkillBundle({
+    bundle, sourceDirectory: resolve(root, 'source'), nativeSkillDirectory: native, policy,
+    serverPublicKey: server.publicKey, devicePrivateKey: device.privateKey, deviceId: randomUUID(),
+    organizationAgentId, workspaceId: randomUUID(), provider: 'codex',
+  }), /invalid provider bootstrap skill/);
+  assert.match(await readFile(resolve(bootstrap, 'SKILL.md'), 'utf8'), /Native bootstrap/);
+});
+
 test('provider activation check is signed into an active installation receipt', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-provider-activation-check-'));
   const source = resolve(root, 'source', 'skill');
