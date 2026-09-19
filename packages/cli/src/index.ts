@@ -55,7 +55,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.57';
+const VERSION = '0.2.58';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -161,11 +161,48 @@ export function isDirectExecution(argvPath: string | undefined, moduleUrl: strin
 
 function dharmaHome(): string { return resolve(process.env.DHARMA_HOME || resolve(homedir(), '.dharma')); }
 function configPath() { return resolve(dharmaHome(), 'device.json'); }
+function installationIdentityPath() { return resolve(dharmaHome(), 'installation.json'); }
 function pendingEnrollmentPath() { return resolve(dharmaHome(), 'pending-enrollment.json'); }
 function protocolStatePath() { return resolve(dharmaHome(), 'relay', 'protocol-state.json'); }
 function workspaceRegistryPath() { return resolve(dharmaHome(), 'registry', 'workspaces.json'); }
 function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evidence-upload-ledger.json'); }
 function evidenceRequestReceiptPath(requestId: string) { return resolve(dharmaHome(), 'relay', 'evidence-requests', `${requestId}.json`); }
+
+export async function loadOrCreateInstallationId(path = installationIdentityPath()): Promise<string> {
+  const readExisting = async (): Promise<string> => {
+    const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    if (value.schema !== 'dharma.installation-identity/v1'
+      || typeof value.installationId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.installationId)) {
+      throw new Error('Installation identity is invalid. Preserve the file and re-enroll this installation.');
+    }
+    return value.installationId;
+  };
+  try {
+    return await readExisting();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const installationId = randomUUID();
+  let handle;
+  try {
+    handle = await open(path, 'wx', 0o600);
+    await handle.writeFile(`${JSON.stringify({
+      schema: 'dharma.installation-identity/v1',
+      installationId,
+      createdAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+    await handle.sync();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    return await readExisting();
+  } finally {
+    await handle?.close();
+  }
+  return installationId;
+}
 
 type EvidenceUploadLedger = {
   schema: 'dharma.evidence-upload-ledger/v2';
@@ -1223,6 +1260,7 @@ async function organizationApi(flags: Map<string, string | boolean>) {
     || await loadOrganizationApiToken({
       hqUrl: enrolled?.hqUrl || portalUrl(flags),
       organizationId,
+      installationId: enrolled?.installationId,
     }) || '';
   if (!token) throw new Error('Organization command requires a token in the OS credential store or DHARMA_ORG_API_TOKEN. Tokens are not accepted on the command line.');
   return new AgentFabricApiClient({
@@ -1536,7 +1574,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   }
   const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
   const devicePlatform = await platform();
-  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });
+  const installationId = existing && !enrollmentMismatch
+    ? existing.installationId
+    : await loadOrCreateInstallationId();
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
   let recipientApproval: { required: boolean; browserOpened: boolean } = {
     required: false,
     browserOpened: false,
@@ -1566,6 +1607,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     schema: 'dharma.device-config/v1',
     hqUrl,
     organizationId,
+    installationId,
     deviceId: redeemed.deviceId,
     deviceName: name,
     platform: devicePlatform,
@@ -1590,7 +1632,12 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   }
   await saveDeviceConfig(configPath(), config);
   await saveDeviceEnrollmentAnchor({ config });
-  await saveOrganizationApiToken({ hqUrl, organizationId, token: redeemed.organizationApiToken });
+  await saveOrganizationApiToken({
+    hqUrl,
+    organizationId,
+    installationId: config.installationId,
+    token: redeemed.organizationApiToken,
+  });
   const onboardFlags = new Map(flags);
   onboardFlags.delete('grant');
   onboardFlags.set('portal-url', hqUrl);
@@ -2068,6 +2115,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   type PendingEnrollment = {
     hqUrl: string;
     organizationId: string;
+    installationId?: string;
     name: string;
     platform: DeviceConfig['platform'];
     publicKeyEd25519: string;
@@ -2115,10 +2163,11 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     await assertEnrollmentHomeCompatible(hqUrl, organizationId);
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
-    const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });
+    const installationId = await loadOrCreateInstallationId();
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
     const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519 });
     pending = {
-      hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
+      hqUrl, organizationId, installationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
       deviceCode: enrollment.deviceCode, verificationUri: enrollment.verificationUri,
       browserCode: enrollment.browserCode,
       expiresAt: new Date(Date.now() + enrollment.expiresInSeconds * 1_000).toISOString(),
@@ -2140,6 +2189,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
       }
       const config: DeviceConfig = {
         schema: 'dharma.device-config/v1', hqUrl: pending.hqUrl, organizationId: pending.organizationId, deviceId: result.deviceId,
+        ...(pending.installationId ? { installationId: pending.installationId } : {}),
         deviceName: pending.name, platform: pending.platform, publicKeyEd25519: pending.publicKeyEd25519,
         serverPublicKeyEd25519: result.serverPublicKeyEd25519, relayUrl: result.relayUrl, enrolledAt: new Date().toISOString(),
       };
@@ -2901,7 +2951,11 @@ async function activeSkillAuthorization(
   if (!await pathExistsOrThrow(pointer)) return null;
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
-    loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId }),
+    loadOrCreateDeviceIdentity({
+      hqUrl: config.hqUrl,
+      organizationId: config.organizationId,
+      installationId: config.installationId,
+    }),
     loadDeviceEnrollmentAnchor({ config }),
     loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
   ]);
@@ -2948,7 +3002,11 @@ async function expiredSkillAuthorizationForReplacement(
   const root = nativeSkillDirectory(provider);
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
-    loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId }),
+    loadOrCreateDeviceIdentity({
+      hqUrl: config.hqUrl,
+      organizationId: config.organizationId,
+      installationId: config.installationId,
+    }),
     loadDeviceEnrollmentAnchor({ config }),
     loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
   ]);
@@ -4978,7 +5036,11 @@ async function activatePreparedSkillUpdate(input: {
       organizationAgentId: String(workspace.repositoryAgentId || ''),
       provider,
     });
-    const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
+    const identity = await loadOrCreateDeviceIdentity({
+      hqUrl: config.hqUrl,
+      organizationId: config.organizationId,
+      installationId: config.installationId,
+    });
     repositoryDelivery?.assertCurrent();
     const current = await loadSkillSynchronizationPolicy(policyPath, workspaceId);
     if (canonicalize(current.policy) !== canonicalize(policy)
@@ -5097,7 +5159,11 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord) {
   if (!config || config.organizationId !== workspace.organizationId || !workspace.repositoryBindingId || !workspace.repositoryAgentId) {
     throw new Error('Installed repository knowledge requires current enrolled workspace scope.');
   }
-  const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl, organizationId: config.organizationId });
+  const identity = await loadOrCreateDeviceIdentity({
+    hqUrl: config.hqUrl,
+    organizationId: config.organizationId,
+    installationId: config.installationId,
+  });
   const enrollment = await loadDeviceEnrollmentAnchor({ config });
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) throw new Error('Installed knowledge device identity mismatch.');
   const organizationAgentId = workspace.repositoryAgentId;

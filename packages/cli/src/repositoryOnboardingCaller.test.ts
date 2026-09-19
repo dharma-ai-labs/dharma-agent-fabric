@@ -43,6 +43,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     configPath: () => '/fixture-config/device.json',
     process: { env: { USER: 'fixture' }, stderr: { write: () => true } },
     platform: async () => 'linux',
+    loadOrCreateInstallationId: async () => '11111111-1111-4111-8111-111111111111',
     loadOrCreateDeviceIdentity: async () => ({ publicKeyEd25519: 'fixture_public_key' }),
     redeemBootstrapGrant: async () => ({ deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
       relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] }),

@@ -163,6 +163,43 @@ test('device identity remains stable in the OS secret store', async () => {
   assert.ok(first.privateJwk.d);
 });
 
+test('device identities are isolated by installation within one OS credential store', async () => {
+  const store = memoryStore();
+  const first = await loadOrCreateDeviceIdentity({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '11111111-1111-4111-8111-111111111111', store,
+  });
+  const second = await loadOrCreateDeviceIdentity({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '22222222-2222-4222-8222-222222222222', store,
+  });
+  const replay = await loadOrCreateDeviceIdentity({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '11111111-1111-4111-8111-111111111111', store,
+  });
+  assert.notEqual(first.account, second.account);
+  assert.notEqual(first.publicKeyEd25519, second.publicKeyEd25519);
+  assert.equal(replay.publicKeyEd25519, first.publicKeyEd25519);
+});
+
+test('organization API tokens are isolated by installation while legacy enrollments remain readable', async () => {
+  const store = memoryStore();
+  const legacy = `dharma_org_${'a'.repeat(43)}`;
+  const first = `dharma_org_${'b'.repeat(43)}`;
+  const second = `dharma_org_${'c'.repeat(43)}`;
+  await saveOrganizationApiToken({ hqUrl: 'https://hq.example', organizationId: 'org_a', token: legacy, store });
+  await saveOrganizationApiToken({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '11111111-1111-4111-8111-111111111111', token: first, store,
+  });
+  await saveOrganizationApiToken({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '22222222-2222-4222-8222-222222222222', token: second, store,
+  });
+  assert.equal(await loadOrganizationApiToken({ hqUrl: 'https://hq.example', organizationId: 'org_a', store }), legacy);
+  assert.equal(await loadOrganizationApiToken({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '11111111-1111-4111-8111-111111111111', store,
+  }), first);
+  assert.equal(await loadOrganizationApiToken({
+    hqUrl: 'https://hq.example', organizationId: 'org_a', installationId: '22222222-2222-4222-8222-222222222222', store,
+  }), second);
+});
+
 test('bootstrap redemption is credential-free on the URL and returns device plus organization authority', async () => {
   const requests: Request[] = [];
   const result = await redeemBootstrapGrant({
