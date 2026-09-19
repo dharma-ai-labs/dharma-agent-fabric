@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-knowledge/v2",
+  "title": "Canonical repository knowledge requiring a verified release",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "managedBy", "organizationId", "repositoryAgentId", "knowledgeBaseId", "generation", "authority", "policyHash", "sourceSnapshotHash", "sourceLocalCatalogHash", "projectionHash", "repoAtlas", "concepts", "unresolved"],
+  "properties": {
+    "schema": { "const": "dharma.repository-knowledge/v2" },
+    "managedBy": { "const": "dharma-agent-fabric" },
+    "organizationId": { "$ref": "#/$defs/organization" },
+    "repositoryAgentId": { "type": "string", "format": "uuid" },
+    "knowledgeBaseId": { "type": "string", "pattern": "^repository-kb:sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "authority": { "const": "requires_verified_release" },
+    "policyHash": { "$ref": "#/$defs/hash" },
+    "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+    "sourceLocalCatalogHash": { "$ref": "#/$defs/hash" },
+    "projectionHash": { "$ref": "#/$defs/hash" },
+    "repoAtlas": {
+      "type": "object", "additionalProperties": false,
+      "required": ["associationId", "knowledgeBaseId", "organizationId", "repositoryAgentId", "basis", "sourceWindowIds", "analysisHash"],
+      "properties": {
+        "associationId": { "type": "string", "format": "uuid" },
+        "knowledgeBaseId": { "type": "string", "pattern": "^repository-kb:sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+        "organizationId": { "$ref": "#/$defs/organization" },
+        "repositoryAgentId": { "type": "string", "format": "uuid" },
+        "basis": { "enum": ["repository_initialization", "semantic_analysis"] },
+        "sourceWindowIds": { "type": "array", "maxItems": 500, "items": { "type": "string", "format": "uuid" } },
+        "analysisHash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
+      }
+    },
+    "concepts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/concept" } },
+    "unresolved": {
+      "type": "array", "maxItems": 128,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["proposalHash", "reason", "conceptId"],
+        "properties": {
+          "proposalHash": { "$ref": "#/$defs/hash" },
+          "reason": { "enum": ["source_not_approved", "unsupported_source_projection", "duplicate_label", "conflicting_definition", "conflicting_alias", "catalog_capacity", "concept_capacity"] },
+          "conceptId": { "type": "string", "pattern": "^concept_[a-f0-9]{64}$(?![\\s\\S])" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "organization": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}$(?![\\s\\S])" },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000-\\u001f]+$(?![\\s\\S])" },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceId", "sourceHash", "firstLine", "lastLine", "quote"],
+      "properties": {
+        "sourceId": { "type": "string", "format": "uuid" },
+        "sourceHash": { "$ref": "#/$defs/hash" },
+        "firstLine": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "lastLine": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "quote": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
+    "concept": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conceptId", "canonicalName", "aliases", "definition", "sources"],
+      "properties": {
+        "conceptId": { "type": "string", "pattern": "^concept_[a-f0-9]{64}$(?![\\s\\S])" },
+        "canonicalName": { "$ref": "#/$defs/label" },
+        "aliases": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/label" } },
+        "definition": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "sources": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/source" } }
+      }
+    }
+  }
+}

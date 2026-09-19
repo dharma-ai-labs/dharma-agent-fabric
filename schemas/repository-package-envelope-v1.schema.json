@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-package-envelope/v1",
+  "title": "Signed Repository Package Delivery Envelope",
+  "description": "Separate signed delivery carrier bound to an unchanged signed skill-bundle/v2. Endpoint authorization and current repository eligibility remain mandatory for every read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "bundleId", "bundleHash", "descriptor", "signature"],
+  "properties": {
+    "schema": { "const": "dharma.repository-package-envelope/v1" },
+    "bundleId": { "type": "string", "format": "uuid" },
+    "bundleHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "descriptor": { "$ref": "https://schemas.dharma-ai.io/repository-package-delivery/v1" },
+    "signature": { "type": "string", "minLength": 86, "maxLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$(?![\\s\\S])" }
+  }
+}

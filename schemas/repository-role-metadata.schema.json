@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dharma.repository-role-metadata/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "observationId", "observedAt", "integrity", "scope", "operation", "stage", "role", "discovery", "sharedRepositoryReady", "communicationReady", "sourceFingerprintVerified", "currentAuthorizationVerified", "contactAuthority", "presence", "limitations"],
+  "properties": {
+    "schema": {"const": "dharma.repository-role-metadata/v1"},
+    "organizationId": {"$ref": "#/$defs/organization"},
+    "observationId": {"$ref": "#/$defs/uuid"},
+    "observedAt": {"type": "string", "format": "date-time", "maxLength": 24},
+    "integrity": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "sha256"],
+      "properties": {"kind": {"const": "local_hash_not_signature"}, "sha256": {"$ref": "#/$defs/hash"}}
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["organizationId", "workspaceId", "repositoryBindingId", "repositoryAgentId", "endpointId", "sourceFingerprint"],
+      "properties": {
+        "organizationId": {"$ref": "#/$defs/organization"},
+        "workspaceId": {"$ref": "#/$defs/uuid"}, "repositoryBindingId": {"$ref": "#/$defs/uuid"},
+        "repositoryAgentId": {"$ref": "#/$defs/uuid"}, "endpointId": {"$ref": "#/$defs/uuid"},
+        "sourceFingerprint": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "operation": {"enum": ["register", "discover"]},
+    "stage": {"const": "repository_role_observed"},
+    "role": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/role"}]},
+    "discovery": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/discovery"}]},
+    "sharedRepositoryReady": {"const": false}, "communicationReady": {"const": false},
+    "sourceFingerprintVerified": {"const": false}, "currentAuthorizationVerified": {"const": false},
+    "contactAuthority": {"const": false}, "presence": {"const": "unavailable"},
+    "limitations": {"const": ["source_fingerprint_unavailable", "current_authorization_not_independently_verified", "presence_unavailable", "contact_authority_unavailable"]}
+  },
+  "oneOf": [
+    {"properties": {"operation": {"const": "register"}, "role": {"$ref": "#/$defs/role"}, "discovery": {"type": "null"}}},
+    {"properties": {"operation": {"const": "discover"}, "role": {"type": "null"}, "discovery": {"$ref": "#/$defs/discovery"}}}
+  ],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"},
+    "organization": {"type": "string", "pattern": "^[A-Za-z0-9_:-]{1,120}$(?![\\s\\S])"},
+    "categories": {
+      "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$(?![\\s\\S])"}
+    },
+    "roleName": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^(?!\\s)(?![\\s\\S]*[\\u0000-\\u001f\\u007f])[\\s\\S]*\\S$(?![\\s\\S])"},
+    "description": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!\\s)(?![\\s\\S]*[\\u0000-\\u001f\\u007f])[\\s\\S]*\\S$(?![\\s\\S])"},
+    "revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "role": {
+      "type": "object", "additionalProperties": false,
+      "required": ["organizationId", "workspaceId", "endpointId", "repositoryBindingId", "repositoryAgentId", "roleName", "questionCategories", "description", "revision"],
+      "properties": {
+        "organizationId": {"$ref": "#/$defs/organization"}, "workspaceId": {"$ref": "#/$defs/uuid"},
+        "endpointId": {"$ref": "#/$defs/uuid"}, "repositoryBindingId": {"$ref": "#/$defs/uuid"}, "repositoryAgentId": {"$ref": "#/$defs/uuid"},
+        "roleName": {"$ref": "#/$defs/roleName"}, "questionCategories": {"$ref": "#/$defs/categories"},
+        "description": {"$ref": "#/$defs/description"}, "revision": {"$ref": "#/$defs/revision"}
+      }
+    },
+    "peer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["endpointId", "workspaceId", "provider", "roleName", "questionCategories", "description", "revision"],
+      "properties": {
+        "endpointId": {"$ref": "#/$defs/uuid"}, "workspaceId": {"$ref": "#/$defs/uuid"},
+        "provider": {"enum": ["codex", "claude", "agy", "hermes"]},
+        "roleName": {"$ref": "#/$defs/roleName"}, "questionCategories": {"$ref": "#/$defs/categories"},
+        "description": {"$ref": "#/$defs/description"}, "revision": {"$ref": "#/$defs/revision"}
+      }
+    },
+    "discovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["peers", "limit", "possiblyTruncated", "catalogComplete"],
+      "properties": {
+        "peers": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/peer"}},
+        "limit": {"const": 50}, "possiblyTruncated": {"type": "boolean"}, "catalogComplete": {"type": "boolean"}
+      },
+      "if": {"properties": {"peers": {"type": "array", "minItems": 50}}},
+      "then": {"properties": {"possiblyTruncated": {"const": true}, "catalogComplete": {"const": false}}},
+      "else": {"properties": {"possiblyTruncated": {"const": false}, "catalogComplete": {"const": true}}}
+    }
+  }
+}

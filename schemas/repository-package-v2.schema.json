@@ -1,0 +1,491 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-package/v2",
+  "title": "Governed Local Repository Package Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "workspaceId",
+    "snapshotId",
+    "snapshotHash",
+    "authority",
+    "roots",
+    "files",
+    "skills",
+    "exclusions",
+    "sourceAuthorization",
+    "sourceFingerprint",
+    "knowledge"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.repository-package/v2"
+    },
+    "organizationId": {
+      "$ref": "#/$defs/identity"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/identity"
+    },
+    "snapshotId": {
+      "type": "string",
+      "pattern": "^repository-package-[a-f0-9]{64}$"
+    },
+    "snapshotHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "authority": {
+      "const": "local_inventory_not_signed"
+    },
+    "roots": {
+      "const": [
+        ".agents/skills",
+        ".claude/skills",
+        ".codex/skills",
+        "skills"
+      ]
+    },
+    "files": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "sizeBytes",
+          "role"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "sha256": {
+            "$ref": "#/$defs/hash"
+          },
+          "managedPath": {
+            "$ref": "#/$defs/managedPath"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 262144
+          },
+          "role": {
+            "enum": [
+              "skill",
+              "dependency",
+              "approved_output",
+              "knowledge",
+              "repository_content"
+            ]
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "providerRoot",
+          "entryPath",
+          "contentHash",
+          "availability",
+          "filePaths",
+          "observation"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "entryPath": {
+            "$ref": "#/$defs/path"
+          },
+          "managedPath": {
+            "$ref": "#/$defs/managedPath"
+          },
+          "providerRoot": {
+            "enum": [
+              ".agents/skills",
+              ".claude/skills",
+              ".codex/skills",
+              "skills"
+            ]
+          },
+          "contentHash": {
+            "$ref": "#/$defs/hash"
+          },
+          "availability": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "filePaths": {
+            "type": "array",
+            "maxItems": 512,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/path"
+            }
+          },
+          "observation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "authority",
+              "references"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "not_observed",
+                  "reported_observed"
+                ]
+              },
+              "authority": {
+                "const": "caller_supplied_not_runtime_verified"
+              },
+              "references": {
+                "type": "array",
+                "maxItems": 256,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/observation"
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "state": {
+                      "const": "not_observed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "references": {
+                      "type": "array",
+                      "maxItems": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "state": {
+                      "const": "reported_observed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "references": {
+                      "type": "array",
+                      "minItems": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "knowledge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryAgentId",
+        "knowledgeBaseId",
+        "catalogPath",
+        "catalogHash",
+        "authority",
+        "atlasAssociation"
+      ],
+      "properties": {
+        "repositoryAgentId": {
+          "$ref": "#/$defs/identity"
+        },
+        "knowledgeBaseId": {
+          "type": "string",
+          "pattern": "^repository-kb:sha256:[a-f0-9]{64}$"
+        },
+        "catalogPath": {
+          "const": ".agents/skills/dharma-agent-fabric/knowledge/CATALOG.json"
+        },
+        "catalogHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "authority": {
+          "const": "locally_initialized_unsigned"
+        },
+        "atlasAssociation": {
+          "const": "local_scope_only"
+        }
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/path"
+          },
+          "reason": {
+            "enum": [
+              "unsupported_path",
+              "excluded_path",
+              "symlink",
+              "not_regular_file",
+              "unavailable",
+              "missing_dependency",
+              "binary_content",
+              "secret_content",
+              "local_path_content",
+              "invalid_dependency",
+              "generated_dependency",
+              "unsupported_content_type",
+              "unauthorized_dependency"
+            ]
+          }
+        }
+      }
+    },
+    "sourceFingerprint": {
+      "$ref": "#/$defs/hash"
+    },
+    "sourceAuthorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "organizationId",
+        "workspaceId",
+        "repositoryBindingId",
+        "repositoryAgentId",
+        "revision",
+        "generationId",
+        "receiptId",
+        "policyRevision",
+        "policyHash",
+        "confirmedAt",
+        "policy"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.repository-source-authorization/v1"
+        },
+        "organizationId": {
+          "$ref": "#/$defs/identity"
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "repositoryBindingId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "repositoryAgentId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483646
+        },
+        "generationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "receiptId": {
+          "type": "string",
+          "pattern": "^repo_consent_[0-9a-f-]{36}$"
+        },
+        "policyRevision": {
+          "type": "string",
+          "pattern": "^repository-source-[0-9a-f-]{36}$"
+        },
+        "policyHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "confirmedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "confirmed",
+            "requestId",
+            "repositoryBindingId",
+            "expectedRevision",
+            "allowedContentClasses",
+            "approvedRepositoryPaths",
+            "approvedOutputFolders",
+            "automaticValidatedPublication",
+            "retentionDays",
+            "maximumFileBytes",
+            "maximumSnapshotBytes",
+            "maximumDailyUploadBytes",
+            "expiresAt"
+          ],
+          "properties": {
+            "action": {
+              "const": "authorize"
+            },
+            "confirmed": {
+              "const": true
+            },
+            "requestId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "repositoryBindingId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483645
+            },
+            "allowedContentClasses": {
+              "const": [
+                "approved_outputs",
+                "repository_content",
+                "repository_skills"
+              ]
+            },
+            "approvedRepositoryPaths": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 250
+              }
+            },
+            "approvedOutputFolders": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 250
+              }
+            },
+            "automaticValidatedPublication": {
+              "const": true
+            },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365
+            },
+            "maximumFileBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            },
+            "maximumSnapshotBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4194304
+            },
+            "maximumDailyUploadBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1073741824
+            },
+            "expiresAt": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "format": "date-time",
+                  "maxLength": 40
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "managedPath": {
+      "type": "string",
+      "minLength": 15,
+      "maxLength": 500,
+      "pattern": "^skills/source/(?!.*(?:^|/)[.]{1,2}(?:/|$))[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^(?!.*(?:^|/)[.]{1,2}(?:/|$))[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$"
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "skillPath",
+        "skillHash",
+        "sourcePath",
+        "sourceHash"
+      ],
+      "properties": {
+        "skillPath": {
+          "$ref": "#/$defs/path"
+        },
+        "skillHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "sourcePath": {
+          "$ref": "#/$defs/path"
+        },
+        "sourceHash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-package/v3",
+  "title": "Governed source inventory with unverified prior-release retention",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "workspaceId", "snapshotId", "snapshotHash", "authority", "roots", "files", "skills", "exclusions", "sourceAuthorization", "sourceFingerprint", "knowledge"],
+  "properties": {
+    "schema": { "const": "dharma.repository-package/v3" },
+    "organizationId": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/organizationId" },
+    "workspaceId": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/workspaceId" },
+    "snapshotId": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/snapshotId" },
+    "snapshotHash": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/snapshotHash" },
+    "authority": { "const": "local_inventory_not_signed" },
+    "roots": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/roots" },
+    "files": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/files" },
+    "skills": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/skills" },
+    "exclusions": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/exclusions" },
+    "sourceAuthorization": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/sourceAuthorization" },
+    "sourceFingerprint": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/sourceFingerprint" },
+    "knowledge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositoryAgentId", "knowledgeBaseId", "catalogPath", "catalogHash", "authority", "atlasAssociation", "priorRelease"],
+      "properties": {
+        "repositoryAgentId": { "$ref": "https://schemas.dharma-ai.io/repository-knowledge-retention/v1#/properties/repositoryAgentId" },
+        "knowledgeBaseId": { "$ref": "https://schemas.dharma-ai.io/repository-package/v2#/properties/knowledge/properties/knowledgeBaseId" },
+        "catalogPath": { "const": ".agents/skills/dharma-agent-fabric/knowledge/CATALOG.json" },
+        "catalogHash": { "$ref": "https://schemas.dharma-ai.io/repository-knowledge-retention/v1#/properties/catalogHash" },
+        "authority": { "const": "unverified_prior_release_reference" },
+        "atlasAssociation": { "const": "requires_verified_release" },
+        "priorRelease": { "$ref": "https://schemas.dharma-ai.io/repository-knowledge-retention/v1" }
+      }
+    }
+  }
+}

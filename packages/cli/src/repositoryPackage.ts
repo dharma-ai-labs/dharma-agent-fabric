@@ -5,7 +5,11 @@ import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalize, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import { readRepositoryKnowledge, validateRepositoryKnowledgeCatalog, REPOSITORY_KNOWLEDGE_CATALOG_PATH } from './repositoryKnowledge.js';
+import { readRepositoryKnowledgeSource, validateRepositoryKnowledgeCatalog, validateRepositoryKnowledgeRetention,
+  REPOSITORY_KNOWLEDGE_CATALOG_PATH, REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH,
+  type RepositoryKnowledgeRetentionReference } from './repositoryKnowledge.js';
+import { repositorySourcePathAllowed, repositorySourcePathSafe, validateRepositorySourceAuthorization,
+  type RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 
 export const REPOSITORY_SKILL_ROOTS = ['.agents/skills', '.claude/skills', '.codex/skills', 'skills'] as const;
 const GENERATED_ROOT = '.agents/skills/dharma-agent-fabric';
@@ -23,10 +27,12 @@ export interface RepositoryPackageFile {
   managedPath?: string;
   sha256: string;
   sizeBytes: number;
-  role: 'skill' | 'dependency' | 'approved_output' | 'knowledge';
+  role: 'skill' | 'dependency' | 'approved_output' | 'repository_content' | 'knowledge';
 }
 export interface RepositoryPackageManifest {
-  schema: 'dharma.repository-package/v1';
+  schema: 'dharma.repository-package/v1' | 'dharma.repository-package/v2' | 'dharma.repository-package/v3';
+  sourceAuthorization?: RepositorySourceAuthorization;
+  sourceFingerprint?: string;
   organizationId: string;
   workspaceId: string;
   snapshotId: string;
@@ -40,7 +46,10 @@ export interface RepositoryPackageManifest {
       references: RepositoryPackageObservation[] } }>;
   exclusions: Array<{ path: string; reason: string }>;
   knowledge?: { repositoryAgentId: string; knowledgeBaseId: string; catalogPath: string;
-    catalogHash: string; authority: 'locally_initialized_unsigned'; atlasAssociation: 'local_scope_only' };
+    catalogHash: string; authority: 'locally_initialized_unsigned'; atlasAssociation: 'local_scope_only' }
+    | { repositoryAgentId: string; knowledgeBaseId: string; catalogPath: string; catalogHash: string;
+      authority: 'unverified_prior_release_reference'; atlasAssociation: 'requires_verified_release';
+      priorRelease: RepositoryKnowledgeRetentionReference };
 }
 export interface RepositoryPackageSnapshot {
   schema: 'dharma.repository-package-snapshot/v1';
@@ -53,10 +62,13 @@ export interface RepositoryPackageInventoryInput {
   organizationId: string;
   workspaceId: string;
   repositoryAgentId?: string | null;
+  repositoryBindingId?: string | null;
+  sourceAuthorization?: unknown;
   approvedOutputs?: string[];
   observations?: RepositoryPackageObservation[];
   limits?: Partial<RepositoryPackageLimits>;
   now?: Date;
+  retainedKnowledge?: { catalogBytes: Buffer; manifestBytes: Buffer } | null;
 }
 
 function digest(value: string | Buffer) { return `sha256:${createHash('sha256').update(value).digest('hex')}`; }
@@ -144,14 +156,34 @@ function dependencies(text: string) {
   return [...paths].sort(compare);
 }
 
+function sourceContentType(path: string) {
+  return /\.(?:md|txt|rst|json|jsonl|csv|yaml|yml|toml|py|ts|tsx|js|jsx|mjs|cjs|sh|sql|go|rs|java|c|cpp|h|r)$/i.test(path)
+    || /^(?:README|LICENSE|Makefile|Dockerfile)$/i.test(posix.basename(path));
+}
+
 export async function inventoryRepositoryPackage(input: RepositoryPackageInventoryInput): Promise<RepositoryPackageSnapshot> {
   if (![input.organizationId, input.workspaceId].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value))) {
     throw new Error('Repository package requires bounded organization and workspace identities.');
+  }
+  const authorization = input.sourceAuthorization === undefined ? undefined
+    : validateRepositorySourceAuthorization(input.sourceAuthorization, input, input.now || new Date());
+  let retained: { catalogBytes: Buffer; manifestBytes: Buffer } | undefined;
+  if (input.retainedKnowledge) {
+    if (!authorization || !input.repositoryAgentId) throw new Error('Retained repository knowledge requires governed scope.');
+    const { catalogBytes, manifestBytes } = input.retainedKnowledge;
+    if (![catalogBytes, manifestBytes].every(value => Buffer.isBuffer(value) && value.length > 0 && value.length <= 262144)) {
+      throw new Error('Retained repository knowledge byte limit exceeded.');
+    }
+    retained = { catalogBytes: Buffer.from(catalogBytes), manifestBytes: Buffer.from(manifestBytes) };
   }
   const workspace = await realpath(input.workspace);
   const limits = { ...DEFAULT_LIMITS, ...input.limits };
   for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof RepositoryPackageLimits>) {
     if (!Number.isSafeInteger(limits[key]) || limits[key] < 1 || limits[key] > DEFAULT_LIMITS[key]) throw new Error('Invalid repository package limit.');
+  }
+  if (authorization) {
+    limits.maximumFileBytes = Math.min(limits.maximumFileBytes, authorization.policy.maximumFileBytes);
+    limits.maximumTotalBytes = Math.min(limits.maximumTotalBytes, authorization.policy.maximumSnapshotBytes);
   }
   const exclusions = new Map<string, string>();
   const affectedPaths = new Set<string>();
@@ -194,6 +226,50 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
   for (const root of REPOSITORY_SKILL_ROOTS) await walk(root, 0, root);
   const approved = new Set((input.approvedOutputs || []).map(pathKey));
   if (approved.size > limits.maximumFiles || [...approved].some(prohibited)) throw new Error('Approved repository outputs exceed scope or limit.');
+  if (authorization && [...approved].some(path => !repositorySourcePathAllowed(authorization, path, 'approved_outputs'))) {
+    throw new Error('Approved repository outputs exceed source authorization scope.');
+  }
+  async function governedSources() {
+    const scoped = new Map<string, RepositoryPackageFile['role']>();
+    const witnesses = new Map<string, string>();
+    let count = 0;
+    async function capture(path: string, depth: number, role: 'repository_content' | 'approved_output') {
+      if (++count > limits.maximumEntries || depth > limits.maximumDepth) throw new Error('Repository source traversal limit exceeded.');
+      if (path !== '.' && !repositorySourcePathSafe(path)) { exclude(path, 'excluded_path'); return; }
+      let source: string;
+      try { source = path === '.' ? workspace : await checkedPath(workspace, path); }
+      catch (error) {
+        if (missing(error)) { witnesses.set(path, 'missing'); return; }
+        if (String(error).includes('symlink')) { exclude(path, 'symlink'); witnesses.set(path, 'symlink'); return; }
+        throw error;
+      }
+      const metadata = await lstat(source);
+      if (metadata.isDirectory()) {
+        const names: string[] = [];
+        const directory = await opendir(source);
+        for await (const entry of directory) {
+          if (names.length + count >= limits.maximumEntries) throw new Error('Repository source directory entry limit exceeded.');
+          names.push(entry.name);
+        }
+        names.sort(compare);
+        const children = names.map(name => path === '.' ? name : `${path}/${name}`);
+        witnesses.set(path, canonicalize({ ino: metadata.ino, dev: metadata.dev,
+          children: children.filter(repositorySourcePathSafe) }));
+        for (const child of children) await capture(child, depth + 1, role);
+      } else if (metadata.isFile()) {
+        witnesses.set(path, canonicalize({ ino: metadata.ino, dev: metadata.dev, size: metadata.size,
+          mtime: metadata.mtimeMs, ctime: metadata.ctimeMs }));
+        if (!sourceContentType(path)) {
+          exclude(path, 'unsupported_content_type'); return;
+        }
+        if (role === 'approved_output' || !scoped.has(path)) scoped.set(path, role);
+      } else { exclude(path, 'not_regular_file'); witnesses.set(path, 'not_regular_file'); }
+    }
+    for (const path of authorization!.policy.approvedRepositoryPaths) await capture(path, 0, 'repository_content');
+    for (const path of authorization!.policy.approvedOutputFolders) await capture(path, 0, 'approved_output');
+    return { scoped, witnesses: [...witnesses].sort(([a], [b]) => compare(a, b)) };
+  }
+  const governed = authorization ? await governedSources() : undefined;
   const files = new Map<string, RepositoryPackageFile>();
   const blobs = new Map<string, string>();
   const texts = new Map<string, string>();
@@ -203,6 +279,9 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
     if ([...skillRoots.keys()].some(root => path.startsWith(`${root}/`))) queue.set(path, 'skill');
   }
   for (const path of [...approved].sort(compare)) queue.set(path, queue.get(path) || 'approved_output');
+  for (const [path, role] of [...(governed?.scoped || [])].sort(([a], [b]) => compare(a, b))) {
+    if (!queue.has(path)) queue.set(path, role);
+  }
   const visited = new Set<string>();
   let totalBytes = 0;
   let dependencyCount = 0;
@@ -213,6 +292,15 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
     visited.add(path);
     if (visited.size > limits.maximumFiles) throw new Error('Repository package file count limit exceeded.');
     if (prohibited(path)) { if (!generated(path)) exclude(path, 'excluded_path'); continue; }
+    if (authorization && ((role === 'approved_output' || role === 'repository_content')
+      || !repositorySourcePathAllowed(authorization, path, 'repository_skills')) && !sourceContentType(path)) {
+      exclude(path, 'unsupported_content_type'); continue;
+    }
+    if (authorization && !repositorySourcePathAllowed(authorization, path, 'repository_skills')
+      && !repositorySourcePathAllowed(authorization, path, 'repository_content')
+      && !repositorySourcePathAllowed(authorization, path, 'approved_outputs')) {
+      exclude(path, 'unauthorized_dependency'); continue;
+    }
     let content: Buffer;
     try { content = await readStable(workspace, path, limits.maximumFileBytes); }
     catch (error) {
@@ -229,7 +317,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
     blobs.set(hash, content.toString('base64'));
     texts.set(path, content.toString('utf8'));
     // Outputs are opaque approved snapshots; they never trigger more collection.
-    if (role === 'approved_output') continue;
+    if (role === 'approved_output' || role === 'repository_content') continue;
     for (const reference of dependencies(texts.get(path)!)) {
       if (++dependencyCount > limits.maximumDependencies) throw new Error('Repository package dependency limit exceeded.');
       const target = posix.normalize(posix.join(posix.dirname(path), reference));
@@ -278,14 +366,32 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
   }
   let knowledge: RepositoryPackageManifest['knowledge'];
   if (input.repositoryAgentId) {
-    const catalog = await readRepositoryKnowledge({ workspace, organizationId: input.organizationId,
-      repositoryAgentId: input.repositoryAgentId });
-    if (catalog) {
-      const knowledgePaths = [REPOSITORY_KNOWLEDGE_CATALOG_PATH,
-        ...catalog.concepts.map(concept => `${GENERATED_ROOT}/knowledge/${concept.relativePath}`)];
-      for (const path of knowledgePaths) {
+    const source = retained ? { kind: 'delivered_v2_requires_verified_release' as const, ...retained,
+      ...validateRepositoryKnowledgeRetention({ identity: { organizationId: input.organizationId,
+        repositoryAgentId: input.repositoryAgentId, repositoryBindingId: authorization!.repositoryBindingId }, ...retained }) }
+      : await readRepositoryKnowledgeSource({ workspace, organizationId: input.organizationId,
+      repositoryAgentId: input.repositoryAgentId, workspaceId: input.workspaceId,
+      repositoryBindingId: authorization?.repositoryBindingId || input.repositoryBindingId });
+    if (source) {
+      const knowledgeFiles: Array<[string, Buffer]> = [[REPOSITORY_KNOWLEDGE_CATALOG_PATH, source.catalogBytes]];
+      if (source.kind === 'local_v1_unsigned') {
+        for (const concept of source.catalog.concepts) {
+          const path = `${GENERATED_ROOT}/knowledge/${concept.relativePath}`;
+          knowledgeFiles.push([path, await readStable(workspace, path, limits.maximumFileBytes)]);
+        }
+        knowledge = { repositoryAgentId: source.catalog.repositoryAgentId, knowledgeBaseId: source.catalog.knowledgeBaseId,
+          catalogPath: REPOSITORY_KNOWLEDGE_CATALOG_PATH, catalogHash: source.catalog.catalogHash,
+          authority: 'locally_initialized_unsigned', atlasAssociation: 'local_scope_only' };
+      } else {
+        if (!authorization) throw new Error('Repository knowledge retention requires governed source authorization.');
+        knowledgeFiles.push([REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH, source.manifestBytes]);
+        knowledge = { repositoryAgentId: source.catalog.repositoryAgentId, knowledgeBaseId: source.catalog.knowledgeBaseId,
+          catalogPath: REPOSITORY_KNOWLEDGE_CATALOG_PATH, catalogHash: source.reference.catalogHash,
+          authority: 'unverified_prior_release_reference', atlasAssociation: 'requires_verified_release', priorRelease: source.reference };
+      }
+      for (const [path, content] of knowledgeFiles) {
         pathKey(path);
-        const content = await readStable(workspace, path, limits.maximumFileBytes);
+        if (content.length > limits.maximumFileBytes) throw new Error('Repository knowledge file byte limit exceeded.');
         if (safeContent(content)) throw new Error('Repository knowledge contains unsafe content.');
         totalBytes += content.length;
         const hash = digest(content);
@@ -293,28 +399,55 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
         blobs.set(hash, content.toString('base64'));
       }
       if (files.size > limits.maximumFiles || totalBytes > limits.maximumTotalBytes) throw new Error('Repository knowledge package limit exceeded.');
-      knowledge = { repositoryAgentId: catalog.repositoryAgentId, knowledgeBaseId: catalog.knowledgeBaseId,
-        catalogPath: REPOSITORY_KNOWLEDGE_CATALOG_PATH, catalogHash: catalog.catalogHash,
-        authority: 'locally_initialized_unsigned', atlasAssociation: 'local_scope_only' };
     }
   }
-  const base = { schema: 'dharma.repository-package/v1' as const, organizationId: input.organizationId,
+  if (governed) {
+    if (!knowledge) throw new Error('Governed repository package requires its initialized knowledge base.');
+    if (canonicalize(governed.witnesses) !== canonicalize((await governedSources()).witnesses)) {
+      throw new Error('Repository source changed during snapshot.');
+    }
+    for (const file of files.values()) {
+      if (file.role !== 'knowledge' && digest(await readStable(workspace, file.path, limits.maximumFileBytes)) !== file.sha256) {
+        throw new Error('Repository source changed during snapshot.');
+      }
+    }
+  }
+  const base = { schema: knowledge?.authority === 'unverified_prior_release_reference' ? 'dharma.repository-package/v3' as const
+    : authorization ? 'dharma.repository-package/v2' as const : 'dharma.repository-package/v1' as const, organizationId: input.organizationId,
     workspaceId: input.workspaceId, authority: 'local_inventory_not_signed' as const, roots: [...REPOSITORY_SKILL_ROOTS],
     files: [...files.values()].sort((a, b) => compare(a.path, b.path)), skills,
     exclusions: [...exclusions].sort(([a], [b]) => compare(a, b)).map(([path, reason]) => ({ path, reason })),
-    ...(knowledge ? { knowledge } : {}) };
-  const snapshotHash = digest(canonicalize(base));
+    ...(knowledge ? { knowledge } : {}), ...(authorization ? { sourceAuthorization: authorization } : {}) };
+  const fingerprinted = authorization ? { ...base, sourceFingerprint: sourceFingerprint(base) } : base;
+  const snapshotHash = digest(canonicalize(fingerprinted));
   return { schema: 'dharma.repository-package-snapshot/v1', capturedAt: (input.now || new Date()).toISOString(),
-    manifest: { ...base, snapshotHash, snapshotId: `repository-package-${snapshotHash.slice(7)}` },
+    manifest: { ...fingerprinted, snapshotHash, snapshotId: `repository-package-${snapshotHash.slice(7)}` },
     blobs: [...blobs].sort(([a], [b]) => compare(a, b)).map(([sha256, contentBase64]) => ({ sha256, contentBase64 })) };
+}
+
+function sourceFingerprint(manifest: Pick<RepositoryPackageManifest, 'organizationId' | 'files' | 'skills' | 'sourceAuthorization'>) {
+  const authorization = manifest.sourceAuthorization!;
+  return digest(canonicalize({ organizationId: manifest.organizationId,
+    repositoryBindingId: authorization.repositoryBindingId, repositoryAgentId: authorization.repositoryAgentId,
+    generationId: authorization.generationId, policyHash: authorization.policyHash,
+    files: manifest.files.filter(file => file.role !== 'knowledge'), skills: manifest.skills }));
 }
 
 export function serializeRepositoryPackageSnapshot(snapshot: RepositoryPackageSnapshot): string {
   const { snapshotHash, snapshotId, ...base } = snapshot.manifest;
   if (safeContent(Buffer.from(canonicalize(base)))) throw new Error('Repository package metadata contains unsafe content.');
-  if (snapshot.schema !== 'dharma.repository-package-snapshot/v1' || base.schema !== 'dharma.repository-package/v1'
+  if (snapshot.schema !== 'dharma.repository-package-snapshot/v1'
+    || !['dharma.repository-package/v1', 'dharma.repository-package/v2', 'dharma.repository-package/v3'].includes(base.schema)
     || base.authority !== 'local_inventory_not_signed' || digest(canonicalize(base)) !== snapshotHash
     || snapshotId !== `repository-package-${snapshotHash.slice(7)}`) throw new Error('Repository package manifest integrity failed.');
+  if (base.schema === 'dharma.repository-package/v2' || base.schema === 'dharma.repository-package/v3') {
+    if (!base.sourceAuthorization) throw new Error('Repository source authorization is missing.');
+    validateRepositorySourceAuthorization(base.sourceAuthorization, { organizationId: base.organizationId,
+      workspaceId: base.workspaceId, repositoryAgentId: base.knowledge?.repositoryAgentId,
+      repositoryBindingId: base.sourceAuthorization.repositoryBindingId });
+    if (base.sourceFingerprint !== sourceFingerprint(base)) throw new Error('Repository source fingerprint integrity failed.');
+  } else if (base.sourceAuthorization !== undefined || base.sourceFingerprint !== undefined
+    || base.files.some(file => file.role === 'repository_content')) throw new Error('Legacy repository package version mismatch.');
   const blobs = new Map<string, Buffer>();
   if (snapshot.blobs.length > DEFAULT_LIMITS.maximumFiles || base.files.length > DEFAULT_LIMITS.maximumFiles
     || base.skills.length > DEFAULT_LIMITS.maximumFiles || base.skills.some(skill => skill.filePaths.length > DEFAULT_LIMITS.maximumFiles)
@@ -330,34 +463,74 @@ export function serializeRepositoryPackageSnapshot(snapshot: RepositoryPackageSn
     blobs.set(blob.sha256, content);
   }
   if (bytes > DEFAULT_LIMITS.maximumTotalBytes) throw new Error('Repository package serialization byte limit exceeded.');
+  if (base.sourceAuthorization && (bytes > base.sourceAuthorization.policy.maximumSnapshotBytes
+    || base.files.some(file => file.sizeBytes > base.sourceAuthorization!.policy.maximumFileBytes))) {
+    throw new Error('Repository source policy byte limit exceeded.');
+  }
   const paths = new Set<string>();
   const knowledgePaths = new Set<string>();
   if (base.knowledge) {
-    if (base.knowledge.catalogPath !== REPOSITORY_KNOWLEDGE_CATALOG_PATH
-      || base.knowledge.authority !== 'locally_initialized_unsigned'
-      || base.knowledge.atlasAssociation !== 'local_scope_only') throw new Error('Repository knowledge mapping integrity failed.');
+    if (base.knowledge.catalogPath !== REPOSITORY_KNOWLEDGE_CATALOG_PATH) throw new Error('Repository knowledge mapping integrity failed.');
     const catalogFile = base.files.find(file => file.path === REPOSITORY_KNOWLEDGE_CATALOG_PATH && file.role === 'knowledge');
     const bytes = catalogFile ? blobs.get(catalogFile.sha256) : undefined;
     if (!bytes) throw new Error('Repository knowledge catalog blob is missing.');
-    const catalog = validateRepositoryKnowledgeCatalog(JSON.parse(bytes.toString('utf8')),
-      { organizationId: base.organizationId, repositoryAgentId: base.knowledge.repositoryAgentId });
-    if (catalog.knowledgeBaseId !== base.knowledge.knowledgeBaseId || catalog.catalogHash !== base.knowledge.catalogHash) {
-      throw new Error('Repository knowledge mapping integrity failed.');
+    if (base.schema === 'dharma.repository-package/v3') {
+      if (base.knowledge.authority !== 'unverified_prior_release_reference'
+        || base.knowledge.atlasAssociation !== 'requires_verified_release' || !base.knowledge.priorRelease || !base.sourceAuthorization) {
+        throw new Error('Repository knowledge retention mapping integrity failed.');
+      }
+      const manifestFile = base.files.find(file => file.path === REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH && file.role === 'knowledge');
+      const manifestBytes = manifestFile ? blobs.get(manifestFile.sha256) : undefined;
+      if (!manifestBytes) throw new Error('Repository knowledge retention manifest blob missing.');
+      const retained = validateRepositoryKnowledgeRetention({ identity: { organizationId: base.organizationId,
+        repositoryAgentId: base.knowledge.repositoryAgentId, repositoryBindingId: base.sourceAuthorization.repositoryBindingId },
+        catalogBytes: bytes, manifestBytes, reference: base.knowledge.priorRelease });
+      if (retained.catalog.knowledgeBaseId !== base.knowledge.knowledgeBaseId || digest(bytes) !== base.knowledge.catalogHash) {
+        throw new Error('Repository knowledge retention mapping integrity failed.');
+      }
+      knowledgePaths.add(REPOSITORY_KNOWLEDGE_CATALOG_PATH);
+      knowledgePaths.add(REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH);
+    } else {
+      if (base.knowledge.authority !== 'locally_initialized_unsigned' || base.knowledge.atlasAssociation !== 'local_scope_only'
+        || Object.hasOwn(base.knowledge, 'priorRelease')) throw new Error('Repository knowledge mapping integrity failed.');
+      const catalog = validateRepositoryKnowledgeCatalog(JSON.parse(bytes.toString('utf8')),
+        { organizationId: base.organizationId, repositoryAgentId: base.knowledge.repositoryAgentId });
+      if (catalog.knowledgeBaseId !== base.knowledge.knowledgeBaseId || catalog.catalogHash !== base.knowledge.catalogHash) {
+        throw new Error('Repository knowledge mapping integrity failed.');
+      }
+      knowledgePaths.add(REPOSITORY_KNOWLEDGE_CATALOG_PATH);
+      for (const concept of catalog.concepts) {
+        const path = `${GENERATED_ROOT}/knowledge/${concept.relativePath}`;
+        const file = base.files.find(item => item.path === path && item.role === 'knowledge');
+        if (file?.sha256 !== concept.sha256) throw new Error('Repository knowledge concept integrity failed.');
+        knowledgePaths.add(path);
+      }
     }
-    knowledgePaths.add(REPOSITORY_KNOWLEDGE_CATALOG_PATH);
-    for (const concept of catalog.concepts) {
-      const path = `${GENERATED_ROOT}/knowledge/${concept.relativePath}`;
-      const file = base.files.find(item => item.path === path && item.role === 'knowledge');
-      if (file?.sha256 !== concept.sha256) throw new Error('Repository knowledge concept integrity failed.');
-      knowledgePaths.add(path);
-    }
-  }
+  } else if (base.schema === 'dharma.repository-package/v3') throw new Error('Repository knowledge retention is missing.');
+  let logicalBytes = 0;
   for (const file of base.files) {
     pathKey(file.path);
     const approvedKnowledge = file.role === 'knowledge' && knowledgePaths.has(file.path) && file.managedPath === undefined;
     if ((file.role === 'knowledge' ? !approvedKnowledge : prohibited(file.path))
       || paths.has(file.path) || blobs.get(file.sha256)?.length !== file.sizeBytes) throw new Error('Repository package file integrity failed.');
     paths.add(file.path);
+    logicalBytes += file.sizeBytes;
+    if (logicalBytes > DEFAULT_LIMITS.maximumTotalBytes) throw new Error('Repository package logical byte limit exceeded.');
+    if (base.sourceAuthorization && logicalBytes > base.sourceAuthorization.policy.maximumSnapshotBytes) {
+      throw new Error('Repository source policy logical byte limit exceeded.');
+    }
+    if (base.sourceAuthorization && file.role !== 'knowledge'
+      && ((file.role === 'approved_output' || file.role === 'repository_content')
+        || !repositorySourcePathAllowed(base.sourceAuthorization, file.path, 'repository_skills')) && !sourceContentType(file.path)) {
+      throw new Error('Repository source content type integrity failed.');
+    }
+    if (base.sourceAuthorization && file.role !== 'knowledge'
+      && !repositorySourcePathAllowed(base.sourceAuthorization, file.path,
+        file.role === 'approved_output' ? 'approved_outputs' : file.role === 'repository_content' ? 'repository_content' : 'repository_skills')
+      && !(file.role === 'dependency' && (repositorySourcePathAllowed(base.sourceAuthorization, file.path, 'repository_content')
+        || repositorySourcePathAllowed(base.sourceAuthorization, file.path, 'approved_outputs')))) {
+      throw new Error('Repository source file scope integrity failed.');
+    }
   }
   const copied = new Set(base.skills.flatMap(skill => skill.filePaths));
   const byPath = new Map(base.files.map(file => [file.path, file]));
@@ -386,15 +559,22 @@ export function serializeRepositoryPackageSnapshot(snapshot: RepositoryPackageSn
 async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: string) {
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
   const validated = await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
-    'https://schemas.dharma-ai.io/repository-package/v1', input.snapshot.manifest);
+    `https://schemas.dharma-ai.io/repository-package/${input.snapshot.manifest.schema.split('/')[1]}`, input.snapshot.manifest);
   if (!validated.ok) throw new Error('Repository package manifest schema is invalid.');
-  const manifestPath = `${GENERATED_ROOT}/MANIFEST.json`;
-  const snapshotPath = `${GENERATED_ROOT}/snapshots/${input.snapshot.manifest.snapshotHash.slice(7)}.json`;
+  const activeManifestPath = `${GENERATED_ROOT}/MANIFEST.json`;
+  const activeManifest = input.candidateOnly ? null : await optionalBytes(workspace, activeManifestPath);
+  // Recognizing a release prevents local mutation; it does not establish trust.
+  const candidateOnly = input.candidateOnly === true || input.snapshot.manifest.schema === 'dharma.repository-package/v3' || (activeManifest !== null
+    && JSON.parse(activeManifest.toString('utf8')).schema === 'dharma.repository-release-manifest/v1');
+  const snapshotRoot = '.dharma/repository-source/snapshots';
+  const snapshotPath = `${snapshotRoot}/${input.snapshot.manifest.snapshotHash.slice(7)}.json`;
+  const candidateManifestPath = `${snapshotRoot}/${input.snapshot.manifest.snapshotHash.slice(7)}.manifest.json`;
+  const manifestPath = candidateOnly ? candidateManifestPath : activeManifestPath;
   const existingSkill = await checkedPath(workspace, `${GENERATED_ROOT}/SKILL.md`).then(() => true, error => {
     if (missing(error)) return false;
     throw error;
   });
-  if (existingSkill) {
+  if (existingSkill && !candidateOnly) {
     let marker;
     try {
       marker = JSON.parse((await readStable(workspace, `${GENERATED_ROOT}/.dharma-agent-fabric.json`, 4096)).toString('utf8'));
@@ -413,25 +593,31 @@ async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: st
     await checkedPath(workspace, current);
   }
   await checkedPath(workspace, posix.dirname(snapshotPath));
-  const stagedSnapshot = `${GENERATED_ROOT}/snapshots/.snapshot-${randomUUID()}.tmp`;
-  try {
-    const handle = await open(resolve(workspace, stagedSnapshot), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
-    try { await handle.writeFile(serialized); await handle.sync(); } finally { await handle.close(); }
-    await checkedPath(workspace, posix.dirname(snapshotPath));
-    try { await link(resolve(workspace, stagedSnapshot), resolve(workspace, snapshotPath)); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const existing = await readStable(workspace, snapshotPath, 8_388_608);
-      if (existing.toString('utf8') !== serialized) throw new Error('Repository package CAS conflict.');
-    }
-  } finally { await unlink(resolve(workspace, stagedSnapshot)).catch(error => { if (!missing(error)) throw error; }); }
+  for (const [path, content] of [[snapshotPath, serialized], [candidateManifestPath, `${canonicalize(input.snapshot.manifest)}\n`]] as const) {
+    const stagedSnapshot = `${snapshotRoot}/.snapshot-${randomUUID()}.tmp`;
+    try {
+      const handle = await open(resolve(workspace, stagedSnapshot), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
+      try { await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
+      await checkedPath(workspace, snapshotRoot);
+      try { await link(resolve(workspace, stagedSnapshot), resolve(workspace, path)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const existing = await readStable(workspace, path, 8_388_608);
+        if (existing.toString('utf8') !== content) throw new Error('Repository package CAS conflict.');
+      }
+    } finally { await unlink(resolve(workspace, stagedSnapshot)).catch(error => { if (!missing(error)) throw error; }); }
+  }
   await syncDirectory(workspace, posix.dirname(snapshotPath));
-  await withCopyLock(workspace, async () => {
-    await recoverCopies(workspace);
-    await prepareCopies(workspace, input.snapshot, input.onCopyCheckpoint);
-  });
+  if (!candidateOnly) {
+    await directories(workspace, GENERATED_ROOT);
+    await withCopyLock(workspace, async () => {
+      await recoverCopies(workspace);
+      await prepareCopies(workspace, input.snapshot, input.onCopyCheckpoint);
+    });
+  }
   return { manifestPath, snapshotPath, snapshotHash: input.snapshot.manifest.snapshotHash,
-    managedCopiesPath: `${GENERATED_ROOT}/skills/source`,
+    managedCopiesPath: candidateOnly ? null : `${GENERATED_ROOT}/skills/source`,
+    disposition: candidateOnly ? 'candidate_only' as const : 'local_bootstrap_inventory' as const,
     authority: 'local_inventory_not_signed' as const };
 }
 
@@ -440,6 +626,7 @@ export type RepositoryPackageCopyCheckpoint = 'journal_prepared' | 'file_backed_
 export interface RepositoryPackageWriteInput {
   workspace: string;
   snapshot: RepositoryPackageSnapshot;
+  candidateOnly?: boolean;
   onCopyCheckpoint?: (point: RepositoryPackageCopyCheckpoint) => void | Promise<void>;
 }
 const writers = new Map<string, Promise<unknown>>();
@@ -520,13 +707,14 @@ async function atomicMetadata(workspace: string, path: string, value: unknown) {
 }
 async function snapshotFor(workspace: string, hash: string) {
   if (!/^sha256:[a-f0-9]{64}$/.test(hash)) throw new Error('Managed copies snapshot integrity failed.');
-  const bytes = await readStable(workspace, `${GENERATED_ROOT}/snapshots/${hash.slice(7)}.json`, 8_388_608);
+  const bytes = await optionalBytes(workspace, `.dharma/repository-source/snapshots/${hash.slice(7)}.json`, 8_388_608)
+    ?? await readStable(workspace, `${GENERATED_ROOT}/snapshots/${hash.slice(7)}.json`, 8_388_608);
   const snapshot: RepositoryPackageSnapshot = { ...JSON.parse(bytes.toString('utf8')), schema: 'dharma.repository-package-snapshot/v1', capturedAt: '' };
   if (snapshot.manifest.snapshotHash !== hash || serializeRepositoryPackageSnapshot(snapshot) !== bytes.toString('utf8')) {
     throw new Error('Managed copies snapshot integrity failed.');
   }
   const validated = await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
-    'https://schemas.dharma-ai.io/repository-package/v1', snapshot.manifest);
+    `https://schemas.dharma-ai.io/repository-package/${snapshot.manifest.schema.split('/')[1]}`, snapshot.manifest);
   if (!validated.ok) throw new Error('Managed copies snapshot schema integrity failed.');
   return snapshot;
 }

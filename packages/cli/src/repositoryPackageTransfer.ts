@@ -5,12 +5,20 @@ export const REPOSITORY_PACKAGE_TRANSFER_LIMITS = Object.freeze({
   maximumFiles: 512, maximumFileBytes: 262_144, maximumTotalBytes: 4_194_304,
   chunkBytes: 65_536, maximumChunks: 1024, maximumIndexBytes: 1_048_576,
 });
+export const REPOSITORY_PACKAGE_TRANSFER_V2_LIMITS = Object.freeze({
+  ...REPOSITORY_PACKAGE_TRANSFER_LIMITS, maximumFiles: 516, maximumTotalBytes: 5_242_880,
+});
+type TransferVersion = 'v1' | 'v2';
 type Digest = `sha256:${string}`;
 interface Scope {
   organizationId: string;
   repositoryAgentId: string;
   releaseId: string;
   gitCommit: string;
+}
+export interface RepositoryTransferScopeV2 extends Scope {
+  repositoryBindingId: string;
+  generation: number;
 }
 export interface RepositoryTransferFile {
   path: string;
@@ -23,6 +31,11 @@ export interface RepositoryTransferIndex extends Scope {
   totalBytes: number;
   files: Array<{ path: string; sha256: string; sizeBytes: number; chunkHashes: string[] }>;
 }
+export interface RepositoryTransferIndexV2 extends RepositoryTransferScopeV2 {
+  schema: 'dharma.repository-package-transfer/v2';
+  totalBytes: number;
+  files: RepositoryTransferIndex['files'];
+}
 export interface RepositoryTransferChunk {
   schema: 'dharma.repository-package-chunk/v1';
   indexHash: string;
@@ -30,7 +43,14 @@ export interface RepositoryTransferChunk {
   chunkIndex: number;
   contentBase64: string;
 }
-const limits = REPOSITORY_PACKAGE_TRANSFER_LIMITS;
+export interface RepositoryTransferChunkV2 extends Omit<RepositoryTransferChunk, 'schema'> {
+  schema: 'dharma.repository-package-chunk/v2';
+}
+type TransferIndex = RepositoryTransferIndex | RepositoryTransferIndexV2;
+type TransferChunk = RepositoryTransferChunk | RepositoryTransferChunkV2;
+const scopeKeys = ['organizationId', 'repositoryAgentId', 'releaseId', 'gitCommit'];
+const scopeV2Keys = [...scopeKeys, 'repositoryBindingId', 'generation'];
+const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}(?![\s\S])/;
 const hash = (bytes: Uint8Array | string): Digest => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const digestPattern = /^sha256:[0-9a-f]{64}(?![\s\S])/;
 
@@ -75,6 +95,13 @@ function scope(value: Scope) {
   }
   requireFact(typeof value.gitCommit === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})(?![\s\S])/.test(value.gitCommit), 'Invalid transfer commit.');
 }
+function scopeV2(value: RepositoryTransferScopeV2) {
+  scope(value);
+  for (const id of [value.repositoryBindingId, value.repositoryAgentId, value.releaseId]) {
+    requireFact(typeof id === 'string' && uuidPattern.test(id), 'Invalid transfer v2 identity.');
+  }
+  requireFact(Number.isSafeInteger(value.generation) && value.generation > 0, 'Invalid transfer v2 generation.');
+}
 function path(value: unknown): asserts value is string {
   requireFact(typeof value === 'string' && value.length > 0 && value.length <= 500
     && Buffer.from(value, 'utf8').toString('utf8') === value && value === value.normalize('NFC')
@@ -93,12 +120,14 @@ function bytes(value: unknown, maximum: number): Buffer {
   requireFact(decoded.length <= maximum && decoded.toString('base64') === value, 'Invalid canonical transfer encoding.');
   return decoded;
 }
-function checkedIndex(value: unknown): RepositoryTransferIndex {
-  record(value, ['schema', 'organizationId', 'repositoryAgentId', 'releaseId', 'gitCommit', 'totalBytes', 'files']);
-  const index = value as unknown as RepositoryTransferIndex;
-  scope(index);
+function checkedIndex(value: unknown, version: TransferVersion): TransferIndex {
+  const limits = version === 'v2' ? REPOSITORY_PACKAGE_TRANSFER_V2_LIMITS : REPOSITORY_PACKAGE_TRANSFER_LIMITS;
+  record(value, ['schema', ...(version === 'v2' ? scopeV2Keys : scopeKeys), 'totalBytes', 'files']);
+  const index = value as unknown as TransferIndex;
+  if (version === 'v2') scopeV2(index as RepositoryTransferIndexV2);
+  else scope(index);
   denseArray(index.files, limits.maximumFiles);
-  requireFact(index.schema === 'dharma.repository-package-transfer/v1'
+  requireFact(index.schema === `dharma.repository-package-transfer/${version}`
     && Array.isArray(index.files) && index.files.length > 0 && index.files.length <= limits.maximumFiles,
   'Invalid transfer index.');
   const paths = new Set<string>();
@@ -132,8 +161,18 @@ function checkedIndex(value: unknown): RepositoryTransferIndex {
 
 // Pure byte planning: callers must independently enforce disclosure and release authorization.
 export function planRepositoryPackageTransfer(input: Scope & { files: RepositoryTransferFile[] }) {
-  record(input, ['organizationId', 'repositoryAgentId', 'releaseId', 'gitCommit', 'files']);
-  scope(input);
+  return planTransfer(input, 'v1') as { index: RepositoryTransferIndex; indexHash: string; chunks: RepositoryTransferChunk[] };
+}
+
+export function planRepositoryPackageTransferV2(input: RepositoryTransferScopeV2 & { files: RepositoryTransferFile[] }) {
+  return planTransfer(input, 'v2') as { index: RepositoryTransferIndexV2; indexHash: string; chunks: RepositoryTransferChunkV2[] };
+}
+
+function planTransfer(input: (Scope | RepositoryTransferScopeV2) & { files: RepositoryTransferFile[] }, version: TransferVersion) {
+  const limits = version === 'v2' ? REPOSITORY_PACKAGE_TRANSFER_V2_LIMITS : REPOSITORY_PACKAGE_TRANSFER_LIMITS;
+  record(input, [...(version === 'v2' ? scopeV2Keys : scopeKeys), 'files']);
+  if (version === 'v2') scopeV2(input as RepositoryTransferScopeV2);
+  else scope(input);
   denseArray(input.files, limits.maximumFiles);
   requireFact(Array.isArray(input.files) && input.files.length > 0 && input.files.length <= limits.maximumFiles,
     'Transfer file count exceeds limit.');
@@ -153,13 +192,15 @@ export function planRepositoryPackageTransfer(input: Scope & { files: Repository
     }
     return { path: file.path, sha256: file.sha256, sizeBytes: file.sizeBytes, chunkHashes };
   });
-  const index = checkedIndex({ schema: 'dharma.repository-package-transfer/v1', organizationId: input.organizationId,
-    repositoryAgentId: input.repositoryAgentId, releaseId: input.releaseId, gitCommit: input.gitCommit, totalBytes, files });
+  const extra = version === 'v2' ? { repositoryBindingId: (input as RepositoryTransferScopeV2).repositoryBindingId,
+    generation: (input as RepositoryTransferScopeV2).generation } : {};
+  const index = checkedIndex({ schema: `dharma.repository-package-transfer/${version}`, organizationId: input.organizationId,
+    repositoryAgentId: input.repositoryAgentId, releaseId: input.releaseId, gitCommit: input.gitCommit, ...extra, totalBytes, files }, version);
   const indexHash = hash(canonical(index));
-  const chunks: RepositoryTransferChunk[] = [];
+  const chunks: TransferChunk[] = [];
   decoded.forEach((content, fileIndex) => {
     for (let offset = 0; offset < content.length; offset += limits.chunkBytes) chunks.push({
-      schema: 'dharma.repository-package-chunk/v1', indexHash, fileIndex,
+      schema: `dharma.repository-package-chunk/${version}`, indexHash, fileIndex,
       chunkIndex: offset / limits.chunkBytes, contentBase64: content.subarray(offset, offset + limits.chunkBytes).toString('base64'),
     });
   });
@@ -169,11 +210,27 @@ export function planRepositoryPackageTransfer(input: Scope & { files: Repository
 // expectedIndexHash must come from the existing verified release, not an untrusted response.
 // Completion proves bytes only. It never authorizes publication, installation or activation.
 export function createRepositoryPackageTransferReceiver(value: unknown, expected: Scope & { expectedIndexHash: string }) {
-  record(expected, ['organizationId', 'repositoryAgentId', 'releaseId', 'gitCommit', 'expectedIndexHash']);
-  scope(expected);
-  const index = checkedIndex(value);
+  return createTransferReceiver(value, expected, 'v1');
+}
+
+export function createRepositoryPackageTransferReceiverV2(value: unknown, expected: RepositoryTransferScopeV2 & { expectedIndexHash: string }) {
+  return createTransferReceiver(value, expected, 'v2');
+}
+
+function createTransferReceiver(value: unknown, expected: (Scope | RepositoryTransferScopeV2) & { expectedIndexHash: string }, version: TransferVersion) {
+  const limits = version === 'v2' ? REPOSITORY_PACKAGE_TRANSFER_V2_LIMITS : REPOSITORY_PACKAGE_TRANSFER_LIMITS;
+  record(expected, [...(version === 'v2' ? scopeV2Keys : scopeKeys), 'expectedIndexHash']);
+  if (version === 'v2') scopeV2(expected as RepositoryTransferScopeV2);
+  else scope(expected);
+  const index = checkedIndex(value, version);
   for (const key of ['organizationId', 'repositoryAgentId', 'releaseId', 'gitCommit'] as const) {
     requireFact(index[key] === expected[key], 'Transfer scope mismatch.');
+  }
+  if (version === 'v2') {
+    const scopedIndex = index as RepositoryTransferIndexV2;
+    const scopedExpected = expected as RepositoryTransferScopeV2;
+    requireFact(scopedIndex.repositoryBindingId === scopedExpected.repositoryBindingId
+      && scopedIndex.generation === scopedExpected.generation, 'Transfer scope mismatch.');
   }
   const indexHash = hash(canonical(index));
   requireFact(typeof expected.expectedIndexHash === 'string'
@@ -183,8 +240,8 @@ export function createRepositoryPackageTransferReceiver(value: unknown, expected
   return {
     accept(value: unknown): void {
       record(value, ['schema', 'indexHash', 'fileIndex', 'chunkIndex', 'contentBase64']);
-      const chunk = value as unknown as RepositoryTransferChunk;
-      requireFact(chunk.schema === 'dharma.repository-package-chunk/v1' && chunk.indexHash === indexHash
+      const chunk = value as unknown as TransferChunk;
+      requireFact(chunk.schema === `dharma.repository-package-chunk/${version}` && chunk.indexHash === indexHash
         && Number.isSafeInteger(chunk.fileIndex) && chunk.fileIndex >= 0 && chunk.fileIndex < index.files.length,
       'Invalid or foreign transfer chunk.');
       const file = index.files[chunk.fileIndex];

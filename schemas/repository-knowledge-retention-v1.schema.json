@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-knowledge-retention/v1",
+  "title": "Unverified prior repository release retention reference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "authority", "organizationId", "repositoryBindingId", "repositoryAgentId", "generation", "catalogPath", "manifestPath", "catalogHash", "manifestHash", "catalogSizeBytes", "manifestSizeBytes"],
+  "properties": {
+    "schema": { "const": "dharma.repository-knowledge-retention/v1" },
+    "authority": { "const": "unverified_prior_release_reference" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,156}$(?![\\s\\S])" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "catalogPath": { "const": ".agents/skills/dharma-agent-fabric/knowledge/CATALOG.json" },
+    "manifestPath": { "const": ".agents/skills/dharma-agent-fabric/MANIFEST.json" },
+    "catalogHash": { "$ref": "#/$defs/hash" },
+    "manifestHash": { "$ref": "#/$defs/hash" },
+    "catalogSizeBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+    "manifestSizeBytes": { "type": "integer", "minimum": 1, "maximum": 262144 }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "uuid": { "type": "string", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\\s\\S])" }
+  }
+}

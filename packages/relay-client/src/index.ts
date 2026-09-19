@@ -1057,5 +1057,6 @@ export const RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS = 90_000;
 
 export function isContentBearingPath(pathname: string): boolean {
   return pathname.endsWith('/agent-fabric/trajectories')
-    || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname);
+    || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname)
+    || /\/agent-fabric\/repository-agents\/[^/]+\/package-candidates$/.test(pathname);
 }

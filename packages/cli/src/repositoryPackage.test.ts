@@ -21,6 +21,113 @@ async function fixture() {
   return { workspace, put, organizationId: 'org_fixture', workspaceId: 'workspace_fixture' };
 }
 
+async function treeBytes(root: string, path = ''): Promise<Array<{ path: string; content: string }>> {
+  const files: Array<{ path: string; content: string }> = [];
+  for (const entry of (await readdir(resolve(root, path), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    const child = path ? `${path}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) files.push(...await treeBytes(root, child));
+    else files.push({ path: child, content: (await readFile(resolve(root, child))).toString('base64') });
+  }
+  return files;
+}
+
+test('collecting a candidate preserves every byte and path of an installed shared release', async () => {
+  const f = await fixture();
+  await f.put('.codex/skills/review/SKILL.md', '# Changed source skill');
+  const snapshot = await inventoryRepositoryPackage(f);
+  const root = '.agents/skills/dharma-agent-fabric';
+  await f.put(`${root}/SKILL.md`, '# Accepted signed skill');
+  await f.put(`${root}/.dharma-agent-fabric.json`, JSON.stringify({ managedBy: 'dharma-agent-fabric' }));
+  await f.put(`${root}/MANIFEST.json`, JSON.stringify({ schema: 'dharma.repository-release-manifest/v1', sourceSnapshotHash: `sha256:${'a'.repeat(64)}` }));
+  await f.put(`${root}/knowledge/CATALOG.json`, '{"schema":"dharma.repository-knowledge/v2","concepts":[{"definition":"Retained knowledge"}]}');
+  await f.put(`${root}/skills/source/.codex/skills/review/SKILL.md`, '# Accepted source copy');
+  await f.put(`${root}/COPY-JOURNAL.json`, '{"interrupted":"must not replay against signed release"}');
+  const before = await treeBytes(resolve(f.workspace, root));
+  const collected = await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot });
+  assert.equal(collected.authority, 'local_inventory_not_signed');
+  assert.equal(collected.managedCopiesPath, null);
+  assert.ok(collected.manifestPath.startsWith('.dharma/repository-source/snapshots/'));
+  assert.ok(collected.snapshotPath.startsWith('.dharma/repository-source/snapshots/'));
+  assert.deepEqual(await treeBytes(resolve(f.workspace, root)), before);
+  assert.equal(await readFile(resolve(f.workspace, collected.snapshotPath), 'utf8'), serializeRepositoryPackageSnapshot(snapshot));
+  assert.deepEqual(JSON.parse(await readFile(resolve(f.workspace, collected.manifestPath), 'utf8')), snapshot.manifest);
+  assert.deepEqual(await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot }), collected);
+  assert.deepEqual(await treeBytes(resolve(f.workspace, root)), before);
+});
+
+test('candidate-only collection never installs or replaces the bootstrap skill inventory', async () => {
+  const f = await fixture();
+  await f.put('skills/review/SKILL.md', '# Original');
+  const initial = await inventoryRepositoryPackage(f);
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: initial });
+  const root = '.agents/skills/dharma-agent-fabric';
+  const before = await treeBytes(resolve(f.workspace, root));
+  await f.put('skills/review/SKILL.md', '# Changed');
+  const snapshot = await inventoryRepositoryPackage(f);
+  const collected = await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot, candidateOnly: true } as Parameters<typeof writeRepositoryPackageSnapshot>[0]);
+  assert.equal(collected.managedCopiesPath, null);
+  assert.ok(collected.snapshotPath.startsWith('.dharma/repository-source/snapshots/'));
+  assert.deepEqual(await treeBytes(resolve(f.workspace, root)), before);
+});
+
+test('candidate-only collection creates no active skill tree and rejects corrupt immutable sidecars', async () => {
+  const f = await fixture();
+  await f.put('skills/review/SKILL.md', '# Review');
+  const snapshot = await inventoryRepositoryPackage(f);
+  const input = { workspace: f.workspace, snapshot, candidateOnly: true };
+  const collected = await writeRepositoryPackageSnapshot(input);
+  assert.equal(collected.disposition, 'candidate_only');
+  await assert.rejects(readdir(resolve(f.workspace, '.agents')), /ENOENT/);
+  await writeFile(resolve(f.workspace, collected.manifestPath), '{}');
+  await assert.rejects(writeRepositoryPackageSnapshot(input), /CAS conflict/);
+  assert.equal(await readFile(resolve(f.workspace, collected.manifestPath), 'utf8'), '{}');
+  await assert.rejects(readdir(resolve(f.workspace, '.agents')), /ENOENT/);
+});
+
+test('candidate storage rejects symlinked source-state ancestors without touching their targets', async () => {
+  const f = await fixture();
+  const other = await fixture();
+  await f.put('skills/review/SKILL.md', '# Review');
+  const snapshot = await inventoryRepositoryPackage(f);
+  await symlink(other.workspace, resolve(f.workspace, '.dharma'), 'dir');
+  await assert.rejects(writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot, candidateOnly: true }), /symlink/);
+  assert.deepEqual(await readdir(other.workspace), []);
+});
+
+test('candidate-only collection does not replay an interrupted local copy transaction', async () => {
+  const f = await fixture();
+  await f.put('skills/review/SKILL.md', '# Original');
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: await inventoryRepositoryPackage(f) });
+  await f.put('skills/review/SKILL.md', '# Intermediate');
+  const interrupted = await inventoryRepositoryPackage(f);
+  await assert.rejects(writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: interrupted,
+    onCopyCheckpoint(point) { if (point === 'file_backed_up') throw new Error('interrupted'); } }), /interrupted/);
+  const root = '.agents/skills/dharma-agent-fabric';
+  const before = await treeBytes(resolve(f.workspace, root));
+  await f.put('skills/review/SKILL.md', '# Latest');
+  const latest = await inventoryRepositoryPackage(f);
+  const collected = await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: latest, candidateOnly: true });
+  assert.equal(collected.disposition, 'candidate_only');
+  assert.deepEqual(await treeBytes(resolve(f.workspace, root)), before);
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: latest });
+  assert.equal(await readFile(resolve(f.workspace, root, 'skills/source/skills/review/SKILL.md'), 'utf8'), '# Latest');
+});
+
+test('legacy in-skill snapshot journals remain recoverable without copying new CAS objects into the skill', async () => {
+  const f = await fixture();
+  await f.put('skills/review/SKILL.md', '# Original');
+  const initial = await inventoryRepositoryPackage(f);
+  const collected = await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: initial });
+  const root = '.agents/skills/dharma-agent-fabric';
+  await f.put(`${root}/snapshots/${initial.manifest.snapshotHash.slice(7)}.json`, serializeRepositoryPackageSnapshot(initial));
+  await unlink(resolve(f.workspace, collected.snapshotPath));
+  await f.put('skills/review/SKILL.md', '# Changed');
+  const next = await inventoryRepositoryPackage(f);
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: next });
+  assert.deepEqual(await readdir(resolve(f.workspace, root, 'snapshots')), [`${initial.manifest.snapshotHash.slice(7)}.json`]);
+  assert.equal(await readFile(resolve(f.workspace, root, 'skills/source/skills/review/SKILL.md'), 'utf8'), '# Changed');
+});
+
 test('inventories all provider roots and companions without claiming runtime use', async () => {
   const f = await fixture();
   for (const root of ['.agents/skills', '.claude/skills', '.codex/skills', 'skills']) {

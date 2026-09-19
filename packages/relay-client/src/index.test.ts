@@ -11,6 +11,7 @@ import {
   deleteActiveSkillAuthorizationAnchor,
   loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity,
+  isContentBearingPath,
   isDefinitiveAgentFabricRejection,
   installTrustedServerSigningKeyset,
   loadDeviceEnrollmentAnchor,
@@ -39,6 +40,12 @@ function memoryStore(): SecureSecretStore {
     async delete(account) { values.delete(account); },
   };
 }
+
+test('repository candidate uploads are content-bearing but status reads are not', () => {
+  const root = '/api/v1/orgs/org_a/agent-fabric/repository-agents/57f61652-a5eb-46e4-930c-9478cd4a9c31/package-candidates';
+  assert.equal(isContentBearingPath(root), true);
+  assert.equal(isContentBearingPath(`${root}/77f61652-a5eb-46e4-930c-9478cd4a9c31`), false);
+});
 
 async function anchorConfig(configPath: string, store: SecureSecretStore) {
   const config = JSON.parse(await readFile(configPath, 'utf8'));

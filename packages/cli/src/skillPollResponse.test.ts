@@ -32,7 +32,7 @@ test('skill poll retains package envelope for subsequent signature validation', 
 
 test('actual skill synchronization parses the authenticated poll before no-update or materialization', async () => {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
-  const sync = source.slice(source.indexOf('async function skillSync('), source.indexOf('async function relayStart('));
+  const sync = source.slice(source.indexOf('export async function prepareSkillUpdate('), source.indexOf('async function skillSync('));
   assert.match(sync, /const rollout = parseSkillRolloutResponse\(response, config\.organizationId\);/);
   assert.ok(sync.indexOf('await fabric.pollSkill(') < sync.indexOf('parseSkillRolloutResponse('));
   assert.ok(sync.indexOf('parseSkillRolloutResponse(') < sync.indexOf('if (!rollout)'));
