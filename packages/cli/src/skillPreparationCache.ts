@@ -256,7 +256,6 @@ export async function takeSkillPreparationCache(input: SkillPreparationCacheExpe
   record: Record<string, unknown>;
 } | null> {
   input.assertCurrent();
-  if (process.platform === 'win32') return null;
   const scopeRoot = skillPreparationScopeRoot(resolve(input.home), input.workspaceId, input.provider);
   const pointerPath = resolve(scopeRoot, 'CURRENT.json');
   let pointerFile: Awaited<ReturnType<typeof privateFile>>;
@@ -264,6 +263,7 @@ export async function takeSkillPreparationCache(input: SkillPreparationCacheExpe
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
   let metadataFile: Awaited<ReturnType<typeof privateFile>> | undefined;
   let consumingPath: string | undefined;
+  let pointerClosed = false;
   try {
     const pointer = JSON.parse(pointerFile.text) as Record<string, unknown>;
     const valid = await validateContract(resolve(import.meta.dirname, 'schemas'),
@@ -289,14 +289,33 @@ export async function takeSkillPreparationCache(input: SkillPreparationCacheExpe
     }
     input.assertCurrent(); await pointerFile.assertStable(); await metadataFile.assertStable();
     consumingPath = resolve(scopeRoot, `.CONSUMING-${pointer.cacheId}.json`);
+    const pointerIdentity = await pointerFile.file.stat();
+    const pointerBytes = Buffer.from(pointerFile.rawBytes);
+    if (process.platform === 'win32') {
+      // Windows does not permit renaming an open file. The scoped transaction
+      // serializes trusted writers; re-open the renamed entry and require the
+      // exact pre-close identity and bytes before allowing activation.
+      await pointerFile.file.close();
+      pointerClosed = true;
+    }
     await rename(pointerPath, consumingPath);
-    input.assertCurrent();
+    if (process.platform === 'win32') {
+      const consumed = await privateFile(consumingPath, 65_536);
+      try {
+        if (!sameIdentity(pointerIdentity, await consumed.file.stat())
+          || !consumed.rawBytes.equals(pointerBytes)) {
+          throw new Error('Preparation cache pointer changed during consumption.');
+        }
+        await consumed.assertStable();
+      } finally { await consumed.file.close(); }
+    }
+    input.assertCurrent(); await metadataFile.assertStable();
     await rm(consumingPath, { force: true });
     consumingPath = undefined;
     return { sourceRoot, record };
   } finally {
     await metadataFile?.file.close();
-    await pointerFile.file.close();
+    if (!pointerClosed) await pointerFile.file.close();
     if (consumingPath) await rm(consumingPath, { force: true });
   }
 }
