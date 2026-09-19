@@ -55,7 +55,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.49';
+const VERSION = '0.2.50';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
