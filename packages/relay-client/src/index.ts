@@ -784,10 +784,10 @@ export class AgentFabricClient {
   }
 
   async openSession(relayVersion = '0.1.0') {
-    if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
-      // Content-bearing requests are never replayed from durable state before
-      // the CLI has refreshed consent. A later explicit sync rebuilds and
-      // reauthorizes the request; server ingestion is capsule-hash idempotent.
+    if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
+      // Content-bearing requests require refreshed consent. Repository connect
+      // requests depend on current workspace registration. Both are rebuilt by
+      // their explicit workflows instead of replayed from stale prerequisites.
       this.#state.pending = null;
       await this.#persist();
     } else if (this.#state.pending) {
@@ -1145,11 +1145,10 @@ export class AgentFabricClient {
   }
 
   #persist() {
-    // Authorized trajectory bodies may contain customer content. Keep an
-    // in-flight request in memory, but never copy that body into the plaintext
-    // protocol-state outbox. The encrypted local vault remains the durable
-    // source from which an explicitly authorized retry is rebuilt.
-    const durableState = this.#state.pending && isContentBearingPath(this.#state.pending.pathname)
+    // Authorized content and state-dependent repository connects are rebuilt
+    // from their governed source. Do not retain them as an automatic replay
+    // that can outlive consent or the workspace registration they depend on.
+    const durableState = this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)
       ? { ...this.#state, nextSequence: this.#state.nextSequence + 1, pending: null }
       : this.#state;
     return atomicJson(this.#statePath, durableState);
@@ -1162,4 +1161,9 @@ export function isContentBearingPath(pathname: string): boolean {
   return pathname.endsWith('/agent-fabric/trajectories')
     || /\/agent-fabric\/evidence-requests\/[^/]+\/responses$/.test(pathname)
     || /\/agent-fabric\/repository-agents\/[^/]+\/package-candidates$/.test(pathname);
+}
+
+export function isExplicitlyRebuiltPath(pathname: string): boolean {
+  return isContentBearingPath(pathname)
+    || pathname.endsWith('/agent-fabric/repository-agents');
 }
