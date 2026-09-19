@@ -30,7 +30,7 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
 function bootstrapDependencies(onboarding: Onboarding) {
   const calls: string[] = [];
   const record = async (name: string) => { calls.push(name); };
-  const dependencies = {
+  const dependencies: Record<string, unknown> = {
     normalizeHqUrl: (value: string) => value,
     portalUrl: () => 'https://fixture.invalid',
     required: (flags: Map<string, string | boolean>, key: string) => {
@@ -41,11 +41,12 @@ function bootstrapDependencies(onboarding: Onboarding) {
     isLocalProviderId: (provider: string) => provider === 'codex',
     readDeviceConfig: async () => null,
     configPath: () => '/fixture-config/device.json',
-    process: { env: { USER: 'fixture' } },
+    process: { env: { USER: 'fixture' }, stderr: { write: () => true } },
     platform: async () => 'linux',
     loadOrCreateDeviceIdentity: async () => ({ publicKeyEd25519: 'fixture_public_key' }),
     redeemBootstrapGrant: async () => ({ deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
       relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] }),
+    openVerificationUri: async () => { await record('open_approval'); return true; },
     saveDeviceConfig: async () => record('save_device'),
     saveDeviceEnrollmentAnchor: async () => record('save_anchor'),
     saveOrganizationApiToken: async () => record('save_token'),
@@ -62,6 +63,27 @@ function bootstrapDependencies(onboarding: Onboarding) {
   };
   return { dependencies, calls };
 }
+
+test('bootstrap passes recipient approval to the verified browser opener before storing credentials', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.redeemBootstrapGrant = async (input: {
+    onRecipientApprovalRequired: (approval: { url: string; expiresAt: string; fingerprint: string }) => Promise<void>;
+  }) => {
+    await input.onRecipientApprovalRequired({
+      url: 'https://fixture.invalid/login?redirect_url=%2Fportal%2Fagent-fabric%2Fbootstrap-approval',
+      expiresAt: '2026-09-19T00:15:00.000Z', fingerprint: `sha256:${'a'.repeat(64)}`,
+    });
+    return { deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
+      relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] };
+  };
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags());
+  const enrollment = actual.enrollment as Record<string, unknown>;
+  const approval = enrollment.recipientApproval as Record<string, unknown>;
+  assert.equal(approval.required, true);
+  assert.equal(approval.browserOpened, true);
+  assert.equal(f.calls.filter(item => item === 'open_approval').length, 1);
+  assert.ok(f.calls.indexOf('open_approval') < f.calls.indexOf('save_token'));
+});
 function bootstrapFlags(complete = false) {
   const flags = new Map<string, string | boolean>([
     ['organization-id', 'org_fixture'], ['grant', 'fixture_grant'], ['workspace', '/fixture-repository'],

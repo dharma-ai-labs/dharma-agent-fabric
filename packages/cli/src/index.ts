@@ -55,7 +55,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.50';
+const VERSION = '0.2.51';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1537,6 +1537,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
   const devicePlatform = await platform();
   const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId });
+  let recipientApproval: { required: boolean; browserOpened: boolean } = {
+    required: false,
+    browserOpened: false,
+  };
   const redeemed = await redeemBootstrapGrant({
     hqUrl,
     organizationId,
@@ -1544,6 +1548,15 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     name,
     platform: devicePlatform,
     publicKeyEd25519: identity.publicKeyEd25519,
+    onRecipientApprovalRequired: async (approval) => {
+      recipientApproval.required = true;
+      recipientApproval.browserOpened = flags.has('no-browser')
+        ? false
+        : await openVerificationUri(approval.url);
+      process.stderr.write(
+        `Confirm this exact device in the authenticated Dharma portal before ${approval.expiresAt}: ${approval.url}\n`,
+      );
+    },
   });
   const rebind = enrollmentMismatch && existing
     ? await archiveEnrollmentForAuthorizedRebind(existing)
@@ -1600,6 +1613,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         status: 'approved',
         organizationApiTokenStored: true,
         scopes: redeemed.organizationApiTokenScopes,
+        recipientApproval,
         rebind,
       },
       repository: onboarded,
@@ -1620,6 +1634,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         status: 'approved',
         organizationApiTokenStored: true,
         scopes: redeemed.organizationApiTokenScopes,
+        recipientApproval,
         rebind,
       },
       repository: onboarded,
@@ -1681,6 +1696,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       status: 'approved',
       organizationApiTokenStored: true,
       scopes: redeemed.organizationApiTokenScopes,
+      recipientApproval,
       rebind,
     },
     repository: onboarded,
