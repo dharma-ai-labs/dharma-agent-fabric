@@ -326,6 +326,43 @@ export async function executableVersion(
   return (stdout || stderr).trim().split('\n')[0] || null;
 }
 
+type SynchronousProbe = (
+  executable: string,
+  argv: string[],
+  options: { encoding: 'utf8'; timeout: number; env: NodeJS.ProcessEnv },
+) => { status: number | null; stdout: string | Buffer; stderr: string | Buffer };
+
+function probeText(value: string | Buffer): string {
+  return typeof value === 'string' ? value : value.toString('utf8');
+}
+
+export async function providerTaskReadiness(
+  provider: Extract<ProviderId, 'codex' | 'claude'>,
+  command: string,
+  source: NodeJS.ProcessEnv = process.env,
+  probe?: SynchronousProbe,
+): Promise<'available' | 'partial'> {
+  const run = probe || (await import('node:child_process')).spawnSync;
+  const argv = provider === 'claude' ? ['auth', 'status'] : ['login', 'status'];
+  const result = run(command, argv, {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: providerProcessEnvironment(source),
+  });
+  const stdout = probeText(result.stdout);
+  const stderr = probeText(result.stderr);
+  if (result.status !== 0) return 'partial';
+  if (provider === 'claude') {
+    try {
+      const parsed = JSON.parse(stdout) as { loggedIn?: unknown };
+      return parsed.loggedIn === true ? 'available' : 'partial';
+    } catch {
+      return 'partial';
+    }
+  }
+  return /logged in/i.test(`${stdout}\n${stderr}`) ? 'available' : 'partial';
+}
+
 function insideWorkspace(workspace: string, candidate: string): boolean {
   const normalizeHostPath = (value: string): string => {
     const slashed = value.replaceAll('\\', '/');
@@ -947,12 +984,13 @@ function adapter(provider: Exclude<ProviderId, 'agy' | 'hermes'>, command: strin
     providerId: provider,
     async capability() {
       const version = await executableVersion(command);
+      const taskExecution = version ? await providerTaskReadiness(provider, command) : 'unavailable';
       return {
         provider,
         version,
         evidence: 'available',
         configuredAssets: 'partial',
-        taskExecution: version ? 'available' : 'unavailable',
+        taskExecution,
         sessionContinuation: 'unavailable',
         skillInstall: version ? 'available' : 'unavailable',
         activation: 'next_session',

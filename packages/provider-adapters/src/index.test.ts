@@ -13,9 +13,37 @@ import {
   hermesCapability,
   hermesAdapter,
   parseHermesSessionExport,
+  providerTaskReadiness,
   providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
+
+test('provider task readiness distinguishes installation from authenticated execution', async () => {
+  const environment = { HOME: '/home/customer', PATH: '/usr/bin:/bin' };
+  const authenticatedClaude = await providerTaskReadiness('claude', 'claude', environment, (_command, argv) => {
+    assert.deepEqual(argv, ['auth', 'status']);
+    return { status: 0, stdout: JSON.stringify({ loggedIn: true }), stderr: '' };
+  });
+  const unauthenticatedClaude = await providerTaskReadiness('claude', 'claude', environment, () => ({
+    status: 1,
+    stdout: JSON.stringify({ loggedIn: false, authMethod: 'none' }),
+    stderr: '',
+  }));
+  const authenticatedCodex = await providerTaskReadiness('codex', 'codex', environment, (_command, argv) => {
+    assert.deepEqual(argv, ['login', 'status']);
+    return { status: 0, stdout: 'Logged in using ChatGPT\n', stderr: '' };
+  });
+  const ambiguousCodex = await providerTaskReadiness('codex', 'codex', environment, () => ({
+    status: 0,
+    stdout: 'Account status unavailable\n',
+    stderr: '',
+  }));
+
+  assert.equal(authenticatedClaude, 'available');
+  assert.equal(unauthenticatedClaude, 'partial');
+  assert.equal(authenticatedCodex, 'available');
+  assert.equal(ambiguousCodex, 'partial');
+});
 
 test('provider discovery finds supported per-user CLI installations outside the parent PATH', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-provider-local-bin-'));
