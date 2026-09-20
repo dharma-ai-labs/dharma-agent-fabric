@@ -25,6 +25,7 @@ import {
   installRepositoryAgentFabricSkill,
   isDirectExecution,
   isTransientBootstrapError,
+  loadAgentFabricOnboardingContract,
   loadOrCreateInstallationId,
   materializeWorkspacePolicy,
   applyServerEvidencePolicy,
@@ -1741,13 +1742,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.61');
+      assert.equal(version, '0.2.62');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.61',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.62',
   });
 });
 
@@ -1959,6 +1960,27 @@ test('native Claude bootstrap installs the bounded project completion policy', a
   assert.ok(settings.permissions.allow.includes(
     'Bash(./.dharma/bin/dharma evidence preview --workspace . --provider claude --policy .dharma/approved-policy.json --maximum-sessions 20)',
   ));
+});
+
+test('native skill persists the complete hash-pinned onboarding contract', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-native-contract-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(workspace, { recursive: true });
+  const contract = await loadAgentFabricOnboardingContract();
+  const installed = await installNativeAgentFabricBootstrap({
+    provider: 'codex', workspace, workspaceId: 'workspace_test', organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io', home,
+  });
+  const skill = await readFile(installed.skillPath, 'utf8');
+  const marker = JSON.parse(await readFile(
+    join(nativeSkillDirectory('codex', {}, home), 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json'),
+    'utf8',
+  )) as { operatingContractSha256: string };
+  assert.match(skill, /# Agent Fabric: repository onboarding and team operation/);
+  assert.ok(skill.includes(contract.markdown));
+  assert.equal(marker.operatingContractSha256, contract.sha256);
+  assert.doesNotMatch(contract.markdown, /--grant|bootstrapGrant|organizationApiToken/);
 });
 
 test('Agy skill verification requires the native plugin to be discoverable by the provider', async () => {

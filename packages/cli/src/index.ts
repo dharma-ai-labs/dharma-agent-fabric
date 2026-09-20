@@ -55,11 +55,22 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.61';
+const VERSION = '0.2.62';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
 type Output = unknown;
+
+const AGENT_FABRIC_ONBOARDING_URL = new URL('../AGENT_FABRIC_ONBOARDING.md', import.meta.url);
+
+export async function loadAgentFabricOnboardingContract() {
+  const markdown = await readFile(AGENT_FABRIC_ONBOARDING_URL, 'utf8');
+  const normalized = markdown.replace(/\r\n/g, '\n').trimEnd();
+  return {
+    markdown: normalized,
+    sha256: createHash('sha256').update(normalized).digest('hex'),
+  };
+}
 
 function isLocalProviderId(value: string): value is ProviderId {
   return (LOCAL_PROVIDER_IDS as readonly string[]).includes(value);
@@ -1732,6 +1743,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     skills,
     usage,
   });
+  const operatingContract = await loadAgentFabricOnboardingContract();
+  const repositoryReceipt = onboarded as Record<string, unknown>;
+  const firstLearning = repositoryReceipt.firstLearningEvidence as Record<string, unknown> | undefined;
+  const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   return {
     ok: true,
     stage: sharedRepositoryReady ? 'complete' : 'shared_repository_pending',
@@ -1758,6 +1773,19 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     relayProbe: relay.probe,
     relay,
     organizationApi,
+    operatingContract: {
+      installed: skill.ready === true,
+      sha256: operatingContract.sha256,
+      file: 'AGENT_FABRIC_ONBOARDING.md',
+    },
+    workflowReadiness: {
+      sharedPackage: sharedRepositoryReady ? 'ready' : 'pending',
+      roleRegistration: role ? 'ready' : 'pending',
+      firstLearning: firstLearning?.state === 'synchronized'
+        ? Number(firstLearning.discovered || 0) > 0 ? 'synchronized' : 'no_eligible_history'
+        : String(firstLearning?.state || 'pending'),
+      synchronization: relay.state === 'running' ? 'running' : 'pending',
+    },
   };
 }
 
@@ -4259,25 +4287,13 @@ export async function installNativeAgentFabricBootstrap(input: {
   const projectPermissions = input.provider === 'claude'
     ? await installClaudeReadOnlyProjectPermissions(input.workspace)
     : null;
+  const operatingContract = await loadAgentFabricOnboardingContract();
   const skill = `---
 name: dharma-agent-fabric
 description: Connect the current repository to Dharma Agent Fabric for signed tasks, bounded evidence, and verified skill releases.
 ---
 
-# Dharma Agent Fabric
-
-This skill supports both first-time repository onboarding and operation after connection.
-
-- If \`.dharma/agent-fabric.json\` and \`.dharma/approved-policy.json\` are absent, do not treat that as an error or claim that onboarding is out of scope. A production portal instruction may guide first-time bootstrap. Verify the pinned package and repository, then request the coding harness's native action-time approval before the first command that installs code, stores a device credential, registers a repository, or opens a relay. After that trust approval, complete the remaining bounded setup without asking the user to type commands.
-- If both manifests exist, use them as the authoritative organization and disclosure contract and continue autonomously within their signed authority.
-
-1. Run \`dharma status\` and \`dharma skills verify --provider ${input.provider} --workspace .\` before accepting work.
-2. Start \`dharma relay start --policy .dharma/approved-policy.json\` for signed task, evidence, and skill delivery.
-3. Preview evidence before sync. Run local deterministic self-analysis and disclose only the policy-selected metadata or customer-authorized content classes. Never expose provider credentials, hidden evaluation truth, or unrelated local files.
-4. Accept only organization-scoped tasks whose workspace, path, command, network, Git, budget, expiry, replay, and skill-pin checks pass locally.
-5. Treat cross-agent requests as structured, task-bound handoffs. Never infer shell, merge, deploy, secret, or unrelated-file authority.
-
-The repository-local skill and connection manifest are authoritative for the active organization. Signed remediation bundles replace this bootstrap only after server-side evaluation, held-out, approval, signing, and rollout gates pass.
+${operatingContract.markdown}
 `;
   await mkdir(skillRoot, { recursive: true, mode: 0o700 });
   await writeFile(resolve(skillRoot, 'SKILL.md'), skill, { mode: 0o600 });
@@ -4286,6 +4302,7 @@ The repository-local skill and connection manifest are authoritative for the act
     managedBy: 'dharma-agent-fabric',
     provider: input.provider,
     hqUrl: input.hqUrl,
+    operatingContractSha256: operatingContract.sha256,
     installedAt: new Date().toISOString(),
   }, null, 2)}\n`, { mode: 0o600 });
   if (input.provider === 'agy') await activateAgyPlugin({ env: input.env, home: input.home });

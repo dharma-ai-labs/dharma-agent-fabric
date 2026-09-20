@@ -61,6 +61,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     runOrganizationCommand: async () => ({ ok: true }),
     requireCompletedBootstrapEvidence: () => undefined,
     summarizeBootstrapOrganizationApi: () => ({ ok: true }),
+    loadAgentFabricOnboardingContract: async () => ({ markdown: '# fixture', sha256: 'a'.repeat(64) }),
   };
   return { dependencies, calls };
 }
