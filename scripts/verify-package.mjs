@@ -61,6 +61,15 @@ for (const packageName of [
   }
 }
 
+const cli = workspaceManifests.get('@dharma-ai-labs/agent-fabric');
+const skillManager = workspaceManifests.get('@dharma-ai-labs/agent-fabric-skill-manager');
+const pinnedSkillManager = cli?.dependencies?.['@dharma-ai-labs/agent-fabric-skill-manager'];
+if (pinnedSkillManager !== skillManager?.version) {
+  throw new Error(
+    `@dharma-ai-labs/agent-fabric must use the current skill manager ${skillManager?.version}; found ${pinnedSkillManager || 'missing'}.`,
+  );
+}
+
 for (const workspace of workspaceDirectories) {
   const manifestPath = resolve(root, workspace, 'package.json');
   const readmePath = resolve(root, workspace, 'README.md');
