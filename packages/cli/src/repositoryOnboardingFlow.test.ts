@@ -36,10 +36,10 @@ test('one prompt submits initial knowledge only for an absent package and derive
   assert.match(onboard, /: await adoptRepositoryCandidate\(/);
   assert.match(onboard, /const derivedRole = deriveRepositoryRole\(/);
   assert.match(onboard, /const roleInput = roleRequested \?/);
-  assert.match(onboard, /await registerRepositoryRoleMetadata\(/);
-  assert.ok(onboard.indexOf('await evidencePreview(') < onboard.indexOf('await synchronizeRepositoryCandidate('));
-  assert.ok(onboard.indexOf('await capture(onboardingEvidenceFlags, true)') < onboard.indexOf('await synchronizeRepositoryCandidate('));
-  assert.ok(onboard.indexOf('await synchronizeRepositoryCandidate(') < onboard.indexOf('await startRelayDaemon('));
+  assert.match(onboard, /registerRepositoryRoleMetadata\(/);
+  assert.ok(onboard.indexOf('evidencePreview(onboardingEvidenceFlags)') < onboard.indexOf('synchronizeRepositoryCandidate('));
+  assert.ok(onboard.indexOf('capture(onboardingEvidenceFlags, true)') < onboard.indexOf('synchronizeRepositoryCandidate('));
+  assert.ok(onboard.indexOf('synchronizeRepositoryCandidate(') < onboard.indexOf('startRelayDaemon('));
 });
 
 test('relay polls candidate state independently and activates only after an idle task boundary', async () => {

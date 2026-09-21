@@ -54,8 +54,9 @@ import { adoptRepositoryCandidate, pollRepositoryCandidate, synchronizeRepositor
 import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type RepositoryRoleScope } from './repositoryRoleMetadata.js';
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
+import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 
-const VERSION = '0.2.64';
+const VERSION = '0.2.65';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3286,43 +3287,53 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       workspaceId: registered.workspaceId, code: 'repository_source_policy_unavailable',
       sharedRepositoryReady: false, localInventoryFallback: false };
   }
-  const installed = await installRepositoryAgentFabricSkill({
+  const boundRepository = registered;
+  const onboardWorkspaceId = registered.workspaceId;
+  const providerOption = providerIds?.length ? ` --providers ${providerIds.join(',')}` : '';
+  const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${authoritativeRevision}${providerOption}`;
+  const staged = <T>(stage: OnboardingStage, operation: () => Promise<T>) =>
+    withOnboardingStage(stage, onboardWorkspaceId, resumeCommand, operation);
+  const installed = await staged('local_skill_inventory', async () => installRepositoryAgentFabricSkill({
     workspace,
     hqUrl,
     organizationId,
-    workspaceId: registered.workspaceId,
-    repositoryAgentId: registered.repositoryAgentId,
-    repositoryBindingId: registered.repositoryBindingId,
+    workspaceId: boundRepository.workspaceId,
+    repositoryAgentId: boundRepository.repositoryAgentId,
+    repositoryBindingId: boundRepository.repositoryBindingId,
     sourceAuthorization,
-    repositoryAgentKey: registered.repositoryAgentKey,
-    controlBranch: registered.controlBranch,
+    repositoryAgentKey: boundRepository.repositoryAgentKey,
+    controlBranch: boundRepository.controlBranch,
     policyRevision: authoritativeRevision,
-  });
+  }));
   const onboardingProvider = providerIds?.[0] || 'codex';
   const onboardingEvidenceFlags = new Map<string, string | boolean>([
     ['workspace', workspace], ['provider', onboardingProvider],
     ['policy', resolve(workspace, '.dharma', 'approved-policy.json')], ['maximum-sessions', '20'],
   ]);
-  const onboardingEvidencePreview = await evidencePreview(onboardingEvidenceFlags) as Record<string, unknown>;
+  const onboardingEvidencePreview = await staged('first_learning_preview',
+    async () => evidencePreview(onboardingEvidenceFlags)) as Record<string, unknown>;
   let onboardingEvidence: BootstrapEvidenceSynchronization = { state: 'synchronized', captured: 0, synced: 0 };
   if (Number(onboardingEvidencePreview.trajectoryCount || 0) > 0
     && (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
     onboardingEvidenceFlags.set('sync', true);
-    onboardingEvidence = await synchronizeBootstrapEvidence(
-      async () => await retryBootstrapOnboarding(
-        async () => await capture(onboardingEvidenceFlags, true) as { captured: number; synced: number },
-      ),
-    );
-    requireCompletedBootstrapEvidence(onboardingEvidence, Number(onboardingEvidencePreview.trajectoryCount || 0));
+    onboardingEvidence = await staged('first_learning_sync', async () => {
+      const result = await synchronizeBootstrapEvidence(
+        async () => await retryBootstrapOnboarding(
+          async () => await capture(onboardingEvidenceFlags, true) as { captured: number; synced: number },
+        ),
+      );
+      requireCompletedBootstrapEvidence(result, Number(onboardingEvidencePreview.trajectoryCount || 0));
+      return result;
+    });
   }
-  const initialSnapshot = await inventoryRepositoryPackage({ workspace, organizationId,
-    workspaceId: registered.workspaceId, repositoryAgentId: registered.repositoryAgentId,
-    repositoryBindingId: registered.repositoryBindingId, sourceAuthorization });
+  const initialSnapshot = await staged('package_snapshot', async () => inventoryRepositoryPackage({ workspace, organizationId,
+    workspaceId: boundRepository.workspaceId, repositoryAgentId: boundRepository.repositoryAgentId,
+    repositoryBindingId: boundRepository.repositoryBindingId, sourceAuthorization }));
   const candidateScope = { organizationId, workspaceId: registered.workspaceId,
     repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId };
   const outboxRoot = resolve(dharmaHome(), 'relay', 'repository-candidates');
   const canonicalPackage = registered.repositoryPackage!;
-  const candidate = canonicalPackage.state === 'absent'
+  const candidate = await staged('package_publication', async () => canonicalPackage.state === 'absent'
     ? await synchronizeRepositoryCandidate({ transport: fabric, outboxRoot, scope: candidateScope,
       snapshot: initialSnapshot, initialRepository: true })
     : await adoptRepositoryCandidate({ outboxRoot, scope: candidateScope,
@@ -3331,7 +3342,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
         candidateId: canonicalPackage.candidateId!, operationId: canonicalPackage.operationId!,
         snapshotHash: canonicalPackage.snapshotHash!, state: canonicalPackage.state,
         releaseId: canonicalPackage.releaseId,
-      } });
+      } }));
   registered = { ...registered, repositoryPackage: {
     state: candidate.state, candidateId: candidate.candidateId, operationId: candidate.operationId,
     snapshotHash: candidate.snapshotHash,
@@ -3342,9 +3353,9 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     consolidationMode: canonicalPackage.state === 'absent' ? 'initial_repository' : canonicalPackage.consolidationMode,
   } };
   await saveWorkspaceRecord(registered);
-  const providers = await receiptAwareProviderCapabilities(
+  const providers = await staged('role_registration', async () => receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
-  );
+  ));
   const roleRequested = ['role-name', 'question-categories', 'role-description'].some(key => flags.has(key));
   if (roleRequested && !['role-name', 'question-categories', 'role-description'].every(key => flags.has(key))) {
     throw new Error('Repository role overrides require --role-name, --question-categories, and --role-description together.');
@@ -3357,28 +3368,30 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       description: required(flags, 'role-description'),
   } : derivedRole;
   const profileHash = sha256(canonicalize(roleInput));
+  const roleWorkspace = registered;
   let role: unknown = registered.repositoryRole?.profileHash === profileHash
     ? { stage: 'repository_role_observed', reused: true, role: { ...roleInput, revision: registered.repositoryRole.revision } }
-    : await registerRepositoryRoleMetadata(fabric, repositoryRoleScope(registered), {
-      expectedRevision: registered.repositoryRole?.revision || Number(flags.get('role-revision') || 0), ...roleInput });
+    : await staged('role_registration', async () => registerRepositoryRoleMetadata(fabric, repositoryRoleScope(roleWorkspace), {
+      expectedRevision: roleWorkspace.repositoryRole?.revision || Number(flags.get('role-revision') || 0), ...roleInput,
+    }));
   if (registered.repositoryRole?.profileHash !== profileHash) {
     const revision = Number(((role as Record<string, unknown>).role as Record<string, unknown> | undefined)?.revision);
     if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Repository role registration returned no durable revision.');
     registered = { ...registered, repositoryRole: { revision, profileHash } };
     await saveWorkspaceRecord(registered);
   }
-  const nativeSkillResult = await installAvailableNativeAgentFabricBootstraps({
+  const nativeSkillResult = await staged('native_skill_install', async () => installAvailableNativeAgentFabricBootstraps({
     providers,
     workspace,
     workspaceId: registered.workspaceId,
     organizationId,
     hqUrl,
-  });
+  }));
   const primaryProvider = providers[0]?.provider || 'codex';
   const relay = flags.has('no-relay-daemon')
     ? { started: false, state: 'not_started' }
-    : await startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json'));
-  const sharedRepositoryReady = await repositorySharedReady(registered);
+    : await staged('relay_start', async () => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')));
+  const sharedRepositoryReady = await staged('readiness', async () => repositorySharedReady(registered));
   return {
     ok: true,
     stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
