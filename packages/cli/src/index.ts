@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.66';
+const VERSION = '0.2.67';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2796,9 +2796,11 @@ async function repositoriesList(flags: Map<string, string | boolean>): Promise<O
   };
 }
 
-async function repositorySharedReady(item: WorkspaceRecord) {
-  if (item.repositoryPackage?.state !== 'published' || !item.repositoryPackage.releaseId) return false;
-  try { return Boolean(await installedRepositoryKnowledge(item)); }
+export async function repositorySharedReady(
+  item: WorkspaceRecord,
+  loadInstalled: (workspace: WorkspaceRecord) => Promise<unknown> = installedRepositoryKnowledge,
+) {
+  try { return Boolean(await loadInstalled(item)); }
   catch { return false; }
 }
 
