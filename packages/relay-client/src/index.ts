@@ -112,6 +112,7 @@ export interface BootstrapRecipientApproval {
   url: string;
   expiresAt: string;
   fingerprint: string;
+  repositoryFingerprint: string;
 }
 
 export interface RedeemBootstrapGrantInput {
@@ -121,6 +122,7 @@ export interface RedeemBootstrapGrantInput {
   name: string;
   platform: DeviceConfig['platform'];
   publicKeyEd25519: string;
+  repositoryFingerprint: string;
   fetcher?: typeof fetch;
   onRecipientApprovalRequired?: (approval: BootstrapRecipientApproval) => Promise<void> | void;
   pollIntervalMs?: number;
@@ -531,7 +533,7 @@ export async function beginEnrollment(input: {
 
 function parseBootstrapRecipientApproval(
   body: unknown,
-  input: Pick<RedeemBootstrapGrantInput, 'hqUrl' | 'organizationId' | 'bootstrapToken' | 'publicKeyEd25519'>,
+  input: Pick<RedeemBootstrapGrantInput, 'hqUrl' | 'organizationId' | 'bootstrapToken' | 'publicKeyEd25519' | 'repositoryFingerprint'>,
 ): BootstrapRecipientApproval | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const record = body as Record<string, unknown>;
@@ -566,10 +568,12 @@ function parseBootstrapRecipientApproval(
   const fragment = new URLSearchParams(destination.hash.slice(1));
   if (fragment.get('organizationId') !== input.organizationId
     || fragment.get('publicKeyEd25519') !== input.publicKeyEd25519
+    || fragment.get('repositoryFingerprint') !== input.repositoryFingerprint
     || !/^[a-f0-9]{64}$/.test(fragment.get('bootstrapTokenHash') || '')
-    || ['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash']
+    || !/^sha256:[a-f0-9]{64}$/.test(fragment.get('repositoryFingerprint') || '')
+    || ['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash', 'repositoryFingerprint']
       .some(key => fragment.getAll(key).length !== 1)
-    || [...fragment.keys()].some(key => !['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash'].includes(key))) {
+    || [...fragment.keys()].some(key => !['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash', 'repositoryFingerprint'].includes(key))) {
     return null;
   }
   let decodedUrl = approvalUrl.toString();
@@ -579,6 +583,7 @@ function parseBootstrapRecipientApproval(
     url: approvalUrl.toString(),
     expiresAt: approval.expiresAt,
     fingerprint: String(approval.fingerprint),
+    repositoryFingerprint: input.repositoryFingerprint,
   };
 }
 
@@ -591,6 +596,7 @@ export async function redeemBootstrapGrant(input: RedeemBootstrapGrantInput): Pr
     name: input.name,
     platform: input.platform,
     publicKeyEd25519: input.publicKeyEd25519,
+    repositoryFingerprint: input.repositoryFingerprint,
   });
   const fetcher = input.fetcher || fetch;
   const now = input.now || Date.now;
