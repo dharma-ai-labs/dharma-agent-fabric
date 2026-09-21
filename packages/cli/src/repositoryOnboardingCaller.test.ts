@@ -61,6 +61,12 @@ function bootstrapDependencies(onboarding: Onboarding) {
     resolve, dirname,
     evidencePreview: async () => ({ trajectoryCount: 0, automaticDisclosure: { ready: false } }),
     startRelayDaemon: async () => { await record('relay'); return { started: true, state: 'running', probe: { ok: true } }; },
+    withOnboardingStage: async (_stage: string, _workspaceId: string, _resume: string,
+      operation: () => Promise<unknown>) => operation(),
+    waitForRepositoryReadiness: async () => {
+      await record('repository_readiness_wait');
+      return { outcome: 'pending', state: 'accepted', ready: false, candidateId: 'candidate_fixture', attempts: 1 };
+    },
     runOrganizationCommand: async () => ({ ok: true }),
     requireCompletedBootstrapEvidence: () => undefined,
     summarizeBootstrapOrganizationApi: () => ({ ok: true }),
@@ -119,6 +125,30 @@ test('bootstrap complete cannot report shared completion while its canonical rep
   assert.equal(actual.sharedRepositoryReady, false);
   assert.equal(f.calls.includes('launcher'), true);
   assert.equal(f.calls.includes('relay'), true);
+  assert.equal(f.calls.includes('repository_readiness_wait'), true);
+});
+
+test('bootstrap completes after the relay installs the signed shared release', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'shared_repository_pending', localStage: 'ready',
+    sharedRepositoryReady: false, workspaceId: 'workspace_fixture' });
+  f.dependencies.waitForRepositoryReadiness = async () => ({ outcome: 'ready', state: 'published',
+    ready: true, candidateId: 'candidate_fixture', attempts: 3 });
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.ok, true);
+  assert.equal(actual.stage, 'complete');
+  assert.equal(actual.sharedRepositoryReady, true);
+  assert.equal((actual.repositoryReadiness as Record<string, unknown>).attempts, 3);
+});
+
+test('bootstrap reports a blocked repository candidate without replaying enrollment', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'shared_repository_pending', localStage: 'ready',
+    sharedRepositoryReady: false, workspaceId: 'workspace_fixture' });
+  f.dependencies.waitForRepositoryReadiness = async () => ({ outcome: 'blocked', state: 'blocked',
+    ready: false, candidateId: 'candidate_fixture', attempts: 2 });
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.ok, false);
+  assert.equal(actual.stage, 'shared_repository_blocked');
+  assert.equal(f.calls.filter(item => item === 'save_token').length, 1);
 });
 
 test('repository connect separates attempts and local readiness from shared connections', async () => {

@@ -55,8 +55,9 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
+import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.65';
+const VERSION = '0.2.66';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1680,7 +1681,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     };
   }
   const launcher = await installStableRepositoryLauncher(workspace);
-  const sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
+  let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
     return {
@@ -1722,6 +1723,23 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const relay = flags.has('no-relay-daemon')
     ? { started: false, ...(await waitForRelayReadiness()) }
     : await startRelayDaemon(policyPath);
+  let repositoryReadiness: RepositoryReadinessResult | null = null;
+  if (!sharedRepositoryReady && relay.state === 'running') {
+    const workspaceId = String(onboarded.workspaceId || '');
+    const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision} --provider ${provider}`;
+    repositoryReadiness = await withOnboardingStage('readiness', workspaceId, resumeCommand,
+      () => waitForRepositoryReadiness(async () => {
+        const current = (await registry()).find(item => item.workspaceId === workspaceId
+          && item.organizationId === organizationId && item.path === workspace);
+        if (!current) throw new Error('Enrolled repository workspace disappeared during publication.');
+        return {
+          state: current.repositoryPackage?.state || 'absent',
+          ready: await repositorySharedReady(current),
+          candidateId: current.repositoryPackage?.candidateId || null,
+        };
+      }));
+    sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
+  }
   const apiFlags = new Map<string, string | boolean>([
     ['organization-id', organizationId], ['portal-url', hqUrl],
   ]);
@@ -1750,8 +1768,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const firstLearning = repositoryReceipt.firstLearningEvidence as Record<string, unknown> | undefined;
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   return {
-    ok: true,
-    stage: sharedRepositoryReady ? 'complete' : 'shared_repository_pending',
+    ok: repositoryReadiness?.outcome !== 'blocked',
+    stage: sharedRepositoryReady ? 'complete'
+      : repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending',
     localStage: 'complete',
     sharedRepositoryReady,
     enrollment: {
@@ -1774,6 +1793,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     },
     relayProbe: relay.probe,
     relay,
+    repositoryReadiness,
     organizationApi,
     operatingContract: {
       installed: skill.ready === true,
