@@ -37,7 +37,10 @@ function bootstrapDependencies(onboarding: Onboarding) {
       const value = flags.get(key); if (typeof value !== 'string') throw new Error(`Missing fixture flag ${key}`); return value;
     },
     realpath: async (path: string) => path,
-    preflightBootstrapWorkspaceIdentity: async () => record('preflight'),
+    preflightBootstrapWorkspaceIdentity: async () => {
+      await record('preflight');
+      return { fingerprint: `sha256:${'e'.repeat(64)}` };
+    },
     isLocalProviderId: (provider: string) => provider === 'codex',
     readDeviceConfig: async () => null,
     configPath: () => '/fixture-config/device.json',

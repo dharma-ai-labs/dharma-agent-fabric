@@ -55,7 +55,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 
-const VERSION = '0.2.63';
+const VERSION = '0.2.64';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1566,7 +1566,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const bootstrapToken = required(flags, 'grant');
   const workspace = await realpath(String(flags.get('workspace') || '.'));
   const policyRevision = required(flags, 'policy-revision');
-  await preflightBootstrapWorkspaceIdentity(
+  const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(
     workspace,
     typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
   );
@@ -1600,6 +1600,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     name,
     platform: devicePlatform,
     publicKeyEd25519: identity.publicKeyEd25519,
+    repositoryFingerprint: repositoryIdentity.fingerprint,
     onRecipientApprovalRequired: async (approval) => {
       recipientApproval.required = true;
       recipientApproval.browserOpened = flags.has('no-browser')

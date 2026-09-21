@@ -209,6 +209,7 @@ test('bootstrap redemption is credential-free on the URL and returns device plus
     name: 'Test device',
     platform: 'wsl',
     publicKeyEd25519: 'device-public-key',
+    repositoryFingerprint: `sha256:${'e'.repeat(64)}`,
     fetcher: async (url, init) => {
       requests.push(new Request(url, init));
       return new Response(JSON.stringify({
@@ -251,6 +252,7 @@ function bootstrapApprovalBody(input: { expiresAt: string; publicKey?: string; o
     organizationId: 'org_a',
     publicKeyEd25519: input.publicKey || 'device-public-key',
     bootstrapTokenHash: 'c'.repeat(64),
+    repositoryFingerprint: `sha256:${'e'.repeat(64)}`,
   }).toString();
   const approval = new URL('/login', origin);
   approval.searchParams.set('redirect_url', destination.toString());
@@ -272,11 +274,11 @@ test('bootstrap opens one validated recipient approval and polls the immutable r
   const expiresAt = new Date(clock + 60_000).toISOString();
   const requests: Request[] = [];
   let attempt = 0;
-  const approvals: Array<{ url: string; expiresAt: string; fingerprint: string }> = [];
+  const approvals: Array<{ url: string; expiresAt: string; fingerprint: string; repositoryFingerprint: string }> = [];
   const result = await redeemBootstrapGrant({
     hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
     bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'wsl',
-    publicKeyEd25519: 'device-public-key', now: () => clock,
+    publicKeyEd25519: 'device-public-key', repositoryFingerprint: `sha256:${'e'.repeat(64)}`, now: () => clock,
     sleep: async milliseconds => { clock += milliseconds; }, pollIntervalMs: 250,
     onRecipientApprovalRequired: approval => { approvals.push(approval); },
     fetcher: async (url, init) => {
@@ -305,7 +307,7 @@ test('bootstrap rejects changed approval context and terminal errors without fur
   await assert.rejects(() => redeemBootstrapGrant({
     hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
     bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'linux',
-    publicKeyEd25519: 'device-public-key', now: () => clock,
+    publicKeyEd25519: 'device-public-key', repositoryFingerprint: `sha256:${'e'.repeat(64)}`, now: () => clock,
     sleep: async milliseconds => { clock += milliseconds; }, pollIntervalMs: 250,
     onRecipientApprovalRequired: () => undefined,
     fetcher: async () => {
@@ -321,7 +323,7 @@ test('bootstrap rejects changed approval context and terminal errors without fur
   await assert.rejects(() => redeemBootstrapGrant({
     hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
     bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'linux',
-    publicKeyEd25519: 'device-public-key', onRecipientApprovalRequired: () => undefined,
+    publicKeyEd25519: 'device-public-key', repositoryFingerprint: `sha256:${'e'.repeat(64)}`, onRecipientApprovalRequired: () => undefined,
     fetcher: async () => {
       terminalAttempts += 1;
       return new Response(JSON.stringify({ error: { code: 'fabric_ownership_required', message: 'Denied.' } }), { status: 403 });
@@ -345,7 +347,7 @@ test('bootstrap rejects deceptive or bearer-bearing recipient approval URLs befo
     await assert.rejects(() => redeemBootstrapGrant({
       hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
       bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Test device', platform: 'wsl',
-      publicKeyEd25519: 'device-public-key',
+      publicKeyEd25519: 'device-public-key', repositoryFingerprint: `sha256:${'e'.repeat(64)}`,
       onRecipientApprovalRequired: () => { opened = true; },
       fetcher: async () => new Response(JSON.stringify(body), { status: 409 }),
     }), /HTTP 409|bootstrap_recipient_approval_required/);
