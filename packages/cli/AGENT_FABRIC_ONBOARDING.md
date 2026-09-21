@@ -12,6 +12,8 @@ The private setup envelope contains the organization, intended recipient, policy
 4. Read the complete JSON result. Verify the organization, member, device, repository identity, provider, and enrollment state. If the command returns a pending or blocked stage, preserve the correlation data and continue only through the supported recovery path.
 5. Confirm provider readiness with `dharma providers list`, enrollment with `dharma status`, and the connected repository with `dharma repositories status --repo . --json`.
 
+Do not modify Dharma or customer product code to work around a failed onboarding step. Do not create a workaround pull request. Do not invent credentials, and do not bypass enrollment, weaken device approval, or substitute a local implementation for the released CLI and platform contract. When setup blocks, report the exact failed stage, non-sensitive error, and correlation ID. Continue only through the CLI's supported retry, reconciliation, rollback, or browser-authorized re-enrollment path.
+
 Verify the installed native skill with the literal command for the active provider: `dharma skills verify --provider codex --workspace .`, `dharma skills verify --provider claude --workspace .`, `dharma skills verify --provider agy --workspace .`, or `dharma skills verify --provider hermes --workspace .`. The result must say `ready: true`.
 
 Do not claim readiness merely because the package installed. Full readiness requires the shared repository package, role registration, first-learning disposition, relay, and synchronization receipts described below.
