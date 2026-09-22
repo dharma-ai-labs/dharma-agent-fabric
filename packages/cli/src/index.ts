@@ -39,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
-import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.68';
+const VERSION = '0.2.69';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5372,6 +5372,15 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let nextPolicyRefreshAt = 0;
   let evidencePolicyFresh = false;
   const repositorySourceWatcher = new RepositorySourceWatcher();
+  let repositorySourceBaselineAvailable = true;
+  if (canonicalWorkspace.repositoryPackage?.snapshotHash) {
+    try {
+      const prior = await readRepositoryPackageSnapshot(canonicalWorkspace.path,
+        canonicalWorkspace.repositoryPackage.snapshotHash);
+      if (!prior.manifest.sourceFingerprint) throw new Error('Repository source baseline is incomplete.');
+      repositorySourceWatcher.seed(prior.manifest.sourceFingerprint);
+    } catch { repositorySourceBaselineAvailable = false; }
+  }
   let nextRepositorySourceScanAt = 0;
   let repositorySourceCandidates = 0;
   let repositorySourceFailures = 0;
@@ -5474,6 +5483,9 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       }
       if (performance.now() >= nextRepositorySourceScanAt) {
         try {
+          if (!repositorySourceBaselineAvailable) {
+            throw new Error('Repository source baseline is unavailable; refusing an unanchored update.');
+          }
           if (!canonicalWorkspace.repositoryBindingId || !canonicalWorkspace.repositoryAgentId) {
             throw new Error('Repository source synchronization requires a complete repository binding.');
           }
