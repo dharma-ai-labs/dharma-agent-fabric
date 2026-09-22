@@ -146,6 +146,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   for (let index = 1; index < cycles; index++) roots.push(await mkdtemp(join(f.scopeRoot, 'attempt-')));
   let preparedCount = 0; let flight: Promise<void> | undefined; let stopped = false;
   let vaultCloses = 0; let transportCalls = 0;
+  const events: string[] = [];
   const flags = new Map<string, string | boolean>([['policy', join(f.home, '.dharma', 'approved-policy.json')], ['once', true]]);
   const workspace = { path: f.home, workspaceId: WORKSPACE, organizationId: 'org_test',
     repositoryAgentId: f.record.repositoryAgentId, repositoryBindingId: '77777777-7777-4777-8777-777777777777' };
@@ -167,6 +168,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     registry: async () => [workspace], loadVerifiedWorkspacePolicy: async () => policy,
     client: async () => Object.freeze({ fixture: true }), dharmaHome: () => f.home,
     RepositorySourceWatcher: class { invalidate() {} },
+    BlockedRepositorySourceRetry: class { consider() { return false; } },
     loadVaultModule: async () => ({ LocalVault: { open: async () => ({ close: () => { vaultCloses++; } }) },
       loadOrCreateVaultMasterKey: async () => Buffer.alloc(32) }),
     rawLocalRetentionDays: () => 1,
@@ -188,13 +190,16 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     },
     deferUnavailableRelayRetention: async (operation: () => Promise<unknown>) => ({ state: 'completed', value: await operation() }),
     finalizeRecoveredSignedTaskTrajectories: async () => [], syncWorkspacePolicy: async () => {},
-    scanRepositorySourceChanges: async () => ({ state: 'fixture_unchanged', localMutation: false }),
+    scanRepositorySourceChanges: async () => { events.push('scan'); return { state: 'fixture_unchanged', localMutation: false }; },
+    withWorkspaceSkillActivationLock: async () => { events.push('activate'); },
     repositorySharedReady: async () => false,
     installedRepositoryKnowledge: async () => null, syncPendingRetentionCapsules: async () => 0,
     processEvidenceRequest: async () => ({}),
-    executeOneTask: async () => { transportCalls++; await flight; return {}; },
+    executeOneTask: async () => { transportCalls++; events.push('task'); await flight; return {}; },
   }) as Record<string, unknown>;
   assert.equal(vaultCloses, 1); assert.equal(transportCalls, 1);
+  assert.ok(events.indexOf('task') < events.indexOf('activate') && events.indexOf('activate') < events.indexOf('scan'),
+    'signed activation must precede source publication at the safe task boundary');
   assert.equal(preparedCount, cycles, 'production staging callback must actually execute');
   assert.equal(processFixture.listenerCount('SIGINT'), 0); assert.equal(processFixture.listenerCount('SIGTERM'), 0);
   return { result, roots };
