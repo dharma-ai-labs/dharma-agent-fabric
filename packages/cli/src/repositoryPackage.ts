@@ -759,6 +759,30 @@ async function snapshotFor(workspace: string, hash: string) {
 export async function readRepositoryPackageSnapshot(workspace: string, hash: string) {
   return snapshotFor(workspace, hash);
 }
+export async function readRepositorySourceBaselineSnapshot(workspace: string, publishedHash: string) {
+  try { return await snapshotFor(workspace, publishedHash); }
+  catch (error) {
+    if (!missing(error)) {
+      if (error instanceof SyntaxError || error instanceof TypeError) {
+        throw new Error('Published repository source baseline integrity failed.', { cause: error });
+      }
+      throw error;
+    }
+  }
+  const bytes = await optionalBytes(workspace, `${GENERATED_ROOT}/MANIFEST.json`, DEFAULT_LIMITS.maximumFileBytes);
+  if (!bytes) throw new Error('Local repository source baseline is unavailable.');
+  let hash: unknown;
+  try { hash = (JSON.parse(bytes.toString('utf8')) as { snapshotHash?: unknown }).snapshotHash; }
+  catch { throw new Error('Local repository source baseline integrity failed.'); }
+  if (typeof hash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(hash)) {
+    throw new Error('Local repository source baseline integrity failed.');
+  }
+  const local = await snapshotFor(workspace, hash);
+  if (bytes.toString('utf8') !== `${canonicalize(local.manifest)}\n`) {
+    throw new Error('Local repository source baseline integrity failed.');
+  }
+  return local;
+}
 async function verifyIndex(workspace: string, index: CopyIndex) {
   if (!index || canonicalize(index) !== canonicalize(indexFor((await snapshotFor(workspace, index.snapshotHash)).manifest))) {
     throw new Error('Managed copies ownership index integrity failed.');
