@@ -82,6 +82,15 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   const durableReceipt = JSON.parse(durableReceiptText);
   assert.equal(durableReceipt.taskId, task.taskId);
   assert.equal(durableReceipt.commandResults[0].stdoutSha256, `sha256:${'1'.repeat(64)}`);
+  const failedReceipt = {
+    ...first, status: 'failed' as const,
+    commandResults: [{ ...first.commandResults[0]!, exitCode: 1, failureCategory: 'quota' as const,
+      stderr: 'private-account@example.test' }],
+  };
+  await store.put(failedReceipt);
+  const recovered = await store.get(task.taskId);
+  assert.equal(recovered?.commandResults[0]?.failureCategory, 'quota');
+  assert.equal(recovered?.commandResults[0]?.stderr, '');
 });
 
 test('task signature tampering is rejected before worktree creation', async () => {

@@ -13,10 +13,37 @@ import {
   hermesCapability,
   hermesAdapter,
   parseHermesSessionExport,
+  providerFailureCategory,
   providerTaskReadiness,
   providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
+
+test('provider failure categories are bounded and never return raw diagnostics', () => {
+  const failure = (stdout: string, stderr = '', exitCode = 1, timedOut = false) =>
+    providerFailureCategory({ provider: 'codex', exitCode, timedOut, stdout, stderr });
+  assert.equal(failure('{"type":"error","message":"Usage limit reached for private-account@example.test"}\n'), 'quota');
+  assert.equal(failure('{"type":"turn.failed","error":{"message":"Authentication required"}}\n'), 'authentication');
+  assert.equal(failure('{"type":"error","message":"Model not found"}\n'), 'model_unavailable');
+  assert.equal(failure('', 'Connection refused'), 'transport');
+  assert.equal(failure('{"type":"item.completed","item":{"text":"Usage limit reached"}}\n'), 'unknown');
+  assert.equal(failure('', '', 1, true), 'timeout');
+  assert.equal(failure('', '', 1), 'unknown');
+  assert.equal(failure('{"type":"error","message":"Usage limit reached"}\n', '', 0), null);
+});
+
+test('failed provider execution returns only a diagnostic category alongside private output', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-provider-failure-'));
+  const result = await executeProviderTask({
+    provider: 'codex', workspace, instructions: 'Read the repository.', timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false,
+    runner: async () => ({ exitCode: 1, signal: null, timedOut: false,
+      stdout: Buffer.from('{"type":"error","message":"Usage limit reached for private-account@example.test"}\n'),
+      stderr: Buffer.alloc(0) }),
+  });
+  assert.equal(result.failureCategory, 'quota');
+  assert.equal(JSON.stringify(result.failureCategory).includes('private-account'), false);
+});
 
 test('provider task readiness distinguishes installation from authenticated execution', async () => {
   const environment = { HOME: '/home/customer', PATH: '/usr/bin:/bin' };

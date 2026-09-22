@@ -54,6 +54,35 @@ export interface ProviderExecutionResult {
   stderr: string;
   stdoutSha256: string;
   stderrSha256: string;
+  failureCategory?: ProviderFailureCategory | null;
+}
+
+export type ProviderFailureCategory = 'quota' | 'authentication' | 'model_unavailable' | 'transport' | 'timeout' | 'unknown';
+
+export function providerFailureCategory(input: {
+  provider: ProviderId; exitCode: number | null; timedOut: boolean; stdout: string; stderr: string;
+}): ProviderFailureCategory | null {
+  if (input.timedOut) return 'timeout';
+  if (input.exitCode === 0) return null;
+  const messages: string[] = [input.stderr.slice(-32_768)];
+  if (input.provider === 'codex' || input.provider === 'claude') {
+    for (const line of input.stdout.slice(-262_144).split(/\r?\n/)) {
+      if (line.length > 32_768) continue;
+      try {
+        const event = JSON.parse(line) as { type?: unknown; message?: unknown; error?: { message?: unknown } };
+        if (event.type === 'error' || event.type === 'turn.failed') {
+          if (typeof event.message === 'string') messages.push(event.message);
+          if (typeof event.error?.message === 'string') messages.push(event.error.message);
+        }
+      } catch { /* Non-JSON output is not a structured provider error. */ }
+    }
+  }
+  const diagnostic = messages.join('\n').slice(-65_536);
+  if (/usage limit|quota exceeded|rate limit|too many requests|insufficient credits|insufficient quota|billing limit/i.test(diagnostic)) return 'quota';
+  if (/authentication required|not logged in|log in to|login required|unauthori[sz]ed|invalid api key|oauth.*(?:expired|failed)|invalid token/i.test(diagnostic)) return 'authentication';
+  if (/model not found|unknown model|model .* unavailable|unsupported model|model .* does not exist/i.test(diagnostic)) return 'model_unavailable';
+  if (/connection refused|connection reset|network error|dns error|econnrefused|enotfound|fetch failed/i.test(diagnostic)) return 'transport';
+  return 'unknown';
 }
 
 export type ProviderProcessRunner = (input: {
@@ -294,11 +323,13 @@ export async function executeProviderTask(input: {
       stderr = `${stderr}${stderr ? '\n' : ''}Hermes returned no task result. Configure an inference provider with hermes model.`;
     }
     const stderrBuffer = Buffer.from(stderr, 'utf8');
+    const stdout = result.stdout.toString('utf8');
     return {
       provider: input.provider, exitCode, signal: result.signal, timedOut: result.timedOut,
-      stdout: result.stdout.toString('utf8'), stderr,
+      stdout, stderr,
       stdoutSha256: `sha256:${createHash('sha256').update(result.stdout).digest('hex')}`,
       stderrSha256: `sha256:${createHash('sha256').update(stderrBuffer).digest('hex')}`,
+      failureCategory: providerFailureCategory({ provider: input.provider, exitCode, timedOut: result.timedOut, stdout, stderr }),
     };
   } finally {
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
