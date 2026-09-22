@@ -4262,8 +4262,9 @@ export async function nativeSkillDirectoryForWorkspace(input: {
 }) {
   const globalRoot = nativeSkillDirectory(input.provider, input.env, input.home);
   const globalPointer = resolve(globalRoot, '.dharma-managed', 'workspaces', input.workspaceId, 'ACTIVE_BUNDLE');
-  if (await pathExists(globalPointer)) return globalRoot;
-  const workspace = input.workspace || (await registry()).find((item) => item.workspaceId === input.workspaceId)?.path;
+  const globalActive = await pathExists(globalPointer);
+  const registered = (await registry()).find((item) => item.workspaceId === input.workspaceId);
+  const workspace = input.workspace || registered?.path;
   if (!workspace) return globalRoot;
   const projectRoot = input.provider === 'codex' ? resolve(workspace, '.agents', 'skills')
     : input.provider === 'claude' ? resolve(workspace, '.claude', 'skills') : null;
@@ -4279,8 +4280,28 @@ export async function nativeSkillDirectoryForWorkspace(input: {
       }
     }
     const projectPointer = resolve(projectRoot, '.dharma-managed', 'workspaces', input.workspaceId, 'ACTIVE_BUNDLE');
-    if (await pathExists(projectPointer)) return projectRoot;
+    const projectActive = await pathExists(projectPointer);
+    if (globalActive && projectActive && registered?.repositoryAgentId) {
+      const config = await readDeviceConfig();
+      if (config?.organizationId === registered.organizationId) {
+        const anchor = await loadActiveSkillAuthorizationAnchor({
+          config, workspaceId: input.workspaceId, organizationAgentId: registered.repositoryAgentId,
+          provider: input.provider, fresh: true,
+        });
+        if (anchor) {
+          const matching = await nativeSkillRootMatchingAuthorization({
+            roots: [projectRoot, globalRoot], workspaceId: input.workspaceId,
+            bundleId: anchor.bundleId, receiptHash: anchor.receiptHash,
+          });
+          if (!matching) throw new Error('Neither native skill root matches the protected active authorization. Use supported skill recovery.');
+          return matching;
+        }
+      }
+    }
+    if (globalActive) return globalRoot;
+    if (projectActive) return projectRoot;
   }
+  if (globalActive) return globalRoot;
   const markerPath = resolve(globalRoot, 'dharma-agent-fabric', '.dharma-agent-fabric.json');
   if (!await pathExists(markerPath)) return globalRoot;
   const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { workspaceId?: unknown };
@@ -4289,6 +4310,30 @@ export async function nativeSkillDirectoryForWorkspace(input: {
   // signed ownership checks reject incompatible activation without hiding other providers' readiness.
   if (!projectRoot) return globalRoot;
   return projectRoot;
+}
+
+export async function nativeSkillRootMatchingAuthorization(input: {
+  roots: readonly string[];
+  workspaceId: string;
+  bundleId: string;
+  receiptHash: string;
+}): Promise<string | null> {
+  for (const root of input.roots) {
+    try {
+      const managed = resolve(root, '.dharma-managed', 'workspaces', input.workspaceId);
+      const [pointer, receiptBytes] = await Promise.all([
+        readFile(resolve(managed, 'ACTIVE_BUNDLE'), 'utf8'),
+        readFile(resolve(managed, 'active', 'INSTALL_RECEIPT.json'), 'utf8'),
+      ]);
+      const receipt = JSON.parse(receiptBytes) as { bundleId?: unknown; receiptHash?: unknown };
+      if (pointer.trim() === input.bundleId
+        && receipt.bundleId === input.bundleId
+        && receipt.receiptHash === input.receiptHash) return root;
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return null;
 }
 
 function claudeReadOnlyCommandRules() {
