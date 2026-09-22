@@ -20,6 +20,7 @@ import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationP
 import {
   executeProviderTask,
   type ProviderExecutionResult,
+  type ProviderFailureCategory,
 } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 
 export interface TaskEnvelope {
@@ -87,6 +88,7 @@ export interface CommandResult {
   stderrSha256: string;
   stdout: string;
   stderr: string;
+  failureCategory?: ProviderFailureCategory | null;
 }
 
 export interface TaskReceipt {
@@ -357,7 +359,9 @@ function assertValidTaskReceipt(value: unknown, expectedTaskId?: string): assert
       || typeof command.timedOut !== 'boolean'
       || !/^sha256:[a-f0-9]{64}$/.test(String(command.stdoutSha256 || ''))
       || !/^sha256:[a-f0-9]{64}$/.test(String(command.stderrSha256 || ''))
-      || typeof command.stdout !== 'string' || typeof command.stderr !== 'string') {
+      || typeof command.stdout !== 'string' || typeof command.stderr !== 'string'
+      || (command.failureCategory !== undefined && command.failureCategory !== null
+        && !['quota', 'authentication', 'model_unavailable', 'transport', 'timeout', 'unknown'].includes(command.failureCategory))) {
       throw new Error('Task receipt command result is invalid.');
     }
   }
@@ -923,6 +927,7 @@ export async function executeTask(input: {
       stderr: providerResult.stderr,
       stdoutSha256: providerResult.stdoutSha256,
       stderrSha256: providerResult.stderrSha256,
+      failureCategory: providerResult.failureCategory,
     });
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
     const trackedChanges = await gitOutput(worktree, [

@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.70';
+const VERSION = '0.2.71';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4180,7 +4180,8 @@ async function executeOneTask(
     trajectory = finalized[0]?.trajectory || null;
     if (!trajectory) throw new Error('Task completion did not return a recoverable server receipt.');
   }
-  return { ok: true, taskId: task.taskId, receipt: summary, trajectory };
+  const failureCategory = receipt.commandResults.find((result) => result.commandId.startsWith('provider.'))?.failureCategory ?? null;
+  return { ok: true, taskId: task.taskId, receipt: summary, trajectory, failureCategory };
   });
   } catch (error) {
     if (error instanceof Error && error.message === 'Timed out waiting for the workspace skill activation lock.') {
@@ -5366,6 +5367,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   let tasksCompleted = 0;
+  let lastProviderFailureCategory: string | null = null;
   let taskTrajectoriesRecovered = 0;
   let evidenceResponsesCompleted = 0;
   let trajectorySyncsCompleted = 0;
@@ -5536,6 +5538,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       }
       const result = await executeOneTask(fabric, leaseSeconds);
       if (result.taskId) tasksCompleted += 1;
+      if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
       if (!result.taskId && performance.now() >= nextSkillActivationAt) {
         for (const adapter of providerAdapters) {
           try {
@@ -5572,6 +5575,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   }
   return {
     ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
+    lastProviderFailureCategory,
     evidenceResponsesCompleted, trajectorySyncsCompleted,
     repositorySourceCandidates, repositorySourceFailures, repositorySourceState,
     skillPreparationsCompleted, skillPreparationFailures, skillActivationsCompleted, skillActivationFailures,
