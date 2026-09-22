@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.71';
+const VERSION = '0.2.72';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1562,10 +1562,26 @@ async function detectBootstrapProvider(workspace: string): Promise<ProviderId> {
   return candidates[0].provider;
 }
 
+export function assertBootstrapResumeAuthority(input: {
+  flags: Map<string, string | boolean>;
+  existing: Pick<DeviceConfig, 'organizationId' | 'hqUrl'> | null;
+  organizationId: string;
+  hqUrl: string;
+}) {
+  if (input.flags.has('grant') || input.flags.has('replace-existing-enrollment') || !input.flags.has('complete')) {
+    throw new Error('Bootstrap resume requires --complete and cannot accept a grant or replace an enrollment.');
+  }
+  if (!input.existing || input.existing.organizationId !== input.organizationId
+    || normalizeHqUrl(input.existing.hqUrl) !== input.hqUrl) {
+    throw new Error('Bootstrap resume requires an existing device enrolled to this organization and portal.');
+  }
+}
+
 async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> {
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
-  const bootstrapToken = required(flags, 'grant');
+  const resuming = flags.has('resume');
+  const bootstrapToken = resuming ? null : required(flags, 'grant');
   const workspace = await realpath(String(flags.get('workspace') || '.'));
   const policyRevision = required(flags, 'policy-revision');
   const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(
@@ -1582,76 +1598,87 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   let existing = await readDeviceConfig();
   const enrollmentMismatch = Boolean(existing
     && (existing.organizationId !== organizationId || normalizeHqUrl(existing.hqUrl) !== hqUrl));
+  if (resuming) assertBootstrapResumeAuthority({ flags, existing, organizationId, hqUrl });
   if (enrollmentMismatch && !flags.has('replace-existing-enrollment')) {
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
   }
-  const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
-  const devicePlatform = await platform();
-  const installationId = existing && !enrollmentMismatch
-    ? existing.installationId
-    : await loadOrCreateInstallationId();
-  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
+  let config: DeviceConfig;
+  let scopes: string[] | undefined;
   let recipientApproval: { required: boolean; browserOpened: boolean } = {
     required: false,
     browserOpened: false,
   };
-  const redeemed = await redeemBootstrapGrant({
-    hqUrl,
-    organizationId,
-    bootstrapToken,
-    name,
-    platform: devicePlatform,
-    publicKeyEd25519: identity.publicKeyEd25519,
-    repositoryFingerprint: repositoryIdentity.fingerprint,
-    onRecipientApprovalRequired: async (approval) => {
-      recipientApproval.required = true;
-      recipientApproval.browserOpened = flags.has('no-browser')
-        ? false
-        : await openVerificationUri(approval.url);
-      process.stderr.write(
-        `Confirm this exact device in the authenticated Dharma portal before ${approval.expiresAt}: ${approval.url}\n`,
-      );
-    },
-  });
-  const rebind = enrollmentMismatch && existing
-    ? await archiveEnrollmentForAuthorizedRebind(existing)
-    : { changed: false, backupId: null, previousOrganizationId: null };
-  if (rebind.changed) existing = null;
-  const config: DeviceConfig = existing || {
-    schema: 'dharma.device-config/v1',
-    hqUrl,
-    organizationId,
-    installationId,
-    deviceId: redeemed.deviceId,
-    deviceName: name,
-    platform: devicePlatform,
-    publicKeyEd25519: identity.publicKeyEd25519,
-    serverPublicKeyEd25519: redeemed.serverPublicKeyEd25519,
-    relayUrl: redeemed.relayUrl,
-    enrolledAt: new Date().toISOString(),
+  let rebind: { changed: boolean; backupId: string | null; previousOrganizationId: string | null } = {
+    changed: false, backupId: null, previousOrganizationId: null,
   };
-  if (config.deviceId !== redeemed.deviceId
-    || config.publicKeyEd25519 !== identity.publicKeyEd25519
-    || config.serverPublicKeyEd25519 !== redeemed.serverPublicKeyEd25519) {
-    throw new Error('Bootstrap replay does not match the enrolled device identity.');
-  }
-  if (redeemed.serverSigningKeyset) {
-    const verification = verifyInitialServerSigningKeyset(
-      redeemed.serverSigningKeyset,
-      createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: redeemed.serverPublicKeyEd25519 }, format: 'jwk' }),
+  if (resuming) {
+    config = existing!;
+  } else {
+    const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
+    const devicePlatform = await platform();
+    const installationId = existing && !enrollmentMismatch
+      ? existing.installationId
+      : await loadOrCreateInstallationId();
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
+    const redeemed = await redeemBootstrapGrant({
+      hqUrl,
       organizationId,
-    );
-    if (!verification.ok) throw new Error(`Bootstrap signing keyset was rejected: ${verification.reason}.`);
-    config.serverSigningKeyset = redeemed.serverSigningKeyset;
+      bootstrapToken: bootstrapToken!,
+      name,
+      platform: devicePlatform,
+      publicKeyEd25519: identity.publicKeyEd25519,
+      repositoryFingerprint: repositoryIdentity.fingerprint,
+      onRecipientApprovalRequired: async (approval) => {
+        recipientApproval.required = true;
+        recipientApproval.browserOpened = flags.has('no-browser')
+          ? false
+          : await openVerificationUri(approval.url);
+        process.stderr.write(
+          `Confirm this exact device in the authenticated Dharma portal before ${approval.expiresAt}: ${approval.url}\n`,
+        );
+      },
+    });
+    rebind = enrollmentMismatch && existing
+      ? await archiveEnrollmentForAuthorizedRebind(existing)
+      : rebind;
+    if (rebind.changed) existing = null;
+    config = existing || {
+      schema: 'dharma.device-config/v1',
+      hqUrl,
+      organizationId,
+      installationId,
+      deviceId: redeemed.deviceId,
+      deviceName: name,
+      platform: devicePlatform,
+      publicKeyEd25519: identity.publicKeyEd25519,
+      serverPublicKeyEd25519: redeemed.serverPublicKeyEd25519,
+      relayUrl: redeemed.relayUrl,
+      enrolledAt: new Date().toISOString(),
+    };
+    if (config.deviceId !== redeemed.deviceId
+      || config.publicKeyEd25519 !== identity.publicKeyEd25519
+      || config.serverPublicKeyEd25519 !== redeemed.serverPublicKeyEd25519) {
+      throw new Error('Bootstrap replay does not match the enrolled device identity.');
+    }
+    if (redeemed.serverSigningKeyset) {
+      const verification = verifyInitialServerSigningKeyset(
+        redeemed.serverSigningKeyset,
+        createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: redeemed.serverPublicKeyEd25519 }, format: 'jwk' }),
+        organizationId,
+      );
+      if (!verification.ok) throw new Error(`Bootstrap signing keyset was rejected: ${verification.reason}.`);
+      config.serverSigningKeyset = redeemed.serverSigningKeyset;
+    }
+    await saveDeviceConfig(configPath(), config);
+    await saveDeviceEnrollmentAnchor({ config });
+    await saveOrganizationApiToken({
+      hqUrl,
+      organizationId,
+      installationId: config.installationId,
+      token: redeemed.organizationApiToken,
+    });
+    scopes = redeemed.organizationApiTokenScopes;
   }
-  await saveDeviceConfig(configPath(), config);
-  await saveDeviceEnrollmentAnchor({ config });
-  await saveOrganizationApiToken({
-    hqUrl,
-    organizationId,
-    installationId: config.installationId,
-    token: redeemed.organizationApiToken,
-  });
   const onboardFlags = new Map(flags);
   onboardFlags.delete('grant');
   onboardFlags.set('portal-url', hqUrl);
@@ -1673,7 +1700,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         deviceId: config.deviceId,
         status: 'approved',
         organizationApiTokenStored: true,
-        scopes: redeemed.organizationApiTokenScopes,
+        scopes,
         recipientApproval,
         rebind,
       },
@@ -1694,7 +1721,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         deviceId: config.deviceId,
         status: 'approved',
         organizationApiTokenStored: true,
-        scopes: redeemed.organizationApiTokenScopes,
+        scopes,
         recipientApproval,
         rebind,
       },
@@ -1778,7 +1805,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       deviceId: config.deviceId,
       status: 'approved',
       organizationApiTokenStored: true,
-      scopes: redeemed.organizationApiTokenScopes,
+      scopes,
       recipientApproval,
       rebind,
     },
