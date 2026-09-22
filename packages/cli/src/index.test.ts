@@ -33,6 +33,7 @@ import {
   validateSkillBundleSources,
   nativeSkillDirectory,
   nativeSkillDirectoryForWorkspace,
+  nativeSkillRootMatchingAuthorization,
   normalizeGitRemoteIdentity,
   postTaskOutcome,
   parseCliOptions,
@@ -1746,13 +1747,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.74');
+      assert.equal(version, '0.2.75');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.74',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.75',
   });
 });
 
@@ -1981,6 +1982,41 @@ test('a second Codex workspace uses its repository skill without replacing the f
   });
   assert.equal(await readFile(join(projectSkill, 'SKILL.md'), 'utf8'), '# Second signed workspace\n');
   assert.equal(await readFile(join(globalSkill, 'SKILL.md'), 'utf8'), '# First signed workspace\n');
+});
+
+test('duplicate native skill roots select the receipt pinned by protected authorization', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-duplicate-native-roots-'));
+  const globalRoot = join(root, 'global');
+  const projectRoot = join(root, 'project');
+  const workspaceId = 'workspace_shared';
+  const oldBundleId = '11111111-1111-4111-8111-111111111111';
+  const currentBundleId = '22222222-2222-4222-8222-222222222222';
+  const oldHash = `sha256:${'a'.repeat(64)}`;
+  const currentHash = `sha256:${'b'.repeat(64)}`;
+  const writeReceipt = async (nativeRoot: string, bundleId: string, receiptHash: string) => {
+    const managed = join(nativeRoot, '.dharma-managed', 'workspaces', workspaceId);
+    await mkdir(join(managed, 'active'), { recursive: true });
+    await writeFile(join(managed, 'ACTIVE_BUNDLE'), bundleId);
+    await writeFile(join(managed, 'active', 'INSTALL_RECEIPT.json'), JSON.stringify({ bundleId, receiptHash }));
+  };
+  await writeReceipt(globalRoot, oldBundleId, oldHash);
+  await writeReceipt(projectRoot, currentBundleId, currentHash);
+
+  const roots = [projectRoot, globalRoot];
+  assert.equal(await nativeSkillRootMatchingAuthorization({
+    roots, workspaceId, bundleId: currentBundleId, receiptHash: currentHash,
+  }), projectRoot);
+  assert.equal(await nativeSkillRootMatchingAuthorization({
+    roots, workspaceId, bundleId: oldBundleId, receiptHash: oldHash,
+  }), globalRoot);
+  assert.equal(await nativeSkillRootMatchingAuthorization({
+    roots, workspaceId, bundleId: currentBundleId, receiptHash: oldHash,
+  }), null);
+
+  await writeReceipt(projectRoot, currentBundleId, oldHash);
+  assert.equal(await nativeSkillRootMatchingAuthorization({
+    roots, workspaceId, bundleId: currentBundleId, receiptHash: currentHash,
+  }), null);
 });
 
 test('Claude uses its project skill when another workspace owns the global skill', async () => {
