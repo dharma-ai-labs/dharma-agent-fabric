@@ -80,6 +80,63 @@ test('root-scoped capture excludes project-native release metadata before traver
   assert.ok(snapshot.manifest.files.every(file => !file.path.includes('.dharma-managed')));
 });
 
+test('root-scoped capture prunes generated worktrees and unapproved outputs before entry limits', async t => {
+  const f = await fixture(t);
+  f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];
+  resign(f.input);
+  await f.put('README.md', '# Repository knowledge');
+  await f.put('.codex/skills/review/SKILL.md', '# Review');
+  await f.put('output/approved/report.md', 'Uncommitted approved finding.');
+  for (let index = 0; index < 50; index += 1) {
+    await f.put(`output/unapproved/report-${index}.md`, 'Not authorized.');
+    await f.put(`.codex-pr-worktrees/run-${index}/README.md`, 'Separate checkout.');
+  }
+  const snapshot = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.deepEqual(snapshot.manifest.files.filter(file => file.role !== 'knowledge').map(file => file.path), [
+    '.codex/skills/review/SKILL.md', 'README.md', 'output/approved/report.md',
+  ]);
+  assert.equal(serializeRepositoryPackageSnapshot(snapshot).includes('Not authorized.'), false);
+  assert.equal(serializeRepositoryPackageSnapshot(snapshot).includes('Separate checkout.'), false);
+  await f.put('output/unapproved/report-0.md', 'Still not authorized.');
+  await f.put('.codex-pr-worktrees/run-0/README.md', 'A changed separate checkout.');
+  const unchanged = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.equal(unchanged.manifest.snapshotHash, snapshot.manifest.snapshotHash);
+});
+
+test('approved output root ignores generated non-document trees before the document budget', async t => {
+  const f = await fixture(t);
+  f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];
+  f.input.sourceAuthorization.policy.approvedOutputFolders = ['output'];
+  resign(f.input);
+  await f.put('README.md', '# Repository knowledge');
+  await f.put('output/reports/lexicon.md', 'Canonical definition with a source.');
+  for (let index = 0; index < 50; index += 1) {
+    await f.put(`output/runs/run-${index}/screenshot.png`, 'generated image');
+  }
+  const snapshot = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.deepEqual(snapshot.manifest.files.filter(file => file.role !== 'knowledge').map(file => file.path), [
+    'README.md', 'output/reports/lexicon.md',
+  ]);
+  await f.put('output/runs/run-0/screenshot.png', 'updated generated image');
+  const unchanged = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.equal(unchanged.manifest.snapshotHash, snapshot.manifest.snapshotHash);
+  for (let index = 0; index < 50; index += 1) {
+    await f.put(`output/reports/report-${index}.md`, `Eligible report ${index}.`);
+  }
+  await assert.rejects(inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } }), /document limit/);
+});
+
+test('approved output traversal keeps a separate hard scan bound', async t => {
+  const f = await fixture(t);
+  f.input.sourceAuthorization.policy.approvedOutputFolders = ['output'];
+  resign(f.input);
+  for (let index = 0; index < 50; index += 1) {
+    await f.put(`output/generated-${index}.png`, 'generated image');
+  }
+  await assert.rejects(inventoryRepositoryPackage({ ...f.input,
+    limits: { maximumScannedSourceEntries: 40 } }), /scan limit/);
+});
+
 test('governed capture preserves native skills and companions alongside repository documents', async t => {
   const f = await fixture(t);
   await f.put('.codex/skills/review/SKILL.md', '# Review\n[Guide](references/procedure.md)');

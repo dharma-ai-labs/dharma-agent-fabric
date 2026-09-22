@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { link, mkdir, mkdtemp, readFile, readdir, rename, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import {
-  inventoryRepositoryPackage, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot,
+  inventoryRepositoryPackage, readRepositoryPackageSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot,
 } from './repositoryPackage.js';
 import { installRepositoryAgentFabricSkill, run } from './index.js';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -53,6 +53,21 @@ test('collecting a candidate preserves every byte and path of an installed share
   assert.deepEqual(JSON.parse(await readFile(resolve(f.workspace, collected.manifestPath), 'utf8')), snapshot.manifest);
   assert.deepEqual(await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot }), collected);
   assert.deepEqual(await treeBytes(resolve(f.workspace, root)), before);
+});
+
+test('snapshot reads accept an alias of the workspace root but reject linked children', async t => {
+  const f = await fixture();
+  const aliasParent = await mkdtemp(resolve(tmpdir(), 'repository-package-alias-'));
+  t.after(() => rm(aliasParent, { recursive: true, force: true }));
+  const alias = resolve(aliasParent, 'workspace');
+  await symlink(f.workspace, alias, 'dir');
+  await f.put('skills/review/SKILL.md', '# Review');
+  const snapshot = await inventoryRepositoryPackage({ ...f, workspace: alias });
+  await writeRepositoryPackageSnapshot({ workspace: alias, snapshot, candidateOnly: true });
+  assert.deepEqual((await readRepositoryPackageSnapshot(alias, snapshot.manifest.snapshotHash)).manifest, snapshot.manifest);
+  await symlink(resolve(f.workspace, 'skills/review/SKILL.md'), resolve(f.workspace, 'skills/linked.md'));
+  const second = await inventoryRepositoryPackage({ ...f, workspace: alias });
+  assert.ok(second.manifest.exclusions.some(entry => entry.reason === 'symlink'));
 });
 
 test('candidate-only collection never installs or replaces the bootstrap skill inventory', async () => {
