@@ -31,6 +31,12 @@ export class RepositorySourceWatcher {
     if (!Number.isSafeInteger(debounceMs) || debounceMs < 1000 || debounceMs > 60000) throw new Error('Invalid repository source debounce.');
     this.debounceMs = debounceMs;
   }
+  seed(fingerprint: string) {
+    if (!HASH.test(fingerprint) || this.#candidate || this.#lastTime !== 0) {
+      throw new Error('Invalid repository source baseline.');
+    }
+    this.#completed = fingerprint;
+  }
   observe(fingerprint: string, now: number): 'unchanged' | 'debouncing' | 'stable' {
     if (!HASH.test(fingerprint) || !Number.isFinite(now) || now < this.#lastTime) {
       this.invalidate();

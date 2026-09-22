@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
+import { readRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
@@ -87,6 +88,15 @@ test('watcher requires a stable debounce and suppresses completed fingerprints',
   assert.equal(watcher.observe(A, 2000), 'unchanged');
   assert.equal(watcher.observe(B, 2001), 'debouncing');
 });
+test('watcher resumes from an integrity-checked persisted source fingerprint', () => {
+  const watcher = new RepositorySourceWatcher(1000);
+  watcher.seed(A);
+  assert.equal(watcher.observe(A, 0), 'unchanged');
+  assert.equal(watcher.observe(B, 1), 'debouncing');
+  assert.equal(watcher.observe(B, 1001), 'stable');
+  assert.throws(() => watcher.seed(A), /Invalid repository source baseline/);
+  assert.throws(() => new RepositorySourceWatcher(1000).seed('unverified'), /Invalid repository source baseline/);
+});
 test('changing content restarts debounce and rejects stale completion', () => {
   const watcher = new RepositorySourceWatcher(1000);
   watcher.observe(A, 0); watcher.observe(B, 999);
@@ -123,6 +133,24 @@ test('relay source scan captures real approved sources only after stable observa
   assert.ok(manifest.files.some((file: { path: string }) => file.path === 'output/approved/report.md'));
   f.setNow(2000);
   assert.equal((await scanRepositorySourceChanges(f.input)).state, 'unchanged');
+});
+test('a restarted relay does not submit unchanged source from its persisted snapshot', async t => {
+  const f = await fixture(t);
+  await scanRepositorySourceChanges(f.input);
+  f.setNow(1000);
+  const collected = await scanRepositorySourceChanges(f.input);
+  assert.ok(collected.persisted);
+  const previous = await readRepositoryPackageSnapshot(f.input.workspace, collected.persisted.snapshotHash);
+  const restarted = new RepositorySourceWatcher(1000);
+  restarted.seed(previous.manifest.sourceFingerprint!);
+  let submissions = 0;
+  const result = await scanRepositorySourceChanges({ ...f.input, watcher: restarted,
+    submitCandidate: async () => { submissions++; return { state: 'accepted' }; } });
+  assert.equal(result.state, 'unchanged');
+  assert.equal(submissions, 0);
+  await f.put('README.md', '# Shared repository\n\nNew approved source.');
+  f.setNow(2000);
+  assert.equal((await scanRepositorySourceChanges({ ...f.input, watcher: restarted })).state, 'debouncing');
 });
 test('candidate submission must succeed before a source fingerprint is completed', async t => {
   const f = await fixture(t);

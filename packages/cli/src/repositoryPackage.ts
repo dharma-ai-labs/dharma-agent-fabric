@@ -732,6 +732,9 @@ async function snapshotFor(workspace: string, hash: string) {
   if (!validated.ok) throw new Error('Managed copies snapshot schema integrity failed.');
   return snapshot;
 }
+export async function readRepositoryPackageSnapshot(workspace: string, hash: string) {
+  return snapshotFor(workspace, hash);
+}
 async function verifyIndex(workspace: string, index: CopyIndex) {
   if (!index || canonicalize(index) !== canonicalize(indexFor((await snapshotFor(workspace, index.snapshotHash)).manifest))) {
     throw new Error('Managed copies ownership index integrity failed.');
