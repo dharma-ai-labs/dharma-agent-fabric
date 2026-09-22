@@ -157,6 +157,17 @@ test('stable CAS serialization deduplicates blobs and excludes capture time and 
   assert.notEqual((await inventoryRepositoryPackage(f)).manifest.snapshotHash, first.manifest.snapshotHash);
 });
 
+test('project-scoped signed skill internals never enter repository source inventory', async () => {
+  const f = await fixture();
+  await f.put('.agents/skills/customer/SKILL.md', '# Customer skill');
+  await f.put('.agents/skills/.dharma-managed/workspaces/local/active/dharma-agent-fabric/SKILL.md', '# Signed release');
+  await f.put('.agents/skills/.dharma-activation-test/staged/dharma-agent-fabric/SKILL.md', '# Staged release');
+  await f.put('.claude/skills/.dharma-managed/workspaces/local/active/dharma-agent-fabric/SKILL.md', '# Signed release');
+  const snapshot = await inventoryRepositoryPackage(f);
+  assert.deepEqual(snapshot.manifest.skills.map(skill => skill.path), ['.agents/skills/customer']);
+  assert.equal(serializeRepositoryPackageSnapshot(snapshot).includes('Signed release'), false);
+});
+
 test('follows relative dependencies once, including cycles, and snapshots only approved outputs', async () => {
   const f = await fixture();
   await f.put('skills/review/SKILL.md', '[Guide](../../docs/a.md)\n[Missing](references/missing.md)');

@@ -2,7 +2,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, chmod, link, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,7 +38,7 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
-import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
+import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.67';
+const VERSION = '0.2.68';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2780,9 +2780,20 @@ export async function receiptAwareProviderCapabilities(
 async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
   const verbose = flags.has('verbose') || flags.has('diagnostic');
   const items = await registry();
+  const repo = flags.get('repo');
+  const workspaceId = flags.get('workspace-id');
+  if (repo !== undefined && typeof repo !== 'string') throw new Error('Repository path must be a string.');
+  if (workspaceId !== undefined && typeof workspaceId !== 'string') throw new Error('Workspace ID must be a string.');
+  const selectedPath = repo === undefined ? null : await realpath(resolve(repo));
+  const selected = items.filter((item) =>
+    (selectedPath === null || item.path === selectedPath)
+    && (workspaceId === undefined || item.workspaceId === workspaceId));
+  if ((repo !== undefined || workspaceId !== undefined) && selected.length === 0) {
+    throw new Error('Requested repository workspace is not registered on this device.');
+  }
   return {
     ok: true,
-    repositories: await Promise.all(items.map(async (item) => ({
+    repositories: await Promise.all(selected.map(async (item) => ({
       workspaceId: item.workspaceId,
       name: item.name,
       repositoryAgentId: item.repositoryAgentId || null,
@@ -2998,7 +3009,7 @@ async function activeSkillAuthorization(
   organizationAgentId: string,
   config: DeviceConfig,
 ) {
-  const root = nativeSkillDirectory(provider);
+  const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId });
   const pointer = resolve(root, '.dharma-managed', 'workspaces', workspaceId, 'ACTIVE_BUNDLE');
   if (!await pathExistsOrThrow(pointer)) return null;
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
@@ -3051,7 +3062,7 @@ async function expiredSkillAuthorizationForReplacement(
   organizationAgentId: string,
   config: DeviceConfig,
 ) {
-  const root = nativeSkillDirectory(provider);
+  const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId });
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
     loadOrCreateDeviceIdentity({
@@ -3134,36 +3145,16 @@ export async function installRepositoryAgentFabricSkill(input: {
     sourceAuthorization: validateRepositorySourceAuthorization(input.sourceAuthorization, input, new Date()) };
   await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
   input = { ...input, workspace: await realpath(input.workspace) };
-  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
+  const ownership = await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
   const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
-  await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
+  if (ownership !== 'signed') await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
   await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
   const skill = `---
 name: dharma-agent-fabric
-description: Connect this repository's coding agents to the organization's Dharma Agent Fabric control plane.
+description: Connect this repository to Dharma Agent Fabric for shared knowledge, signed skills, and team coordination.
 ---
 
-# Dharma Agent Fabric
-
-Use the installed \`dharma\` CLI for organization-scoped agent work. Never print or commit provider credentials, developer tokens, local paths, or raw private trajectories. Transmit content only when the organization policy contains an auditable customer-authorized content grant.
-
-## Required flow
-
-1. Run \`dharma status\`, then run the verification command for the current agent before accepting work:
-   - Codex: \`dharma skills verify --provider codex --workspace .\`
-   - Claude Code: \`dharma skills verify --provider claude --workspace .\`
-   - Agy: \`dharma skills verify --provider agy --workspace .\`
-   Do not substitute a placeholder or shell variable. Stop unless the result reports \`ready: true\`. Restart the provider after the first installation so it discovers the native skill.
-2. Run \`dharma providers list\` to confirm the provider's independently tested evidence, task, continuation, skill, activation, and rollback capabilities.
-3. Keep \`dharma relay start --policy .dharma/approved-policy.json\` running for signed task, evidence, and skill delivery.
-4. Preview the exact automatic disclosure with \`dharma evidence preview --workspace . --provider codex --policy .dharma/approved-policy.json --maximum-sessions 20\` for Codex, replacing only the literal provider value with \`claude\`, \`agy\`, or \`hermes\` when that is the current agent. Confirm the policy mode and consent receipt before syncing.
-5. Run local deterministic self-analysis during capture. Deliver event counts, timing, coverage, failure signals, tool-discipline results, reason codes, and content availability metadata. Do not invent a semantic judgment from metadata. Sessions flagged \`semanticReviewRecommended\` require a policy-authorized evidence request or customer-authorized content mode before server judging.
-6. Use only signed tasks whose organization, device, workspace, authority, budget, and skill pin pass local validation.
-7. For cross-agent help, ask the control plane for a structured, task-bound handoff. Do not open arbitrary chat, shell, file, merge, deploy, or secret authority.
-8. Install only signed skill bundles. Preserve the active bundle receipt and automatic rollback result.
-9. Use the organization MCP connection for role-scoped status, experiments, failures, remediations, rollouts, and profile administration. Reads may run directly. Paid evals, task dispatch, GitHub writes, approvals, rollout, rollback, and profile mutation require the granted scope and explicit confirmation.
-
-The organization contract and API origin are recorded in \`.dharma/agent-fabric.json\`; the logical repository-agent identity is recorded in \`.dharma/repository-agent.json\`. API calls must use the published SDK and a scoped organization token supplied at runtime, never a credential committed to this repository.
+${(await loadAgentFabricOnboardingContract()).markdown}
 `;
   const reference = `# Organization connection
 
@@ -3198,13 +3189,26 @@ The CLI enrolls this device through browser-confirmed Clerk organization consent
     controlBranch: input.controlBranch || null,
     workspaceId: input.workspaceId,
   };
-  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md', skill);
-  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/references/organization.md', reference);
-  await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json',
-    `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`);
-  const knowledge = input.repositoryAgentId ? await initializeRepositoryKnowledge({
-    workspace: input.workspace, organizationId: input.organizationId, repositoryAgentId: input.repositoryAgentId,
-  }) : null;
+  if (ownership !== 'signed') {
+    await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md', skill);
+    await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/references/organization.md', reference);
+    await writeRepositoryInstallerFile(input.workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json',
+      `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId }, null, 2)}\n`);
+  }
+  const knowledge = input.repositoryAgentId
+    ? ownership === 'signed'
+      ? await readRepositoryKnowledgeSource({ workspace: input.workspace,
+        organizationId: input.organizationId, repositoryAgentId: input.repositoryAgentId,
+        repositoryBindingId: input.repositoryBindingId, workspaceId: input.workspaceId }).then((source) => {
+          if (!source || source.kind !== 'delivered_v2_requires_verified_release') {
+            throw new Error('Signed repository skill is missing its retained knowledge release.');
+          }
+          return { catalog: source.catalog, relativePath: '.agents/skills/dharma-agent-fabric/knowledge/CATALOG.json',
+            disposition: 'signed_release_reused' as const };
+        })
+      : await initializeRepositoryKnowledge({ workspace: input.workspace,
+        organizationId: input.organizationId, repositoryAgentId: input.repositoryAgentId })
+    : null;
   const repositoryPackage = await writeRepositoryPackageSnapshot({
     workspace: input.workspace, snapshot: await inventoryRepositoryPackage(input),
   });
@@ -4221,6 +4225,44 @@ export function nativeSkillDirectory(
   return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
 }
 
+export async function nativeSkillDirectoryForWorkspace(input: {
+  provider: ProviderId;
+  workspaceId: string;
+  workspace?: string;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+}) {
+  const globalRoot = nativeSkillDirectory(input.provider, input.env, input.home);
+  const globalPointer = resolve(globalRoot, '.dharma-managed', 'workspaces', input.workspaceId, 'ACTIVE_BUNDLE');
+  if (await pathExists(globalPointer)) return globalRoot;
+  const workspace = input.workspace || (await registry()).find((item) => item.workspaceId === input.workspaceId)?.path;
+  if (!workspace) return globalRoot;
+  const projectRoot = input.provider === 'codex' ? resolve(workspace, '.agents', 'skills')
+    : input.provider === 'claude' ? resolve(workspace, '.claude', 'skills') : null;
+  if (projectRoot) {
+    for (const path of [dirname(projectRoot), projectRoot, resolve(projectRoot, 'dharma-agent-fabric')]) {
+      try {
+        const metadata = await lstat(path);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+          throw new Error('Repository-native skill path must not contain a link or non-directory.');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    const projectPointer = resolve(projectRoot, '.dharma-managed', 'workspaces', input.workspaceId, 'ACTIVE_BUNDLE');
+    if (await pathExists(projectPointer)) return projectRoot;
+  }
+  const markerPath = resolve(globalRoot, 'dharma-agent-fabric', '.dharma-agent-fabric.json');
+  if (!await pathExists(markerPath)) return globalRoot;
+  const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { workspaceId?: unknown };
+  if (marker.workspaceId === input.workspaceId) return globalRoot;
+  // Providers without a project-native directory retain the global root, where
+  // signed ownership checks reject incompatible activation without hiding other providers' readiness.
+  if (!projectRoot) return globalRoot;
+  return projectRoot;
+}
+
 function claudeReadOnlyCommandRules() {
   const launcher = './.dharma/bin/dharma';
   return [
@@ -4314,15 +4356,34 @@ export async function installNativeAgentFabricBootstrap(input: {
   home?: string;
   executeHermes?: HermesSkillExecutor;
 }) {
-  const root = nativeSkillDirectory(input.provider, input.env, input.home);
+  const root = await nativeSkillDirectoryForWorkspace({
+    provider: input.provider, workspaceId: input.workspaceId, workspace: input.workspace,
+    env: input.env, home: input.home,
+  });
   const skillRoot = resolve(root, 'dharma-agent-fabric');
   const marker = resolve(skillRoot, '.dharma-agent-fabric-bootstrap.json');
-  if (await pathExists(skillRoot) && !await pathExists(marker)) {
+  const ownershipPath = resolve(skillRoot, '.dharma-agent-fabric.json');
+  let signed = false;
+  let installerManaged = false;
+  if (await pathExists(ownershipPath)) {
+    const ownership = JSON.parse(await readFile(ownershipPath, 'utf8')) as Record<string, unknown>;
+    signed = ownership.workspaceId === input.workspaceId
+      && ownership.skillId === 'dharma-agent-fabric' && typeof ownership.bundleId === 'string';
+    installerManaged = ownership.workspaceId === input.workspaceId
+      && ownership.managedBy === 'dharma-agent-fabric' && Object.keys(ownership).length === 2;
+  }
+  if (await pathExists(skillRoot) && !await pathExists(marker) && !signed && !installerManaged) {
     throw new Error(`Refusing to replace an unmanaged ${input.provider} skill at ${skillRoot}.`);
   }
   const projectPermissions = input.provider === 'claude'
     ? await installClaudeReadOnlyProjectPermissions(input.workspace)
     : null;
+  if (signed) {
+    if (!await pathExists(resolve(skillRoot, 'SKILL.md'))) throw new Error('Signed native skill is missing its instructions.');
+    return { provider: input.provider, nativeSkillDirectory: root,
+      skillPath: resolve(skillRoot, 'SKILL.md'), activation: 'next_session' as const,
+      verified: true, projectPermissions };
+  }
   const operatingContract = await loadAgentFabricOnboardingContract();
   const skill = `---
 name: dharma-agent-fabric
@@ -4409,10 +4470,6 @@ export async function verifyAgentFabricSkillInstallation(input: {
   const workspace = await realpath(input.workspace);
   const repositorySkillPath = resolve(workspace, '.agents', 'skills', 'dharma-agent-fabric', 'SKILL.md');
   const connectionPath = resolve(workspace, '.dharma', 'agent-fabric.json');
-  const nativeRoot = nativeSkillDirectory(input.provider, input.env, input.home);
-  const nativeSkillPath = resolve(nativeRoot, 'dharma-agent-fabric', 'SKILL.md');
-  const nativeBootstrapMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
-  const nativeSignedMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric.json');
   const repositoryInstalled = await pathExists(repositorySkillPath) && await pathExists(connectionPath);
   let workspaceId: string | undefined;
   let organizationAgentId: string | undefined;
@@ -4423,6 +4480,12 @@ export async function verifyAgentFabricSkillInstallation(input: {
       organizationAgentId = (await registry()).find((item) => item.workspaceId === workspaceId)?.repositoryAgentId || undefined;
     }
   } catch {}
+  const nativeRoot = workspaceId
+    ? await nativeSkillDirectoryForWorkspace({ provider: input.provider, workspaceId, workspace, env: input.env, home: input.home })
+    : nativeSkillDirectory(input.provider, input.env, input.home);
+  const nativeSkillPath = resolve(nativeRoot, 'dharma-agent-fabric', 'SKILL.md');
+  const nativeBootstrapMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric-bootstrap.json');
+  const nativeSignedMarkerPath = resolve(nativeRoot, 'dharma-agent-fabric', '.dharma-agent-fabric.json');
   let bootstrapManaged = false;
   if (await pathExists(nativeSkillPath) && await pathExists(nativeBootstrapMarkerPath)) {
     try {
@@ -4935,7 +4998,9 @@ export async function prepareSkillUpdate(input: {
   const context = await loadSkillSynchronizationPolicy(policyPath, workspaceId, input.store);
   const { workspace, policy, config } = context;
   assertRunning();
-  const destination = nativeSkillDirectory(provider);
+  const destination = await nativeSkillDirectoryForWorkspace({
+    provider, workspaceId, workspace: workspace.path,
+  });
   const fabric = input.fabric || await client();
   assertRunning();
   let activeBundleId: string | null;
@@ -5223,7 +5288,9 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord) {
   return selectInstalledRepositoryKnowledge({ organizationId: config.organizationId,
     repositoryBindingId: workspace.repositoryBindingId, repositoryAgentId: organizationAgentId,
     loadProvider: async provider => {
-      const root = nativeSkillDirectory(provider);
+      const root = await nativeSkillDirectoryForWorkspace({
+        provider, workspaceId: workspace.workspaceId, workspace: workspace.path,
+      });
       if (!await pathExistsOrThrow(resolve(root, '.dharma-managed/workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE'))) return null;
       const anchorInput = { config, workspaceId: workspace.workspaceId, organizationAgentId, provider };
       const active = await loadActiveSkillAuthorizationAnchor(anchorInput);
@@ -5270,7 +5337,9 @@ async function takeCachedSkillUpdate(input: {
         throw new Error('Cached skill tree does not match the signed content hash.');
       }
     }
-    return { workspace, policy, config, destination: nativeSkillDirectory(input.provider), fabric: input.fabric,
+    return { workspace, policy, config, destination: await nativeSkillDirectoryForWorkspace({
+      provider: input.provider, workspaceId: input.workspaceId, workspace: workspace.path,
+    }), fabric: input.fabric,
       rollout: { id: String(cached.record.rolloutId), bundle }, bundle, sourceRoot: cached.sourceRoot,
       repositoryDelivery: undefined, assertCurrent: () => verifySkillBundle(bundle, serverPublicKey) };
   } catch (error) {
@@ -5580,11 +5649,13 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'skills' && subcommand === 'status') {
     const providerValue = required(flags, 'provider');
     if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
-    const root = nativeSkillDirectory(providerValue as ProviderId);
     const workspaceId = required(flags, 'workspace-id');
     const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
     const workspace = (await registry()).find((item) => item.workspaceId === workspaceId);
     if (!workspace) throw new Error('Skill workspace is not registered locally.');
+    const root = await nativeSkillDirectoryForWorkspace({
+      provider: providerValue as ProviderId, workspaceId, workspace: workspace.path,
+    });
     return {
       provider: providerValue,
       workspaceId,

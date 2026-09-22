@@ -7,7 +7,7 @@ import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { canonicalize, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { inventoryRepositoryPackage, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { parseRepositorySourcePolicyResponse, validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { parseRepositorySourcePolicyResponse, repositorySourcePathSafe, validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 
 const NOW = new Date('2026-09-18T09:00:00.000Z');
@@ -62,6 +62,22 @@ test('governed v2 capture includes authorized documents and uncommitted report f
     ['README.md', 'repository_content'], ['docs/nested/terms.md', 'repository_content'],
     ['output/approved/report.md', 'approved_output'],
   ]);
+});
+
+test('root-scoped capture excludes project-native release metadata before traversal', async t => {
+  const f = await fixture(t);
+  assert.equal(repositorySourcePathSafe('.agents/skills/.dharma-managed'), false);
+  assert.equal(repositorySourcePathSafe('.claude/skills/.dharma-activation-test'), false);
+  f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];
+  f.input.sourceAuthorization.policyHash = `sha256:${createHash('sha256')
+    .update(canonicalize(f.input.sourceAuthorization.policy)).digest('hex')}`;
+  await f.put('README.md', '# Approved root document');
+  for (let index = 0; index < 50; index += 1) {
+    await f.put(`.agents/skills/.dharma-managed/workspaces/local/releases/release-${index}/SKILL.md`, '# Internal signed copy');
+  }
+  const snapshot = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.ok(snapshot.manifest.files.some(file => file.path === 'README.md'));
+  assert.ok(snapshot.manifest.files.every(file => !file.path.includes('.dharma-managed')));
 });
 
 test('governed capture preserves native skills and companions alongside repository documents', async t => {

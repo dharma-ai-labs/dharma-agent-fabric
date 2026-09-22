@@ -39,7 +39,7 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
   if (!await checkedPath(workspace, resolve(workspace), 'directory')) throw new Error('Repository installer workspace is missing.');
   const rootExists = await checkedPath(workspace, resolve(workspace, ROOT), 'directory');
   for (const path of FILES) await checkedPath(workspace, resolve(workspace, path), 'file');
-  if (!rootExists) return;
+  if (!rootExists) return 'absent' as const;
   const markerPath = resolve(workspace, MARKER);
   if (!await checkedPath(workspace, markerPath, 'file')) {
     throw new Error('Refusing to replace an unmanaged repository skill at .agents/skills/dharma-agent-fabric.');
@@ -57,12 +57,18 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
     let marker: unknown;
     try { marker = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')); }
     catch { throw new Error('Invalid repository skill ownership marker.'); }
-    if (!marker || typeof marker !== 'object' || Array.isArray(marker)
-      || Object.keys(marker).sort().join(',') !== 'managedBy,workspaceId'
-      || (marker as Record<string, unknown>).managedBy !== 'dharma-agent-fabric'
-      || (marker as Record<string, unknown>).workspaceId !== workspaceId) {
+    if (!marker || typeof marker !== 'object' || Array.isArray(marker)) {
       throw new Error('Invalid or foreign repository skill ownership marker.');
     }
+    const value = marker as Record<string, unknown>;
+    const installerOwned = Object.keys(value).sort().join(',') === 'managedBy,workspaceId'
+      && value.managedBy === 'dharma-agent-fabric' && value.workspaceId === workspaceId;
+    const signedOwned = Object.keys(value).sort().join(',') === 'bundleId,skillId,workspaceId'
+      && value.skillId === 'dharma-agent-fabric' && value.workspaceId === workspaceId
+      && typeof value.bundleId === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.bundleId);
+    if (!installerOwned && !signedOwned) throw new Error('Invalid or foreign repository skill ownership marker.');
+    return signedOwned ? 'signed' as const : 'installer' as const;
   } finally { await handle.close(); }
 }
 
