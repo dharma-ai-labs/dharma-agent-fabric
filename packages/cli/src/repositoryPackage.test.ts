@@ -7,7 +7,8 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import {
-  inventoryRepositoryPackage, readRepositoryPackageSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot,
+  inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot,
+  serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot,
 } from './repositoryPackage.js';
 import { installRepositoryAgentFabricSkill, run } from './index.js';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -68,6 +69,33 @@ test('snapshot reads accept an alias of the workspace root but reject linked chi
   await symlink(resolve(f.workspace, 'skills/review/SKILL.md'), resolve(f.workspace, 'skills/linked.md'));
   const second = await inventoryRepositoryPackage({ ...f, workspace: alias });
   assert.ok(second.manifest.exclusions.some(entry => entry.reason === 'symlink'));
+});
+
+test('relay recovers its verified local source baseline after installing another member release', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/review/SKILL.md', '# Local source skill');
+  const local = await inventoryRepositoryPackage(f);
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: local });
+  const remotePublishedHash = `sha256:${'f'.repeat(64)}`;
+
+  const recovered = await readRepositorySourceBaselineSnapshot(f.workspace, remotePublishedHash);
+  assert.equal(recovered.manifest.snapshotHash, local.manifest.snapshotHash);
+  assert.equal(recovered.manifest.sourceFingerprint, local.manifest.sourceFingerprint);
+
+  await writeFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/MANIFEST.json'), '{}');
+  await assert.rejects(readRepositorySourceBaselineSnapshot(f.workspace, remotePublishedHash), /integrity/);
+});
+
+test('relay does not replace a corrupt published snapshot with a local baseline', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/review/SKILL.md', '# Local source skill');
+  const local = await inventoryRepositoryPackage(f);
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: local });
+  const remotePublishedHash = `sha256:${'f'.repeat(64)}`;
+  await f.put(`.dharma/repository-source/snapshots/${'f'.repeat(64)}.json`, '{}');
+  await assert.rejects(readRepositorySourceBaselineSnapshot(f.workspace, remotePublishedHash), /integrity/);
 });
 
 test('candidate-only collection never installs or replaces the bootstrap skill inventory', async () => {

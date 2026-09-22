@@ -39,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
-import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.72';
+const VERSION = '0.2.73';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5404,7 +5404,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let repositorySourceBaselineAvailable = true;
   if (canonicalWorkspace.repositoryPackage?.snapshotHash) {
     try {
-      const prior = await readRepositoryPackageSnapshot(canonicalWorkspace.path,
+      const prior = await readRepositorySourceBaselineSnapshot(canonicalWorkspace.path,
         canonicalWorkspace.repositoryPackage.snapshotHash);
       if (!prior.manifest.sourceFingerprint) throw new Error('Repository source baseline is incomplete.');
       repositorySourceWatcher.seed(prior.manifest.sourceFingerprint);
