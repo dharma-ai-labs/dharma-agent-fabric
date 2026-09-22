@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { parseRepositorySourcePolicyResponse, validateRepositorySourceAuthorization, type RepositorySourceScope } from './repositorySourceAuthorization.js';
@@ -57,6 +58,23 @@ export class RepositorySourceWatcher {
     this.#candidate = null;
   }
   invalidate() { this.#candidate = null; this.#completed = null; this.#lastTime = 0; }
+}
+
+export class BlockedRepositorySourceRetry {
+  #attempted = new Set<string>();
+  consider(candidateId: string, knowledge: { authority: 'locally_initialized_unsigned' }
+    | { authority: 'unverified_prior_release_reference'; priorRelease: { catalogHash: string; manifestHash: string } } | undefined,
+  installed: { catalogBytes: Buffer; manifestBytes: Buffer } | null): boolean {
+    if (!candidateId || !knowledge || !installed) return false;
+    const catalogHash = `sha256:${createHash('sha256').update(installed.catalogBytes).digest('hex')}`;
+    const manifestHash = `sha256:${createHash('sha256').update(installed.manifestBytes).digest('hex')}`;
+    if (knowledge.authority === 'unverified_prior_release_reference'
+      && knowledge.priorRelease.catalogHash === catalogHash && knowledge.priorRelease.manifestHash === manifestHash) return false;
+    const key = `${candidateId}:${catalogHash}:${manifestHash}`;
+    if (this.#attempted.has(key)) return false;
+    this.#attempted.add(key);
+    return true;
+  }
 }
 
 export async function scanRepositorySourceChanges(input: BoundRepositorySource & {

@@ -7,7 +7,7 @@ import test, { type TestContext } from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { readRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
+import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
   repositoryBindingId: '73a95988-fd64-41ba-a0b9-6c8867d03788', repositoryAgentId: '57f61652-a5eb-46e4-930c-9478cd4a9c31' };
@@ -96,6 +96,23 @@ test('watcher resumes from an integrity-checked persisted source fingerprint', (
   assert.equal(watcher.observe(B, 1001), 'stable');
   assert.throws(() => watcher.seed(A), /Invalid repository source baseline/);
   assert.throws(() => new RepositorySourceWatcher(1000).seed('unverified'), /Invalid repository source baseline/);
+});
+test('blocked source retries once only after a distinct verified knowledge release is installed', () => {
+  const gate = new BlockedRepositorySourceRetry();
+  const local = { authority: 'locally_initialized_unsigned' as const };
+  const first = { catalogBytes: Buffer.from('signed catalog 1'), manifestBytes: Buffer.from('signed manifest 1') };
+  const second = { catalogBytes: Buffer.from('signed catalog 2'), manifestBytes: Buffer.from('signed manifest 2') };
+  assert.equal(gate.consider('candidate-a', local, null), false);
+  assert.equal(gate.consider('candidate-a', local, first), true);
+  assert.equal(gate.consider('candidate-a', local, first), false);
+  const retained = { authority: 'unverified_prior_release_reference' as const, priorRelease: {
+    catalogHash: `sha256:${createHash('sha256').update(first.catalogBytes).digest('hex')}`,
+    manifestHash: `sha256:${createHash('sha256').update(first.manifestBytes).digest('hex')}`,
+  } };
+  assert.equal(gate.consider('candidate-b', retained, first), false);
+  assert.equal(gate.consider('candidate-b', retained, second), true);
+  assert.equal(gate.consider('candidate-b', retained, second), false);
+  assert.equal(gate.consider('candidate-c', retained, second), true);
 });
 test('changing content restarts debounce and rejects stale completion', () => {
   const watcher = new RepositorySourceWatcher(1000);

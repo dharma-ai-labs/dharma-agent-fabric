@@ -41,7 +41,7 @@ import { CLI_USAGE } from './usage.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
-import { fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
+import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.73';
+const VERSION = '0.2.74';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5401,6 +5401,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let nextPolicyRefreshAt = 0;
   let evidencePolicyFresh = false;
   const repositorySourceWatcher = new RepositorySourceWatcher();
+  const blockedRepositorySourceRetry = new BlockedRepositorySourceRetry();
   let repositorySourceBaselineAvailable = true;
   if (canonicalWorkspace.repositoryPackage?.snapshotHash) {
     try {
@@ -5510,36 +5511,6 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
           }
         } catch { repositorySourceFailures += 1; }
       }
-      if (performance.now() >= nextRepositorySourceScanAt) {
-        try {
-          if (!repositorySourceBaselineAvailable) {
-            throw new Error('Repository source baseline is unavailable; refusing an unanchored update.');
-          }
-          if (!canonicalWorkspace.repositoryBindingId || !canonicalWorkspace.repositoryAgentId) {
-            throw new Error('Repository source synchronization requires a complete repository binding.');
-          }
-          const sourceCycle = await scanRepositorySourceChanges({
-            workspace: canonicalWorkspace.path, organizationId: canonicalWorkspace.organizationId,
-            workspaceId: canonicalWorkspace.workspaceId, repositoryBindingId: canonicalWorkspace.repositoryBindingId,
-            repositoryAgentId: canonicalWorkspace.repositoryAgentId, transport: fabric, watcher: repositorySourceWatcher,
-            loadRetainedKnowledge: () => installedRepositoryKnowledge(canonicalWorkspace),
-            submitCandidate: snapshot => synchronizeRepositoryCandidate({ transport: fabric,
-              outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
-              scope: { organizationId: canonicalWorkspace.organizationId,
-                workspaceId: canonicalWorkspace.workspaceId,
-                repositoryBindingId: canonicalWorkspace.repositoryBindingId!,
-                repositoryAgentId: canonicalWorkspace.repositoryAgentId! },
-              snapshot, initialRepository: false }),
-          });
-          repositorySourceState = sourceCycle.state;
-          if (sourceCycle.localMutation) repositorySourceCandidates += 1;
-        } catch {
-          repositorySourceWatcher.invalidate();
-          repositorySourceFailures += 1;
-          repositorySourceState = 'blocked';
-        }
-        nextRepositorySourceScanAt = performance.now() + 60_000;
-      }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh) {
         const evidenceCycle = await deferUnavailableRelayRetention(async () => {
@@ -5589,6 +5560,49 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
           } catch { skillActivationFailures += 1; }
         }
         nextSkillActivationAt = performance.now() + 60_000;
+      }
+      if (performance.now() >= nextRepositorySourceScanAt) {
+        try {
+          if (!repositorySourceBaselineAvailable) {
+            throw new Error('Repository source baseline is unavailable; refusing an unanchored update.');
+          }
+          if (!canonicalWorkspace.repositoryBindingId || !canonicalWorkspace.repositoryAgentId) {
+            throw new Error('Repository source synchronization requires a complete repository binding.');
+          }
+          const installedKnowledge = await installedRepositoryKnowledge(canonicalWorkspace);
+          if (!installedKnowledge && (canonicalWorkspace.repositoryPackage?.generation ?? 0) > 0) {
+            repositorySourceState = 'awaiting_signed_baseline';
+            nextRepositorySourceScanAt = performance.now() + 15_000;
+          } else {
+            if (canonicalWorkspace.repositoryPackage?.state === 'blocked' && canonicalWorkspace.repositoryPackage.snapshotHash) {
+              const blocked = await readRepositorySourceBaselineSnapshot(canonicalWorkspace.path,
+                canonicalWorkspace.repositoryPackage.snapshotHash);
+              if (blockedRepositorySourceRetry.consider(canonicalWorkspace.repositoryPackage.candidateId ?? '',
+                blocked.manifest.knowledge, installedKnowledge)) repositorySourceWatcher.invalidate();
+            }
+            const sourceCycle = await scanRepositorySourceChanges({
+              workspace: canonicalWorkspace.path, organizationId: canonicalWorkspace.organizationId,
+              workspaceId: canonicalWorkspace.workspaceId, repositoryBindingId: canonicalWorkspace.repositoryBindingId,
+              repositoryAgentId: canonicalWorkspace.repositoryAgentId, transport: fabric, watcher: repositorySourceWatcher,
+              loadRetainedKnowledge: () => installedRepositoryKnowledge(canonicalWorkspace),
+              submitCandidate: snapshot => synchronizeRepositoryCandidate({ transport: fabric,
+                outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
+                scope: { organizationId: canonicalWorkspace.organizationId,
+                  workspaceId: canonicalWorkspace.workspaceId,
+                  repositoryBindingId: canonicalWorkspace.repositoryBindingId!,
+                  repositoryAgentId: canonicalWorkspace.repositoryAgentId! },
+                snapshot, initialRepository: false }),
+            });
+            repositorySourceState = sourceCycle.state;
+            if (sourceCycle.localMutation) repositorySourceCandidates += 1;
+            nextRepositorySourceScanAt = performance.now() + (sourceCycle.state === 'debouncing' ? 15_000 : 60_000);
+          }
+        } catch {
+          repositorySourceWatcher.invalidate();
+          repositorySourceFailures += 1;
+          repositorySourceState = 'blocked';
+          nextRepositorySourceScanAt = performance.now() + 60_000;
+        }
       }
       if (flags.has('once')) break;
       if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
