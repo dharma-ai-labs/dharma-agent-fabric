@@ -14,7 +14,8 @@ import { repositorySourcePathAllowed, repositorySourcePathSafe, validateReposito
 export const REPOSITORY_SKILL_ROOTS = ['.agents/skills', '.claude/skills', '.codex/skills', 'skills'] as const;
 const GENERATED_ROOT = '.agents/skills/dharma-agent-fabric';
 const DEFAULT_LIMITS = { maximumEntries: 4096, maximumFiles: 512, maximumFileBytes: 262_144,
-  maximumTotalBytes: 4_194_304, maximumDepth: 12, maximumDependencies: 256 };
+  maximumTotalBytes: 4_194_304, maximumDepth: 12, maximumDependencies: 256,
+  maximumScannedSourceEntries: 65_536 };
 export type RepositoryPackageLimits = typeof DEFAULT_LIMITS;
 export interface RepositoryPackageObservation {
   skillPath: string;
@@ -115,14 +116,15 @@ function safeContent(bytes: Buffer) {
 // Reject every symlink component, not just links escaping the repository.
 async function checkedPath(workspace: string, path: string) {
   pathKey(path);
-  let current = workspace;
+  const root = await realpath(workspace);
+  let current = root;
   for (const part of path.split('/')) {
     current = resolve(current, part);
     const metadata = await lstat(current);
     if (metadata.isSymbolicLink()) throw new Error('Repository package symlink is excluded.');
   }
   const resolved = await realpath(current);
-  const route = relative(workspace, resolved);
+  const route = relative(root, resolved);
   if (route === '..' || route.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(route)) {
     throw new Error('Repository package path escapes its workspace.');
   }
@@ -211,6 +213,9 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
         const names: string[] = [];
         const directory = await opendir(source);
         for await (const entry of directory) {
+          const child = `${path}/${entry.name}`;
+          if (generated(child)) continue;
+          if (prohibited(child)) { exclude(child, 'excluded_path'); continue; }
           names.push(entry.name);
           if (names.length + entries > limits.maximumEntries) throw new Error('Repository package directory entry limit exceeded.');
         }
@@ -236,15 +241,18 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
   async function governedSources() {
     const scoped = new Map<string, RepositoryPackageFile['role']>();
     const witnesses = new Map<string, string>();
-    let count = 0;
-    async function capture(path: string, depth: number, role: 'repository_content' | 'approved_output') {
-      if (++count > limits.maximumEntries || depth > limits.maximumDepth) throw new Error('Repository source traversal limit exceeded.');
-      if (path !== '.' && !repositorySourcePathSafe(path)) { exclude(path, 'excluded_path'); return; }
+    const countedFiles = new Set<string>();
+    let scanned = 0;
+    async function capture(path: string, depth: number, role: 'repository_content' | 'approved_output', broadRoot = false): Promise<boolean> {
+      if (path !== '.' && (!repositorySourcePathSafe(path) || broadRoot && path === 'output')) {
+        exclude(path, 'excluded_path'); return false;
+      }
+      if (depth > limits.maximumDepth) throw new Error('Repository source traversal limit exceeded.');
       let source: string;
       try { source = path === '.' ? workspace : await checkedPath(workspace, path); }
       catch (error) {
-        if (missing(error)) { witnesses.set(path, 'missing'); return; }
-        if (String(error).includes('symlink')) { exclude(path, 'symlink'); witnesses.set(path, 'symlink'); return; }
+        if (missing(error)) { witnesses.set(path, 'missing'); return false; }
+        if (String(error).includes('symlink')) { exclude(path, 'symlink'); witnesses.set(path, 'symlink'); return false; }
         throw error;
       }
       const metadata = await lstat(source);
@@ -252,24 +260,40 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
         const names: string[] = [];
         const directory = await opendir(source);
         for await (const entry of directory) {
-          if (names.length + count >= limits.maximumEntries) throw new Error('Repository source directory entry limit exceeded.');
+          if (++scanned > limits.maximumScannedSourceEntries) throw new Error('Repository source scan limit exceeded.');
+          const child = path === '.' ? entry.name : `${path}/${entry.name}`;
+          if (broadRoot && child === 'output') continue;
+          if (!repositorySourcePathSafe(child)) {
+            if (child.split('/').includes('.codex-pr-worktrees')) continue;
+            exclude(child, 'excluded_path'); continue;
+          }
+          if (entry.isFile() && !sourceContentType(child)) {
+            if (role === 'repository_content') exclude(child, 'unsupported_content_type');
+            continue;
+          }
           names.push(entry.name);
         }
         names.sort(compare);
-        const children = names.map(name => path === '.' ? name : `${path}/${name}`);
-        witnesses.set(path, canonicalize({ ino: metadata.ino, dev: metadata.dev,
-          children: children.filter(repositorySourcePathSafe) }));
-        for (const child of children) await capture(child, depth + 1, role);
+        const children: string[] = [];
+        for (const name of names) {
+          const child = path === '.' ? name : `${path}/${name}`;
+          if (await capture(child, depth + 1, role, broadRoot)) children.push(child);
+        }
+        if (children.length) witnesses.set(path, canonicalize({ ino: metadata.ino, dev: metadata.dev, children }));
+        return children.length > 0;
       } else if (metadata.isFile()) {
+        if (!sourceContentType(path)) {
+          exclude(path, 'unsupported_content_type'); return false;
+        }
+        countedFiles.add(path);
+        if (countedFiles.size > limits.maximumEntries) throw new Error('Repository source document limit exceeded.');
         witnesses.set(path, canonicalize({ ino: metadata.ino, dev: metadata.dev, size: metadata.size,
           mtime: metadata.mtimeMs, ctime: metadata.ctimeMs }));
-        if (!sourceContentType(path)) {
-          exclude(path, 'unsupported_content_type'); return;
-        }
         if (role === 'approved_output' || !scoped.has(path)) scoped.set(path, role);
-      } else { exclude(path, 'not_regular_file'); witnesses.set(path, 'not_regular_file'); }
+        return true;
+      } else { exclude(path, 'not_regular_file'); witnesses.set(path, 'not_regular_file'); return true; }
     }
-    for (const path of authorization!.policy.approvedRepositoryPaths) await capture(path, 0, 'repository_content');
+    for (const path of authorization!.policy.approvedRepositoryPaths) await capture(path, 0, 'repository_content', path === '.');
     for (const path of authorization!.policy.approvedOutputFolders) await capture(path, 0, 'approved_output');
     return { scoped, witnesses: [...witnesses].sort(([a], [b]) => compare(a, b)) };
   }
