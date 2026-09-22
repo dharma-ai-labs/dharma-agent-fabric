@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.75';
+const VERSION = '0.2.76';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3260,10 +3260,20 @@ async function repositorySnapshotCommand(flags: Map<string, string | boolean>, o
       throw new Error('Snapshot --apply requires an installed managed repository skill; use --dry-run before onboarding.');
     });
   }
+  const registeredWorkspace = (await registry()).find(record => record.path === resolve(workspace)
+    && record.organizationId === flags.get('organization-id') && record.workspaceId === flags.get('workspace-id'));
+  const sourceAuthorization = registeredWorkspace?.repositoryAgentId && registeredWorkspace.repositoryBindingId
+    ? await fetchRepositorySourceAuthorization(await client(), {
+      organizationId: registeredWorkspace.organizationId,
+      workspaceId: registeredWorkspace.workspaceId,
+      repositoryAgentId: registeredWorkspace.repositoryAgentId,
+      repositoryBindingId: registeredWorkspace.repositoryBindingId,
+    }) : undefined;
   const snapshot = await inventoryRepositoryPackage({
     workspace, organizationId: required(flags, 'organization-id'), workspaceId: required(flags, 'workspace-id'),
-    repositoryAgentId: (await registry()).find(record => record.path === resolve(workspace)
-      && record.organizationId === flags.get('organization-id') && record.workspaceId === flags.get('workspace-id'))?.repositoryAgentId,
+    repositoryAgentId: registeredWorkspace?.repositoryAgentId,
+    repositoryBindingId: registeredWorkspace?.repositoryBindingId,
+    sourceAuthorization,
     approvedOutputs: outputs as string[],
   });
   const persisted = apply ? await writeRepositoryPackageSnapshot({ workspace, snapshot }) : null;
@@ -5470,6 +5480,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let skillPreparationFailures = 0;
   let skillActivationsCompleted = 0;
   let skillActivationFailures = 0;
+  const skillActivationFailuresByProvider: Partial<Record<ProviderId, number>> = {};
   let nextSkillActivationAt = 0;
   const skillPreparationPump = startSkillPreparationPump({
     prepare: async assertRunning => {
@@ -5602,7 +5613,10 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
                 skillActivationsCompleted += 1;
               });
             });
-          } catch { skillActivationFailures += 1; }
+          } catch {
+            skillActivationFailures += 1;
+            skillActivationFailuresByProvider[adapter.providerId] = (skillActivationFailuresByProvider[adapter.providerId] || 0) + 1;
+          }
         }
         nextSkillActivationAt = performance.now() + 60_000;
       }
@@ -5665,6 +5679,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     evidenceResponsesCompleted, trajectorySyncsCompleted,
     repositorySourceCandidates, repositorySourceFailures, repositorySourceState,
     skillPreparationsCompleted, skillPreparationFailures, skillActivationsCompleted, skillActivationFailures,
+    skillActivationFailuresByProvider,
     sharedRepositoryReady: await repositorySharedReady(canonicalWorkspace),
   };
 }

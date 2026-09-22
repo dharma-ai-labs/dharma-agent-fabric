@@ -33,3 +33,11 @@ test('actual relay consumes a verified cache only after an idle task boundary an
   assert.match(relay, /const prepared = cached \|\| await prepareSkillUpdate\(/);
   assert.ok(relay.indexOf('await takeCachedSkillUpdate(') < relay.indexOf('await activatePreparedSkillUpdate('));
 });
+
+test('relay receipt attributes activation failures to a provider without raw error text', async () => {
+  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const relay = source.slice(source.indexOf('async function relayStart('), source.indexOf('export async function run('));
+  assert.match(relay, /skillActivationFailuresByProvider\[adapter\.providerId\]/);
+  assert.match(relay, /skillActivationFailuresByProvider,/);
+  assert.doesNotMatch(relay, /skillActivationFailureMessage/);
+});
