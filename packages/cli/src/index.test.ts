@@ -32,6 +32,7 @@ import {
   materializeInlineSkillFiles,
   validateSkillBundleSources,
   nativeSkillDirectory,
+  nativeSkillDirectoryForWorkspace,
   normalizeGitRemoteIdentity,
   postTaskOutcome,
   parseCliOptions,
@@ -941,6 +942,9 @@ test('workspace registration reuses a normalized repository identity across loca
     const listed = await run(['repositories', 'list', '--verbose']) as { repositories: Array<Record<string, unknown>> };
     assert.equal(listed.repositories.length, 3);
     assert.equal(listed.repositories.every((entry) => entry.connected === false), true);
+    const selected = await run(['repositories', 'list', '--repo', second]) as { repositories: Array<Record<string, unknown>> };
+    assert.deepEqual(selected.repositories.map((entry) => entry.workspaceId), [right.workspaceId]);
+    await assert.rejects(() => run(['repositories', 'list', '--workspace-id', 'missing']), /not registered/);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
@@ -1072,12 +1076,12 @@ test('repository onboarding skill records scoped API metadata without local path
   });
   const skill = await readFile(join(workspace, result.skillPath), 'utf8');
   const connection = await readFile(join(workspace, result.connectionPath), 'utf8');
-  assert.match(skill, /structured, task-bound handoff/);
-  assert.match(skill, /local deterministic self-analysis/);
+  assert.ok(skill.includes((await loadAgentFabricOnboardingContract()).markdown));
+  assert.match(skill, /bounded, task-related question/);
   assert.match(skill, /dharma skills verify --provider codex --workspace \./);
   assert.match(skill, /dharma skills verify --provider claude --workspace \./);
   assert.match(skill, /dharma skills verify --provider agy --workspace \./);
-  assert.equal(skill.includes('<provider>'), false);
+  assert.doesNotMatch(skill, /--grant|bootstrapGrant|organizationApiToken/);
   assert.match(connection, /workspace-northstar/);
   assert.equal(connection.includes(workspace), false);
   assert.equal(/token|secret/i.test(connection), false);
@@ -1742,13 +1746,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.67');
+      assert.equal(version, '0.2.68');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.67',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.68',
   });
 });
 
@@ -1934,6 +1938,88 @@ test('signed native ownership rejects a foreign workspace marker', async () => {
   assert.equal(verified.ready, false);
   assert.equal(verified.nativeInstalled, false);
   assert.equal(verified.nativeManaged, false);
+});
+
+test('a second Codex workspace uses its repository skill without replacing the first signed skill', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-codex-multiworkspace-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'second-repo');
+  const workspaceId = 'workspace_second';
+  await mkdir(workspace, { recursive: true });
+  const globalSkill = join(nativeSkillDirectory('codex', {}, home), 'dharma-agent-fabric');
+  await mkdir(globalSkill, { recursive: true });
+  await writeFile(join(globalSkill, 'SKILL.md'), '# First signed workspace\n');
+  await writeFile(join(globalSkill, '.dharma-agent-fabric.json'), JSON.stringify({
+    bundleId: '11111111-1111-4111-8111-111111111111',
+    skillId: 'dharma-agent-fabric', workspaceId: 'workspace_first',
+  }));
+  await installRepositoryAgentFabricSkill({
+    workspace, hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_test',
+    workspaceId, policyRevision: 'agent-fabric-policy-v1',
+  });
+  const projectRoot = join(workspace, '.agents', 'skills');
+  assert.equal(await nativeSkillDirectoryForWorkspace({ provider: 'codex', workspaceId, workspace, home }), projectRoot);
+  const installed = await installNativeAgentFabricBootstrap({
+    provider: 'codex', workspace, workspaceId, organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io', home,
+  });
+  assert.equal(installed.nativeSkillDirectory, projectRoot);
+  assert.equal((await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace, home })).ready, true);
+  assert.equal(await readFile(join(globalSkill, 'SKILL.md'), 'utf8'), '# First signed workspace\n');
+  const projectSkill = join(projectRoot, 'dharma-agent-fabric');
+  await writeFile(join(projectSkill, 'SKILL.md'), '# Second signed workspace\n');
+  await writeFile(join(projectSkill, '.dharma-agent-fabric.json'), JSON.stringify({
+    bundleId: '22222222-2222-4222-8222-222222222222', skillId: 'dharma-agent-fabric', workspaceId,
+  }));
+  await installRepositoryAgentFabricSkill({
+    workspace, hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_test',
+    workspaceId, policyRevision: 'agent-fabric-policy-v1',
+  });
+  await installNativeAgentFabricBootstrap({
+    provider: 'codex', workspace, workspaceId, organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io', home,
+  });
+  assert.equal(await readFile(join(projectSkill, 'SKILL.md'), 'utf8'), '# Second signed workspace\n');
+  assert.equal(await readFile(join(globalSkill, 'SKILL.md'), 'utf8'), '# First signed workspace\n');
+});
+
+test('Claude uses its project skill when another workspace owns the global skill', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-claude-multiworkspace-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'second-repo');
+  await mkdir(workspace, { recursive: true });
+  const globalSkill = join(nativeSkillDirectory('claude', {}, home), 'dharma-agent-fabric');
+  await mkdir(globalSkill, { recursive: true });
+  await writeFile(join(globalSkill, 'SKILL.md'), '# First signed workspace\n');
+  await writeFile(join(globalSkill, '.dharma-agent-fabric.json'), JSON.stringify({
+    bundleId: '11111111-1111-4111-8111-111111111111',
+    skillId: 'dharma-agent-fabric', workspaceId: 'workspace_first',
+  }));
+  await installRepositoryAgentFabricSkill({
+    workspace, hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_test',
+    workspaceId: 'workspace_second', policyRevision: 'agent-fabric-policy-v1',
+  });
+  const installed = await installNativeAgentFabricBootstrap({
+    provider: 'claude', workspace, workspaceId: 'workspace_second', organizationId: 'org_test',
+    hqUrl: 'https://www.dharma-ai.io', home,
+  });
+  assert.equal(installed.nativeSkillDirectory, join(workspace, '.claude', 'skills'));
+  assert.equal((await verifyAgentFabricSkillInstallation({ provider: 'claude', workspace, home })).ready, true);
+  assert.equal(await readFile(join(globalSkill, 'SKILL.md'), 'utf8'), '# First signed workspace\n');
+});
+
+test('project-scoped skill resolution rejects a linked native directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-linked-native-root-'));
+  const workspace = join(root, 'repo');
+  const outside = join(root, 'outside');
+  await mkdir(workspace);
+  await mkdir(outside);
+  await symlink(outside, join(workspace, '.claude'));
+  await assert.rejects(
+    () => nativeSkillDirectoryForWorkspace({
+      provider: 'claude', workspaceId: 'workspace_second', workspace, home: join(root, 'home'),
+    }), /must not contain a link/,
+  );
 });
 
 test('native Claude bootstrap installs the bounded project completion policy', async () => {

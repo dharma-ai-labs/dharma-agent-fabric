@@ -85,7 +85,11 @@ function pathKey(value: string) {
   return value;
 }
 function generated(path: string) {
-  return REPOSITORY_SKILL_ROOTS.some(root => path === `${root}/dharma-agent-fabric` || path.startsWith(`${root}/dharma-agent-fabric/`));
+  return REPOSITORY_SKILL_ROOTS.some(root => {
+    const child = path === root ? '' : path.startsWith(`${root}/`) ? path.slice(root.length + 1).split('/')[0] ?? '' : '';
+    return child === 'dharma-agent-fabric' || child === '.dharma-managed'
+      || child.startsWith('.dharma-activation-');
+  });
 }
 function prohibited(path: string) {
   return generated(path) || path.split('/').some(part => /^(?:\.env.*|\.netrc|\.npmrc|\.pypirc|\.git|\.dharma|node_modules|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519)$/i.test(part)
@@ -563,27 +567,37 @@ async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: st
   if (!validated.ok) throw new Error('Repository package manifest schema is invalid.');
   const activeManifestPath = `${GENERATED_ROOT}/MANIFEST.json`;
   const activeManifest = input.candidateOnly ? null : await optionalBytes(workspace, activeManifestPath);
-  // Recognizing a release prevents local mutation; it does not establish trust.
-  const candidateOnly = input.candidateOnly === true || input.snapshot.manifest.schema === 'dharma.repository-package/v3' || (activeManifest !== null
-    && JSON.parse(activeManifest.toString('utf8')).schema === 'dharma.repository-release-manifest/v1');
-  const snapshotRoot = '.dharma/repository-source/snapshots';
-  const snapshotPath = `${snapshotRoot}/${input.snapshot.manifest.snapshotHash.slice(7)}.json`;
-  const candidateManifestPath = `${snapshotRoot}/${input.snapshot.manifest.snapshotHash.slice(7)}.manifest.json`;
-  const manifestPath = candidateOnly ? candidateManifestPath : activeManifestPath;
+  const releaseManifest = activeManifest !== null
+    && JSON.parse(activeManifest.toString('utf8')).schema === 'dharma.repository-release-manifest/v1';
+  const alreadyCandidateOnly = input.candidateOnly === true
+    || input.snapshot.manifest.schema === 'dharma.repository-package/v3' || releaseManifest;
   const existingSkill = await checkedPath(workspace, `${GENERATED_ROOT}/SKILL.md`).then(() => true, error => {
     if (missing(error)) return false;
     throw error;
   });
-  if (existingSkill && !candidateOnly) {
-    let marker;
+  let signedSkill = false;
+  if (existingSkill && !alreadyCandidateOnly) {
+    let marker: Record<string, unknown>;
     try {
       marker = JSON.parse((await readStable(workspace, `${GENERATED_ROOT}/.dharma-agent-fabric.json`, 4096)).toString('utf8'));
     } catch (error) {
       if (String(error).includes('symlink')) throw error;
       throw new Error('Refusing to write into an unmanaged repository skill.');
     }
-    if (marker.managedBy !== 'dharma-agent-fabric') throw new Error('Refusing to write into an unmanaged repository skill.');
+    signedSkill = marker.skillId === 'dharma-agent-fabric'
+      && marker.workspaceId === input.snapshot.manifest.workspaceId
+      && typeof marker.bundleId === 'string';
+    if (!signedSkill && (marker.managedBy !== 'dharma-agent-fabric'
+      || marker.workspaceId !== input.snapshot.manifest.workspaceId)) {
+      throw new Error('Refusing to write into an unmanaged repository skill.');
+    }
   }
+  // Recognizing a release prevents local mutation; it does not establish trust.
+  const candidateOnly = alreadyCandidateOnly || signedSkill;
+  const snapshotRoot = '.dharma/repository-source/snapshots';
+  const snapshotPath = `${snapshotRoot}/${input.snapshot.manifest.snapshotHash.slice(7)}.json`;
+  const candidateManifestPath = `${snapshotRoot}/${input.snapshot.manifest.snapshotHash.slice(7)}.manifest.json`;
+  const manifestPath = candidateOnly ? candidateManifestPath : activeManifestPath;
   let current = '';
   for (const part of posix.dirname(snapshotPath).split('/')) {
     current = current ? `${current}/${part}` : part;
