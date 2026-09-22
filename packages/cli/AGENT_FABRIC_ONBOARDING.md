@@ -73,6 +73,8 @@ Apply signed releases at a safe task or session boundary. Running work stays pin
 
 On failure, classify the stage: provider readiness, enrollment, authority, repository identity, source policy, package convergence, relay connectivity, signing, delivery, or activation. Retain the last verified release. Use supported retry, reconciliation, rollback, or browser-authorized re-enrollment; never edit trust files, extend an expired key, create a replacement organization, or manufacture a success receipt.
 
+After the recipient has approved and the device is enrolled, an `agent_fabric_onboarding_*` stage error may be resumed without the spent grant. From the same repository and secure device home, use the exact pinned CLI release with `bootstrap --resume --complete`, the original portal, organization, and policy revision, and no grant or enrollment-replacement flag. Read its final JSON receipt. Do not use this path for a missing device, wrong organization or portal, revoked authority, signing failure, or unrelated error. Do not run a new bootstrap redemption or create a second organization or device to repair an incomplete package.
+
 An expired bootstrap grant requires a new private setup envelope. An expired device trust anchor requires normal browser-authorized re-enrollment. Revoked policy or membership must remain revoked. Cross-tenant, cross-repository, and stale-recipient requests must fail closed.
 
 ## 9. Report readiness
