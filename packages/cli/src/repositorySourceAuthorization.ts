@@ -83,7 +83,7 @@ export function repositorySourcePathSafe(path: string): boolean {
   return path.length >= 1 && path.length <= 250 && path.split('/').every(part =>
     /^[A-Za-z0-9._ -]{1,160}$(?![\s\S])/.test(part) && part !== '.' && part !== '..' && !/[. ]$/.test(part)
     && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
-    && !/^(?:\.env.*|\.netrc|\.npmrc|\.pypirc|\.git|\.dharma|\.dharma-managed|\.dharma-activation-.*|\.codex-pr-worktrees|node_modules|dist|build|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519)$/i.test(part)
+    && !/^(?:\.env.*|\.netrc|\.npmrc|\.pypirc|\.git|\.dharma|\.dharma-managed|\.dharma-activation-.*|\.codex-pr-worktrees|\.worktrees|node_modules|dist|build|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519)$/i.test(part)
     && !/(?:^|[._ -])(?:secrets?|credentials?|passwords?|private[-_ ]?keys?|keystore)(?:[._ -]|$)/i.test(part)
     && !/\.(?:pem|key|p12|pfx|jks|kdbx)$/i.test(part))
     && !SKILL_ROOTS.some(root => path.toLowerCase() === `${root}/dharma-agent-fabric`
