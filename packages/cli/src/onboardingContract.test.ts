@@ -14,3 +14,16 @@ test('the installed onboarding contract forbids product-code workarounds', async
   assert.match(contract, /exact failed stage, non-sensitive error, and correlation ID/i);
   assert.match(contract, /supported retry, reconciliation, rollback, or browser-authorized re-enrollment/i);
 });
+
+test('the installed guide names the supported knowledge and peer workflow', async () => {
+  const contract = await readFile(contractUrl, 'utf8');
+
+  assert.match(contract, /repositories snapshot --workspace \. --organization-id <organization-id> --workspace-id <workspace-id> --dry-run/);
+  assert.match(contract, /repositories role-discover --workspace-id <workspace-id> --category <category>/);
+  assert.match(contract, /repositories ask --workspace-id <workspace-id> --category <category> --question/);
+  assert.match(contract, /repositories reply --workspace-id <workspace-id> --question-id <question-id>/);
+  assert.match(contract, /reads the response rather than manually sending one/);
+  assert.match(contract, /active signed release and its source references/);
+  assert.match(contract, /source edit, successful upload, or local snapshot alone is not publication/);
+  assert.doesNotMatch(contract, /dhab_[A-Za-z0-9_-]+/);
+});
