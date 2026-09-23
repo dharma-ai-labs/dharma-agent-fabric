@@ -107,6 +107,25 @@ test('root-scoped capture prunes generated worktrees and unapproved outputs befo
   assert.equal(unchanged.manifest.snapshotHash, snapshot.manifest.snapshotHash);
 });
 
+test('root-scoped capture prunes generated indexes and context caches before source limits', async t => {
+  const f = await fixture(t);
+  assert.equal(repositorySourcePathSafe('.gitnexus/parse-cache/result.json'), false);
+  assert.equal(repositorySourcePathSafe('.context/cache/result.json'), false);
+  f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];
+  resign(f.input);
+  await f.put('README.md', '# Repository knowledge');
+  for (let index = 0; index < 50; index += 1) {
+    await f.put(`.gitnexus/parse-cache/result-${index}.json`, 'x'.repeat(300_000));
+    await f.put(`.context/cache/result-${index}.json`, 'x'.repeat(300_000));
+  }
+  const snapshot = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.deepEqual(snapshot.manifest.files.filter(file => file.role !== 'knowledge').map(file => file.path), ['README.md']);
+  await f.put('.gitnexus/parse-cache/result-0.json', 'changed');
+  await f.put('.context/cache/result-0.json', 'changed');
+  const unchanged = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
+  assert.equal(unchanged.manifest.snapshotHash, snapshot.manifest.snapshotHash);
+});
+
 test('approved output root ignores generated non-document trees before the document budget', async t => {
   const f = await fixture(t);
   f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];

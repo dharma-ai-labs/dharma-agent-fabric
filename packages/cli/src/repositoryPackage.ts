@@ -93,7 +93,7 @@ function generated(path: string) {
   });
 }
 function prohibited(path: string) {
-  return generated(path) || path.split('/').some(part => /^(?:\.env.*|\.netrc|\.npmrc|\.pypirc|\.git|\.dharma|node_modules|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519)$/i.test(part)
+  return generated(path) || path.split('/').some(part => /^(?:\.env.*|\.netrc|\.npmrc|\.pypirc|\.git|\.gitnexus|\.context|\.dharma|node_modules|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519)$/i.test(part)
     || /(?:^|[._ -])(?:secrets?|credentials?|passwords?|private[-_ ]?keys?|keystore)(?:[._ -]|$)/i.test(part)
     || /\.(?:pem|key|p12|pfx|jks|kdbx)$/i.test(part));
 }
@@ -264,7 +264,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
           const child = path === '.' ? entry.name : `${path}/${entry.name}`;
           if (broadRoot && child === 'output') continue;
           if (!repositorySourcePathSafe(child)) {
-            if (child.split('/').some(part => ['.codex-pr-worktrees', '.worktrees'].includes(part.toLowerCase()))) continue;
+            if (child.split('/').some(part => ['.codex-pr-worktrees', '.worktrees', '.gitnexus', '.context'].includes(part.toLowerCase()))) continue;
             exclude(child, 'excluded_path'); continue;
           }
           if (entry.isFile() && !sourceContentType(child)) {
