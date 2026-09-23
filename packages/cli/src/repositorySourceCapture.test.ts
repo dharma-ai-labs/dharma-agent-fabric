@@ -82,6 +82,7 @@ test('root-scoped capture excludes project-native release metadata before traver
 
 test('root-scoped capture prunes generated worktrees and unapproved outputs before entry limits', async t => {
   const f = await fixture(t);
+  assert.equal(repositorySourcePathSafe('.worktrees/peer/README.md'), false);
   f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];
   resign(f.input);
   await f.put('README.md', '# Repository knowledge');
@@ -90,6 +91,7 @@ test('root-scoped capture prunes generated worktrees and unapproved outputs befo
   for (let index = 0; index < 50; index += 1) {
     await f.put(`output/unapproved/report-${index}.md`, 'Not authorized.');
     await f.put(`.codex-pr-worktrees/run-${index}/README.md`, 'Separate checkout.');
+    await f.put(`.worktrees/run-${index}/README.md`, 'Another Git worktree.');
   }
   const snapshot = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
   assert.deepEqual(snapshot.manifest.files.filter(file => file.role !== 'knowledge').map(file => file.path), [
@@ -97,8 +99,10 @@ test('root-scoped capture prunes generated worktrees and unapproved outputs befo
   ]);
   assert.equal(serializeRepositoryPackageSnapshot(snapshot).includes('Not authorized.'), false);
   assert.equal(serializeRepositoryPackageSnapshot(snapshot).includes('Separate checkout.'), false);
+  assert.equal(serializeRepositoryPackageSnapshot(snapshot).includes('Another Git worktree.'), false);
   await f.put('output/unapproved/report-0.md', 'Still not authorized.');
   await f.put('.codex-pr-worktrees/run-0/README.md', 'A changed separate checkout.');
+  await f.put('.worktrees/run-0/README.md', 'A changed Git worktree.');
   const unchanged = await inventoryRepositoryPackage({ ...f.input, limits: { maximumEntries: 40 } });
   assert.equal(unchanged.manifest.snapshotHash, snapshot.manifest.snapshotHash);
 });
