@@ -56,6 +56,7 @@ import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repository
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
+import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 
 const VERSION = '0.2.80';
 const USAGE = CLI_USAGE;
@@ -5703,6 +5704,39 @@ export async function run(argv: string[]): Promise<Output> {
   const [command, subcommand] = positional;
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
+  if (command === 'demo' && ['connect', 'status'].includes(String(subcommand))) {
+    const hqUrl = normalizeHqUrl(portalUrl(flags));
+    const organizationId = required(flags, 'organization-id');
+    const repositoryId = required(flags, 'repository-id');
+    const normalizedRepository = required(flags, 'normalized-repository');
+    const workspace = await realpath(String(flags.get('workspace') || '.'));
+    const root = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
+    if (!root) throw new Error('Demo device setup must run inside the exact Git repository.');
+    const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+    if (!remote || normalizeGitRemoteIdentity(remote) !== normalizedRepository) {
+      throw new Error('Local Git remote does not match the private Demo repository binding.');
+    }
+    if (flags.has('dry-run')) return { ok: true, stage: 'demo_device_plan',
+      organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
+      repositoryPackageState: 'not_connected' };
+    const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
+    const scope = {
+      hqUrl, organizationId, repositoryId, normalizedRepository,
+      installationId: await loadOrCreateInstallationId(), stateRoot: dharmaHome(),
+    };
+    const connected = subcommand === 'status'
+      ? await verifyDemoDevice(scope)
+      : await connectDemoDevice({
+      ...scope, grant: grant!,
+      deviceName: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
+      platform: await platform(),
+    }, { onApprovalRequired: async (url) => {
+      if (!flags.has('no-browser')) await openVerificationUri(url);
+      process.stderr.write(`Approve this exact Demo device in your signed-in Dharma session: ${url}\n`);
+    } });
+    const { configPath: _configPath, ...receipt } = connected;
+    return receipt;
+  }
   if (command === 'bootstrap') return bootstrap(flags);
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
