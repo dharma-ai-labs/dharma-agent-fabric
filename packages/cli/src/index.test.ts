@@ -74,7 +74,7 @@ import {
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
-import { buildTrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { buildTrajectoryCapsule, trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { CLI_USAGE } from './usage.js';
 import {
@@ -1553,6 +1553,81 @@ test('oversized queued current-device revision is retired only after checking th
   assert.equal(pending.length, 1);
 });
 
+test('queued native recipient paths retire only an unsent revision without uploading it', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-recipient-path-capsule-'));
+  const signed = signedPolicyAuthorization({
+    revision: 'content-v1', evidence: {
+      automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent-recipient', allowedContentClasses: ['native_provider_payload'] },
+      maximumCapsuleBytes: 500_000, maximumDailyUploadBytes: 50_000_000,
+    },
+  });
+  const base = await materializeWorkspacePolicy({
+    workspace, organizationId: 'org_northstar', revision: 'portal-bootstrap',
+    serverPolicyAuthorization: signed.envelope, serverPublicKeyEd25519: signed.publicKeyEd25519,
+    workspaceId: 'workspace-northstar', secureStore: memorySecureStore(),
+  });
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId: '22222222-2222-4222-8222-222222222222',
+    workspaceId: 'workspace-northstar', policy: base.policy,
+    session: {
+      provider: 'codex', sessionId: 'recipient-path-pending', sourcePath: '/private/codex.jsonl',
+      workspace: '/repo', coverage: 'observed', startedAt: '2026-09-24T00:00:00.000Z',
+      endedAt: '2026-09-24T00:00:01.000Z',
+      records: [{ native: { type: 'tool_call', payload: { recipient: 'peer' } }, sourcePath: '/private/codex.jsonl',
+        line: 1, workspace: '/repo', timestamp: '2026-09-24T00:00:00.000Z', kind: 'tool_call' }],
+    },
+    rawContentId: `sha256:${'b'.repeat(64)}`, rawBytes: 32,
+  });
+  const native = capsule.events[0]!.payload.nativeProviderPayload as { payload: { recipient: string } };
+  native.payload.recipient = '/home';
+  capsule.capsuleHash = trajectoryCapsuleHash(capsule);
+  const pending = [{ trajectoryId: capsule.trajectoryId, revision: 1, capsule }];
+  const discarded: string[] = [];
+  let synced = 0;
+  let head: { revision: number; capsuleHash: string } | null = null;
+  let unavailable = false;
+  const vault = {
+    listPendingCapsuleSyncs: async () => [...pending],
+    markCapsuleSynced: () => { synced += 1; pending.length = 0; },
+    discardPendingCapsuleSync: (_trajectoryId: string, _revision: number, reason: string) => {
+      discarded.push(reason); pending.length = 0;
+    },
+  };
+  const fabric = {
+    config: { organizationId: 'org_northstar', deviceId: capsule.deviceId },
+    getTrajectoryHead: async () => {
+      if (unavailable) throw new Error('provider unavailable');
+      return { trajectoryId: capsule.trajectoryId, head };
+    },
+    syncTrajectory: async () => { throw new Error('path-bearing capsule must not be uploaded'); },
+  };
+
+  assert.equal(await syncPendingRetentionCapsules(vault as never, fabric as never,
+    base.policy, 'workspace-northstar'), 0);
+  assert.deepEqual(discarded, ['local_path_disclosure_superseded']);
+  assert.equal(synced, 0);
+  assert.equal(native.payload.recipient, '/home');
+
+  pending.push({ trajectoryId: capsule.trajectoryId, revision: 1, capsule });
+  head = { revision: 1, capsuleHash: capsule.capsuleHash };
+  assert.equal(await syncPendingRetentionCapsules(vault as never, fabric as never,
+    base.policy, 'workspace-northstar'), 1);
+  assert.equal(synced, 1);
+  assert.deepEqual(discarded, ['local_path_disclosure_superseded']);
+
+  pending.push({ trajectoryId: capsule.trajectoryId, revision: 1, capsule });
+  head = { revision: 2, capsuleHash: capsule.capsuleHash };
+  await assert.rejects(() => syncPendingRetentionCapsules(vault as never, fabric as never,
+    base.policy, 'workspace-northstar'), /conflicts with the accepted server head/);
+  assert.equal(pending.length, 1);
+
+  head = null;
+  unavailable = true;
+  await assert.rejects(() => syncPendingRetentionCapsules(vault as never, fabric as never,
+    base.policy, 'workspace-northstar'), /provider unavailable/);
+  assert.equal(pending.length, 1);
+});
+
 test('recovered task evidence distinguishes a superseded policy from the current revision', () => {
   const capsule = { redactionReceipt: { policyRevision: 'policy-v1' } } as never;
   assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v2' }), true);
@@ -1868,13 +1943,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.87');
+      assert.equal(version, '0.2.88');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.87',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.88',
   });
 });
 
