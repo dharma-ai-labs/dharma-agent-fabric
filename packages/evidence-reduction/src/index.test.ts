@@ -555,7 +555,20 @@ test('bounded expansion redacts file URIs and local paths while preserving web U
   assert.equal(redacted.includes('https://dharma-ai.io/docs'), true);
   assert.equal(redacted.includes('vscode://settings'), true);
   assert.equal(stats.classes.has('local_path'), true);
-  assert.equal(stats.redactedValues, 7);
+  assert.equal(stats.redactedValues, 6);
+});
+
+test('slash-separated condition descriptions are not mistaken for absolute paths', async () => {
+  const { redactValue } = await import('./index.js');
+  const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const redacted = String(redactValue(
+    'The boots are worn/dirty/scuffed. Inspect /home/alice/order-notes before release.',
+    stats,
+  ));
+  assert.equal(redacted,
+    'The boots are worn/dirty/scuffed. Inspect [REDACTED:local_path] before release.');
+  assert.equal(stats.redactedValues, 1);
+  assert.deepEqual([...stats.classes], ['local_path']);
 });
 
 test('customer-authorized content never discloses local paths when identity pseudonymization is disabled', async () => {
