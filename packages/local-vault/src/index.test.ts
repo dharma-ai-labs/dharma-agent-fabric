@@ -224,6 +224,8 @@ test('vault returns only the requested immutable capsule revision', async () => 
 test('vault discards only local revisions newer than the accepted server head', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-reconcile-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const raw = Buffer.from('encrypted source evidence retained across recapture');
+  const rawContentId = await vault.putBlob(raw, 'raw-provider-turn');
   for (const revision of [1, 2, 3]) {
     const value = { trajectoryId: 'trajectory-reconcile', revision };
     const blobContentId = await vault.putBlob(Buffer.from(JSON.stringify(value)), 'trajectory-capsule');
@@ -233,6 +235,10 @@ test('vault discards only local revisions newer than the accepted server head', 
   assert.equal(await vault.discardCapsuleRevisionsAfter('trajectory-reconcile', 1), 2);
   assert.equal(vault.getLatestCapsuleMetadata('trajectory-reconcile')?.revision, 1);
   assert.equal((await vault.listPendingCapsuleSyncs()).length, 1);
+  assert.deepEqual(await vault.getBlob(rawContentId), raw);
+  assert.deepEqual(await vault.getCapsule('trajectory-reconcile', 1), {
+    trajectoryId: 'trajectory-reconcile', revision: 1,
+  });
   vault.close();
 });
 

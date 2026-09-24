@@ -1477,6 +1477,82 @@ test('queued capsules from a replaced device are retained locally but never sent
   assert.equal(old.deviceId, '11111111-1111-4111-8111-111111111111');
 });
 
+test('oversized queued current-device revision is retired only after checking the accepted head', async () => {
+  const base = await materializeWorkspacePolicy({
+    workspace: await mkdtemp(join(tmpdir(), 'dharma-oversized-capsule-')),
+    organizationId: 'org_northstar', revision: 'local',
+  });
+  const session = {
+    provider: 'codex' as const, sessionId: 'oversized-pending', sourcePath: '/private/codex.jsonl',
+    workspace: '/repo', coverage: 'observed' as const,
+    startedAt: '2026-09-24T00:00:00.000Z', endedAt: '2026-09-24T00:00:01.000Z',
+    records: [{ native: { type: 'message' }, sourcePath: '/private/codex.jsonl', line: 1,
+      workspace: '/repo', timestamp: '2026-09-24T00:00:00.000Z', kind: 'metadata' as const }],
+  };
+  const previousRevisionHash = `sha256:${'a'.repeat(64)}`;
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId: '22222222-2222-4222-8222-222222222222',
+    workspaceId: 'workspace-northstar', session, policy: base.policy,
+    rawContentId: `sha256:${'b'.repeat(64)}`, rawBytes: 32,
+    revision: 4, previousRevisionHash,
+  });
+  const capsuleBytes = Buffer.byteLength(canonicalize(capsule));
+  const policyWithSmallerCap = {
+    ...base.policy,
+    evidence: { ...base.policy.evidence, maximumCapsuleBytes: capsuleBytes - 1 },
+  };
+  const pending = [{ trajectoryId: capsule.trajectoryId, revision: 4, capsule }];
+  const discarded: string[] = [];
+  let synced = 0;
+  let head: { revision: number; capsuleHash: string } | null = {
+    revision: 3, capsuleHash: previousRevisionHash,
+  };
+  let headUnavailable = false;
+  const vault = {
+    listPendingCapsuleSyncs: async () => [...pending],
+    markCapsuleSynced: () => { synced += 1; pending.length = 0; },
+    discardPendingCapsuleSync: (_trajectoryId: string, _revision: number, reason: string) => {
+      discarded.push(reason); pending.length = 0;
+    },
+  };
+  const fabric = {
+    config: { organizationId: 'org_northstar', deviceId: capsule.deviceId },
+    getTrajectoryHead: async () => {
+      if (headUnavailable) throw new Error('provider unavailable');
+      return { trajectoryId: capsule.trajectoryId, head };
+    },
+    syncTrajectory: async () => { throw new Error('oversized capsule must not be uploaded'); },
+  };
+
+  assert.equal(await syncPendingRetentionCapsules(vault as never, fabric as never,
+    policyWithSmallerCap, 'workspace-northstar'), 0);
+  assert.deepEqual(discarded, ['capsule_size_limit_superseded']);
+  assert.equal(synced, 0);
+  assert.equal(capsule.capsuleHash, buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId: capsule.deviceId, workspaceId: 'workspace-northstar',
+    session, policy: base.policy, rawContentId: `sha256:${'b'.repeat(64)}`, rawBytes: 32,
+    revision: 4, previousRevisionHash,
+  }).capsuleHash);
+
+  pending.push({ trajectoryId: capsule.trajectoryId, revision: 4, capsule });
+  head = { revision: 4, capsuleHash: capsule.capsuleHash };
+  assert.equal(await syncPendingRetentionCapsules(vault as never, fabric as never,
+    policyWithSmallerCap, 'workspace-northstar'), 1);
+  assert.equal(synced, 1);
+  assert.deepEqual(discarded, ['capsule_size_limit_superseded']);
+
+  pending.push({ trajectoryId: capsule.trajectoryId, revision: 4, capsule });
+  headUnavailable = true;
+  await assert.rejects(() => syncPendingRetentionCapsules(vault as never, fabric as never,
+    policyWithSmallerCap, 'workspace-northstar'), /provider unavailable/);
+  assert.equal(pending.length, 1);
+  headUnavailable = false;
+  head = { revision: 2, capsuleHash: previousRevisionHash };
+  await assert.rejects(() => syncPendingRetentionCapsules(vault as never, fabric as never,
+    policyWithSmallerCap, 'workspace-northstar'), /conflicts with the accepted server head/);
+  assert.equal(pending.length, 1);
+});
+
 test('recovered task evidence distinguishes a superseded policy from the current revision', () => {
   const capsule = { redactionReceipt: { policyRevision: 'policy-v1' } } as never;
   assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v2' }), true);
@@ -1792,13 +1868,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.86');
+      assert.equal(version, '0.2.87');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.86',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.87',
   });
 });
 

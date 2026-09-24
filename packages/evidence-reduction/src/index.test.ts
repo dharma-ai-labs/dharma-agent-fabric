@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
-import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { buildTrajectoryCapsule, trajectoryCapsuleHash } from './index.js';
 
@@ -614,6 +614,46 @@ test('identical source sessions produce an identical capsule revision hash', () 
   assert.equal(first.createdAt, session.endedAt);
   assert.equal(second.capsuleHash, first.capsuleHash);
   assert.notEqual(otherWorkspace.trajectoryId, first.trajectoryId);
+});
+
+test('capsule sizing includes its final hash at the exact policy boundary', () => {
+  const session = {
+    provider: 'codex' as const,
+    sessionId: 'session_size_boundary',
+    sourcePath: '/private/large.jsonl',
+    workspace: '/repo',
+    coverage: 'observed' as const,
+    startedAt: '2026-09-24T00:00:00.000Z',
+    endedAt: '2026-09-24T00:00:01.000Z',
+    records: Array.from({ length: 1_800 }, (_, index) => ({
+      native: { type: 'assistant_message', text: 'x'.repeat(index + 1) },
+      sourcePath: '/private/large.jsonl', line: index + 1, workspace: '/repo',
+      timestamp: '2026-09-24T00:00:01.000Z', kind: 'assistant_message',
+    })),
+  };
+  const input = {
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
+    rawContentId: `sha256:${'b'.repeat(64)}`, rawBytes: 700_000,
+    policy: { ...policy, evidence: { ...policy.evidence, maximumCapsuleBytes: 1_000_000 } },
+  };
+  const unbounded = buildTrajectoryCapsule(input);
+  const { capsuleHash: _hash, ...unsigned } = unbounded;
+  const unsignedBytes = Buffer.byteLength(canonicalize(unsigned));
+  assert.ok(unsignedBytes > 500_000);
+
+  const atLimit = buildTrajectoryCapsule({
+    ...input, policy: { ...input.policy, evidence: { ...input.policy.evidence, maximumCapsuleBytes: 500_000 } },
+  });
+  assert.ok(atLimit.events.length < unbounded.events.length);
+  assert.ok(Buffer.byteLength(canonicalize(atLimit)) <= 500_000);
+  assert.ok(Buffer.byteLength(JSON.stringify(atLimit)) <= 500_000);
+  assert.equal(atLimit.capsuleHash, trajectoryCapsuleHash(atLimit));
+
+  const hashOverheadBoundary = buildTrajectoryCapsule({
+    ...input, policy: { ...input.policy, evidence: { ...input.policy.evidence, maximumCapsuleBytes: unsignedBytes } },
+  });
+  assert.ok(hashOverheadBoundary.events.length < unbounded.events.length);
+  assert.ok(Buffer.byteLength(canonicalize(hashOverheadBoundary)) <= unsignedBytes);
 });
 
 test('a changed session can produce a hash-linked next revision', () => {
