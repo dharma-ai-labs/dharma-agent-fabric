@@ -59,7 +59,7 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 
-const VERSION = '0.2.88';
+const VERSION = '0.2.89';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3019,7 +3019,8 @@ async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | '
     return discoverRepositoryRoleMetadata(transport, scope, category);
   }
   if (action === 'ask') return askRepositoryRoleQuestion({ transport, scope,
-    category: required(flags, 'category'), question: required(flags, 'question') });
+    category: required(flags, 'category'), question: required(flags, 'question'),
+    targetEndpointId: typeof flags.get('target-endpoint-id') === 'string' ? String(flags.get('target-endpoint-id')) : undefined });
   return readRepositoryRoleReply({ transport, scope, questionId: required(flags, 'question-id') });
 }
 

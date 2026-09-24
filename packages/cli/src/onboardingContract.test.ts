@@ -20,7 +20,7 @@ test('the installed guide names the supported knowledge and peer workflow', asyn
 
   assert.match(contract, /repositories snapshot --workspace \. --organization-id <organization-id> --workspace-id <workspace-id> --dry-run/);
   assert.match(contract, /repositories role-discover --workspace-id <workspace-id> --category <category>/);
-  assert.match(contract, /repositories ask --workspace-id <workspace-id> --category <category> --question/);
+  assert.match(contract, /repositories ask --workspace-id <workspace-id> --target-endpoint-id <endpoint-id> --category <category> --question/);
   assert.match(contract, /repositories reply --workspace-id <workspace-id> --question-id <question-id>/);
   assert.match(contract, /reads the response rather than manually sending one/);
   assert.match(contract, /active signed release and its source references/);
