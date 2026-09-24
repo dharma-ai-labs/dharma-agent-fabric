@@ -119,6 +119,12 @@ test('Demo command dry-run verifies the local repository without a grant or devi
       '--portal-url', hqUrl, '--organization-id', orgId,
       '--repository-id', repositoryId, '--normalized-repository', normalizedRepository]);
     assert.equal((receipt as { stage: string }).stage, 'demo_device_plan');
+    for (const command of ['status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume']) {
+      const peerPlan = await run(['demo', command, '--dry-run', '--workspace', root,
+        '--portal-url', hqUrl, '--organization-id', orgId,
+        '--repository-id', repositoryId, '--normalized-repository', normalizedRepository]);
+      assert.equal((peerPlan as { stage: string }).stage, 'demo_device_plan');
+    }
     await assert.rejects(stat(resolve(home, 'installation.json')), { code: 'ENOENT' });
     await assert.rejects(run(['demo', 'connect', '--dry-run', '--workspace', root,
       '--portal-url', hqUrl, '--organization-id', orgId,

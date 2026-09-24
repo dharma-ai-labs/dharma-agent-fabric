@@ -57,8 +57,9 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
+import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 
-const VERSION = '0.2.82';
+const VERSION = '0.2.83';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5704,7 +5705,8 @@ export async function run(argv: string[]): Promise<Output> {
   const [command, subcommand] = positional;
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
-  if (command === 'demo' && ['connect', 'status'].includes(String(subcommand))) {
+  if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume']
+    .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
     const repositoryId = required(flags, 'repository-id');
@@ -5724,18 +5726,41 @@ export async function run(argv: string[]): Promise<Output> {
       hqUrl, organizationId, repositoryId, normalizedRepository,
       installationId: await loadOrCreateInstallationId(), stateRoot: dharmaHome(),
     };
-    const connected = subcommand === 'status'
-      ? await verifyDemoDevice(scope)
-      : await connectDemoDevice({
-      ...scope, grant: grant!,
-      deviceName: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
-      platform: await platform(),
-    }, { onApprovalRequired: async (url) => {
-      if (!flags.has('no-browser')) await openVerificationUri(url);
-      process.stderr.write(`Approve this exact Demo device in your signed-in Dharma session: ${url}\n`);
-    } });
-    const { configPath: _configPath, ...receipt } = connected;
-    return receipt;
+    return withDemoDeviceLock(scope, async () => {
+      if (subcommand === 'connect' || subcommand === 'status') {
+        const connected = subcommand === 'status'
+          ? await verifyDemoDevice(scope)
+          : await connectDemoDevice({
+            ...scope, grant: grant!,
+            deviceName: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
+            platform: await platform(),
+          }, { onApprovalRequired: async (url) => {
+            if (!flags.has('no-browser')) await openVerificationUri(url);
+            process.stderr.write(`Approve this exact Demo device in your signed-in Dharma session: ${url}\n`);
+          } });
+        const { configPath: _configPath, ...receipt } = connected;
+        return receipt;
+      }
+      let action: DemoPeerAction | null = null;
+      if (subcommand === 'role') {
+        const categories = repeated.get('category') || [];
+        if (categories.some((category) => typeof category !== 'string')) {
+          throw new Error('Each --category requires a value.');
+        }
+        action = { kind: 'role', role: required(flags, 'role'),
+          categories: categories as string[] };
+      }
+      if (subcommand === 'peers') action = { kind: 'peers' };
+      if (subcommand === 'ask') action = { kind: 'ask',
+        recipientDeviceId: required(flags, 'recipient-device-id'),
+        content: required(flags, 'content') };
+      if (subcommand === 'reply') action = { kind: 'reply',
+        recipientDeviceId: required(flags, 'recipient-device-id'),
+        questionId: required(flags, 'question-id'), content: required(flags, 'content') };
+      if (subcommand === 'inbox') action = { kind: 'inbox' };
+      if (subcommand === 'ack') action = { kind: 'ack', messageId: required(flags, 'message-id') };
+      return performDemoPeerAction(scope, action);
+    });
   }
   if (command === 'bootstrap') return bootstrap(flags);
   if (command === 'onboard') return onboard(flags);
