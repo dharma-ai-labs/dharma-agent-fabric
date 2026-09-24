@@ -173,10 +173,35 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
 
 const LOCAL_PATH_PATTERNS = [
   /\bfile:\/{2,3}(?:[^\s"'<>|,}\]]*[A-Za-z0-9_~@%+=/-])?/gi,
+  /(?<![A-Za-z0-9_:/])\/(?:home|users|root|usr|srv|tmp|var|etc|opt|boot|dev|proc|sys|workspace|repo|mnt\/[a-z])(?:[\\/][^\s"'<>|,}\]]*|$)/gi,
   /(?<![A-Za-z0-9_:/])\/(?!api(?:\/|\b)|help(?:\b|\/))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._~@%+=:,-]*[A-Za-z0-9_~@%+=-])+/g,
-  /\b[A-Za-z]:[\\/]+[^\s"'<>|,}\]]+/g,
+  /\b[A-Za-z]:[\\/]+[^\s"'<>|,}\]]*/g,
   /\\{2,}(?:wsl(?:\.localhost)?\\{1,})?[^\s"'<>|,}\]]+/gi,
 ];
+
+// Keep detection aligned with the API's trajectoryInput local-path guard. A
+// queued capsule is immutable, so detection is used only to retire an unsent
+// rejected upload; new capsules are redacted before their hash is calculated.
+const FORBIDDEN_LOCAL_PATH = /(?:file:\/{2,3}|(?:^|[\s"'=(])(?:[A-Za-z]:[\\/]|\\\\[^\s\\/"'<>]+[\\/][^\s\\/"'<>]+|\/(?:home|users|root|usr|srv|tmp|var|etc|opt|boot|dev|proc|sys|mnt\/[a-z]|workspace|repo)(?:[\\/]|$)))/i;
+
+export function containsDisallowedLocalPath(value: unknown, depth = 0): boolean {
+  if (depth > 64) throw new Error('Trajectory capsule path inspection exceeded its depth limit.');
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^[\[{]/.test(trimmed)) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(trimmed); } catch {}
+      if (parsed !== undefined && containsDisallowedLocalPath(parsed, depth + 1)) return true;
+    }
+    return FORBIDDEN_LOCAL_PATH.test(value);
+  }
+  if (Array.isArray(value)) return value.some((item) => containsDisallowedLocalPath(item, depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>)
+      .some((item) => containsDisallowedLocalPath(item, depth + 1));
+  }
+  return false;
+}
 
 function redactString(value: string, stats: RedactionStats, _options: RedactionOptions): string {
   stats.inputBytes += Buffer.byteLength(value);

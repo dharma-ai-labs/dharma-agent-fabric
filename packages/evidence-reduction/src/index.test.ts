@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { buildTrajectoryCapsule, trajectoryCapsuleHash } from './index.js';
+import { buildTrajectoryCapsule, containsDisallowedLocalPath, trajectoryCapsuleHash } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: 'rev_1',
@@ -586,6 +586,32 @@ test('customer-authorized content never discloses local paths when identity pseu
   assert.equal(encoded.includes('C:/Users/alice'), false);
   assert.equal(encoded.includes('[REDACTED:local_path]'), true);
   assert.equal(stats.classes.has('local_path'), true);
+});
+
+test('customer-authorized native provider recipients redact root paths before capsule hashing', () => {
+  const session = {
+    provider: 'codex' as const, sessionId: 'recipient-paths', sourcePath: '/private/codex.jsonl',
+    workspace: '/repo', coverage: 'observed' as const,
+    startedAt: '2026-09-24T00:00:00.000Z', endedAt: '2026-09-24T00:00:01.000Z',
+    records: ['/home', '/home/alice', '/mnt/c', 'C:\\', 'file:///tmp', 'https://dharma-ai.io/help'].map((recipient, index) => ({
+      native: { type: 'tool_call', payload: { recipient } }, sourcePath: '/private/codex.jsonl',
+      line: index + 1, workspace: '/repo', timestamp: '2026-09-24T00:00:00.000Z', kind: 'tool_call',
+    })),
+  };
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    session, policy: customerAuthorizedPolicy(), rawContentId: `sha256:${'a'.repeat(64)}`,
+    rawBytes: 100, createdAt: '2026-09-24T00:00:02.000Z',
+  });
+  const recipients = capsule.events.map((event) => (
+    (event.payload.nativeProviderPayload as { payload: { recipient: string } }).payload.recipient
+  ));
+  assert.ok(recipients.filter((recipient) => recipient === '[REDACTED:local_path]').length >= 1);
+  assert.ok(recipients.includes('https://dharma-ai.io/help'));
+  assert.ok(capsule.redactionReceipt.redactedValues >= 5);
+  assert.equal(containsDisallowedLocalPath(capsule), false);
+  assert.equal(containsDisallowedLocalPath({ events: [{ payload: { nativeProviderPayload: { payload: { recipient: '/home' } } } }] }), true);
+  assert.equal(capsule.capsuleHash, trajectoryCapsuleHash(capsule));
 });
 
 test('identical source sessions produce an identical capsule revision hash', () => {

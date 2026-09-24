@@ -203,6 +203,28 @@ test('vault expires raw evidence, retains capsule history, and queues an unavail
   vault.close();
 });
 
+test('retiring an unsent path-bearing capsule preserves encrypted raw evidence and capsule history', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-path-retirement-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const raw = Buffer.from('local provider evidence retained for authorized recapture');
+  const rawContentId = await vault.putBlob(raw, 'raw-provider-turn');
+  const capsule = {
+    trajectoryId: 'trajectory-path-retirement', revision: 1,
+    contentIndex: [{ contentId: rawContentId, kind: 'raw-provider-turn' }],
+    events: [{ payload: { nativeProviderPayload: { payload: { recipient: '/home' } } } }],
+  };
+  const capsuleContentId = await vault.putBlob(Buffer.from(JSON.stringify(capsule)), 'trajectory-capsule');
+  vault.recordCapsule(capsule.trajectoryId, capsule.revision, `sha256:${'a'.repeat(64)}`, capsuleContentId);
+  vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+
+  vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'local_path_disclosure_superseded');
+
+  assert.deepEqual(await vault.listPendingCapsuleSyncs(), []);
+  assert.deepEqual(await vault.getBlob(rawContentId), raw);
+  assert.deepEqual(await vault.getCapsule(capsule.trajectoryId, capsule.revision), capsule);
+  vault.close();
+});
+
 test('vault returns only the requested immutable capsule revision', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-revision-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
