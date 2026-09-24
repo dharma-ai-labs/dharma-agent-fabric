@@ -58,6 +58,7 @@ import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js'
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
+import { demoRepositoryPackage } from './demoPackage.js';
 
 const VERSION = '0.2.87';
 const USAGE = CLI_USAGE;
@@ -5751,7 +5752,8 @@ export async function run(argv: string[]): Promise<Output> {
   const [command, subcommand] = positional;
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
-  if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume']
+  if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
+    'package', 'package-status']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -5786,6 +5788,10 @@ export async function run(argv: string[]): Promise<Output> {
           } });
         const { configPath: _configPath, ...receipt } = connected;
         return receipt;
+      }
+      if (subcommand === 'package' || subcommand === 'package-status') {
+        return demoRepositoryPackage({ scope, workspace,
+          statusOnly: subcommand === 'package-status' });
       }
       let action: DemoPeerAction | null = null;
       if (subcommand === 'role') {
