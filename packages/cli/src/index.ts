@@ -2865,12 +2865,9 @@ export function canonicalRepositoryPackage(value: unknown): NonNullable<Workspac
   }
   const row = value as Record<string, unknown>;
   const keys = ['state', 'candidateId', 'operationId', 'snapshotHash', 'sourceManifestHash', 'releaseId', 'generation', 'consolidationMode'];
-  if (!keys.every(key => Object.hasOwn(row, key)) || Object.keys(row).some(key => ![...keys, 'sourcePolicyGenerationId'].includes(key))
+  if (!keys.every(key => Object.hasOwn(row, key)) || Object.keys(row).some(key => !keys.includes(key))
     || !['absent', 'accepted', 'processing', 'published', 'blocked'].includes(String(row.state))
-    || !Number.isSafeInteger(row.generation) || Number(row.generation) < 0
-    || Object.hasOwn(row, 'sourcePolicyGenerationId')
-      && row.sourcePolicyGenerationId !== null
-      && (typeof row.sourcePolicyGenerationId !== 'string' || !UUID_PATTERN.test(row.sourcePolicyGenerationId))) {
+    || !Number.isSafeInteger(row.generation) || Number(row.generation) < 0) {
     throw new Error('Dharma HQ returned invalid canonical repository package state.');
   }
   const nullableUuid = (candidate: unknown) => candidate === null || typeof candidate === 'string' && UUID_PATTERN.test(candidate);
@@ -2880,8 +2877,7 @@ export function canonicalRepositoryPackage(value: unknown): NonNullable<Workspac
     || ![row.operationId, row.snapshotHash, row.sourceManifestHash].every(nullableHash)
     || ![null, 'initial_repository', 'repository_update'].includes(row.consolidationMode as null | string)
     || absent !== (row.candidateId === null && row.operationId === null && row.snapshotHash === null
-      && row.sourceManifestHash === null && row.releaseId === null && row.consolidationMode === null && row.generation === 0
-      && (row.sourcePolicyGenerationId === undefined || row.sourcePolicyGenerationId === null))
+      && row.sourceManifestHash === null && row.releaseId === null && row.consolidationMode === null && row.generation === 0)
     || (row.state === 'published') !== (row.releaseId !== null)
     || (!absent && (row.candidateId === null || row.operationId === null || row.snapshotHash === null
       || row.sourceManifestHash === null || row.consolidationMode === null))) {

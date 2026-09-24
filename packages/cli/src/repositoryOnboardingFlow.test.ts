@@ -20,16 +20,14 @@ test('repository connect package state distinguishes unseen and published canoni
     releaseId: ids.releaseId, generation: 4, consolidationMode: 'initial_repository' };
   assert.deepEqual(canonicalRepositoryPackage(published), published);
   assert.throws(() => canonicalRepositoryPackage({ ...published, releaseId: null }), /inconsistent/);
-  const withGeneration = { ...published, sourcePolicyGenerationId: ids.candidateId };
-  assert.deepEqual(canonicalRepositoryPackage(withGeneration), withGeneration);
-  assert.throws(() => canonicalRepositoryPackage({ ...withGeneration, sourcePolicyGenerationId: 'wrong' }), /invalid/);
+  assert.throws(() => canonicalRepositoryPackage({ ...published, sourcePolicyGenerationId: ids.candidateId }), /invalid/);
 });
 
 test('onboarding refreshes a published package only after its source policy generation changes', () => {
-  const published = canonicalRepositoryPackage({ state: 'published', candidateId: ids.candidateId,
+  const published = { ...canonicalRepositoryPackage({ state: 'published', candidateId: ids.candidateId,
     operationId: `sha256:${'a'.repeat(64)}`, snapshotHash: `sha256:${'b'.repeat(64)}`,
     sourceManifestHash: `sha256:${'c'.repeat(64)}`, releaseId: ids.releaseId,
-    generation: 4, consolidationMode: 'repository_update', sourcePolicyGenerationId: ids.candidateId });
+    generation: 4, consolidationMode: 'repository_update' }), sourcePolicyGenerationId: ids.candidateId };
   assert.equal(repositoryPackageNeedsPolicyRefresh(published, ids.candidateId), false);
   assert.equal(repositoryPackageNeedsPolicyRefresh(published, ids.releaseId), true);
   assert.equal(repositoryPackageNeedsPolicyRefresh({ ...published, sourcePolicyGenerationId: undefined }, ids.releaseId), false);
