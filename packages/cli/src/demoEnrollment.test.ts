@@ -94,6 +94,62 @@ test('Demo enrollment verifies the browser origin, waits for approval and signs 
   if (process.platform !== 'win32') assert.equal((await stat(connected.configPath)).mode & 0o777, 0o600);
 });
 
+test('Demo enrollment recovers from one transient poll failure without restarting enrollment', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-poll-retry-'));
+  const calls: string[] = [];
+  const fetcher: typeof fetch = async (resource) => {
+    const pathname = new URL(String(resource)).pathname;
+    calls.push(pathname);
+    if (pathname.endsWith('/enrollments')) {
+      return new Response(JSON.stringify({ ok: true, status: 'pending', organizationId: orgId,
+        repositoryId, deviceCode, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }),
+      { status: 202 });
+    }
+    if (pathname.endsWith('/poll')) {
+      if (calls.filter((path) => path.endsWith('/poll')).length === 1) {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'internal_error',
+          message: 'Temporary database failure.' } }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+        { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository }), { status: 200 });
+  };
+  const connected = await connectDemoDevice(options(stateRoot), {
+    store: memoryStore(), fetcher, sleep: async () => {},
+  });
+  assert.equal(connected.stage, 'device_signed_ready');
+  assert.equal(calls.filter((path) => path.endsWith('/enrollments')).length, 1);
+  assert.equal(calls.filter((path) => path.endsWith('/poll')).length, 2);
+});
+
+test('Demo enrollment bounds repeated transient poll failures and stops on authorization errors', async () => {
+  for (const pollStatus of [500, 403]) {
+    const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-poll-failure-'));
+    let polls = 0;
+    const fetcher: typeof fetch = async (resource) => {
+      const pathname = new URL(String(resource)).pathname;
+      if (pathname.endsWith('/enrollments')) {
+        return new Response(JSON.stringify({ ok: true, status: 'pending', organizationId: orgId,
+          repositoryId, deviceCode, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }),
+        { status: 202 });
+      }
+      polls += 1;
+      return new Response(JSON.stringify({ ok: false, error: { code: pollStatus === 500
+        ? 'internal_error' : 'demo_fabric_membership_required', message: 'Unavailable.' } }),
+      { status: pollStatus });
+    };
+    await assert.rejects(connectDemoDevice(options(stateRoot), {
+      store: memoryStore(), fetcher, sleep: async () => {},
+    }), pollStatus === 500 ? /polling failed after 3 transient attempts/i
+      : /demo_fabric_membership_required/);
+    assert.equal(polls, pollStatus === 500 ? 3 : 1);
+  }
+});
+
 test('Demo enrollment rejects an off-origin approval link before opening a browser or saving a device', async () => {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-cli-invalid-'));
   let opened = false;

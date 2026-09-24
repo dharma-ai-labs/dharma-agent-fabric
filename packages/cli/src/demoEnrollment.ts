@@ -56,7 +56,7 @@ function assertInput(input: DemoDeviceConnectOptions) {
 }
 
 class DemoDeviceApiError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly status: number) {
     super(`${code}: ${message}`);
   }
 }
@@ -69,7 +69,13 @@ function apiError(body: unknown, status: number) {
     : typeof item.error === 'string' ? item.error : `http_${status}`;
   const message = typeof nested?.message === 'string' ? nested.message
     : typeof item.message === 'string' ? item.message : 'Demo device request failed.';
-  return new DemoDeviceApiError(code, message);
+  return new DemoDeviceApiError(code, message, status);
+}
+
+function transientPollFailure(error: unknown) {
+  return error instanceof TypeError
+    || (error instanceof DemoDeviceApiError
+      && (error.status === 429 || error.status >= 500));
 }
 
 async function readJsonResponse(response: Response) {
@@ -247,11 +253,25 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
   const deadline = Math.min(Date.parse(String(started.expiresAt)),
     Date.now() + Math.min(Math.max(input.maximumWaitMs ?? 10 * 60_000, 1_000), 15 * 60_000));
   let deviceId = '';
+  let transientFailures = 0;
   while (Date.now() < deadline) {
-    const polled = await readJsonResponse(await fetcher(`${origin}/api/demo/fabric/enrollments/poll`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ orgId: input.organizationId, deviceCode: started.deviceCode }),
-    }));
+    let polled: Record<string, unknown>;
+    try {
+      polled = await readJsonResponse(await fetcher(`${origin}/api/demo/fabric/enrollments/poll`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ orgId: input.organizationId, deviceCode: started.deviceCode }),
+      }));
+    } catch (error) {
+      if (!transientPollFailure(error)) throw error;
+      transientFailures += 1;
+      if (transientFailures >= 3) {
+        throw new Error('Demo device polling failed after 3 transient attempts. Resume with the same prompt while its grant is valid.',
+          { cause: error });
+      }
+      await sleep(Math.min(2_000, Math.max(0, deadline - Date.now())));
+      continue;
+    }
+    transientFailures = 0;
     if (polled.status === 'approved') {
       if (polled.repositoryId !== input.repositoryId || !UUID.test(String(polled.deviceId || ''))) {
         throw new Error('Approved Demo device does not match the requested repository.');
