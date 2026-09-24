@@ -45,6 +45,7 @@ import {
   probeRelayConnection,
   preflightBootstrapWorkspaceIdentity,
   rawLocalRetentionDays,
+  syncPendingRetentionCapsules,
   requireCompletedBootstrapEvidence,
   retryBootstrapOnboarding,
   synchronizeBootstrapEvidence,
@@ -1432,6 +1433,50 @@ test('queued content must match the current signed consent and policy revision',
   assert.throws(() => assertCapsuleAuthorizedByCurrentPolicy(current, { ...policy, evidence: { ...policy.evidence, automaticDisclosure: { mode: 'local_analysis' } } }), /invalid|no longer authorized/);
 });
 
+test('queued capsules from a replaced device are retained locally but never sent under the current device signature', async () => {
+  const base = await materializeWorkspacePolicy({
+    workspace: await mkdtemp(join(tmpdir(), 'dharma-rebound-capsules-')),
+    organizationId: 'org_northstar', revision: 'local',
+  });
+  const workspaceId = 'workspace-northstar';
+  const currentDeviceId = '22222222-2222-4222-8222-222222222222';
+  const session = {
+    provider: 'codex' as const, sessionId: 'same-workspace-history', sourcePath: '/private/codex.jsonl',
+    workspace: '/repo', coverage: 'observed' as const,
+    startedAt: '2026-09-23T00:00:00.000Z', endedAt: '2026-09-23T00:00:01.000Z',
+    records: [{ native: { type: 'message' }, sourcePath: '/private/codex.jsonl', line: 1,
+      workspace: '/repo', timestamp: '2026-09-23T00:00:00.000Z', kind: 'metadata' as const }],
+  };
+  const capsuleFor = (deviceId: string) => buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId, workspaceId, session, policy: base.policy,
+    rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 32,
+  });
+  const old = capsuleFor('11111111-1111-4111-8111-111111111111');
+  const current = capsuleFor(currentDeviceId);
+  const pending = [old, current];
+  const discarded: Array<{ trajectoryId: string; reason: string }> = [];
+  const sent: string[] = [];
+  const vault = {
+    listPendingCapsuleSyncs: async () => pending.map(capsule => ({ trajectoryId: capsule.trajectoryId,
+      revision: capsule.revision, capsule })),
+    markCapsuleSynced: (trajectoryId: string) => { pending.splice(pending.findIndex(c => c.trajectoryId === trajectoryId), 1); },
+    discardPendingCapsuleSync: (trajectoryId: string, _revision: number, reason: string) => {
+      discarded.push({ trajectoryId, reason });
+      pending.splice(pending.findIndex(c => c.trajectoryId === trajectoryId), 1);
+    },
+  };
+  const fabric = { config: { organizationId: 'org_northstar', deviceId: currentDeviceId },
+    syncTrajectory: async (capsule: { deviceId: string; trajectoryId: string }) => {
+      if (capsule.deviceId !== currentDeviceId) throw new Error('trajectory_tenant_mismatch');
+      sent.push(capsule.trajectoryId);
+    } };
+  const count = await syncPendingRetentionCapsules(vault as never, fabric as never, base.policy, workspaceId);
+  assert.equal(count, 1);
+  assert.deepEqual(discarded, [{ trajectoryId: old.trajectoryId, reason: 'device_binding_changed' }]);
+  assert.deepEqual(sent, [current.trajectoryId]);
+  assert.equal(old.deviceId, '11111111-1111-4111-8111-111111111111');
+});
+
 test('recovered task evidence distinguishes a superseded policy from the current revision', () => {
   const capsule = { redactionReceipt: { policyRevision: 'policy-v1' } } as never;
   assert.equal(recoveredTaskPolicyWasSuperseded(capsule, { revision: 'policy-v2' }), true);
@@ -1747,13 +1792,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.79');
+      assert.equal(version, '0.2.80');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.79',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.80',
   });
 });
 

@@ -57,7 +57,7 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 
-const VERSION = '0.2.79';
+const VERSION = '0.2.80';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -318,7 +318,7 @@ export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retentio
   return Number(value);
 }
 
-async function syncPendingRetentionCapsules(
+export async function syncPendingRetentionCapsules(
   vault: {
     listPendingCapsuleSyncs<T>(limit?: number, offset?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
     markCapsuleSynced(trajectoryId: string, revision: number): void;
@@ -333,6 +333,7 @@ async function syncPendingRetentionCapsules(
   assertPolicy(policy);
   let synced = 0;
   let offset = 0;
+  let warnedPreviousDevice = false;
   for (;;) {
     const pending = await vault.listPendingCapsuleSyncs<Record<string, unknown>>(1_000, offset);
     if (pending.length === 0) return synced;
@@ -344,6 +345,15 @@ async function syncPendingRetentionCapsules(
         assertCapsuleIntegrity(item.capsule);
       } catch {
         vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
+        continue;
+      }
+      if (item.capsule.organizationId === fabric.config.organizationId
+        && item.capsule.deviceId !== fabric.config.deviceId) {
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'device_binding_changed');
+        if (!warnedPreviousDevice) {
+          process.stderr.write('Queued trajectory capsules from a previous device were preserved locally and excluded from upload. Recapture eligible provider sessions under the current device.\n');
+          warnedPreviousDevice = true;
+        }
         continue;
       }
       // Policy expiry and signature failure pause the queue. Only a capsule
@@ -2360,6 +2370,10 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       getTrajectoryHead(body: { trajectoryId: string; workspaceId: string }): Promise<Record<string, unknown>>;
     }
     : null;
+  if (fabric && (fabric.config.organizationId !== device.organizationId
+    || fabric.config.deviceId !== device.deviceId)) {
+    throw new Error('The enrolled device changed during evidence capture. Retry from the current device home.');
+  }
   if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
