@@ -130,7 +130,7 @@ test('Demo command dry-run verifies the local repository without a grant or devi
   }
 });
 
-test('lost status response resumes grant-free with exact replay then a forward sequence after expiry', async () => {
+test('lost status response resumes grant-free with exact replay, then retries an unseen expired sequence', async () => {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-recovery-'));
   const store = memoryStore();
   const signed: Headers[] = [];
@@ -168,8 +168,126 @@ test('lost status response resumes grant-free with exact replay then a forward s
     deviceId, sequence: 2, createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
     headers: {} };
   await writeFile(pendingPath, JSON.stringify(pending));
-  const advanced = await verifyDemoDevice(scope, { store, fetcher });
-  assert.equal(advanced.stage, 'device_signed_ready');
-  assert.equal(signed.at(-1)!.get('x-dharma-sequence'), '3');
+  const recoveredAfterExpiry = await verifyDemoDevice(scope, { store, fetcher });
+  assert.equal(recoveredAfterExpiry.stage, 'device_signed_ready');
+  assert.equal(signed.at(-1)!.get('x-dharma-sequence'), '2');
+  assert.equal((JSON.parse(await readFile(configPath, 'utf8')) as { nextSequence: number }).nextSequence, 3);
+});
+
+test('expired status advances once only after a typed sequence conflict', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-expired-'));
+  const store = memoryStore();
+  const sequences: number[] = [];
+  let acceptedSequence = 0;
+  const fetcher: typeof fetch = async (resource, init) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) {
+      return new Response(JSON.stringify({ ok: true, status: 'pending', organizationId: orgId,
+        repositoryId, deviceCode, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }),
+      { status: 202 });
+    }
+    if (url.pathname.endsWith('/poll')) {
+      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+        { status: 200 });
+    }
+    const sequence = Number(new Headers(init?.headers).get('x-dharma-sequence'));
+    sequences.push(sequence);
+    if (sequence !== acceptedSequence + 1) {
+      return new Response(JSON.stringify({ ok: false, error: {
+        code: 'demo_fabric_sequence_out_of_order', message: 'Device sequence is out of order.',
+      } }), { status: 409 });
+    }
+    acceptedSequence = sequence;
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository }), { status: 200 });
+  };
+  const connected = await connectDemoDevice(options(stateRoot), { store, fetcher });
+  assert.equal(acceptedSequence, 1);
+  const configPath = connected.configPath;
+  const pendingPath = `${configPath}.pending-status.json`;
+  await writeFile(pendingPath, JSON.stringify({
+    url: `${hqUrl}/api/demo/fabric/repositories/${repositoryId}/status?orgId=${orgId}`,
+    deviceId, sequence: 2, createdAt: new Date(Date.now() - 5 * 60_000).toISOString(), headers: {},
+  }));
+  acceptedSequence = 2;
+  const recovered = await verifyDemoDevice(options(stateRoot), { store, fetcher });
+  assert.equal(recovered.stage, 'device_signed_ready');
+  assert.deepEqual(sequences, [1, 2, 3]);
   assert.equal((JSON.parse(await readFile(configPath, 'utf8')) as { nextSequence: number }).nextSequence, 4);
+});
+
+test('a 0.2.81 pending sequence that skipped an unseen request recovers without another grant', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-legacy-gap-'));
+  const store = memoryStore();
+  const sequences: number[] = [];
+  let lastAccepted = 0;
+  const fetcher: typeof fetch = async (resource, init) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) {
+      return new Response(JSON.stringify({ ok: true, status: 'pending', organizationId: orgId,
+        repositoryId, deviceCode, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }),
+      { status: 202 });
+    }
+    if (url.pathname.endsWith('/poll')) {
+      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+        { status: 200 });
+    }
+    const sequence = Number(new Headers(init?.headers).get('x-dharma-sequence'));
+    sequences.push(sequence);
+    if (sequence !== lastAccepted + 1) {
+      return new Response(JSON.stringify({ ok: false, error: {
+        code: 'demo_fabric_sequence_out_of_order', message: 'Device sequence is out of order.',
+      } }), { status: 409 });
+    }
+    lastAccepted = sequence;
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository }), { status: 200 });
+  };
+  const connected = await connectDemoDevice(options(stateRoot), { store, fetcher });
+  await writeFile(`${connected.configPath}.pending-status.json`, JSON.stringify({
+    url: `${hqUrl}/api/demo/fabric/repositories/${repositoryId}/status?orgId=${orgId}`,
+    deviceId, sequence: 3, createdAt: new Date(Date.now() - 5 * 60_000).toISOString(), headers: {},
+  }));
+  const recovered = await verifyDemoDevice(options(stateRoot), { store, fetcher });
+  assert.equal(recovered.stage, 'device_signed_ready');
+  assert.deepEqual(sequences, [1, 3, 2]);
+  assert.equal((JSON.parse(await readFile(connected.configPath, 'utf8')) as { nextSequence: number }).nextSequence, 3);
+});
+
+test('expired status does not advance on an unrelated conflict', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-conflict-'));
+  const store = memoryStore();
+  const sequences: number[] = [];
+  const fetcher: typeof fetch = async (resource, init) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) {
+      return new Response(JSON.stringify({ ok: true, status: 'pending', organizationId: orgId,
+        repositoryId, deviceCode, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }),
+      { status: 202 });
+    }
+    if (url.pathname.endsWith('/poll')) {
+      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+        { status: 200 });
+    }
+    const sequence = Number(new Headers(init?.headers).get('x-dharma-sequence'));
+    sequences.push(sequence);
+    if (sequence > 1) return new Response(JSON.stringify({ ok: false, error: {
+      code: 'demo_fabric_message_replay_conflict', message: 'Message conflict.',
+    } }), { status: 409 });
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository }), { status: 200 });
+  };
+  const connected = await connectDemoDevice(options(stateRoot), { store, fetcher });
+  const pendingPath = `${connected.configPath}.pending-status.json`;
+  await writeFile(pendingPath, JSON.stringify({
+    url: `${hqUrl}/api/demo/fabric/repositories/${repositoryId}/status?orgId=${orgId}`,
+    deviceId, sequence: 2, createdAt: new Date(Date.now() - 5 * 60_000).toISOString(), headers: {},
+  }));
+  await assert.rejects(verifyDemoDevice(options(stateRoot), { store, fetcher }),
+    /demo_fabric_message_replay_conflict/);
+  assert.deepEqual(sequences, [1, 2]);
+  assert.equal((JSON.parse(await readFile(connected.configPath, 'utf8')) as { nextSequence: number }).nextSequence, 2);
 });

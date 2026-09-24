@@ -54,11 +54,21 @@ function assertInput(input: DemoDeviceConnectOptions) {
   }
 }
 
+class DemoDeviceApiError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(`${code}: ${message}`);
+  }
+}
+
 function apiError(body: unknown, status: number) {
   const item = body && typeof body === 'object' ? body as Record<string, unknown> : {};
-  const code = typeof item.error === 'string' ? item.error : `http_${status}`;
-  const message = typeof item.message === 'string' ? item.message : 'Demo device request failed.';
-  return new Error(`${code}: ${message}`);
+  const nested = item.error && typeof item.error === 'object' && !Array.isArray(item.error)
+    ? item.error as Record<string, unknown> : null;
+  const code = typeof nested?.code === 'string' ? nested.code
+    : typeof item.error === 'string' ? item.error : `http_${status}`;
+  const message = typeof nested?.message === 'string' ? nested.message
+    : typeof item.message === 'string' ? item.message : 'Demo device request failed.';
+  return new DemoDeviceApiError(code, message);
 }
 
 async function readJsonResponse(response: Response) {
@@ -149,31 +159,55 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
   if (config.publicKeyEd25519 !== identity.publicKeyEd25519) {
     throw new Error('Demo device key does not match its protected local identity.');
   }
+  let hasPending = false;
   let pending = signedStatusRequest(origin, input, config.deviceId,
     identity.privateJwk, config.nextSequence);
   try {
     const existing = JSON.parse(await readFile(pendingPath, 'utf8')) as typeof pending;
     if (existing.deviceId !== config.deviceId || existing.url !== pending.url
-      || !Number.isSafeInteger(existing.sequence)
+      || !Number.isSafeInteger(existing.sequence) || existing.sequence < config.nextSequence
       || !Number.isFinite(Date.parse(existing.createdAt))) {
       throw new Error('Pending Demo device status does not match this identity.');
     }
-    if (existing.sequence >= config.nextSequence) {
-      pending = Date.now() - Date.parse(existing.createdAt) < 4 * 60_000
-        ? existing
-        : signedStatusRequest(origin, input, config.deviceId,
-          identity.privateJwk, existing.sequence + 1);
-    }
+    hasPending = true;
+    pending = Date.now() - Date.parse(existing.createdAt) < 4 * 60_000
+      ? existing
+      : signedStatusRequest(origin, input, config.deviceId,
+        identity.privateJwk, existing.sequence);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw new Error('Pending Demo device status is invalid; preserve it for recovery.', { cause: error });
     }
   }
-  await writePrivateJson(pendingPath, pending);
-  const status = await readJsonResponse(await (deps.fetcher || fetch)(pending.url, {
-    method: 'GET', headers: pending.headers,
-  }));
-  if (status.organizationId !== input.organizationId || status.repositoryId !== input.repositoryId
+  const requestStatus = async () => {
+    await writePrivateJson(pendingPath, pending);
+    return readJsonResponse(await (deps.fetcher || fetch)(pending.url, {
+      method: 'GET', headers: pending.headers,
+    }));
+  };
+  let status: Record<string, unknown> | null = null;
+  try {
+    status = await requestStatus();
+  } catch (error) {
+    if (!hasPending || !(error instanceof DemoDeviceApiError)
+      || error.code !== 'demo_fabric_sequence_out_of_order') throw error;
+    const candidates = [pending.sequence - 1, pending.sequence + 1]
+      .filter((sequence) => sequence >= config.nextSequence);
+    let recovered = false;
+    for (const sequence of candidates) {
+      pending = signedStatusRequest(origin, input, config.deviceId, identity.privateJwk, sequence);
+      try {
+        status = await requestStatus();
+        recovered = true;
+        break;
+      } catch (candidateError) {
+        if (!(candidateError instanceof DemoDeviceApiError)
+          || candidateError.code !== 'demo_fabric_sequence_out_of_order') throw candidateError;
+      }
+    }
+    if (!recovered) throw error;
+  }
+  if (!status || status.organizationId !== input.organizationId || status.repositoryId !== input.repositoryId
     || status.deviceId !== config.deviceId || status.normalizedRepository !== input.normalizedRepository) {
     throw new Error('Signed Demo status did not confirm the exact repository and device.');
   }

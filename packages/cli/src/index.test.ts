@@ -1792,13 +1792,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.81');
+      assert.equal(version, '0.2.82');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.81',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.82',
   });
 });
 
