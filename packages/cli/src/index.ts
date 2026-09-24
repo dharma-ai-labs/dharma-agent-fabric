@@ -59,7 +59,7 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 
-const VERSION = '0.2.86';
+const VERSION = '0.2.87';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -344,6 +344,9 @@ export async function syncPendingRetentionCapsules(
     for (const item of pending) {
       if (String(item.capsule.workspaceId || '') !== workspaceId) continue;
       matched += 1;
+      if (item.capsule.trajectoryId !== item.trajectoryId || item.capsule.revision !== item.revision) {
+        throw new Error('Pending trajectory capsule identity does not match its vault record.');
+      }
       try {
         assertCapsuleIntegrity(item.capsule);
       } catch {
@@ -369,6 +372,24 @@ export async function syncPendingRetentionCapsules(
         // A successfully refreshed policy is authoritative. Retire only the
         // superseded capsule so it cannot permanently block later valid work.
         vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
+        continue;
+      }
+      if (Buffer.byteLength(canonicalize(item.capsule)) > policy.evidence.maximumCapsuleBytes) {
+        const serverHead = acceptedTrajectoryHead(await fabric.getTrajectoryHead({
+          trajectoryId: item.trajectoryId, workspaceId,
+        }), item.trajectoryId);
+        if (serverHead && serverHead.revision === item.revision
+          && serverHead.capsuleHash === item.capsule.capsuleHash) {
+          vault.markCapsuleSynced(item.trajectoryId, item.revision);
+          synced += 1;
+          continue;
+        }
+        if (serverHead ? serverHead.revision !== item.revision - 1
+          : item.revision !== 1) {
+          throw new Error('Oversized pending trajectory revision conflicts with the accepted server head.');
+        }
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_size_limit_superseded');
+        process.stderr.write('An unsent oversized trajectory capsule was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n');
         continue;
       }
       await reserveDailyContentUpload(item.capsule, policy);

@@ -640,7 +640,10 @@ export function buildTrajectoryCapsule(input: {
     createdAt,
   };
 
-  while (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes && base.events.length > 1) {
+  const serializedBytes = () => Buffer.byteLength(canonicalize({
+    ...base, capsuleHash: `sha256:${'0'.repeat(64)}`,
+  }));
+  while (serializedBytes() > input.policy.evidence.maximumCapsuleBytes && base.events.length > 1) {
     base.events.shift();
     base.events.forEach((event, index) => { event.sequence = index; });
     base.coverage.state = 'partial';
@@ -649,7 +652,7 @@ export function buildTrajectoryCapsule(input: {
       base.coverage.missingFields.push('events_collapsed_for_size');
     }
   }
-  if (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes && base.events.length === 1) {
+  if (serializedBytes() > input.policy.evidence.maximumCapsuleBytes && base.events.length === 1) {
     base.events[0]!.payload = {
       nativeKind: base.events[0]!.payload.nativeKind,
       recordBytes: base.events[0]!.payload.recordBytes,
@@ -660,7 +663,7 @@ export function buildTrajectoryCapsule(input: {
     base.status = 'partial';
     base.coverage.missingFields.push('native_payload_collapsed_for_size');
   }
-  if (Buffer.byteLength(canonicalize(base)) > input.policy.evidence.maximumCapsuleBytes) {
+  if (serializedBytes() > input.policy.evidence.maximumCapsuleBytes) {
     throw new Error('Trajectory capsule metadata cannot fit the organization maximumCapsuleBytes policy.');
   }
   return { ...base, capsuleHash: trajectoryCapsuleHash(base as Omit<TrajectoryCapsule, 'capsuleHash'>) };
