@@ -100,6 +100,7 @@ interface WorkspaceRecord {
     releaseId: string | null;
     generation: number;
     consolidationMode: 'initial_repository' | 'repository_update' | null;
+    sourcePolicyGenerationId?: string | null;
   };
   repositoryRole?: { revision: number; profileHash: string } | null;
   repositoryAgentKey?: string | null;
@@ -2885,6 +2886,23 @@ export function canonicalRepositoryPackage(value: unknown): NonNullable<Workspac
   return row as NonNullable<WorkspaceRecord['repositoryPackage']>;
 }
 
+export function canonicalRepositoryPackagePolicyGeneration(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw new Error('Dharma HQ returned invalid repository package policy generation.');
+  }
+  return value;
+}
+
+export function repositoryPackageNeedsPolicyRefresh(
+  repositoryPackage: NonNullable<WorkspaceRecord['repositoryPackage']>,
+  activeGenerationId: string,
+): boolean {
+  return repositoryPackage.state === 'published'
+    && typeof repositoryPackage.sourcePolicyGenerationId === 'string'
+    && repositoryPackage.sourcePolicyGenerationId !== activeGenerationId;
+}
+
 export function canonicalEndpointRole(value: unknown): WorkspaceRecord['repositoryRole'] {
   if (value === null) return null;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Dharma HQ returned invalid endpoint role state.');
@@ -2929,7 +2947,11 @@ async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRec
     repositoryBindingId: String(repositoryAgent?.id || ''),
     endpointId: typeof response.endpointId === 'string' ? response.endpointId
       : typeof endpoint?.id === 'string' ? endpoint.id : item.endpointId || null,
-    repositoryPackage: canonicalRepositoryPackage(response.repositoryPackage),
+    repositoryPackage: {
+      ...canonicalRepositoryPackage(response.repositoryPackage),
+      sourcePolicyGenerationId: canonicalRepositoryPackagePolicyGeneration(
+        response.repositoryPackageSourcePolicyGenerationId),
+    },
     repositoryRole: canonicalEndpointRole(response.endpointRole),
     repositoryAgentKey: String(repositoryAgent?.agent_key || ''),
     controlBranch: String(repositoryAgent?.control_branch || branch?.branch || ''),
@@ -3412,9 +3434,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId };
   const outboxRoot = resolve(dharmaHome(), 'relay', 'repository-candidates');
   const canonicalPackage = registered.repositoryPackage!;
-  const candidate = await staged('package_publication', async () => canonicalPackage.state === 'absent'
+  const refreshPolicy = repositoryPackageNeedsPolicyRefresh(canonicalPackage, sourceAuthorization.generationId);
+  const candidate = await staged('package_publication', async () => canonicalPackage.state === 'absent' || refreshPolicy
     ? await synchronizeRepositoryCandidate({ transport: fabric, outboxRoot, scope: candidateScope,
-      snapshot: initialSnapshot, initialRepository: true })
+      snapshot: initialSnapshot, initialRepository: canonicalPackage.state === 'absent' })
     : await adoptRepositoryCandidate({ outboxRoot, scope: candidateScope,
       sourceManifestHash: canonicalPackage.sourceManifestHash!,
       consolidationMode: canonicalPackage.consolidationMode!, candidate: {
@@ -3425,11 +3448,13 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   registered = { ...registered, repositoryPackage: {
     state: candidate.state, candidateId: candidate.candidateId, operationId: candidate.operationId,
     snapshotHash: candidate.snapshotHash,
-    sourceManifestHash: canonicalPackage.state === 'absent'
+    sourceManifestHash: canonicalPackage.state === 'absent' || refreshPolicy
       ? sha256(canonicalize(initialSnapshot.manifest)) : canonicalPackage.sourceManifestHash,
     releaseId: candidate.releaseId,
     generation: candidate.state === 'published' ? Math.max(1, canonicalPackage.generation) : canonicalPackage.generation,
-    consolidationMode: canonicalPackage.state === 'absent' ? 'initial_repository' : canonicalPackage.consolidationMode,
+    consolidationMode: canonicalPackage.state === 'absent' ? 'initial_repository'
+      : refreshPolicy ? 'repository_update' : canonicalPackage.consolidationMode,
+    sourcePolicyGenerationId: refreshPolicy ? sourceAuthorization.generationId : canonicalPackage.sourcePolicyGenerationId,
   } };
   await saveWorkspaceRecord(registered);
   const providers = await staged('role_registration', async () => receiptAwareProviderCapabilities(
