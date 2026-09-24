@@ -12,7 +12,7 @@ import {
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
   type ProviderCapability, type ProviderId, type TrustedServerSigningKeyset,
 } from '@dharma-ai-labs/agent-fabric-contracts';
-import { buildTrajectoryCapsule, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
@@ -60,7 +60,7 @@ import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
 
-const VERSION = '0.2.87';
+const VERSION = '0.2.88';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -375,7 +375,9 @@ export async function syncPendingRetentionCapsules(
         vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
         continue;
       }
-      if (Buffer.byteLength(canonicalize(item.capsule)) > policy.evidence.maximumCapsuleBytes) {
+      const oversized = Buffer.byteLength(canonicalize(item.capsule)) > policy.evidence.maximumCapsuleBytes;
+      const containsLocalPath = containsDisallowedLocalPath(item.capsule);
+      if (oversized || containsLocalPath) {
         const serverHead = acceptedTrajectoryHead(await fabric.getTrajectoryHead({
           trajectoryId: item.trajectoryId, workspaceId,
         }), item.trajectoryId);
@@ -386,11 +388,15 @@ export async function syncPendingRetentionCapsules(
           continue;
         }
         if (serverHead ? serverHead.revision !== item.revision - 1
-          : item.revision !== 1) {
-          throw new Error('Oversized pending trajectory revision conflicts with the accepted server head.');
+          || serverHead.capsuleHash !== item.capsule.previousRevisionHash
+          : item.revision !== 1 || item.capsule.previousRevisionHash !== null) {
+          throw new Error('Rejected pending trajectory revision conflicts with the accepted server head.');
         }
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_size_limit_superseded');
-        process.stderr.write('An unsent oversized trajectory capsule was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n');
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision,
+          containsLocalPath ? 'local_path_disclosure_superseded' : 'capsule_size_limit_superseded');
+        process.stderr.write(containsLocalPath
+          ? 'An unsent trajectory capsule containing a local path was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n'
+          : 'An unsent oversized trajectory capsule was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n');
         continue;
       }
       await reserveDailyContentUpload(item.capsule, policy);
