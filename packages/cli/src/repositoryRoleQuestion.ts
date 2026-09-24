@@ -35,14 +35,17 @@ export async function askRepositoryRoleQuestion(input: {
   scope: RepositoryRoleScope;
   category: string;
   question: string;
+  targetEndpointId?: string;
 }) {
   requireFact(CATEGORY.test(input.category));
   const question = text(input.question, 2_000);
   const observed = await discoverRepositoryRoleMetadata(input.transport, input.scope, input.category);
   const discovery = observed.discovery as { peers: Array<{ endpointId: string; workspaceId: string; provider: string }> } | null;
   requireFact(discovery && discovery.peers.length > 0);
-  const target = discovery.peers.filter(peer => peer.endpointId !== input.scope.endpointId)
-    .sort((left, right) => left.endpointId.localeCompare(right.endpointId))[0];
+  const peers = discovery.peers.filter(peer => peer.endpointId !== input.scope.endpointId);
+  const target = input.targetEndpointId
+    ? peers.find(peer => peer.endpointId === input.targetEndpointId)
+    : peers.sort((left, right) => left.endpointId.localeCompare(right.endpointId))[0];
   requireFact(target);
   const response = record(await input.transport.signedPost('/agent-fabric/repository-questions', {
     workspaceId: input.scope.workspaceId, repositoryBindingId: input.scope.repositoryBindingId,
