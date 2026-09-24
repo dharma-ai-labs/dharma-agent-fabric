@@ -59,7 +59,7 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 
-const VERSION = '0.2.89';
+const VERSION = '0.2.90';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4232,8 +4232,17 @@ async function executeOneTask(
   }, Math.max(15_000, Math.floor(leaseSeconds * 500)));
   let receipt;
   try {
+    const repositoryKnowledge = task.skillBundle && workspace.repositoryBindingId && workspace.repositoryAgentId
+      && task.authority.writePaths.length === 0 && task.authority.commands.length === 0
+      && task.authority.network === 'deny' && task.authority.readPaths.includes('.')
+      ? await installedRepositoryKnowledge(workspace, task.target.provider) : null;
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
+      ...(repositoryKnowledge && activeSkill ? { verifiedRepositoryKnowledge: {
+        organizationId: config.organizationId, workspaceId: workspace.workspaceId, provider: task.target.provider,
+        bundleId: activeSkill.bundleId, bundleHash: activeSkill.bundleHash,
+        catalogBytes: repositoryKnowledge.catalogBytes, manifestBytes: repositoryKnowledge.manifestBytes,
+      } } : {}),
       ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
@@ -5424,7 +5433,7 @@ async function skillSync(flags: Map<string, string | boolean>): Promise<Output> 
   });
 }
 
-async function installedRepositoryKnowledge(workspace: WorkspaceRecord) {
+async function installedRepositoryKnowledge(workspace: WorkspaceRecord, selectedProvider?: ProviderId) {
   const config = await readDeviceConfig();
   if (!config || config.organizationId !== workspace.organizationId || !workspace.repositoryBindingId || !workspace.repositoryAgentId) {
     throw new Error('Installed repository knowledge requires current enrolled workspace scope.');
@@ -5440,6 +5449,7 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord) {
   return selectInstalledRepositoryKnowledge({ organizationId: config.organizationId,
     repositoryBindingId: workspace.repositoryBindingId, repositoryAgentId: organizationAgentId,
     loadProvider: async provider => {
+      if (selectedProvider && provider !== selectedProvider) return null;
       const root = await nativeSkillDirectoryForWorkspace({
         provider, workspaceId: workspace.workspaceId, workspace: workspace.path,
       });
