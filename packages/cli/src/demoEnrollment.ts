@@ -42,6 +42,7 @@ export interface DemoDeviceConnectDependencies {
   fetcher?: typeof fetch;
   sleep?: (milliseconds: number) => Promise<void>;
   onApprovalRequired?: (url: string) => Promise<void>;
+  expectedAcceptedSequence?: number;
 }
 
 function assertInput(input: DemoDeviceConnectOptions) {
@@ -81,7 +82,7 @@ async function readJsonResponse(response: Response) {
   return body as Record<string, unknown>;
 }
 
-function scopePath(input: DemoDeviceScope, origin: string) {
+export function scopePath(input: DemoDeviceScope, origin: string) {
   const scope = createHash('sha256').update(`${origin}\0${input.organizationId}\0${input.repositoryId}`)
     .digest('hex').slice(0, 32);
   return resolve(input.stateRoot, 'demo', scope, 'device.json');
@@ -141,7 +142,7 @@ function signedStatusRequest(origin: string, input: DemoDeviceScope,
 }
 
 export async function verifyDemoDevice(input: DemoDeviceScope,
-  deps: Pick<DemoDeviceConnectDependencies, 'store' | 'fetcher'> = {}) {
+  deps: Pick<DemoDeviceConnectDependencies, 'store' | 'fetcher' | 'expectedAcceptedSequence'> = {}) {
   const origin = normalizeHqUrl(input.hqUrl);
   const configPath = scopePath(input, origin);
   const pendingPath = `${configPath}.pending-status.json`;
@@ -189,7 +190,8 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
   try {
     status = await requestStatus();
   } catch (error) {
-    if (!hasPending || !(error instanceof DemoDeviceApiError)
+    if ((!hasPending && deps.expectedAcceptedSequence !== pending.sequence)
+      || !(error instanceof DemoDeviceApiError)
       || error.code !== 'demo_fabric_sequence_out_of_order') throw error;
     const candidates = [pending.sequence - 1, pending.sequence + 1]
       .filter((sequence) => sequence >= config.nextSequence);

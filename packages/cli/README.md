@@ -6,6 +6,31 @@ discovers provider capabilities, keeps full trajectories in an encrypted local
 vault, syncs policy-qualified evidence, executes bounded signed tasks, and
 installs signed Skill releases with receipts and rollback ancestry.
 
+## Demo peer collaboration
+
+After a recipient approves a Demo device, run these commands from the exact
+repository named by that recipient's private Demo binding. All commands require
+`--organization-id`, `--repository-id`, and `--normalized-repository`; pass
+`--portal-url` when using a staging portal. The CLI verifies the Git remote and
+uses the enrolled device key. It does not grant access to another participant's
+repository or publish a shared package.
+
+```bash
+dharma demo status --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote>
+dharma demo role --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --role "Billing reviewer" --category "mapping"
+dharma demo peers --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote>
+dharma demo ask --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --recipient-device-id <uuid> --content "Which approved mapping applies?"
+dharma demo inbox --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote>
+dharma demo reply --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --recipient-device-id <uuid> --question-id <uuid> --content "Use the reviewed mapping."
+dharma demo ack --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --message-id <uuid>
+dharma demo resume --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote>
+```
+
+`demo resume` replays an interrupted signed operation before another command
+is sent. An acknowledged message proves delivery, not that the recipient agent
+used or correctly applied the answer. The Demo peer transport is separate from
+the signed package, knowledge, Atlas, and autonomous-update readiness gates.
+
 ## Autonomous organization setup
 
 Requires Node.js 22.20.0 through 24.x.
