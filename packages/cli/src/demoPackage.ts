@@ -1,9 +1,16 @@
-import { createHash, randomBytes, randomUUID, sign } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadOrCreateDeviceIdentity, normalizeHqUrl, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
-import { scopePath, verifyDemoDevice, type DemoDeviceScope } from './demoEnrollment.js';
+import { verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor,
+  loadOrCreateDeviceIdentity, normalizeHqUrl,
+  saveActiveSkillAuthorizationAnchor, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
+import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { getActiveSkillBundleAuthorization, installSkillBundle, rollbackUnconfirmedSkillBundle,
+  verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
+import { loadDemoSigningTrust, scopePath, verifyDemoDevice, type DemoDeviceScope } from './demoEnrollment.js';
+import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
@@ -114,13 +121,13 @@ function transport(input: DemoDeviceScope, deps: DemoPackageDependencies): Repos
 
 async function ensureDemoLocalKnowledge(input: { workspace: string; scope: DemoDeviceScope;
   workspaceId: string }) {
-  const ownership = await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
+  const ownership = await assertRepositoryInstallerOwnership(input.workspace, input.scope.repositoryId);
   if (ownership === 'absent') {
     await mkdir(resolve(input.workspace, '.agents/skills'), { recursive: true, mode: 0o700 });
     await mkdir(resolve(input.workspace, '.agents/skills/dharma-agent-fabric'), { mode: 0o700 });
     await writeRepositoryInstallerFile(input.workspace,
       '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json',
-      `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.workspaceId })}\n`);
+      `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.scope.repositoryId })}\n`);
   }
   if (ownership !== 'signed') {
     await mkdir(resolve(input.workspace, '.agents/skills/dharma-agent-fabric/references'),
@@ -138,10 +145,219 @@ async function ensureDemoLocalKnowledge(input: { workspace: string; scope: DemoD
   return null;
 }
 
+async function reconcileDemoInstallerMarker(input: { workspace: string; repositoryId: string;
+  legacySpaceId: string }) {
+  try { return await assertRepositoryInstallerOwnership(input.workspace, input.repositoryId); }
+  catch (error) {
+    if (input.repositoryId === input.legacySpaceId) throw error;
+    const legacy = await assertRepositoryInstallerOwnership(input.workspace, input.legacySpaceId);
+    if (legacy !== 'installer') throw error;
+    await writeRepositoryInstallerFile(input.workspace,
+      '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json',
+      `${JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: input.repositoryId })}\n`);
+    return assertRepositoryInstallerOwnership(input.workspace, input.repositoryId);
+  }
+}
+
+function demoInstallPolicy(authorization: ReturnType<typeof validateRepositorySourceAuthorization>): OrganizationPolicy {
+  return { schema: 'dharma.organization-policy/v1', organizationId: authorization.organizationId,
+    revision: authorization.policyRevision,
+    evidence: { defaultMode: 'structured', registeredWorkspaceOnly: true, excludePaths: [],
+      maximumCapsuleBytes: 0, maximumDailyUploadBytes: 0, maximumExpansionBytes: 0 },
+    tasks: { defaultNetwork: 'deny', defaultGit: 'read_only', allowedCommands: {},
+      writePaths: [], requireLocalConfirmationFor: [] },
+    skills: { automaticInstall: authorization.policy.automaticValidatedPublication,
+      automaticPromotionMaxRisk: 'R1', canaryPercent: 100 },
+    retention: {}, budgets: {} };
+}
+
+async function installActiveDemoPackage(input: {
+  scope: DemoDeviceScope; workspaceId: string;
+  provider: ProviderId; nativeSkillDirectory: string;
+  authorization: ReturnType<typeof validateRepositorySourceAuthorization>;
+}, deps: DemoPackageDependencies) {
+  const { scope } = input;
+  const root = `/api/demo/fabric/repositories/${scope.repositoryId}/packages`;
+  const active = await signedJson(scope, 'GET', `${root}/active`, undefined, deps);
+  if (active.organizationId !== scope.organizationId || active.repositoryId !== scope.repositoryId
+    || active.repositoryPackageState !== 'published' || !active.package
+    || typeof active.package !== 'object' || Array.isArray(active.package)) {
+    return null;
+  }
+  const published = active.package as Record<string, unknown>;
+  if (!UUID.test(String(published.releaseId || '')) || !published.envelope || !published.bundle
+    || !published.index || typeof published.index !== 'object') {
+    throw new Error('Active Demo package receipt is incomplete.');
+  }
+  const envelope = published.envelope as Record<string, unknown>;
+  const descriptor = envelope.descriptor as Record<string, unknown>;
+  if (!descriptor || descriptor.policyHash !== input.authorization.policyHash
+    || descriptor.organizationId !== scope.organizationId
+    || descriptor.repositoryBindingId !== scope.repositoryId
+    || descriptor.releaseId !== published.releaseId) {
+    throw new Error('Active Demo release does not match the current repository authorization.');
+  }
+  const trust = await loadDemoSigningTrust(scope);
+  const bundle = published.bundle as SkillBundle;
+  const { signature, ...unsignedEnvelope } = envelope;
+  const now = Date.now();
+  const signingKey = trust.keyset.keys.filter(key =>
+    ['active', 'overlap'].includes(key.status)
+    && Date.parse(key.notBefore) <= now && Date.parse(key.notAfter) > now)
+    .map(key => createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
+      x: key.publicKeyEd25519 }, format: 'jwk' }))
+    .find(key => {
+      if (typeof signature !== 'string' || !verifyCanonicalObject(unsignedEnvelope, signature, key)) return false;
+      try { verifySkillBundle(bundle, key); return true; }
+      catch { return false; }
+    });
+  if (!signingKey) throw new Error('Demo release is not signed by a currently trusted organization key.');
+  const releaseId = String(published.releaseId);
+  const delivery = await receiveRepositoryPackageDelivery({
+    envelope, bundle, serverPublicKey: signingKey,
+    scope: { organizationId: scope.organizationId, repositoryBindingId: scope.repositoryId,
+      repositoryAgentId: scope.repositoryId, deviceId: trust.deviceId,
+      workspaceId: input.workspaceId, provider: input.provider },
+    fetchIndex: async () => published.index,
+    fetchChunk: async (fileIndex, chunkIndex) => {
+      const response = await signedJson(scope, 'GET',
+        `${root}/${releaseId}/chunks/${fileIndex}/${chunkIndex}`, undefined, deps);
+      if (response.organizationId !== scope.organizationId || response.repositoryId !== scope.repositoryId
+        || response.releaseId !== releaseId) throw new Error('Demo package chunk scope changed.');
+      return response.chunk;
+    },
+  });
+  const installerWorkspaceId = scope.repositoryId;
+  const config = { hqUrl: normalizeHqUrl(scope.hqUrl), organizationId: scope.organizationId,
+    deviceId: trust.deviceId };
+  const anchorInput = { config, workspaceId: installerWorkspaceId,
+    organizationAgentId: scope.repositoryId, provider: input.provider, store: deps.store };
+  const prior = await loadActiveSkillAuthorizationAnchor(anchorInput);
+  if (prior) {
+    const priorBundle = JSON.parse(await readFile(resolve(input.nativeSkillDirectory,
+      '.dharma-managed', 'workspaces', installerWorkspaceId, 'active', 'AUTHORIZATION.json'),
+    'utf8')) as SkillBundle;
+    const priorSigningKey = trust.keyset.keys.filter(key =>
+      ['active', 'overlap'].includes(key.status)
+      && Date.parse(key.notBefore) <= now && Date.parse(key.notAfter) > now)
+      .map(key => createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
+        x: key.publicKeyEd25519 }, format: 'jwk' }))
+      .find(key => {
+        try { verifySkillBundle(priorBundle, key); return true; }
+        catch { return false; }
+      });
+    if (!priorSigningKey) throw new Error('Active Demo package is not signed by a currently trusted key.');
+    const priorAuthorization = await getActiveSkillBundleAuthorization({ nativeSkillDirectory: input.nativeSkillDirectory,
+      workspaceId: installerWorkspaceId, provider: input.provider,
+      organizationId: scope.organizationId, organizationAgentId: scope.repositoryId,
+      deviceId: trust.deviceId, serverPublicKey: priorSigningKey,
+      devicePublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
+        x: (JSON.parse(await readFile(scopePath(scope, config.hqUrl), 'utf8')) as DeviceConfig).publicKeyEd25519 }, format: 'jwk' }),
+      expectedReceiptHash: prior.receiptHash });
+    if (!priorAuthorization || priorAuthorization.bundleId !== prior.bundleId) {
+      throw new Error('Protected Demo package receipt does not match the active installation.');
+    }
+    if (prior.bundleId === bundle.bundleId) return { releaseId, bundleId: bundle.bundleId,
+      receiptHash: prior.receiptHash, alreadyInstalled: true };
+  } else {
+    const pointer = resolve(input.nativeSkillDirectory, '.dharma-managed', 'workspaces',
+      installerWorkspaceId, 'ACTIVE_BUNDLE');
+    try { await readFile(pointer); throw new Error('Existing Demo package has no protected receipt anchor.'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  const currentScope = await signedJson(scope, 'GET',
+    `/api/demo/fabric/repositories/${scope.repositoryId}/package-scope`, undefined, deps);
+  const currentAuthorization = validateRepositorySourceAuthorization(currentScope.sourceAuthorization,
+    { organizationId: scope.organizationId, workspaceId: input.workspaceId,
+      repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId }, new Date());
+  const currentActive = await signedJson(scope, 'GET', `${root}/active`, undefined, deps);
+  if (currentAuthorization.policyHash !== input.authorization.policyHash
+    || currentActive.repositoryPackageState !== 'published'
+    || (currentActive.package as Record<string, unknown> | null)?.releaseId !== releaseId) {
+    throw new Error('Demo policy or active release changed before installation.');
+  }
+  delivery.assertCurrent();
+  const parent = resolve(scope.stateRoot, 'demo-package-sources');
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const sourceRoot = await mkdtemp(resolve(parent, 'attempt-'));
+  try {
+    for (const file of delivery.files) {
+      delivery.assertCurrent();
+      const destination = resolve(sourceRoot, file.path);
+      const within = relative(sourceRoot, destination);
+      if (within === '..' || within.startsWith('../') || within.startsWith('..\\') || isAbsolute(within)) {
+        throw new Error('Demo package file escapes its staging directory.');
+      }
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      await writeFile(destination, Buffer.from(file.contentBase64, 'base64'), { flag: 'wx', mode: 0o600 });
+    }
+    delivery.assertCurrent();
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl: config.hqUrl,
+      organizationId: `${scope.organizationId}:${scope.repositoryId}`,
+      installationId: scope.installationId, store: deps.store });
+    const receipt = await installSkillBundle({ bundle: delivery.bundle, sourceDirectory: sourceRoot,
+      nativeSkillDirectory: input.nativeSkillDirectory, policy: demoInstallPolicy(currentAuthorization),
+      serverPublicKey: signingKey, devicePrivateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }),
+      deviceId: trust.deviceId, organizationAgentId: scope.repositoryId,
+      workspaceId: installerWorkspaceId, provider: input.provider });
+    if (receipt.status !== 'active') throw new Error(`Demo signed package installation ${receipt.status}.`);
+    try {
+      await saveActiveSkillAuthorizationAnchor({ ...anchorInput, bundleId: receipt.bundleId,
+        receiptHash: receipt.receiptHash, activatedAt: receipt.completedAt,
+        expiresAt: delivery.bundle.expiresAt ?? null });
+    } catch (error) {
+      const recoveryErrors: unknown[] = [];
+      try { await rollbackUnconfirmedSkillBundle({ nativeSkillDirectory: input.nativeSkillDirectory,
+        workspaceId: installerWorkspaceId, receipt }); }
+      catch (failure) { recoveryErrors.push(failure); }
+      try {
+        if (prior) await saveActiveSkillAuthorizationAnchor({ ...anchorInput,
+          bundleId: prior.bundleId, receiptHash: prior.receiptHash,
+          activatedAt: prior.activatedAt, expiresAt: prior.expiresAt });
+        else await deleteActiveSkillAuthorizationAnchor(anchorInput);
+      } catch (failure) { recoveryErrors.push(failure); }
+      if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors],
+        'Demo package anchor persistence failed and local recovery was incomplete.');
+      throw error;
+    }
+    return { releaseId, bundleId: receipt.bundleId, receiptHash: receipt.receiptHash,
+      alreadyInstalled: false };
+  } finally { await rm(sourceRoot, { recursive: true, force: true }); }
+}
+
+async function acknowledgeDemoInstallation(input: { scope: DemoDeviceScope;
+  nativeSkillDirectory: string; installed: { releaseId: string; bundleId: string;
+    receiptHash: string } }, deps: DemoPackageDependencies) {
+  const { scope, installed } = input;
+  const path = resolve(input.nativeSkillDirectory, '.dharma-managed', 'workspaces',
+    scope.repositoryId, 'active', 'INSTALL_RECEIPT.json');
+  const bytes = await readFile(path);
+  if (bytes.length > 131_072) throw new Error('Demo installation receipt exceeds its limit.');
+  const receipt = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
+  if (receipt.schema !== 'dharma.install-receipt/v1'
+    || receipt.workspaceId !== scope.repositoryId
+    || receipt.bundleId !== installed.bundleId
+    || receipt.receiptHash !== installed.receiptHash
+    || receipt.status !== 'active') {
+    throw new Error('Local Demo installation receipt does not match the protected release.');
+  }
+  const result = await signedJson(scope, 'POST',
+    `/api/demo/fabric/repositories/${scope.repositoryId}/packages/${installed.releaseId}/install-receipts`,
+    { receipt }, deps);
+  if (result.organizationId !== scope.organizationId || result.repositoryId !== scope.repositoryId
+    || result.releaseId !== installed.releaseId || result.bundleId !== installed.bundleId
+    || result.receiptHash !== installed.receiptHash) {
+    throw new Error('Demo package acknowledgement does not match the active installation.');
+  }
+  return { receiptHash: installed.receiptHash, duplicate: result.duplicate === true };
+}
+
 export async function demoRepositoryPackage(input: {
   scope: DemoDeviceScope;
   workspace: string;
   statusOnly?: boolean;
+  provider?: ProviderId;
+  nativeSkillDirectory?: string;
 }, deps: DemoPackageDependencies = {}) {
   const { scope } = input;
   const root = `/api/demo/fabric/repositories/${scope.repositoryId}`;
@@ -165,15 +381,29 @@ export async function demoRepositoryPackage(input: {
       activationState: view.repositoryPackageState === 'published'
         ? 'signed_delivery_pending' : 'candidate_pending' };
   }
-  const ownership = await assertRepositoryInstallerOwnership(input.workspace, view.workspaceId);
-  if (view.repositoryPackageState === 'published' && ownership !== 'signed') {
-    return { ok: true, stage: 'demo_repository_package_delivery_pending',
-      repositoryId: scope.repositoryId, repositoryPackageState: view.repositoryPackageState,
-      candidate: null, ready: false, activationState: 'signed_delivery_pending' };
-  }
   if (!view.sourceAuthorization) throw new Error('Demo repository has no active source authorization.');
   const sourceAuthorization = validateRepositorySourceAuthorization(view.sourceAuthorization,
     candidateScope, new Date());
+  await reconcileDemoInstallerMarker({ workspace: input.workspace,
+    repositoryId: scope.repositoryId, legacySpaceId: view.workspaceId });
+  if (view.repositoryPackageState === 'published') {
+    const nativeSkillDirectory = input.nativeSkillDirectory ?? resolve(input.workspace, '.agents/skills');
+    const installed = await installActiveDemoPackage({ scope,
+      workspaceId: view.workspaceId, provider: input.provider ?? 'codex',
+      nativeSkillDirectory,
+      authorization: sourceAuthorization }, deps);
+    if (installed) {
+      const acknowledgement = await acknowledgeDemoInstallation({ scope, nativeSkillDirectory,
+        installed }, deps);
+      return { ok: true, stage: 'demo_repository_package_installed',
+        repositoryId: scope.repositoryId, repositoryPackageState: 'published',
+        candidate: null, installed, acknowledgement,
+        ready: false, activationState: 'signed_package_active' };
+    }
+    return { ok: true, stage: 'demo_repository_package_delivery_pending',
+      repositoryId: scope.repositoryId, repositoryPackageState: 'published',
+      candidate: null, ready: false, activationState: 'signed_delivery_pending' };
+  }
   const knowledge = await ensureDemoLocalKnowledge({ workspace: input.workspace,
     scope, workspaceId: view.workspaceId });
   const snapshot = await inventoryRepositoryPackage({ workspace: input.workspace,

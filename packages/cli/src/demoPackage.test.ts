@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
-import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { loadOrCreateDeviceIdentity, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
+import { calculateBundleHash } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { scopePath } from './demoEnrollment.js';
 import { demoRepositoryPackage } from './demoPackage.js';
+import { planRepositoryPackageTransferV2, type RepositoryTransferFile } from './repositoryPackageTransfer.js';
 
 const organizationId = 'org_fixture';
 const repositoryId = '10000000-0000-4000-8000-000000000001';
@@ -16,6 +18,101 @@ const workspaceId = '40000000-0000-4000-8000-000000000001';
 const installationId = '50000000-0000-4000-8000-000000000001';
 const normalizedRepository = 'github.com/example/private';
 const hqUrl = 'https://dharma.example';
+const digest = (value: string | Buffer) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+
+function signedPackage(policyHash: string) {
+  const signer = generateKeyPairSync('ed25519');
+  const serverPublicKeyEd25519 = (signer.publicKey.export({ format: 'jwk' }) as { x?: string }).x!;
+  const issuedAt = new Date(Date.now() - 60_000).toISOString();
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+  const keyVersion = 'projects/test/locations/global/keyRings/demo/cryptoKeys/signing/cryptoKeyVersions/1';
+  const keysetBase = { schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId, generation: 1, keys: [{ keyVersion, publicKeyEd25519: serverPublicKeyEd25519,
+      status: 'active' as const, notBefore: issuedAt, notAfter: expiresAt }],
+    signedByKeyVersion: keyVersion, issuedAt, expiresAt };
+  const keyset = { ...keysetBase, signature: signCanonicalObject(keysetBase, signer.privateKey) };
+  const pin = (letter: string) => `sha256:${letter.repeat(64)}`;
+  const root = '.agents/skills/dharma-agent-fabric/';
+  const catalogPath = `${root}knowledge/CATALOG.json`;
+  const manifestPath = `${root}MANIFEST.json`;
+  const promptPath = '.dharma/onboarding-prompt.md';
+  const knowledgeBaseId = `repository-kb:${digest(canonicalize({
+    schema: 'dharma.repository-knowledge-identity/v1', organizationId, repositoryAgentId: repositoryId,
+  }))}`;
+  const projection = { schema: 'dharma.repository-concept-projection/v1',
+    organizationId, repositoryAgentId: repositoryId, policyHash, snapshotHash: pin('b'),
+    authority: 'unsigned_projection', publicationAuthorized: false, concepts: [],
+    acceptedProposalHashes: [], unresolved: [] };
+  const catalog = { schema: 'dharma.repository-knowledge/v2', managedBy: 'dharma-agent-fabric',
+    organizationId, repositoryAgentId: repositoryId, knowledgeBaseId, generation: 1,
+    authority: 'requires_verified_release', policyHash, sourceSnapshotHash: pin('b'),
+    sourceLocalCatalogHash: pin('c'), projectionHash: digest(canonicalize(projection)),
+    repoAtlas: { associationId: '244b5a90-3b7a-4a81-9503-c9f49be790c3',
+      knowledgeBaseId, organizationId, repositoryAgentId: repositoryId,
+      basis: 'repository_initialization', sourceWindowIds: [], analysisHash: null },
+    concepts: [], unresolved: [] };
+  const file = (path: string, text: string): RepositoryTransferFile => ({ path,
+    contentBase64: Buffer.from(text).toString('base64'), sha256: digest(text),
+    sizeBytes: Buffer.byteLength(text) });
+  const copies = [
+    { ...file(`${root}SKILL.md`, '# Repository Agent Fabric\n'), role: 'skill' },
+    { ...file(`${root}skills/source/.claude/skills/verifier/SKILL.md`, '# Verifier\n'), role: 'skill' },
+    { ...file(promptPath, 'Use the organization repository package.\n'), role: 'onboarding_prompt' },
+    { ...file(catalogPath, `${canonicalize(catalog)}\n`), role: 'knowledge' },
+  ];
+  const entryPath = '.claude/skills/verifier/SKILL.md';
+  const manifest = { schema: 'dharma.repository-release-manifest/v1', organizationId,
+    repositoryAgentId: repositoryId, generation: 1, authority: 'requires_verified_release',
+    sourceManifestHash: pin('e'), sourceSnapshotHash: pin('b'), policyHash,
+    knowledgeBaseId, atlasAssociationId: catalog.repoAtlas.associationId,
+    sourceSkills: [{ path: '.claude/skills/verifier', providerRoot: '.claude/skills',
+      entryPath, contentHash: digest(canonicalize([{ path: entryPath, sha256: copies[1]!.sha256 }])),
+      availability: 'available', filePaths: [entryPath],
+      observation: { state: 'not_observed', authority: 'caller_supplied_not_runtime_verified', references: [] } }],
+    files: copies.map(({ contentBase64: _content, ...row }) => row)
+      .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0) };
+  const files = [...copies.map(({ role: _role, ...row }) => row),
+    file(manifestPath, `${canonicalize(manifest)}\n`)];
+  const commit = 'a'.repeat(40);
+  const releaseId = '90000000-0000-4000-8000-000000000001';
+  const bundleId = 'a0000000-0000-4000-8000-000000000001';
+  const transfer = planRepositoryPackageTransferV2({ files, organizationId,
+    repositoryBindingId: repositoryId, repositoryAgentId: repositoryId,
+    releaseId, generation: 1, gitCommit: commit });
+  const tree = createHash('sha256');
+  for (const row of files.filter(row => row.path.startsWith(root))
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) {
+    tree.update(`dharma-agent-fabric/${row.path.slice(root.length)}`).update('\0')
+      .update(Buffer.from(row.contentBase64, 'base64')).update('\0');
+  }
+  const bundleBase = { schema: 'dharma.skill-bundle/v2' as const, bundleId,
+    organizationId, version: '1.0.0', operation: 'install' as const,
+    skills: [{ skillId: 'dharma-agent-fabric', version: '1.0.0',
+      repository: 'https://github.com/example/private.git', commit,
+      contentHash: `sha256:${tree.digest('hex')}`, path: root.slice(0, -1) }],
+    riskClass: 'R1' as const, targetSelectors: { organizationAgentIds: [repositoryId],
+      deviceIds: [], workspaceIds: [], providers: [] }, activationPolicy: 'next_session' as const,
+    rollbackBundleId: null, evaluationReceiptId: 'fixture:evaluated', createdAt: issuedAt,
+    expiresAt: null };
+  const bundleUnsigned = { ...bundleBase, bundleHash: calculateBundleHash(bundleBase) };
+  const bundle = { ...bundleUnsigned, signature: signCanonicalObject(bundleUnsigned, signer.privateKey) };
+  const descriptor = { schema: 'dharma.repository-package-delivery/v1',
+    delivery: 'authenticated_chunks', transferSchema: 'dharma.repository-package-transfer/v2',
+    organizationId, repositoryBindingId: repositoryId, repositoryAgentId: repositoryId,
+    releaseId, generation: 1, gitCommit: commit, policyHash, sourceSnapshotHash: pin('b'),
+    sourceManifestHash: pin('e'), sourceLocalCatalogHash: pin('c'),
+    catalogHash: files.find(row => row.path === catalogPath)!.sha256,
+    manifestHash: files.find(row => row.path === manifestPath)!.sha256,
+    transferIndexHash: transfer.indexHash, fileCount: files.length,
+    totalBytes: transfer.index.totalBytes, maximumFileBytes: 262_144,
+    createdAt: issuedAt, expiresAt };
+  const envelopeUnsigned = { schema: 'dharma.repository-package-envelope/v1',
+    bundleId, bundleHash: bundle.bundleHash, descriptor };
+  const envelope = { ...envelopeUnsigned,
+    signature: signCanonicalObject(envelopeUnsigned, signer.privateKey) };
+  return { serverPublicKeyEd25519, keyset, releaseId, bundleId, bundle,
+    envelope, index: transfer.index, chunks: transfer.chunks };
+}
 
 function memoryStore(): SecureSecretStore {
   const values = new Map<string, string>();
@@ -26,7 +123,8 @@ function memoryStore(): SecureSecretStore {
 }
 
 async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boolean;
-  loseFirstUpload?: boolean; packagePublished?: boolean; candidatePublished?: boolean } = {}) {
+  loseFirstUpload?: boolean; packagePublished?: boolean; candidatePublished?: boolean;
+  activePackage?: boolean | 'valid'; loseFirstAck?: boolean } = {}) {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-package-'));
   const workspace = await mkdtemp(resolve(tmpdir(), 'dharma-demo-source-'));
   await writeFile(resolve(workspace, 'README.md'), 'Approved source evidence.\n');
@@ -36,14 +134,11 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
   const identity = await loadOrCreateDeviceIdentity({ hqUrl,
     organizationId: `${organizationId}:${repositoryId}`, installationId, store });
   const configPath = scopePath(scope, hqUrl);
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, JSON.stringify({ schema: 'dharma.demo-device/v1',
-    ...scope, deviceId, publicKeyEd25519: identity.publicKeyEd25519,
-    signedReady: true, nextSequence: 1 }), { mode: 0o600 });
   let sequence = 0;
   let lost = false;
   let uploadLost = false;
   const uploads: Array<Record<string, unknown>> = [];
+  const acknowledgements: Array<Record<string, unknown>> = [];
   const generationId = '60000000-0000-4000-8000-000000000001';
   const policy = { action: 'authorize', confirmed: true,
     requestId: '70000000-0000-4000-8000-000000000001', repositoryBindingId: repositoryId,
@@ -58,6 +153,13 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
     policyRevision: `repository-source-${generationId}`,
     policyHash: `sha256:${createHash('sha256').update(canonicalize(policy)).digest('hex')}`,
     confirmedAt: new Date().toISOString(), policy };
+  const release = options.activePackage === 'valid' ? signedPackage(sourceAuthorization.policyHash) : null;
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({ schema: 'dharma.demo-device/v1',
+    ...scope, deviceId, publicKeyEd25519: identity.publicKeyEd25519,
+    signedReady: true, nextSequence: 1,
+    ...(release ? { serverPublicKeyEd25519: release.serverPublicKeyEd25519,
+      serverSigningKeyset: release.keyset } : {}) }), { mode: 0o600 });
   const fetcher: typeof fetch = async (resource, init) => {
     const url = new URL(String(resource));
     const headers = new Headers(init?.headers);
@@ -86,6 +188,38 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
         sourceAuthorization: options.sourcePolicy ? sourceAuthorization : null,
         repositoryPackageState: options.packagePublished ? 'published' : 'not_connected' });
     }
+    if (url.pathname.endsWith('/packages/active')) return Response.json({ ok: true,
+      organizationId, repositoryId, repositoryPackageState: options.activePackage ? 'published' : 'pending',
+      package: release ? { releaseId: release.releaseId, envelope: release.envelope,
+        bundle: release.bundle, index: release.index } : options.activePackage ? {
+        releaseId: '90000000-0000-4000-8000-000000000001',
+        envelope: { descriptor: { policyHash: sourceAuthorization.policyHash,
+          organizationId, repositoryBindingId: repositoryId,
+          releaseId: '90000000-0000-4000-8000-000000000001' } },
+        bundle: {}, index: {},
+      } : null });
+    if (release && url.pathname.includes('/packages/') && url.pathname.includes('/chunks/')) {
+      const parts = url.pathname.split('/');
+      const fileIndex = Number(parts.at(-2));
+      const chunkIndex = Number(parts.at(-1));
+      const chunk = release.chunks.find(row => row.fileIndex === fileIndex && row.chunkIndex === chunkIndex);
+      assert.ok(chunk);
+      return Response.json({ ok: true, organizationId, repositoryId,
+        releaseId: release.releaseId, chunk });
+    }
+    if (release && url.pathname.endsWith('/install-receipts')) {
+      const receipt = (JSON.parse(body) as { receipt: Record<string, unknown> }).receipt;
+      assert.equal(receipt.workspaceId, repositoryId);
+      assert.equal(receipt.bundleId, release.bundleId);
+      assert.equal(receipt.deviceId, deviceId);
+      acknowledgements.push(receipt);
+      if (options.loseFirstAck && acknowledgements.length === 1) {
+        throw new Error('connection lost after installation acknowledgement');
+      }
+      return Response.json({ ok: true, organizationId, repositoryId,
+        releaseId: release.releaseId, bundleId: release.bundleId,
+        receiptHash: receipt.receiptHash, duplicate: acknowledgements.length > 1 });
+    }
     if (url.pathname.endsWith('/package-candidates')) {
       const upload = JSON.parse(body) as Record<string, unknown>;
       assert.equal(upload.repositoryBindingId, repositoryId);
@@ -105,7 +239,7 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
     }
     throw new Error(`Unexpected package route: ${url.pathname}`);
   };
-  return { scope, workspace, store, fetcher, configPath, uploads,
+  return { scope, workspace, store, fetcher, configPath, uploads, acknowledgements, release,
     get sequence() { return sequence; } };
 }
 
@@ -118,6 +252,20 @@ test('signed Demo package status reports no candidate and does not invent a rele
   assert.equal(result.candidate, null);
   assert.equal((JSON.parse(await readFile(f.configPath, 'utf8')) as { nextSequence: number }).nextSequence,
     f.sequence + 1);
+});
+
+test('lost acknowledgement response retries the identical anchored installation receipt', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true,
+    activePackage: 'valid', loseFirstAck: true });
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  await assert.rejects(demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher }),
+    /connection lost after installation acknowledgement/);
+  assert.equal(f.acknowledgements.length, 1);
+  const recovered = await demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher });
+  assert.equal(recovered.installed?.alreadyInstalled, true);
+  assert.equal(recovered.acknowledgement?.duplicate, true);
+  assert.deepEqual(f.acknowledgements[0], f.acknowledgements[1]);
 });
 
 test('lost scope response reconciles the consumed sequence on retry', async () => {
@@ -163,6 +311,53 @@ test('a published shared repository waits for signed delivery without submitting
   assert.equal(result.activationState, 'signed_delivery_pending');
   assert.equal(f.uploads.length, 0);
   await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
+});
+
+test('a published package cannot install without the browser-pinned signing anchor', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: true });
+  await assert.rejects(demoRepositoryPackage({ scope: f.scope, workspace: f.workspace },
+    { store: f.store, fetcher: f.fetcher }), /signing trust is not pinned/i);
+  assert.equal(f.uploads.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
+});
+
+test('a published signed package installs once under the scoped provider and reuses its protected receipt', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const nativeSkillDirectory = resolve(f.workspace, '.agents/skills');
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory };
+  const first = await demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher });
+  assert.equal(first.stage, 'demo_repository_package_installed');
+  assert.equal(first.ready, false);
+  assert.equal(first.activationState, 'signed_package_active');
+  assert.equal(first.installed?.alreadyInstalled, false);
+  assert.equal(first.installed?.releaseId, f.release?.releaseId);
+  assert.equal(first.installed?.bundleId, f.release?.bundleId);
+  assert.equal(await readFile(resolve(nativeSkillDirectory, 'dharma-agent-fabric/SKILL.md'), 'utf8'),
+    '# Repository Agent Fabric\n');
+  assert.equal(f.uploads.length, 0);
+  assert.equal(f.acknowledgements.length, 1);
+  const second = await demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher });
+  assert.equal(second.stage, 'demo_repository_package_installed');
+  assert.equal(second.installed?.alreadyInstalled, true);
+  assert.equal(second.installed?.receiptHash, first.installed?.receiptHash);
+  assert.equal(second.acknowledgement?.duplicate, true);
+  assert.equal(f.acknowledgements.length, 2);
+});
+
+test('a legacy installer-only marker migrates to repository ownership before signed activation', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const skillRoot = resolve(f.workspace, '.agents/skills/dharma-agent-fabric');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(resolve(skillRoot, '.dharma-agent-fabric.json'), JSON.stringify({
+    managedBy: 'dharma-agent-fabric', workspaceId,
+  }));
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    provider: 'codex', nativeSkillDirectory: resolve(f.workspace, '.agents/skills') },
+  { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.stage, 'demo_repository_package_installed');
+  assert.deepEqual(JSON.parse(await readFile(resolve(skillRoot, '.dharma-agent-fabric.json'), 'utf8')),
+    { bundleId: f.release!.bundleId, skillId: 'dharma-agent-fabric', workspaceId: repositoryId });
 });
 
 test('a published candidate is not ready until its signed release is installed', async () => {

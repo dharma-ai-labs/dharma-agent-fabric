@@ -112,7 +112,7 @@ export async function loadDemoSigningTrust(input: DemoDeviceScope) {
   const verification = verifyInitialServerSigningKeyset(
     config.serverSigningKeyset, publicKey, input.organizationId);
   if (!verification.ok) throw new Error(`Demo signing trust is invalid: ${verification.reason}.`);
-  return { publicKey, deviceId: config.deviceId };
+  return { publicKey, keyset: config.serverSigningKeyset, deviceId: config.deviceId };
 }
 
 async function writePrivateJson(path: string, value: unknown) {

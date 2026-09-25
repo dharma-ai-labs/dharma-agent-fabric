@@ -5796,8 +5796,19 @@ export async function run(argv: string[]): Promise<Output> {
         return receipt;
       }
       if (subcommand === 'package' || subcommand === 'package-status') {
+        const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+        const provider = subcommand === 'package-status' && requestedProvider === 'auto' ? 'codex'
+          : requestedProvider === 'auto'
+          ? await detectBootstrapProvider(workspace) : requestedProvider;
+        if (!isLocalProviderId(provider)) {
+          throw new Error('Demo package provider must be auto, codex, claude, agy, or hermes.');
+        }
+        const demoNativeSkillDirectory = provider === 'codex' ? resolve(workspace, '.agents', 'skills')
+          : provider === 'claude' ? resolve(workspace, '.claude', 'skills')
+            : nativeSkillDirectory(provider);
         return demoRepositoryPackage({ scope, workspace,
-          statusOnly: subcommand === 'package-status' });
+          statusOnly: subcommand === 'package-status', provider,
+          nativeSkillDirectory: demoNativeSkillDirectory });
       }
       let action: DemoPeerAction | null = null;
       if (subcommand === 'role') {
