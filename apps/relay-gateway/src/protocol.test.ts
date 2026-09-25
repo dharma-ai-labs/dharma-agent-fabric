@@ -70,6 +70,35 @@ test('relay permits only bounded repository collaboration and package routes', (
   }
 });
 
+test('relay permits only signed, bounded repository source reads', () => {
+  const id = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
+  const candidateId = '77f61652-a5eb-46e4-930c-9478cd4a9c31';
+  const prefix = `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/source-inventory`;
+  const blob = `${prefix}/${candidateId}/blobs/sha256%3A${'a'.repeat(64)}`;
+  for (const pathname of [
+    `${prefix}?workspaceId=${id}`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md`,
+    `${blob}?workspaceId=${id}&path=approved+reports%2Fnotes%23one.md`,
+  ]) {
+    assert.doesNotThrow(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }));
+    assert.throws(() => parseRelayRequest({ ...request, method: 'POST', pathname }), /route_not_allowed/);
+  }
+  for (const pathname of [
+    prefix,
+    `${prefix}?workspaceId=all`,
+    `${prefix}?workspaceId=${id}&admin=true`,
+    `${blob}?workspaceId=${id}`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&admin=true`,
+    `${blob}?path=skills%2Fcodex%2FSKILL.md&workspaceId=${id}`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md/raw`,
+    `${prefix}/${candidateId}/blobs/all?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md`,
+  ]) {
+    assert.throws(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }), /route_not_allowed/);
+  }
+  assert.throws(() => parseRelayRequest({ ...request, method: 'GET',
+    pathname: `${prefix}?workspaceId=${id}`, body: '{}' }), /get_body_forbidden/);
+});
+
 test('relay permits only the bounded trajectory-head reconciliation route', () => {
   assert.doesNotThrow(() => parseRelayRequest({
     ...request,
