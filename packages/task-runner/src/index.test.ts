@@ -131,6 +131,12 @@ test('read-only signed tasks receive only matching verified knowledge and remove
       providerCalls += 1;
       assert.equal(input.allowWrites, false);
       assert.match(input.instructions, /\.dharma-task-knowledge\/CATALOG\.json/);
+      assert.match(input.instructions, /isolated temporary task worktree, not the enrolled repository workspace/);
+      assert.match(input.instructions, /Do not run dharma skills verify --workspace \. here/);
+      assert.match(input.instructions, /generic-bootstrap result cannot describe the enrolled package/);
+      assert.match(input.instructions, /If a file read is denied, report the exact denied operation/);
+      assert.ok(input.instructions.includes(bundleId));
+      assert.ok(input.instructions.includes(bundleHash));
       assert.equal(await readFile(resolve(input.workspace, '.dharma-task-knowledge/CATALOG.json'), 'utf8'), knowledge.catalogBytes.toString());
       assert.equal(await readFile(resolve(input.workspace, '.dharma-task-knowledge/MANIFEST.json'), 'utf8'), knowledge.manifestBytes.toString());
       return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'answer', stderr: '',

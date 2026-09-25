@@ -24,6 +24,9 @@ test('the installed guide names the supported knowledge and peer workflow', asyn
   assert.match(contract, /repositories reply --workspace-id <workspace-id> --question-id <question-id>/);
   assert.match(contract, /reads the response rather than manually sending one/);
   assert.match(contract, /active signed release and its source references/);
+  assert.match(contract, /detached task worktree is not the enrolled workspace/);
+  assert.match(contract, /Do not run `dharma skills verify --workspace \.` there/);
+  assert.match(contract, /report the exact denied operation/);
   assert.match(contract, /source edit, successful upload, or local snapshot alone is not publication/);
   assert.doesNotMatch(contract, /dhab_[A-Za-z0-9_-]+/);
 });
