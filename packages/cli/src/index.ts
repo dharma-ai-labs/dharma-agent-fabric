@@ -60,8 +60,9 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
+import { runDemoWatch } from './demoWatch.js';
 
-const VERSION = '0.2.95';
+const VERSION = '0.2.96';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5853,7 +5854,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
-    'package', 'package-status']
+    'package', 'package-status', 'watch']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -5874,6 +5875,39 @@ export async function run(argv: string[]): Promise<Output> {
       hqUrl, organizationId, repositoryId, normalizedRepository,
       installationId: await loadOrCreateInstallationId(), stateRoot: dharmaHome(),
     };
+    if (['package', 'package-status', 'watch'].includes(String(subcommand))) {
+      const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+      const provider = subcommand === 'package-status' && requestedProvider === 'auto' ? 'codex'
+        : requestedProvider === 'auto'
+        ? await detectBootstrapProvider(workspace) : requestedProvider;
+      if (!isLocalProviderId(provider)) {
+        throw new Error('Demo package provider must be auto, codex, claude, agy, or hermes.');
+      }
+      const demoNativeSkillDirectory = provider === 'codex' ? resolve(workspace, '.agents', 'skills')
+        : provider === 'claude' ? resolve(workspace, '.claude', 'skills')
+          : nativeSkillDirectory(provider);
+      const cycle = () => withDemoDeviceLock(scope, () => demoRepositoryPackage({ scope, workspace,
+        statusOnly: subcommand === 'package-status', provider,
+        nativeSkillDirectory: demoNativeSkillDirectory }));
+      if (subcommand !== 'watch') return cycle();
+      const rawInterval = flags.get('interval-ms');
+      const intervalMs = rawInterval === undefined ? 60_000 : Number(rawInterval);
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        return await runDemoWatch({ cycle, intervalMs, once: flags.has('once'),
+          signal: controller.signal,
+          onCycle: result => process.stderr.write(`${JSON.stringify({ stage: result.stage,
+            sourceState: result.sourceSync?.state ?? null })}\n`),
+          onFailure: code => process.stderr.write(`${JSON.stringify({ stage: 'demo_watch_failure', code })}\n`),
+        });
+      } finally {
+        process.removeListener('SIGINT', stop);
+        process.removeListener('SIGTERM', stop);
+      }
+    }
     return withDemoDeviceLock(scope, async () => {
       if (subcommand === 'connect' || subcommand === 'status') {
         const connected = subcommand === 'status'
@@ -5888,21 +5922,6 @@ export async function run(argv: string[]): Promise<Output> {
           } });
         const { configPath: _configPath, ...receipt } = connected;
         return receipt;
-      }
-      if (subcommand === 'package' || subcommand === 'package-status') {
-        const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
-        const provider = subcommand === 'package-status' && requestedProvider === 'auto' ? 'codex'
-          : requestedProvider === 'auto'
-          ? await detectBootstrapProvider(workspace) : requestedProvider;
-        if (!isLocalProviderId(provider)) {
-          throw new Error('Demo package provider must be auto, codex, claude, agy, or hermes.');
-        }
-        const demoNativeSkillDirectory = provider === 'codex' ? resolve(workspace, '.agents', 'skills')
-          : provider === 'claude' ? resolve(workspace, '.claude', 'skills')
-            : nativeSkillDirectory(provider);
-        return demoRepositoryPackage({ scope, workspace,
-          statusOnly: subcommand === 'package-status', provider,
-          nativeSkillDirectory: demoNativeSkillDirectory });
       }
       let action: DemoPeerAction | null = null;
       if (subcommand === 'role') {
