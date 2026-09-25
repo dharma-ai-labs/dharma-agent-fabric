@@ -143,7 +143,7 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
   const policy = { action: 'authorize', confirmed: true,
     requestId: '70000000-0000-4000-8000-000000000001', repositoryBindingId: repositoryId,
     expectedRevision: 0, allowedContentClasses: ['approved_outputs', 'repository_content', 'repository_skills'],
-    approvedRepositoryPaths: ['.'], approvedOutputFolders: [],
+    approvedRepositoryPaths: ['README.md'], approvedOutputFolders: [],
     automaticValidatedPublication: options.automaticPublication !== false,
     retentionDays: 30, maximumFileBytes: 262144, maximumSnapshotBytes: 4194304,
     maximumDailyUploadBytes: 8388608, expiresAt: null };
@@ -154,6 +154,17 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
     policyRevision: `repository-source-${generationId}`,
     policyHash: `sha256:${createHash('sha256').update(canonicalize(policy)).digest('hex')}`,
     confirmedAt: new Date().toISOString(), policy };
+  let currentAuthorization = sourceAuthorization;
+  let releaseAuthorization: typeof sourceAuthorization | null = sourceAuthorization;
+  const advancePolicy = (paths: string[]) => {
+    const next = { ...policy, requestId: '70000000-0000-4000-8000-000000000002',
+      expectedRevision: 1, approvedRepositoryPaths: paths };
+    currentAuthorization = { ...sourceAuthorization, revision: 2,
+      generationId: '60000000-0000-4000-8000-000000000002',
+      receiptId: 'repo_consent_60000000-0000-4000-8000-000000000002',
+      policyRevision: 'repository-source-60000000-0000-4000-8000-000000000002',
+      policyHash: digest(canonicalize(next)), policy: next };
+  };
   const release = options.activePackage === 'valid' ? signedPackage(sourceAuthorization.policyHash) : null;
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, JSON.stringify({ schema: 'dharma.demo-device/v1',
@@ -186,7 +197,8 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
       if (options.loseFirstScope && !lost) { lost = true; throw new Error('connection lost after scope'); }
       return Response.json({ ok: true, organizationId, repositoryId,
         repositoryAgentId: repositoryId, normalizedRepository, workspaceId,
-        sourceAuthorization: options.sourcePolicy ? sourceAuthorization : null,
+        sourceAuthorization: options.sourcePolicy ? currentAuthorization : null,
+        activeReleaseSourceAuthorization: options.packagePublished ? releaseAuthorization : null,
         repositoryPackageState: options.packagePublished ? 'published' : 'not_connected',
         activeReleaseId: options.packagePublished ? release?.releaseId
           ?? '90000000-0000-4000-8000-000000000001' : null,
@@ -244,6 +256,7 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
     throw new Error(`Unexpected package route: ${url.pathname}`);
   };
   return { scope, workspace, store, fetcher, configPath, uploads, acknowledgements, release,
+    advancePolicy, hideReleaseAuthorization: () => { releaseAuthorization = null; },
     get sequence() { return sequence; } };
 }
 
@@ -385,6 +398,50 @@ test('a stable approved source edit submits one scoped repository update candida
     includeApprovedOutputs: true, requireAtlasAssociation: true,
     expectedLatestSourceFingerprint: digest('published source') });
   assert.equal(f.uploads[0]!.repositoryBindingId, repositoryId);
+});
+
+test('an expanded policy publishes a replacement without installing the stale signed release', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  let now = 1_000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  await demoRepositoryPackage(input, deps);
+  assert.equal(f.acknowledgements.length, 1);
+  f.advancePolicy(['.agents/skills/utility-bill-review/SKILL.md', 'README.md']);
+  await mkdir(resolve(f.workspace, '.agents/skills/utility-bill-review'), { recursive: true });
+  await writeFile(resolve(f.workspace, '.agents/skills/utility-bill-review/SKILL.md'),
+    '---\nname: utility-bill-review\ndescription: Review utility bills.\n---\n');
+  now = 2_000;
+  const first = await demoRepositoryPackage(input, deps);
+  assert.equal(first.stage, 'demo_repository_package_policy_transition');
+  assert.equal(first.sourceSync?.state, 'debouncing');
+  assert.equal(first.ready, false);
+  assert.equal(f.acknowledgements.length, 1);
+  now = 17_000;
+  const updated = await demoRepositoryPackage(input, deps);
+  assert.equal(updated.sourceSync?.state, 'submitted');
+  assert.equal(f.uploads.length, 1);
+  assert.deepEqual(f.uploads[0]!.consolidation, { mode: 'repository_update',
+    includeApprovedOutputs: true, requireAtlasAssociation: true,
+    expectedLatestSourceFingerprint: digest('published source') });
+  assert.equal(f.acknowledgements.length, 1);
+});
+
+test('a narrowed or unverifiable policy transition cannot publish a replacement', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  await demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher });
+  f.advancePolicy(['experiment_score.py']);
+  await assert.rejects(demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher }),
+    /narrows the active release policy/i);
+  assert.equal(f.uploads.length, 0);
+  f.advancePolicy(['.agents/skills/utility-bill-review/SKILL.md', 'README.md']);
+  f.hideReleaseAuthorization();
+  await assert.rejects(demoRepositoryPackage(input, { store: f.store, fetcher: f.fetcher }),
+    /active release policy.*unavailable/i);
+  assert.equal(f.uploads.length, 0);
 });
 
 test('repository authorization rejects disabled automatic publication before package installation', async () => {

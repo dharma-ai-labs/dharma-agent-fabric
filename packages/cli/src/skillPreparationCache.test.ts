@@ -164,7 +164,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   };
   const result = await new Script(`${declaration}\nrelayStart(flags);`, { filename: 'synthetic-relay-staging-fixture.js' }).runInNewContext({
     flags, process: processFixture, performance: { now: () => elapsedMs }, Date, Map, Promise, Number, Error,
-    VERSION: '0.2.101',
+    VERSION: '0.2.102',
     resolve, mkdir: (path: string, options: Parameters<typeof mkdir>[1]) => mkdir(checkedPath(path), options),
     writeFile: (path: string, bytes: string, options: Parameters<typeof writeFile>[2]) => writeFile(checkedPath(path), bytes, options),
     rm: (path: string, options: Parameters<typeof rm>[1]) => rm(checkedPath(path), options),

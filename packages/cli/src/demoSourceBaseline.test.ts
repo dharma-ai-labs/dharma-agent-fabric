@@ -54,6 +54,17 @@ test('a previously submitted initial source anchors the first published release'
   assert.equal(observed.baseline.publishedFingerprint, a);
 });
 
+test('an old-policy baseline is readable only for its verified transition hash', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'demo-source-transition-'));
+  const baseline = observeDemoSource({ scope, baseline: null,
+    localFingerprint: a, publishedFingerprint: b, now: 1_000 }).baseline;
+  await writeDemoSourceBaseline(root, baseline);
+  const next = { ...scope, policyHash: c };
+  await assert.rejects(readDemoSourceBaseline(root, next), /invalid/);
+  assert.deepEqual(await readDemoSourceBaseline(root, next, { priorPolicyHash: scope.policyHash }), baseline);
+  await assert.rejects(readDemoSourceBaseline(root, next, { priorPolicyHash: b }), /invalid/);
+});
+
 test('baseline storage does not follow a symlink or accept foreign scope', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'demo-source-symlink-'));
   const baseline = observeDemoSource({ scope, baseline: null,

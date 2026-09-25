@@ -32,7 +32,7 @@ test('Linux enable, status and disable preserve an explicit OS registration rece
   const options = {
     platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
     workspace: join(root, 'repo'), launcher: join(root, 'repo', '.dharma', 'bin', 'dharma'),
-    policy: join(root, 'repo', '.dharma', 'approved-policy.json'), version: '0.2.101', run,
+    policy: join(root, 'repo', '.dharma', 'approved-policy.json'), version: '0.2.102', run,
   };
   const installed = await enableRelayAutostart(options);
   assert.equal(installed.state, 'enabled');
@@ -64,7 +64,7 @@ test('Windows task registration uses the enrolled user without an embedded passw
   const options = {
     platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
     workspace: 'C:\\Work Space\\repo', launcher: 'C:\\Work Space\\repo\\.dharma\\bin\\dharma.cmd',
-    policy: 'C:\\Work Space\\repo\\.dharma\\approved-policy.json', version: '0.2.101', run,
+    policy: 'C:\\Work Space\\repo\\.dharma\\approved-policy.json', version: '0.2.102', run,
   };
   assert.equal((await enableRelayAutostart(options)).state, 'enabled');
   const script = await readFile(join(root, 'dharma', 'relay', 'autostart.ps1'), 'utf8');
@@ -80,7 +80,7 @@ test('failed OS registration remains unavailable instead of reporting completion
   const options = {
     platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
     workspace: join(root, 'repo'), launcher: join(root, 'repo', '.dharma', 'bin', 'dharma'),
-    policy: join(root, 'repo', '.dharma', 'approved-policy.json'), version: '0.2.101',
+    policy: join(root, 'repo', '.dharma', 'approved-policy.json'), version: '0.2.102',
     run: async () => { throw new Error('No systemd user bus'); },
   };
   await assert.rejects(enableRelayAutostart(options), /No systemd user bus/);
@@ -95,7 +95,7 @@ test('registration refuses to replace an unmanaged user startup entry', async ()
   await assert.rejects(enableRelayAutostart({
     platform: 'linux', home: join(root, 'dharma'), userHome: root,
     workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'),
-    policy: join(root, 'repo', 'policy.json'), version: '0.2.101',
+    policy: join(root, 'repo', 'policy.json'), version: '0.2.102',
     run: async () => ({ stdout: '' }),
   }), /autostart_conflict/);
   assert.equal(await readFile(unit, 'utf8'), '[Service]\nExecStart=/custom/relay\n');
@@ -106,7 +106,7 @@ test('Windows registration refuses an existing task without an ownership receipt
   await assert.rejects(enableRelayAutostart({
     platform: 'win32', home: join(root, 'dharma'), userHome: root,
     workspace: 'C:\\Work', launcher: 'C:\\Work\\dharma.cmd',
-    policy: 'C:\\Work\\policy.json', version: '0.2.101',
+    policy: 'C:\\Work\\policy.json', version: '0.2.102',
     run: async (_file, args) => ({ stdout: Buffer.from(args.at(-1) || '', 'base64').toString('utf16le')
       .includes('Get-ScheduledTask') ? 'exists\n' : '' }),
   }), /autostart_conflict/);
