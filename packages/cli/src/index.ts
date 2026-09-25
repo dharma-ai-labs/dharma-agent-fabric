@@ -59,7 +59,7 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 
-const VERSION = '0.2.90';
+const VERSION = '0.2.91';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
