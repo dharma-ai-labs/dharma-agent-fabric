@@ -105,3 +105,41 @@ test('repository reply requires the original repository binding and a signed tas
   assert.deepEqual(result, { state: 'answered', body: 'Enforce exact receipt-to-snapshot binding.',
     receiptHash: `sha256:${'b'.repeat(64)}` });
 });
+
+test('repository reply accepts bounded multiline agent answers without relaxing question input', async () => {
+  for (const body of [
+    'Current signed package:\n- Bundle: generation 6\n- Concept: Commercial Narrative',
+    '\r\nBundle: generation 6\r\n\tConcept: Commercial Narrative\r\n',
+  ]) {
+    const result = await readRepositoryRoleReply({ scope, questionId: '97f61652-a5eb-46e4-930c-9478cd4a9c31',
+      transport: { signedGet: async () => ({ ok: true, organizationId: scope.organizationId, question: {
+        questionId: '97f61652-a5eb-46e4-930c-9478cd4a9c31', repositoryBindingId: scope.repositoryBindingId,
+        sourceWorkspaceId: scope.workspaceId, state: 'answered', reply: {
+          taskId: 'a7f61652-a5eb-46e4-930c-9478cd4a9c31', targetEndpointId: target.endpointId,
+          body, receiptHash: `sha256:${'b'.repeat(64)}` } } }) } });
+    assert.equal(result.body, body);
+  }
+});
+
+test('repository question still rejects multiline input before discovery', async () => {
+  let reads = 0;
+  await assert.rejects(() => askRepositoryRoleQuestion({ scope, category: 'verifier-design',
+    question: 'First line\nSecond line', transport: {
+      signedGet: async () => { reads += 1; throw new Error('must not discover'); },
+      signedPost: async () => { throw new Error('must not dispatch'); },
+    },
+  }), /same-repository contract/);
+  assert.equal(reads, 0);
+});
+
+test('repository reply still rejects blank, oversized and unsafe control content', async () => {
+  for (const body of [' \n\t ', 'unsafe\u0000content', 'unsafe\u001bcontent', 'x'.repeat(8_001)]) {
+    await assert.rejects(() => readRepositoryRoleReply({ scope,
+      questionId: '97f61652-a5eb-46e4-930c-9478cd4a9c31',
+      transport: { signedGet: async () => ({ ok: true, organizationId: scope.organizationId, question: {
+        questionId: '97f61652-a5eb-46e4-930c-9478cd4a9c31', repositoryBindingId: scope.repositoryBindingId,
+        sourceWorkspaceId: scope.workspaceId, state: 'answered', reply: {
+          taskId: 'a7f61652-a5eb-46e4-930c-9478cd4a9c31', targetEndpointId: target.endpointId,
+          body, receiptHash: `sha256:${'b'.repeat(64)}` } } }) } }), /same-repository contract/);
+  }
+});
