@@ -4,6 +4,7 @@ export const MAX_REPOSITORY_PACKAGE_CANDIDATE_BODY_BYTES = 4_194_304;
 export const MAX_RELAY_MESSAGE_BYTES = 8_500_000;
 const AGENT_FABRIC_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(sessions|repository-agents|repository-agents\/[0-9a-f-]{36}\/package-candidates|repository-roles|repository-questions|workspaces|trajectories(?:\/head)?|evidence-requests\/poll|evidence-requests\/[0-9a-f-]{36}\/responses|tasks\/poll|tasks\/[0-9a-f-]{36}\/events|decisions\/[0-9a-f-]{36}\/enforcements|skills\/poll|skills\/[0-9a-f-]{36}\/receipts)$/i;
 const AGENT_FABRIC_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(repository-source-policy\?workspaceId=[0-9a-f-]{36}|repository-agents\/[0-9a-f-]{36}\/package-candidates\/[0-9a-f-]{36}\?workspaceId=[0-9a-f-]{36}&operationId=sha256%3A[a-f0-9]{64}|repository-roles\?workspaceId=[0-9a-f-]{36}(?:&category=[a-z][a-z0-9-]{0,63})?|repository-questions\/[0-9a-f-]{36}\?workspaceId=[0-9a-f-]{36}|skills\/[0-9a-f-]{36}\/repository-package\/index\?rolloutId=[0-9a-f-]{36}&workspaceId=[0-9a-f-]{36}&provider=(?:codex|claude|agy|hermes)|skills\/[0-9a-f-]{36}\/repository-package\/chunks\?rolloutId=[0-9a-f-]{36}&workspaceId=[0-9a-f-]{36}&provider=(?:codex|claude|agy|hermes)&fileIndex=\d+&chunkIndex=\d+)$/i;
+const AGENT_FABRIC_SOURCE_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/repository-agents\/[0-9a-f-]{36}\/source-inventory(?:\?workspaceId=[0-9a-f-]{36}|\/[0-9a-f-]{36}\/blobs\/sha256%3A[a-f0-9]{64}\?workspaceId=[0-9a-f-]{36}&path=[A-Za-z0-9._~%+*-]{1,2048})$/i;
 const CONTROL_AGENT_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions|sessions\/[0-9a-f-]{36}\/messages)$/i;
 const CONTROL_AGENT_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions(?:\?sessionId=[0-9a-f-]{36})?|sessions\/[0-9a-f-]{36}\/events(?:\?afterSequence=\d+)?)$/i;
 const FORWARDED_HEADERS = new Set([
@@ -28,7 +29,8 @@ export function parseRelayRequest(value: unknown): RelayRequest {
   if (method !== 'GET' && method !== 'POST') throw new Error('route_not_allowed');
   const methodAllowed = method === 'POST'
     ? AGENT_FABRIC_POST_ROUTE.test(input.pathname) || CONTROL_AGENT_POST_ROUTE.test(input.pathname)
-    : AGENT_FABRIC_GET_ROUTE.test(input.pathname) || CONTROL_AGENT_GET_ROUTE.test(input.pathname);
+    : AGENT_FABRIC_GET_ROUTE.test(input.pathname) || AGENT_FABRIC_SOURCE_GET_ROUTE.test(input.pathname)
+      || CONTROL_AGENT_GET_ROUTE.test(input.pathname);
   if (!methodAllowed) throw new Error('route_not_allowed');
   const maximumBodyBytes = method === 'POST' && /\/repository-agents\/[0-9a-f-]{36}\/package-candidates$/i.test(input.pathname)
     ? MAX_REPOSITORY_PACKAGE_CANDIDATE_BODY_BYTES
