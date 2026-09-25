@@ -461,6 +461,30 @@ function sourceFingerprint(manifest: Pick<RepositoryPackageManifest, 'organizati
     files: manifest.files.filter(file => file.role !== 'knowledge'), skills: manifest.skills }));
 }
 
+export function rebuildRepositoryPackageSnapshot(input: RepositoryPackageSnapshot, source: {
+  files: RepositoryPackageFile[];
+  skills: RepositoryPackageManifest['skills'];
+  blobs: RepositoryPackageSnapshot['blobs'];
+}): RepositoryPackageSnapshot {
+  if (!input.manifest.sourceAuthorization || !input.manifest.sourceFingerprint) {
+    throw new Error('Repository source reconciliation requires governed inventory.');
+  }
+  const comparePath = (a: { path: string }, b: { path: string }) => compare(a.path, b.path);
+  const { snapshotHash: _snapshotHash, snapshotId: _snapshotId,
+    sourceFingerprint: _sourceFingerprint, ...base } = input.manifest;
+  const manifestBase = { ...base, files: [...source.files].sort(comparePath),
+    skills: [...source.skills].sort(comparePath) };
+  const fingerprinted = { ...manifestBase, sourceFingerprint: sourceFingerprint(manifestBase) };
+  const snapshotHash = digest(canonicalize(fingerprinted));
+  const snapshot: RepositoryPackageSnapshot = {
+    ...input,
+    manifest: { ...fingerprinted, snapshotHash, snapshotId: `repository-package-${snapshotHash.slice(7)}` },
+    blobs: [...source.blobs].sort((a, b) => compare(a.sha256, b.sha256)),
+  };
+  serializeRepositoryPackageSnapshot(snapshot);
+  return snapshot;
+}
+
 export function serializeRepositoryPackageSnapshot(snapshot: RepositoryPackageSnapshot): string {
   const { snapshotHash, snapshotId, ...base } = snapshot.manifest;
   if (safeContent(Buffer.from(canonicalize(base)))) throw new Error('Repository package metadata contains unsafe content.');

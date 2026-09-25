@@ -39,6 +39,7 @@ type CandidateOutbox = {
     mode: 'initial_repository' | 'repository_update';
     includeApprovedOutputs: true;
     requireAtlasAssociation: true;
+    expectedLatestSourceFingerprint?: string;
   };
   candidateId: string | null;
   state: 'pending_upload' | RepositoryCandidateState;
@@ -118,9 +119,14 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
   requireFact(row.consolidation !== null && typeof row.consolidation === 'object' && !Array.isArray(row.consolidation),
     'Repository candidate consolidation is invalid.');
   const consolidation = row.consolidation as Record<string, unknown>;
-  requireFact(Object.keys(consolidation).sort().join(',') === 'includeApprovedOutputs,mode,requireAtlasAssociation'
+  requireFact(Object.keys(consolidation).sort().join(',') === (Object.hasOwn(consolidation, 'expectedLatestSourceFingerprint')
+    ? 'expectedLatestSourceFingerprint,includeApprovedOutputs,mode,requireAtlasAssociation'
+    : 'includeApprovedOutputs,mode,requireAtlasAssociation')
     && ['initial_repository', 'repository_update'].includes(String(consolidation.mode))
-    && consolidation.includeApprovedOutputs === true && consolidation.requireAtlasAssociation === true,
+    && consolidation.includeApprovedOutputs === true && consolidation.requireAtlasAssociation === true
+    && (consolidation.expectedLatestSourceFingerprint === undefined
+      || consolidation.mode === 'repository_update' && typeof consolidation.expectedLatestSourceFingerprint === 'string'
+        && HASH.test(consolidation.expectedLatestSourceFingerprint)),
   'Repository candidate consolidation is invalid.');
   return { schema: 'dharma.repository-candidate-outbox/v1', scope,
     operationId: row.operationId as string, sourceManifestHash: row.sourceManifestHash as string,
@@ -146,6 +152,7 @@ export async function synchronizeRepositoryCandidate(input: {
   scope: RepositoryCandidateScope;
   snapshot: RepositoryPackageSnapshot;
   initialRepository: boolean;
+  expectedLatestSourceFingerprint?: string;
 }): Promise<RepositoryCandidateReceipt> {
   const scope = checkedScope(input.scope);
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
@@ -167,9 +174,15 @@ export async function synchronizeRepositoryCandidate(input: {
     && snapshot.manifest.knowledge?.repositoryAgentId === scope.repositoryAgentId
     && HASH.test(snapshot.manifest.snapshotHash), 'Repository candidate snapshot scope is invalid.');
   const sourceManifestHash = sha256(canonicalize(snapshot.manifest));
+  requireFact(input.expectedLatestSourceFingerprint === undefined
+    || !input.initialRepository && HASH.test(input.expectedLatestSourceFingerprint),
+  'Repository candidate expected source parent is invalid.');
   const consolidation: CandidateOutbox['consolidation'] = {
     mode: input.initialRepository ? 'initial_repository' : 'repository_update',
     includeApprovedOutputs: true, requireAtlasAssociation: true,
+    ...(input.expectedLatestSourceFingerprint ? {
+      expectedLatestSourceFingerprint: input.expectedLatestSourceFingerprint,
+    } : {}),
   };
   const operationId = sha256(canonicalize({ schema: 'dharma.repository-candidate-operation/v1', ...scope,
     snapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash, consolidation }));

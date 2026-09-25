@@ -6,8 +6,9 @@ import { dirname, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
-import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher,
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepositoryPackageSnapshot,
+  writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
@@ -56,6 +57,59 @@ test('source policy fetch uses the enrolled signed GET and the bound workspace',
   assert.equal(result.repositoryBindingId, scope.repositoryBindingId);
   assert.equal(result.repositoryAgentId, scope.repositoryAgentId);
 });
+
+test('relay merges another workspace report before signing its own candidate', async t => {
+  const f = await fixture(t);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const baseline = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace,
+    sourceAuthorization: authorization });
+  const remoteBytes = Buffer.from('# Remote approved report\n');
+  const remoteFile = { path: 'output/approved/remote.md', role: 'approved_output' as const,
+    sha256: `sha256:${createHash('sha256').update(remoteBytes).digest('hex')}`,
+    sizeBytes: remoteBytes.length };
+  const remote = rebuildRepositoryPackageSnapshot(baseline, {
+    files: [...baseline.manifest.files, remoteFile], skills: baseline.manifest.skills,
+    blobs: [...baseline.blobs, { sha256: remoteFile.sha256, contentBase64: remoteBytes.toString('base64') }],
+  });
+  const candidateId = '99999999-9999-4999-8999-999999999999';
+  const metadata = { ok: true, organizationId: scope.organizationId,
+    repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+    policyGenerationId: authorization.generationId, workspaceBaseline: null,
+    source: { candidateId, workspaceId: '88888888-8888-4888-8888-888888888888',
+      sourceSnapshotHash: remote.manifest.snapshotHash,
+      sourceManifestHash: `sha256:${createHash('sha256').update(canonicalize(remote.manifest)).digest('hex')}`,
+      sourceFingerprint: remote.manifest.sourceFingerprint,
+      files: remote.manifest.files.filter(file => file.role !== 'knowledge'), skills: remote.manifest.skills } };
+  const transport = { signedGet: async (route: string) => {
+    if (route.startsWith('/agent-fabric/repository-source-policy')) return response();
+    if (route.includes('/blobs/')) return { ok: true, organizationId: scope.organizationId,
+      repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+      candidateId, sourceSnapshotHash: remote.manifest.snapshotHash,
+      sourceFingerprint: remote.manifest.sourceFingerprint, path: remoteFile.path,
+      role: remoteFile.role, sha256: remoteFile.sha256, sizeBytes: remoteFile.sizeBytes,
+      contentBase64: remoteBytes.toString('base64') };
+    return metadata;
+  } };
+  await f.put('output/approved/local.md', '# Local approved report\n');
+  const submissions: Array<{ paths: string[]; parent: string | undefined; hash: string }> = [];
+  const input = { ...f.input, transport,
+    loadPublishedLocalBaseline: async () => baseline,
+    submitCandidate: async (snapshot: Awaited<ReturnType<typeof inventoryRepositoryPackage>>,
+      parent?: string) => {
+      submissions.push({ paths: snapshot.manifest.files.filter(file => file.role !== 'knowledge').map(file => file.path),
+        parent, hash: snapshot.manifest.snapshotHash });
+      return { state: 'accepted', candidateId, operationId: A, snapshotHash: snapshot.manifest.snapshotHash };
+    } };
+  assert.equal((await scanRepositorySourceChanges(input)).state, 'debouncing');
+  f.setNow(1000);
+  assert.equal((await scanRepositorySourceChanges(input)).state, 'local_candidate_collected');
+  assert.deepEqual({ paths: submissions[0]?.paths, parent: submissions[0]?.parent },
+    { paths: ['.codex/skills/review/SKILL.md', 'README.md',
+      'output/approved/local.md', 'output/approved/remote.md'], parent: remote.manifest.sourceFingerprint });
+  assert.ok(submissions[0]);
+  const durable = await readRepositoryPackageSnapshot(f.input.workspace, submissions[0].hash);
+  assert.equal(durable.manifest.snapshotHash, submissions[0].hash);
+});
 test('an incomplete repository identity cannot dispatch a source-policy read', async () => {
   let calls = 0;
   await assert.rejects(fetchRepositorySourceAuthorization({ signedGet: async () => { calls++; return response(); } },
@@ -88,6 +142,29 @@ test('watcher requires a stable debounce and suppresses completed fingerprints',
   watcher.complete(A);
   assert.equal(watcher.observe(A, 2000), 'unchanged');
   assert.equal(watcher.observe(B, 2001), 'debouncing');
+});
+test('published and blocked receipts advance only the matching pending local source baseline', () => {
+  const pending = { localBaselineSnapshotHash: B, publishedLocalSnapshotHash: A,
+    pendingLocalSnapshotHash: B, pendingLocalOperationId: 'operation-1' };
+  assert.deepEqual(advanceRepositorySourceBaseline(pending,
+    { state: 'processing', operationId: 'operation-1' }), pending);
+  assert.deepEqual(advanceRepositorySourceBaseline(pending,
+    { state: 'published', operationId: 'operation-1' }), {
+    localBaselineSnapshotHash: B, publishedLocalSnapshotHash: B,
+    pendingLocalSnapshotHash: null, pendingLocalOperationId: null,
+  });
+  assert.deepEqual(advanceRepositorySourceBaseline(pending,
+    { state: 'blocked', operationId: 'operation-1' }), {
+    localBaselineSnapshotHash: A, publishedLocalSnapshotHash: A,
+    pendingLocalSnapshotHash: null, pendingLocalOperationId: null,
+  });
+  assert.throws(() => advanceRepositorySourceBaseline(pending,
+    { state: 'published', operationId: 'other-operation' }), /does not match/);
+  assert.deepEqual(advanceRepositorySourceBaseline({ localBaselineSnapshotHash: A,
+    publishedLocalSnapshotHash: A }, { state: 'published', operationId: 'legacy-operation' }), {
+    localBaselineSnapshotHash: A, publishedLocalSnapshotHash: A,
+    pendingLocalSnapshotHash: null, pendingLocalOperationId: null,
+  });
 });
 test('watcher resumes from an integrity-checked persisted source fingerprint', () => {
   const watcher = new RepositorySourceWatcher(1000);

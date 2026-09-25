@@ -93,6 +93,31 @@ test('repository candidate rejects non-canonical upload timestamps before transp
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('reconciled updates pin the latest source in the signed upload and durable outbox', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-parent-'));
+  const parent = `sha256:${'a'.repeat(64)}`;
+  const candidateId = '77f61652-a5eb-46e4-930c-9478cd4a9c31';
+  const requests: Record<string, unknown>[] = [];
+  try {
+    const candidateSnapshot = await snapshot(root);
+    const transport = { signedGet: async () => ({}), signedPost: async (_route: string, value: unknown) => {
+      const body = value as Record<string, unknown>;
+      requests.push(body);
+      return { ok: true, organizationId: 'org_fixture', candidate: { candidateId,
+        operationId: body.operationId, snapshotHash: body.sourceSnapshotHash,
+        state: 'accepted', releaseId: null } };
+    } };
+    const input = { transport, outboxRoot: join(root, 'outbox'), scope: { organizationId: 'org_fixture', ...ids },
+      snapshot: candidateSnapshot, initialRepository: false, expectedLatestSourceFingerprint: parent };
+    await synchronizeRepositoryCandidate(input);
+    assert.deepEqual(requests[0]?.consolidation, { mode: 'repository_update', includeApprovedOutputs: true,
+      requireAtlasAssociation: true, expectedLatestSourceFingerprint: parent });
+    const stored = JSON.parse(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'));
+    assert.equal(stored.consolidation.expectedLatestSourceFingerprint, parent);
+    await assert.rejects(synchronizeRepositoryCandidate({ ...input, initialRepository: true }), /expected source parent/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('repository candidate status polling is independent of repository source observation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-'));
   const candidateId = '77f61652-a5eb-46e4-930c-9478cd4a9c31';
