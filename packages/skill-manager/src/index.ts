@@ -701,7 +701,9 @@ export async function installSkillBundle(input: {
   bundle: SkillBundle;
   sourceDirectory: string;
   nativeSkillDirectory: string;
-  policy: OrganizationPolicy;
+  policy: OrganizationPolicy | (Pick<OrganizationPolicy, 'organizationId'> & {
+    skills: Pick<OrganizationPolicy['skills'], 'automaticInstall'>;
+  });
   serverPublicKey: KeyObject;
   devicePrivateKey: KeyObject;
   deviceId: string;
@@ -722,6 +724,10 @@ export async function installSkillBundle(input: {
     throw new Error(`${input.bundle.riskClass} skill bundles require organization approval.`);
   }
   if (!input.policy.skills.automaticInstall) throw new Error('Automatic skill installation is disabled by policy.');
+  const smokePolicy = 'tasks' in input.policy ? input.policy : null;
+  if (input.smokeCommandId && !smokePolicy) {
+    throw new Error('A smoke check requires a full organization policy.');
+  }
 
   const managedRoot = workspaceManagedRoot(input.nativeSkillDirectory, input.workspaceId);
   await recoverInterruptedSkillRollbacks(input.nativeSkillDirectory, input.workspaceId);
@@ -795,7 +801,7 @@ export async function installSkillBundle(input: {
     return restored;
   };
   if (input.smokeCommandId) {
-    const check = await runSmoke(input.smokeCommandId, input.policy, active);
+    const check = await runSmoke(input.smokeCommandId, smokePolicy!, active);
     checks.push({ name: `smoke:${input.smokeCommandId}`, ...check });
     if (check.status === 'fail') {
       status = await restorePreviousBundle();

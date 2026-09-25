@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
 import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
+import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { connectDemoDevice, scopePath } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock } from './demoPeer.js';
@@ -29,6 +30,15 @@ function scope(stateRoot: string) {
 }
 
 function server(options: { failNextSendWithCode?: string; invalidNextSend?: boolean } = {}) {
+  const signer = generateKeyPairSync('ed25519');
+  const serverPublicKeyEd25519 = (signer.publicKey.export({ format: 'jwk' }) as { x?: string }).x!;
+  const issuedAt = new Date(Date.now() - 60_000).toISOString();
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+  const keyVersion = 'projects/test/locations/global/keyRings/demo/cryptoKeys/signing/cryptoKeyVersions/1';
+  const keyset = { schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: orgId, generation: 1, keys: [{ keyVersion, publicKeyEd25519: serverPublicKeyEd25519,
+      status: 'active' as const, notBefore: issuedAt, notAfter: expiresAt }],
+    signedByKeyVersion: keyVersion, issuedAt, expiresAt };
   let publicKey = '';
   let sequence = 0;
   let loseNextSend = !options.failNextSendWithCode && !options.invalidNextSend;
@@ -48,7 +58,9 @@ function server(options: { failNextSendWithCode?: string; invalidNextSend?: bool
       { status: 202 });
     }
     if (url.pathname.endsWith('/poll')) {
-      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId,
+        serverPublicKeyEd25519,
+        serverSigningKeyset: { ...keyset, signature: signCanonicalObject(keyset, signer.privateKey) } }),
         { status: 200 });
     }
     const headers = new Headers(init?.headers);

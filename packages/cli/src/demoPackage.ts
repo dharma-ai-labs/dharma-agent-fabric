@@ -6,7 +6,6 @@ import { verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fa
 import { deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity, normalizeHqUrl,
   saveActiveSkillAuthorizationAnchor, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
-import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { getActiveSkillBundleAuthorization, installSkillBundle, rollbackUnconfirmedSkillBundle,
   verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { loadDemoSigningTrust, scopePath, verifyDemoDevice, type DemoDeviceScope } from './demoEnrollment.js';
@@ -159,16 +158,10 @@ async function reconcileDemoInstallerMarker(input: { workspace: string; reposito
   }
 }
 
-function demoInstallPolicy(authorization: ReturnType<typeof validateRepositorySourceAuthorization>): OrganizationPolicy {
-  return { schema: 'dharma.organization-policy/v1', organizationId: authorization.organizationId,
-    revision: authorization.policyRevision,
-    evidence: { defaultMode: 'structured', registeredWorkspaceOnly: true, excludePaths: [],
-      maximumCapsuleBytes: 0, maximumDailyUploadBytes: 0, maximumExpansionBytes: 0 },
-    tasks: { defaultNetwork: 'deny', defaultGit: 'read_only', allowedCommands: {},
-      writePaths: [], requireLocalConfirmationFor: [] },
-    skills: { automaticInstall: authorization.policy.automaticValidatedPublication,
-      automaticPromotionMaxRisk: 'R1', canaryPercent: 100 },
-    retention: {}, budgets: {} };
+function demoInstallPolicy(authorization: ReturnType<typeof validateRepositorySourceAuthorization>):
+  Parameters<typeof installSkillBundle>[0]['policy'] {
+  return { organizationId: authorization.organizationId,
+    skills: { automaticInstall: authorization.policy.automaticValidatedPublication } };
 }
 
 async function installActiveDemoPackage(input: {

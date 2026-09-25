@@ -124,7 +124,7 @@ function memoryStore(): SecureSecretStore {
 
 async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boolean;
   loseFirstUpload?: boolean; packagePublished?: boolean; candidatePublished?: boolean;
-  activePackage?: boolean | 'valid'; loseFirstAck?: boolean } = {}) {
+  activePackage?: boolean | 'valid'; loseFirstAck?: boolean; automaticPublication?: boolean } = {}) {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-package-'));
   const workspace = await mkdtemp(resolve(tmpdir(), 'dharma-demo-source-'));
   await writeFile(resolve(workspace, 'README.md'), 'Approved source evidence.\n');
@@ -143,7 +143,8 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
   const policy = { action: 'authorize', confirmed: true,
     requestId: '70000000-0000-4000-8000-000000000001', repositoryBindingId: repositoryId,
     expectedRevision: 0, allowedContentClasses: ['approved_outputs', 'repository_content', 'repository_skills'],
-    approvedRepositoryPaths: ['.'], approvedOutputFolders: [], automaticValidatedPublication: true,
+    approvedRepositoryPaths: ['.'], approvedOutputFolders: [],
+    automaticValidatedPublication: options.automaticPublication !== false,
     retentionDays: 30, maximumFileBytes: 262144, maximumSnapshotBytes: 4194304,
     maximumDailyUploadBytes: 8388608, expiresAt: null };
   const sourceAuthorization = { schema: 'dharma.repository-source-authorization/v1',
@@ -343,6 +344,16 @@ test('a published signed package installs once under the scoped provider and reu
   assert.equal(second.installed?.receiptHash, first.installed?.receiptHash);
   assert.equal(second.acknowledgement?.duplicate, true);
   assert.equal(f.acknowledgements.length, 2);
+});
+
+test('repository authorization rejects disabled automatic publication before package installation', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true,
+    activePackage: 'valid', automaticPublication: false });
+  await assert.rejects(demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    provider: 'codex', nativeSkillDirectory: resolve(f.workspace, '.agents/skills') },
+  { store: f.store, fetcher: f.fetcher }), /repository source authorization policy is invalid/i);
+  assert.equal(f.acknowledgements.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
 });
 
 test('a legacy installer-only marker migrates to repository ownership before signed activation', async () => {
