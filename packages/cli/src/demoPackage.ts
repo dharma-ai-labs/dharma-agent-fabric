@@ -15,7 +15,8 @@ import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { pollRepositoryCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateTransport } from './repositoryCandidateSync.js';
-import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { validateRepositorySourceAuthorization,
+  type RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { observeDemoSource, readDemoSourceBaseline, writeDemoSourceBaseline } from './demoSourceBaseline.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -165,6 +166,23 @@ function demoInstallPolicy(authorization: ReturnType<typeof validateRepositorySo
     skills: { automaticInstall: authorization.policy.automaticValidatedPublication } };
 }
 
+function policyCoversPrior(prior: RepositorySourceAuthorization, current: RepositorySourceAuthorization) {
+  const covers = (earlier: string[], later: string[]) => earlier.every(path => later.some(root =>
+    root === '.' || root === path || path.startsWith(`${root}/`)));
+  const old = prior.policy, next = current.policy;
+  return current.revision > prior.revision && current.generationId !== prior.generationId
+    && Date.parse(current.confirmedAt) >= Date.parse(prior.confirmedAt)
+    && old.allowedContentClasses.every(value => next.allowedContentClasses.includes(value))
+    && covers(old.approvedRepositoryPaths, next.approvedRepositoryPaths)
+    && covers(old.approvedOutputFolders, next.approvedOutputFolders)
+    && next.automaticValidatedPublication && next.maximumFileBytes >= old.maximumFileBytes
+    && next.maximumSnapshotBytes >= old.maximumSnapshotBytes
+    && next.maximumDailyUploadBytes >= old.maximumDailyUploadBytes
+    && next.retentionDays >= old.retentionDays
+    && (next.expiresAt === null || old.expiresAt !== null
+      && Date.parse(next.expiresAt) >= Date.parse(old.expiresAt));
+}
+
 async function installActiveDemoPackage(input: {
   scope: DemoDeviceScope; workspaceId: string;
   provider: ProviderId; nativeSkillDirectory: string;
@@ -185,8 +203,7 @@ async function installActiveDemoPackage(input: {
   }
   const envelope = published.envelope as Record<string, unknown>;
   const descriptor = envelope.descriptor as Record<string, unknown>;
-  if (!descriptor || descriptor.policyHash !== input.authorization.policyHash
-    || descriptor.organizationId !== scope.organizationId
+  if (!descriptor || descriptor.organizationId !== scope.organizationId
     || descriptor.repositoryBindingId !== scope.repositoryId
     || descriptor.releaseId !== published.releaseId) {
     throw new Error('Active Demo release does not match the current repository authorization.');
@@ -207,6 +224,9 @@ async function installActiveDemoPackage(input: {
     });
   if (!signingKey) throw new Error('Demo release is not signed by a currently trusted organization key.');
   const releaseId = String(published.releaseId);
+  if (descriptor.policyHash !== input.authorization.policyHash) {
+    return { policyTransition: true as const, releaseId, policyHash: descriptor.policyHash };
+  }
   const delivery = await receiveRepositoryPackageDelivery({
     envelope, bundle, serverPublicKey: signingKey,
     scope: { organizationId: scope.organizationId, repositoryBindingId: scope.repositoryId,
@@ -353,6 +373,7 @@ async function syncPublishedDemoSource(input: {
   authorization: ReturnType<typeof validateRepositorySourceAuthorization>;
   candidateTransport: RepositoryCandidateTransport;
   outboxRoot: string;
+  priorPolicyHash?: string;
 }, deps: DemoPackageDependencies) {
   const { scope } = input;
   const baselineScope = { organizationId: scope.organizationId, repositoryId: scope.repositoryId,
@@ -363,8 +384,15 @@ async function syncPublishedDemoSource(input: {
     sourceAuthorization: input.authorization });
   const fingerprint = snapshot.manifest.sourceFingerprint;
   if (!fingerprint) throw new Error('Demo source inventory has no fingerprint.');
-  const baseline = await readDemoSourceBaseline(scope.stateRoot, baselineScope);
-  const observed = observeDemoSource({ baseline, scope: baselineScope,
+  const baseline = await readDemoSourceBaseline(scope.stateRoot, baselineScope,
+    { priorPolicyHash: input.priorPolicyHash });
+  const scheduled = input.priorPolicyHash && (!baseline || baseline.policyHash !== baselineScope.policyHash)
+    ? { schema: 'dharma.demo-source-baseline/v1' as const, ...baselineScope,
+        localFingerprint: input.publishedSourceFingerprint,
+        publishedFingerprint: input.publishedSourceFingerprint,
+        pendingFingerprint: null, firstObservedAt: null }
+    : baseline;
+  const observed = observeDemoSource({ baseline: scheduled, scope: baselineScope,
     localFingerprint: fingerprint, publishedFingerprint: input.publishedSourceFingerprint,
     now: (deps.now || Date.now)() });
   if (observed.baseline !== baseline) await writeDemoSourceBaseline(scope.stateRoot, observed.baseline);
@@ -424,7 +452,7 @@ export async function demoRepositoryPackage(input: {
   if (!view.sourceAuthorization) throw new Error('Demo repository has no active source authorization.');
   const sourceAuthorization = validateRepositorySourceAuthorization(view.sourceAuthorization,
     candidateScope, new Date());
-  await reconcileDemoInstallerMarker({ workspace: input.workspace,
+  const ownership = await reconcileDemoInstallerMarker({ workspace: input.workspace,
     repositoryId: scope.repositoryId, legacySpaceId: view.workspaceId });
   if (view.repositoryPackageState === 'published') {
     if (typeof view.publishedSourceFingerprint !== 'string'
@@ -437,6 +465,34 @@ export async function demoRepositoryPackage(input: {
       workspaceId: view.workspaceId, provider: input.provider ?? 'codex',
       nativeSkillDirectory,
       authorization: sourceAuthorization }, deps);
+    if (installed && 'policyTransition' in installed) {
+      if (installed.releaseId !== view.activeReleaseId) {
+        throw new Error('Demo active release changed during policy transition.');
+      }
+      if (!view.activeReleaseSourceAuthorization) {
+        throw new Error('Demo active release policy is unavailable for transition.');
+      }
+      const previous = validateRepositorySourceAuthorization(view.activeReleaseSourceAuthorization,
+        candidateScope);
+      if (previous.policyHash !== installed.policyHash) {
+        throw new Error('Demo active release policy hash does not match its signed descriptor.');
+      }
+      if (!policyCoversPrior(previous, sourceAuthorization)) {
+        throw new Error('Demo current source policy narrows the active release policy; suspend or replace the release before synchronization.');
+      }
+      if (ownership !== 'signed') return { ok: true,
+        stage: 'demo_repository_package_policy_transition', repositoryId: scope.repositoryId,
+        repositoryPackageState: 'published', candidate: null, ready: false,
+        activationState: 'signed_delivery_pending' };
+      const sourceSync = await syncPublishedDemoSource({ scope, workspace: input.workspace,
+        workspaceId: view.workspaceId, authorization: sourceAuthorization,
+        publishedSourceFingerprint: view.publishedSourceFingerprint,
+        activeReleaseId: view.activeReleaseId, candidateTransport, outboxRoot,
+        priorPolicyHash: previous.policyHash }, deps);
+      return { ok: true, stage: 'demo_repository_package_policy_transition',
+        repositoryId: scope.repositoryId, repositoryPackageState: 'published',
+        candidate: null, sourceSync, ready: false, activationState: 'candidate_pending' };
+    }
     if (installed) {
       const acknowledgement = await acknowledgeDemoInstallation({ scope, nativeSkillDirectory,
         installed }, deps);

@@ -55,7 +55,8 @@ function parse(value: unknown, scope: DemoSourceBaselineScope): DemoSourceBaseli
   return row as DemoSourceBaseline;
 }
 
-export async function readDemoSourceBaseline(root: string, scope: DemoSourceBaselineScope) {
+export async function readDemoSourceBaseline(root: string, scope: DemoSourceBaselineScope,
+  options: { priorPolicyHash?: string } = {}) {
   const target = path(root, scope);
   let entry;
   try { entry = await lstat(target); }
@@ -80,7 +81,13 @@ export async function readDemoSourceBaseline(root: string, scope: DemoSourceBase
       || (after.ino !== 0 && stat.ino !== after.ino)) {
       throw new Error('Demo source baseline file is invalid.');
     }
-    return parse(JSON.parse(await handle.readFile({ encoding: 'utf8' })), scope);
+    const stored: unknown = JSON.parse(await handle.readFile({ encoding: 'utf8' }));
+    const policyHash = stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? (stored as Record<string, unknown>).policyHash : null;
+    const accepted = policyHash === scope.policyHash ? scope.policyHash
+      : typeof options.priorPolicyHash === 'string' && policyHash === options.priorPolicyHash
+        ? options.priorPolicyHash : scope.policyHash;
+    return parse(stored, { ...scope, policyHash: accepted });
   } finally { await handle.close(); }
 }
 

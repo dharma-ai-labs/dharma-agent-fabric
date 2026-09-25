@@ -1043,12 +1043,12 @@ test('status reports verified relay state and hides local identifiers by default
     await writeFile(join(home, 'relay', 'supervisor.pid'), `${process.pid}\n`);
     await writeFile(join(home, 'relay', 'supervisor-workspace.json'), JSON.stringify({ pid: process.pid, workspaceId: 'workspace_private' }));
     await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
-      at: acknowledgedAt, workspaceId: 'workspace_private', version: '0.2.101',
+      at: acknowledgedAt, workspaceId: 'workspace_private', version: '0.2.102',
     }));
     const acknowledged = await run(['status']) as Record<string, unknown>;
     assert.deepEqual(acknowledged.reconnect, { state: 'acknowledged_recently', lastSuccessfulPollAt: acknowledgedAt });
     await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
-      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: '0.2.101',
+      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: '0.2.102',
     }));
     const foreign = await run(['status']) as Record<string, unknown>;
     assert.deepEqual(foreign.reconnect, { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null });
@@ -2017,13 +2017,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.101');
+      assert.equal(version, '0.2.102');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.101',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.102',
   });
 });
 

@@ -59,7 +59,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     installStableRepositoryLauncher: async () => { await record('launcher');
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
     dharmaHome: () => '/fixture-home',
-    VERSION: '0.2.101',
+    VERSION: '0.2.102',
     enableRelayAutostart: async () => { await record('autostart'); return { state: 'enabled', backend: 'systemd-user' }; },
     verifyAgentFabricSkillInstallation: async () => ({ ready: true }),
     resolve, dirname,
