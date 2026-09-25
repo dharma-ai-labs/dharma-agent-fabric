@@ -108,10 +108,12 @@ No command broadens organization policy locally.
 dharma relay start --policy .dharma/approved-policy.json
 dharma relay stop
 dharma relay probe
+dharma relay autostart status
+dharma relay autostart disable
 dharma status
 ```
 
-Onboarding starts a detached, process-level supervisor. `relay start` is a foreground receiver; `relay stop` gracefully stops the supervisor and receiver without deleting enrolled identity or vault data. A reboot-time OS service installer is not yet shipped.
+Complete bootstrap starts a detached supervisor and registers per-user startup on Windows or Linux with a systemd user session. `relay start` is a foreground receiver; `relay stop` gracefully stops the current supervisor and receiver without deleting enrolled identity or vault data. The startup entry remains for the next user sign-in until `relay autostart disable` removes it. `status` reports startup registration and the last successful relay poll; `relay probe` independently checks the signed connection. Unsupported user-session startup is reported as an incomplete bootstrap stage.
 
 ## Exit codes
 

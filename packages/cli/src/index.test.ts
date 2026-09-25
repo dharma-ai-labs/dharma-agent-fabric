@@ -1034,7 +1034,24 @@ test('status reports verified relay state and hides local identifiers by default
     }));
     const status = await run(['status']) as Record<string, unknown>;
     const version = await run(['version']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: version.version, enrolled: true, relay: 'running', supervisor: 'stopped' });
+    assert.deepEqual(status, {
+      version: version.version, enrolled: true, relay: 'running', supervisor: 'stopped',
+      autostart: { state: 'disabled', backend: null },
+      reconnect: { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null },
+    });
+    const acknowledgedAt = new Date().toISOString();
+    await writeFile(join(home, 'relay', 'supervisor.pid'), `${process.pid}\n`);
+    await writeFile(join(home, 'relay', 'supervisor-workspace.json'), JSON.stringify({ pid: process.pid, workspaceId: 'workspace_private' }));
+    await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
+      at: acknowledgedAt, workspaceId: 'workspace_private', version: '0.2.101',
+    }));
+    const acknowledged = await run(['status']) as Record<string, unknown>;
+    assert.deepEqual(acknowledged.reconnect, { state: 'acknowledged_recently', lastSuccessfulPollAt: acknowledgedAt });
+    await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
+      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: '0.2.101',
+    }));
+    const foreign = await run(['status']) as Record<string, unknown>;
+    assert.deepEqual(foreign.reconnect, { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -2000,13 +2017,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.100');
+      assert.equal(version, '0.2.101');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.100',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.101',
   });
 });
 

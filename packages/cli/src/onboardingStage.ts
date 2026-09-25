@@ -7,6 +7,7 @@ export type OnboardingStage =
   | 'role_registration'
   | 'native_skill_install'
   | 'relay_start'
+  | 'autostart'
   | 'readiness';
 
 export async function withOnboardingStage<T>(
