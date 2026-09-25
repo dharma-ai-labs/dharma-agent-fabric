@@ -187,7 +187,10 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
       return Response.json({ ok: true, organizationId, repositoryId,
         repositoryAgentId: repositoryId, normalizedRepository, workspaceId,
         sourceAuthorization: options.sourcePolicy ? sourceAuthorization : null,
-        repositoryPackageState: options.packagePublished ? 'published' : 'not_connected' });
+        repositoryPackageState: options.packagePublished ? 'published' : 'not_connected',
+        activeReleaseId: options.packagePublished ? release?.releaseId
+          ?? '90000000-0000-4000-8000-000000000001' : null,
+        publishedSourceFingerprint: options.packagePublished ? digest('published source') : null });
     }
     if (url.pathname.endsWith('/packages/active')) return Response.json({ ok: true,
       organizationId, repositoryId, repositoryPackageState: options.activePackage ? 'published' : 'pending',
@@ -345,6 +348,7 @@ test('a published signed package installs once under the scoped provider and reu
   assert.equal(first.stage, 'demo_repository_package_installed');
   assert.equal(first.ready, false);
   assert.equal(first.activationState, 'signed_package_active');
+  assert.equal(first.sourceSync?.state, 'seeded');
   assert.equal(first.installed?.alreadyInstalled, false);
   assert.equal(first.installed?.releaseId, f.release?.releaseId);
   assert.equal(first.installed?.bundleId, f.release?.bundleId);
@@ -357,7 +361,30 @@ test('a published signed package installs once under the scoped provider and reu
   assert.equal(second.installed?.alreadyInstalled, true);
   assert.equal(second.installed?.receiptHash, first.installed?.receiptHash);
   assert.equal(second.acknowledgement?.duplicate, true);
+  assert.equal(second.sourceSync?.state, 'unchanged');
   assert.equal(f.acknowledgements.length, 2);
+});
+
+test('a stable approved source edit submits one scoped repository update candidate', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  let now = 1_000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'seeded');
+  await writeFile(resolve(f.workspace, 'README.md'), 'Approved source revision.\n');
+  now = 2_000;
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'debouncing');
+  assert.equal(f.uploads.length, 0);
+  now = 17_000;
+  const updated = await demoRepositoryPackage(input, deps);
+  assert.equal(updated.sourceSync?.state, 'submitted');
+  assert.equal(updated.sourceSync?.candidate?.state, 'accepted');
+  assert.equal(f.uploads.length, 1);
+  assert.deepEqual(f.uploads[0]!.consolidation, { mode: 'repository_update',
+    includeApprovedOutputs: true, requireAtlasAssociation: true,
+    expectedLatestSourceFingerprint: digest('published source') });
+  assert.equal(f.uploads[0]!.repositoryBindingId, repositoryId);
 });
 
 test('repository authorization rejects disabled automatic publication before package installation', async () => {

@@ -16,6 +16,7 @@ import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from
 import { pollRepositoryCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateTransport } from './repositoryCandidateSync.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { observeDemoSource, readDemoSourceBaseline, writeDemoSourceBaseline } from './demoSourceBaseline.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -25,7 +26,7 @@ type DeviceConfig = {
   publicKeyEd25519: string; signedReady: boolean; nextSequence: number;
 };
 
-export interface DemoPackageDependencies { store?: SecureSecretStore; fetcher?: typeof fetch }
+export interface DemoPackageDependencies { store?: SecureSecretStore; fetcher?: typeof fetch; now?: () => number }
 
 function apiError(value: unknown, status: number) {
   const response = value && typeof value === 'object' && !Array.isArray(value)
@@ -345,6 +346,52 @@ async function acknowledgeDemoInstallation(input: { scope: DemoDeviceScope;
   return { receiptHash: installed.receiptHash, duplicate: result.duplicate === true };
 }
 
+async function syncPublishedDemoSource(input: {
+  scope: DemoDeviceScope; workspace: string; workspaceId: string;
+  publishedSourceFingerprint: string;
+  activeReleaseId: string;
+  authorization: ReturnType<typeof validateRepositorySourceAuthorization>;
+  candidateTransport: RepositoryCandidateTransport;
+  outboxRoot: string;
+}, deps: DemoPackageDependencies) {
+  const { scope } = input;
+  const baselineScope = { organizationId: scope.organizationId, repositoryId: scope.repositoryId,
+    workspaceId: input.workspaceId, policyHash: input.authorization.policyHash };
+  const snapshot = await inventoryRepositoryPackage({ workspace: input.workspace,
+    organizationId: scope.organizationId, workspaceId: input.workspaceId,
+    repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId,
+    sourceAuthorization: input.authorization });
+  const fingerprint = snapshot.manifest.sourceFingerprint;
+  if (!fingerprint) throw new Error('Demo source inventory has no fingerprint.');
+  const baseline = await readDemoSourceBaseline(scope.stateRoot, baselineScope);
+  const observed = observeDemoSource({ baseline, scope: baselineScope,
+    localFingerprint: fingerprint, publishedFingerprint: input.publishedSourceFingerprint,
+    now: (deps.now || Date.now)() });
+  if (observed.baseline !== baseline) await writeDemoSourceBaseline(scope.stateRoot, observed.baseline);
+  if (observed.state !== 'stable') return { state: observed.state, fingerprint, candidate: null };
+  const fresh = await signedJson(scope, 'GET',
+    `/api/demo/fabric/repositories/${scope.repositoryId}/package-scope`, undefined, deps);
+  if (fresh.activeReleaseId !== input.activeReleaseId
+    || fresh.publishedSourceFingerprint !== input.publishedSourceFingerprint
+    || fresh.sourceAuthorization === null) {
+    throw new Error('Demo source parent or authorization changed before submission.');
+  }
+  const current = validateRepositorySourceAuthorization(fresh.sourceAuthorization,
+    { organizationId: scope.organizationId, workspaceId: input.workspaceId,
+      repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId }, new Date());
+  if (current.policyHash !== input.authorization.policyHash) {
+    throw new Error('Demo source policy changed before submission.');
+  }
+  await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
+  const candidate = await synchronizeRepositoryCandidate({ transport: input.candidateTransport,
+    outboxRoot: input.outboxRoot,
+    scope: { organizationId: scope.organizationId, workspaceId: input.workspaceId,
+      repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId },
+    snapshot, initialRepository: false,
+    expectedLatestSourceFingerprint: input.publishedSourceFingerprint });
+  return { state: candidate.state === 'blocked' ? 'blocked' : 'submitted', fingerprint, candidate };
+}
+
 export async function demoRepositoryPackage(input: {
   scope: DemoDeviceScope;
   workspace: string;
@@ -380,6 +427,11 @@ export async function demoRepositoryPackage(input: {
   await reconcileDemoInstallerMarker({ workspace: input.workspace,
     repositoryId: scope.repositoryId, legacySpaceId: view.workspaceId });
   if (view.repositoryPackageState === 'published') {
+    if (typeof view.publishedSourceFingerprint !== 'string'
+      || !/^sha256:[a-f0-9]{64}$/.test(view.publishedSourceFingerprint)
+      || typeof view.activeReleaseId !== 'string' || !UUID.test(view.activeReleaseId)) {
+      throw new Error('Published Demo package has no verified source parent.');
+    }
     const nativeSkillDirectory = input.nativeSkillDirectory ?? resolve(input.workspace, '.agents/skills');
     const installed = await installActiveDemoPackage({ scope,
       workspaceId: view.workspaceId, provider: input.provider ?? 'codex',
@@ -388,9 +440,13 @@ export async function demoRepositoryPackage(input: {
     if (installed) {
       const acknowledgement = await acknowledgeDemoInstallation({ scope, nativeSkillDirectory,
         installed }, deps);
+      const sourceSync = await syncPublishedDemoSource({ scope, workspace: input.workspace,
+        workspaceId: view.workspaceId, authorization: sourceAuthorization,
+        publishedSourceFingerprint: view.publishedSourceFingerprint,
+        activeReleaseId: view.activeReleaseId, candidateTransport, outboxRoot }, deps);
       return { ok: true, stage: 'demo_repository_package_installed',
         repositoryId: scope.repositoryId, repositoryPackageState: 'published',
-        candidate: null, installed, acknowledgement,
+        candidate: null, installed, acknowledgement, sourceSync,
         ready: false, activationState: 'signed_package_active' };
     }
     return { ok: true, stage: 'demo_repository_package_delivery_pending',
@@ -407,6 +463,15 @@ export async function demoRepositoryPackage(input: {
   const candidate = await synchronizeRepositoryCandidate({ transport: candidateTransport,
     outboxRoot, scope: candidateScope, snapshot,
     initialRepository: view.repositoryPackageState !== 'published' });
+  if (candidate.state !== 'blocked' && snapshot.manifest.sourceFingerprint) {
+    await writeDemoSourceBaseline(scope.stateRoot, {
+      schema: 'dharma.demo-source-baseline/v1',
+      organizationId: scope.organizationId, repositoryId: scope.repositoryId,
+      workspaceId: view.workspaceId, policyHash: sourceAuthorization.policyHash,
+      localFingerprint: snapshot.manifest.sourceFingerprint,
+      publishedFingerprint: null, pendingFingerprint: null, firstObservedAt: null,
+    });
+  }
   return { ok: true, stage: 'demo_repository_package_candidate', repositoryId: scope.repositoryId,
     repositoryPackageState: view.repositoryPackageState, candidate,
     firstLearning: knowledge ? { disposition: knowledge.disposition,

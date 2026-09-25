@@ -162,9 +162,12 @@ export async function readRepositoryKnowledgeSource(input: RepositoryKnowledgeSo
   const markerBytes = await readOptional(workspace, `${SKILL_ROOT}/.dharma-agent-fabric.json`, 4096);
   let marker: { managedBy?: unknown; bundleId?: unknown; skillId?: unknown; workspaceId?: unknown } | null;
   try { marker = JSON.parse(markerBytes?.toString('utf8') ?? 'null'); } catch { throw new Error('Invalid managed repository knowledge marker.'); }
+  const markerWorkspaceIds = new Set([input.workspaceId]);
+  if (input.repositoryBindingId === input.repositoryAgentId) markerWorkspaceIds.add(input.repositoryBindingId);
   if (!marker || !(marker.managedBy === 'dharma-agent-fabric'
-    && (marker.workspaceId === undefined || marker.workspaceId === input.workspaceId) || (typeof marker.bundleId === 'string'
-    && UUID.test(marker.bundleId) && typeof marker.skillId === 'string' && ID.test(marker.skillId) && marker.workspaceId === input.workspaceId))) {
+    && (marker.workspaceId === undefined || markerWorkspaceIds.has(marker.workspaceId as string)) || (typeof marker.bundleId === 'string'
+    && UUID.test(marker.bundleId) && typeof marker.skillId === 'string' && ID.test(marker.skillId)
+    && markerWorkspaceIds.has(marker.workspaceId as string)))) {
     throw new Error('Unmanaged repository knowledge retention root.');
   }
   const manifestBytes = await readOptional(workspace, REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH, RETENTION_MAXIMUM_BYTES);
