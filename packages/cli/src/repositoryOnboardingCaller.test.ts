@@ -44,7 +44,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     isLocalProviderId: (provider: string) => provider === 'codex',
     readDeviceConfig: async () => null,
     configPath: () => '/fixture-config/device.json',
-    process: { env: { USER: 'fixture' }, stderr: { write: () => true } },
+    process: { platform: 'linux', env: { USER: 'fixture' }, stderr: { write: () => true } },
     platform: async () => 'linux',
     loadOrCreateInstallationId: async () => '11111111-1111-4111-8111-111111111111',
     loadOrCreateDeviceIdentity: async () => ({ publicKeyEd25519: 'fixture_public_key' }),
@@ -56,7 +56,11 @@ function bootstrapDependencies(onboarding: Onboarding) {
     saveOrganizationApiToken: async () => record('save_token'),
     retryBootstrapOnboarding: async (operation: () => Promise<unknown>) => operation(),
     onboard: async () => onboarding,
-    installStableRepositoryLauncher: async () => { await record('launcher'); return { installed: true }; },
+    installStableRepositoryLauncher: async () => { await record('launcher');
+      return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
+    dharmaHome: () => '/fixture-home',
+    VERSION: '0.2.101',
+    enableRelayAutostart: async () => { await record('autostart'); return { state: 'enabled', backend: 'systemd-user' }; },
     verifyAgentFabricSkillInstallation: async () => ({ ready: true }),
     resolve, dirname,
     evidencePreview: async () => ({ trajectoryCount: 0, automaticDisclosure: { ready: false } }),
@@ -94,6 +98,7 @@ test('bootstrap passes recipient approval to the verified browser opener before 
   assert.equal(approval.browserOpened, true);
   assert.equal(f.calls.filter(item => item === 'open_approval').length, 1);
   assert.ok(f.calls.indexOf('open_approval') < f.calls.indexOf('save_token'));
+  assert.ok(f.calls.indexOf('launcher') < f.calls.indexOf('autostart'));
 });
 function bootstrapFlags(complete = false) {
   const flags = new Map<string, string | boolean>([

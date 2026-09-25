@@ -39,6 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { superviseRelay } from './relaySupervisor.js';
+import { disableRelayAutostart, enableRelayAutostart, relayAutostartStatus } from './relayAutostart.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
@@ -63,7 +64,7 @@ import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from '
 import { demoRepositoryPackage } from './demoPackage.js';
 import { runDemoWatch } from './demoWatch.js';
 
-const VERSION = '0.2.100';
+const VERSION = '0.2.101';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1501,6 +1502,7 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
     .update(`${existing.hqUrl}\0${existing.organizationId}`)
     .digest('hex').slice(0, 12)}`;
   const backupRoot = resolve(dirname(dharmaHome()), '.dharma-rebind-backups', backupId);
+  await disableRelayAutostart({ home: dharmaHome() });
   await mkdir(backupRoot, { recursive: true, mode: 0o700 });
   for (const relativePath of ['device.json', 'pending-enrollment.json', 'registry', 'relay', 'vault']) {
     const source = resolve(dharmaHome(), relativePath);
@@ -1905,6 +1907,15 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     };
   }
   const launcher = await installStableRepositoryLauncher(workspace);
+  const autostart = flags.has('no-relay-daemon')
+    ? { state: 'disabled' as const, backend: null }
+    : await withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
+      `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+      () => enableRelayAutostart({
+        home: dharmaHome(), workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
+        launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
+        version: VERSION,
+      }));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
@@ -1924,6 +1935,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       },
       repository: onboarded,
       launcher,
+      autostart,
     };
   }
 
@@ -2008,6 +2020,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     },
     repository: onboarded,
     launcher,
+    autostart,
     provider,
     skill,
     evidence: {
@@ -5709,6 +5722,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let evidenceResponsesCompleted = 0;
   let trajectorySyncsCompleted = 0;
   let nextPolicyRefreshAt = 0;
+  let lastPollReceiptAt = 0;
   let evidencePolicyFresh = false;
   const repositorySourceWatcher = new RepositorySourceWatcher();
   const blockedRepositorySourceRetry = new BlockedRepositorySourceRetry();
@@ -5953,6 +5967,12 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         }
       }
       const result = await executeOneTask(fabric, leaseSeconds);
+      if (Date.now() - lastPollReceiptAt >= 30_000) {
+        await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'last-successful-poll.json'), {
+          at: new Date().toISOString(), workspaceId: canonicalWorkspace.workspaceId, version: VERSION,
+        });
+        lastPollReceiptAt = Date.now();
+      }
       if (result.taskId) tasksCompleted += 1;
       if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
       if (!result.taskId && performance.now() >= nextSkillActivationAt) {
@@ -6186,15 +6206,33 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'status') {
     const relay = await relayProcessState();
     const supervisor = await relaySupervisorProcessState();
+    const autostart = await relayAutostartStatus({ home: dharmaHome() });
+    const lastPoll = await readFile(resolve(dharmaHome(), 'relay', 'last-successful-poll.json'), 'utf8')
+      .then(value => JSON.parse(value) as { at?: string; workspaceId?: string; version?: string }).catch(() => null);
+    const binding = await readFile(resolve(dharmaHome(), 'relay', 'supervisor-workspace.json'), 'utf8')
+      .then(value => JSON.parse(value) as { pid?: number; workspaceId?: string }).catch(() => null);
+    const supervisorPid = await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
+      .then(value => Number(value.trim())).catch(() => 0);
+    const acknowledgedWorkspace = supervisor === 'running' && binding?.pid === supervisorPid
+      && Boolean(binding?.workspaceId) && lastPoll?.workspaceId === binding?.workspaceId
+      && lastPoll?.version === VERSION;
+    const lastSuccessfulPollAt = acknowledgedWorkspace && typeof lastPoll?.at === 'string' ? lastPoll.at : null;
+    const pollAge = lastSuccessfulPollAt ? Date.now() - Date.parse(lastSuccessfulPollAt) : NaN;
+    const reconnect = {
+      state: relay !== 'running' ? (supervisor === 'running' ? 'restarting' : 'stopped')
+        : !Number.isFinite(pollAge) ? 'awaiting_acknowledgement'
+          : pollAge <= 300_000 && pollAge >= 0 ? 'acknowledged_recently' : 'stale',
+      lastSuccessfulPollAt,
+    };
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor };
+      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor, autostart, reconnect };
       if (flags.has('verbose') || flags.has('diagnostic')) {
         Object.assign(status, { home: dharmaHome(), organizationId: config.organizationId, deviceId: config.deviceId });
       }
       return status;
     } catch {
-      const status: Record<string, unknown> = { version: VERSION, enrolled: false, relay, supervisor };
+      const status: Record<string, unknown> = { version: VERSION, enrolled: false, relay, supervisor, autostart, reconnect };
       if (flags.has('verbose') || flags.has('diagnostic')) status.home = dharmaHome();
       return status;
     }
@@ -6216,6 +6254,11 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'probe') return probeRelayConnection();
   if (command === 'relay' && subcommand === 'stop') return relayStop();
+  if (command === 'relay' && subcommand === 'autostart') {
+    if (positional[2] === 'status') return relayAutostartStatus({ home: dharmaHome() });
+    if (positional[2] === 'disable') return disableRelayAutostart({ home: dharmaHome() });
+    throw new Error('Use dharma relay autostart status or dharma relay autostart disable.');
+  }
   if (command === 'relay' && subcommand === 'supervise') return relaySupervise(flags);
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);

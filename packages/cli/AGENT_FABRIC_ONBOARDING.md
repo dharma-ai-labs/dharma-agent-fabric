@@ -73,7 +73,7 @@ To propose a new or corrected term, edit an approved repository source or regist
 
 ## 7. Maintain autonomous synchronization
 
-Completed onboarding starts a detached supervisor for the outbound relay. It restarts the receiver after an unexpected process exit while the machine is running. Verify both processes with `dharma status`; `dharma relay probe` verifies the signed connection. If an enrolled device reports a stopped relay or supervisor, use the supported grant-free onboarding resume from this bound repository. `dharma relay stop` intentionally stops both without deleting credentials or vault data. A machine reboot does not yet install an automatic OS startup service; report that limitation instead of claiming unattended reboot recovery. The relay receives signed tasks, policy refreshes, package releases, evidence requests, role questions, remediation skills, and rollback instructions.
+Completed onboarding starts a detached supervisor for the outbound relay and registers per-user startup on Windows or Linux with a systemd user session. It restarts the receiver after an unexpected process exit. After a reboot and normal sign-in by the enrolled operating-system user, startup resumes the bound relay without another grant or prompt. Verify `autostart.state: enabled`, `supervisor: running`, and a recent `reconnect.lastSuccessfulPollAt` with `dharma status`; `dharma relay probe` independently verifies the signed connection. Startup registration failure is an incomplete onboarding stage, not a success receipt. If the relay does not reconnect, use the supported grant-free onboarding resume from this bound repository. `dharma relay stop` stops current processes without deleting credentials, vault data, or the next-login startup entry; `dharma relay autostart disable` removes that entry. Linux environments without a systemd user bus and macOS are not yet reboot-autonomous. The relay receives signed tasks, policy refreshes, package releases, evidence requests, role questions, remediation skills, and rollback instructions.
 
 Watch approved source branches, repository skills, dependencies, and registered output folders. Debounce changes, hash stable snapshots, and publish only against the expected parent. Validated updates publish automatically under the standing policy. Permission expansion, secret detection, manifest corruption, unresolved conflicts, failed evaluation, or budget exhaustion blocks publication.
 
@@ -125,6 +125,8 @@ Report `complete` only when identity, shared package, native skill, role, first 
 - Ask a specific peer: `dharma repositories ask --workspace-id <workspace-id> --target-endpoint-id <endpoint-id> --category <category> --question "<question>"`.
 - Read a peer answer: `dharma repositories reply --workspace-id <workspace-id> --question-id <question-id>`.
 - Check relay connectivity: `dharma relay probe`.
+- Check user-logon startup: `dharma relay autostart status`.
+- Disable future user-logon startup without deleting enrollment: `dharma relay autostart disable`.
 - Resume a stopped supervised receiver from an enrolled checkout: `dharma onboard --resume --organization-id <organization-id> --workspace . --policy-revision <policy-revision> --providers <provider>`.
 - Stop the receiver intentionally, preserving enrollment and vault: `dharma relay stop`.
 
