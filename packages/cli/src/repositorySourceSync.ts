@@ -34,6 +34,31 @@ export function advanceRepositorySourceBaseline(record: {
     pendingLocalOperationId: terminal ? null : record.pendingLocalOperationId ?? null,
   };
 }
+
+export async function recoverPublishedLocalSourceBaseline(input: BoundRepositorySource & {
+  workspace: string;
+  record: { state: string; snapshotHash?: string | null; pendingLocalOperationId?: string | null };
+}): Promise<string | null> {
+  const { record } = input;
+  if (record.state !== 'published' || record.pendingLocalOperationId || !record.snapshotHash) return null;
+  if (!HASH.test(record.snapshotHash)) throw new Error('Published repository source baseline hash is invalid.');
+  let snapshot: RepositoryPackageSnapshot;
+  try { snapshot = await readRepositoryPackageSnapshot(input.workspace, record.snapshotHash); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (error instanceof SyntaxError || error instanceof TypeError) {
+      throw new Error('Published repository source baseline integrity failed.', { cause: error });
+    }
+    throw error;
+  }
+  const manifest = snapshot.manifest;
+  if (manifest.organizationId !== input.organizationId || manifest.workspaceId !== input.workspaceId
+    || manifest.sourceAuthorization?.repositoryBindingId !== input.repositoryBindingId
+    || manifest.sourceAuthorization?.repositoryAgentId !== input.repositoryAgentId) {
+    throw new Error('Published repository source baseline scope is invalid.');
+  }
+  return record.snapshotHash;
+}
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$(?![\s\S])/i;
 const HASH = /^sha256:[a-f0-9]{64}$(?![\s\S])/;
 

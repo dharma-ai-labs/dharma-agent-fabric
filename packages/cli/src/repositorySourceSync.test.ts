@@ -8,7 +8,7 @@ import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepositoryPackageSnapshot,
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher,
+import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
@@ -165,6 +165,42 @@ test('published and blocked receipts advance only the matching pending local sou
     localBaselineSnapshotHash: A, publishedLocalSnapshotHash: A,
     pendingLocalSnapshotHash: null, pendingLocalOperationId: null,
   });
+});
+test('relay recovers the verified latest same-workspace source baseline before watching deletions', async t => {
+  const f = await fixture(t);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const old = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace,
+    sourceAuthorization: authorization });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot: old, candidateOnly: true });
+  const addedSkill = '.codex/skills/published-only/SKILL.md';
+  await f.put(addedSkill, '# Published only');
+  const published = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace,
+    sourceAuthorization: authorization });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot: published, candidateOnly: true });
+  const record = { state: 'published', snapshotHash: published.manifest.snapshotHash,
+    localBaselineSnapshotHash: old.manifest.snapshotHash,
+    publishedLocalSnapshotHash: old.manifest.snapshotHash, pendingLocalOperationId: null };
+  const recovered = await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace, record });
+  assert.equal(recovered, published.manifest.snapshotHash);
+  const watcher = new RepositorySourceWatcher(1000);
+  await seedRepositorySourceWatcher({ ...scope, workspace: f.input.workspace,
+    publishedHash: recovered!, localHash: recovered, watcher });
+  await rm(resolve(f.input.workspace, addedSkill));
+  const deleted = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace,
+    sourceAuthorization: authorization });
+  assert.equal(watcher.observe(deleted.manifest.sourceFingerprint!, 0), 'debouncing');
+  await assert.rejects(recoverPublishedLocalSourceBaseline({ ...scope,
+    workspaceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', workspace: f.input.workspace, record }), /scope/);
+  assert.equal(await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace,
+    record: { ...record, pendingLocalOperationId: 'pending' } }), null);
+  assert.equal(await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace,
+    record: { ...record, state: 'blocked' } }), null);
+  assert.equal(await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace,
+    record: { ...record, snapshotHash: B } }), null);
+  await writeFile(resolve(f.input.workspace, '.dharma/repository-source/snapshots',
+    `${published.manifest.snapshotHash.slice(7)}.json`), '{}');
+  await assert.rejects(recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace, record }),
+    /integrity/);
 });
 test('watcher resumes from an integrity-checked persisted source fingerprint', () => {
   const watcher = new RepositorySourceWatcher(1000);
