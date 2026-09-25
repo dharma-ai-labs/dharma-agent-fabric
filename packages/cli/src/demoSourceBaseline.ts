@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { mkdir, open, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, open, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 
@@ -57,6 +57,15 @@ function parse(value: unknown, scope: DemoSourceBaselineScope): DemoSourceBaseli
 
 export async function readDemoSourceBaseline(root: string, scope: DemoSourceBaselineScope) {
   const target = path(root, scope);
+  let entry;
+  try { entry = await lstat(target); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new Error('Demo source baseline symlink or file type is invalid.');
+  }
   let handle;
   try { handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)); }
   catch (error) {
@@ -65,7 +74,12 @@ export async function readDemoSourceBaseline(root: string, scope: DemoSourceBase
   }
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > 4096) throw new Error('Demo source baseline file is invalid.');
+    const after = await lstat(target);
+    if (!stat.isFile() || stat.size > 4096 || !after.isFile() || after.isSymbolicLink()
+      || (entry.ino !== 0 && stat.ino !== entry.ino)
+      || (after.ino !== 0 && stat.ino !== after.ino)) {
+      throw new Error('Demo source baseline file is invalid.');
+    }
     return parse(JSON.parse(await handle.readFile({ encoding: 'utf8' })), scope);
   } finally { await handle.close(); }
 }
