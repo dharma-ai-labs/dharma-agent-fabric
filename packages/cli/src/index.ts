@@ -804,6 +804,28 @@ export async function relayProcessState(home = dharmaHome()): Promise<'running' 
   }
 }
 
+export async function acquireRelayProcessLease(home = dharmaHome()): Promise<() => Promise<void>> {
+  const pidPath = resolve(home, 'relay', 'relay.pid');
+  const releaseLock = await acquirePidLock(
+    `${pidPath}.lock`, 250, 'Another relay process is already running for this device.',
+  );
+  try {
+    const state = await relayProcessState(home);
+    if (state !== 'stopped') throw new Error(`Cannot start a second relay while process state is ${state}.`);
+    await writeFile(pidPath, `${process.pid}\n`, { mode: 0o600 });
+  } catch (error) {
+    await releaseLock();
+    throw error;
+  }
+  return async () => {
+    try {
+      if ((await readFile(pidPath, 'utf8').catch(() => '')).trim() === String(process.pid)) {
+        await rm(pidPath, { force: true });
+      }
+    } finally { await releaseLock(); }
+  };
+}
+
 export async function materializeWorkspacePolicy(input: {
   workspace: string;
   organizationId: string;
@@ -1489,6 +1511,7 @@ export async function waitForRelayReadiness(options: {
   attempts?: number;
   delayMs?: number;
   wait?: (delayMs: number) => Promise<void>;
+  expectedVersion?: string;
 } = {}) {
   const processState = options.processState || relayProcessState;
   const probe = options.probe || probeRelayConnection;
@@ -1502,8 +1525,14 @@ export async function waitForRelayReadiness(options: {
     lastState = await processState();
     if (lastState === 'running') {
       try {
-        return { state: 'running' as const, probe: await probe() };
-      } catch {
+        const acknowledged = await probe();
+        if (!acknowledged.connected) throw new Error('Relay session is not connected.');
+        if (options.expectedVersion && acknowledged.relayVersion !== options.expectedVersion) {
+          throw new Error(`relay_version_mismatch:${acknowledged.relayVersion}:${options.expectedVersion}`);
+        }
+        return { state: 'running' as const, probe: acknowledged };
+      } catch (error) {
+        if (String((error as Error).message).startsWith('relay_version_mismatch:')) throw error;
         acknowledgementPending = true;
       }
     }
@@ -1525,7 +1554,7 @@ async function startRelayDaemon(policyPath: string) {
     });
     child.unref();
   }
-  const readiness = await waitForRelayReadiness();
+  const readiness = await waitForRelayReadiness({ expectedVersion: VERSION });
   return { started: !alreadyRunning, ...readiness };
 }
 
@@ -5546,9 +5575,8 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
-  const pidPath = resolve(dharmaHome(), 'relay', 'relay.pid');
-  await mkdir(resolve(dharmaHome(), 'relay'), { recursive: true, mode: 0o700 });
-  await writeFile(pidPath, `${process.pid}\n`, { mode: 0o600 });
+  const releaseRelayLease = await acquireRelayProcessLease();
+  try {
   let stopping = false;
   let stopPreparation: (() => void) | undefined;
   const stop = () => { stopping = true; stopPreparation?.(); };
@@ -5852,7 +5880,6 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     vault.close();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
-    await rm(pidPath, { force: true });
   }
   return {
     ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
@@ -5863,6 +5890,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     skillActivationFailuresByProvider,
     sharedRepositoryReady: await repositorySharedReady(canonicalWorkspace),
   };
+  } finally { await releaseRelayLease(); }
 }
 
 export async function run(argv: string[]): Promise<Output> {
