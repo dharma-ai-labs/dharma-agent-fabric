@@ -135,7 +135,8 @@ test('symlinked pointer does not modify its foreign target', async () => {
 // Synthetic development seam: execute the compiled production function, not its module
 // initialization. Authorization, transport, vault and OS-lock boundaries are injected;
 // this qualifies staging ownership only, never enrollment, native locking or live use.
-async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: number, diagnostic: (message: string) => void) {
+async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: number,
+  diagnostic: (message: string) => void, holdSourceScan = false) {
   const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
   diagnostic(`synthetic production-caller source=${sha256(await readFile(new URL('../src/index.ts', import.meta.url)))} emitted=${sha256(source)}`);
   const ast = ts.createSourceFile('index.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -145,9 +146,12 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   const roots = [f.sourceRoot];
   for (let index = 1; index < cycles; index++) roots.push(await mkdtemp(join(f.scopeRoot, 'attempt-')));
   let preparedCount = 0; let flight: Promise<void> | undefined; let stopped = false;
-  let vaultCloses = 0; let transportCalls = 0;
+  let vaultCloses = 0; let transportCalls = 0; let sourceScans = 0; let candidatePolls = 0;
+  let releaseSourceScan: (() => void) | undefined;
+  let elapsedMs = 0; let activations = 0;
   const events: string[] = [];
-  const flags = new Map<string, string | boolean>([['policy', join(f.home, '.dharma', 'approved-policy.json')], ['once', true]]);
+  const flags = new Map<string, string | boolean>([['policy', join(f.home, '.dharma', 'approved-policy.json')]]);
+  if (!holdSourceScan) flags.set('once', true);
   const workspace = { path: f.home, workspaceId: WORKSPACE, organizationId: 'org_test',
     repositoryAgentId: f.record.repositoryAgentId, repositoryBindingId: '77777777-7777-4777-8777-777777777777' };
   const policy = { revision: 1, fixture: 'synthetic-staging-policy' };
@@ -159,7 +163,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     return resolved;
   };
   const result = await new Script(`${declaration}\nrelayStart(flags);`, { filename: 'synthetic-relay-staging-fixture.js' }).runInNewContext({
-    flags, process: processFixture, performance, Date, Map, Promise, Number, Error,
+    flags, process: processFixture, performance: { now: () => elapsedMs }, Date, Map, Promise, Number, Error,
     resolve, mkdir: (path: string, options: Parameters<typeof mkdir>[1]) => mkdir(checkedPath(path), options),
     writeFile: (path: string, bytes: string, options: Parameters<typeof writeFile>[2]) => writeFile(checkedPath(path), bytes, options),
     rm: (path: string, options: Parameters<typeof rm>[1]) => rm(checkedPath(path), options),
@@ -191,16 +195,41 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     },
     deferUnavailableRelayRetention: async (operation: () => Promise<unknown>) => ({ state: 'completed', value: await operation() }),
     finalizeRecoveredSignedTaskTrajectories: async () => [], syncWorkspacePolicy: async () => {},
-    scanRepositorySourceChanges: async () => { events.push('scan'); return { state: 'fixture_unchanged', localMutation: false }; },
-    withWorkspaceSkillActivationLock: async () => { events.push('activate'); },
+    pollRepositoryCandidate: async () => { candidatePolls++; return null; },
+    scanRepositorySourceChanges: async () => {
+      sourceScans++; events.push('scan-start');
+      if (holdSourceScan) await new Promise<void>(accept => { releaseSourceScan = accept; });
+      events.push('scan-end');
+      return { state: 'fixture_unchanged', localMutation: false };
+    },
+    withWorkspaceSkillActivationLock: async () => {
+      activations++; events.push(`activate-${activations}`);
+      if (holdSourceScan && activations === 2) {
+        processFixture.emit('SIGINT');
+        releaseSourceScan?.();
+      }
+    },
     repositorySharedReady: async () => false,
     installedRepositoryKnowledge: async () => null, syncPendingRetentionCapsules: async () => 0,
     processEvidenceRequest: async () => ({}),
-    executeOneTask: async () => { transportCalls++; events.push('task'); await flight; return {}; },
+    executeOneTask: async () => {
+      transportCalls++; events.push(`task-${transportCalls}`); await flight;
+      if (holdSourceScan && transportCalls === 2) {
+        assert.ok(releaseSourceScan, 'second task poll must run while source scan is pending');
+        elapsedMs = 61_000;
+      }
+      return {};
+    },
   }) as Record<string, unknown>;
-  assert.equal(vaultCloses, 1); assert.equal(transportCalls, 1);
-  assert.ok(events.indexOf('task') < events.indexOf('activate') && events.indexOf('activate') < events.indexOf('scan'),
+  assert.equal(vaultCloses, 1); assert.equal(transportCalls, holdSourceScan ? 2 : 1);
+  assert.equal(sourceScans, 1, 'source scan must remain single-flight');
+  assert.equal(candidatePolls, 1, 'candidate polling must wait until the in-flight scan is applied');
+  assert.ok(events.indexOf('task-1') < events.indexOf('activate-1') && events.indexOf('activate-1') < events.indexOf('scan-start'),
     'signed activation must precede source publication at the safe task boundary');
+  if (holdSourceScan) assert.ok(events.indexOf('scan-start') < events.indexOf('task-2')
+    && events.indexOf('task-2') < events.indexOf('activate-2')
+    && events.indexOf('activate-2') < events.indexOf('scan-end'),
+  'task polling and signed activation must continue during source reconciliation');
   assert.equal(preparedCount, cycles, 'production staging callback must actually execute');
   assert.equal(processFixture.listenerCount('SIGINT'), 0); assert.equal(processFixture.listenerCount('SIGTERM'), 0);
   return { result, roots };
@@ -215,6 +244,15 @@ test('actual relay staging publishes a recoverable pointer without live dependen
     const pointer = JSON.parse(await readFile(join(f.scopeRoot, 'CURRENT.json'), 'utf8'));
     assert.equal(pointer.sourceDirectory, f.sourceRoot.slice(f.scopeRoot.length + 1));
     assert.equal(pointer.activationAuthorized, false);
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('actual relay continues task polling during a single in-flight source reconciliation', async t => {
+  const f = await fixture(false);
+  try {
+    const { result } = await runActualRelay(f, 0, message => t.diagnostic(message), true);
+    assert.equal(result.repositorySourceState, 'fixture_unchanged');
+    assert.equal(result.repositorySourceFailures, 0);
   } finally { await rm(f.home, { recursive: true, force: true }); }
 });
 

@@ -62,7 +62,7 @@ import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from '
 import { demoRepositoryPackage } from './demoPackage.js';
 import { runDemoWatch } from './demoWatch.js';
 
-const VERSION = '0.2.98';
+const VERSION = '0.2.99';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5633,6 +5633,9 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let repositorySourceCandidates = 0;
   let repositorySourceFailures = 0;
   let repositorySourceState = 'not_scanned';
+  let sourceScanFlight: Promise<void> | null = null;
+  let sourceScanReady: { cycle: Awaited<ReturnType<typeof scanRepositorySourceChanges>> }
+    | { state: 'awaiting_signed_baseline' } | { error: unknown } | null = null;
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
@@ -5695,6 +5698,72 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   });
   stopPreparation = skillPreparationPump.requestStop;
   if (stopping) stopPreparation();
+  const applyReadySourceScan = async () => {
+    if (!sourceScanReady) return;
+    const ready = sourceScanReady;
+    sourceScanReady = null;
+    sourceScanFlight = null;
+    if ('error' in ready) {
+      repositorySourceWatcher.invalidate();
+      repositorySourceFailures += 1;
+      repositorySourceState = 'blocked';
+      nextRepositorySourceScanAt = performance.now() + 60_000;
+      return;
+    }
+    if ('state' in ready) {
+      repositorySourceState = ready.state;
+      nextRepositorySourceScanAt = performance.now() + 15_000;
+      return;
+    }
+    const sourceCycle = ready.cycle;
+    repositorySourceState = sourceCycle.state;
+    if (sourceCycle.localMutation) {
+      repositorySourceCandidates += 1;
+      if (canonicalWorkspace.repositoryPackage && sourceCycle.persisted) {
+        canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash = sourceCycle.persisted.snapshotHash;
+        if (sourceCycle.state === 'source_already_published') {
+          canonicalWorkspace.repositoryPackage.publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
+          canonicalWorkspace.repositoryPackage.pendingLocalSnapshotHash = null;
+          canonicalWorkspace.repositoryPackage.pendingLocalOperationId = null;
+          publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
+        } else if (sourceCycle.candidate) {
+          const receipt = sourceCycle.candidate;
+          if (typeof receipt.candidateId === 'string' && typeof receipt.operationId === 'string'
+            && typeof receipt.snapshotHash === 'string' && sourceCycle.submittedManifestHash) {
+            Object.assign(canonicalWorkspace.repositoryPackage, {
+              state: receipt.state, candidateId: receipt.candidateId, operationId: receipt.operationId,
+              snapshotHash: receipt.snapshotHash, sourceManifestHash: sourceCycle.submittedManifestHash,
+              releaseId: typeof receipt.releaseId === 'string' ? receipt.releaseId : null,
+              consolidationMode: 'repository_update',
+            });
+          }
+          if (receipt.state === 'published') {
+            canonicalWorkspace.repositoryPackage.publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
+            canonicalWorkspace.repositoryPackage.pendingLocalSnapshotHash = null;
+            canonicalWorkspace.repositoryPackage.pendingLocalOperationId = null;
+            publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
+          } else if ((receipt.state === 'accepted' || receipt.state === 'processing')
+            && typeof receipt.operationId === 'string') {
+            canonicalWorkspace.repositoryPackage.pendingLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
+            canonicalWorkspace.repositoryPackage.pendingLocalOperationId = receipt.operationId;
+          } else if (receipt.state === 'blocked') {
+            canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash = publishedLocalSnapshotHash;
+            repositorySourceWatcher.invalidate();
+          }
+        }
+        await saveWorkspaceRecord(canonicalWorkspace);
+      }
+    }
+    nextRepositorySourceScanAt = performance.now() + (sourceCycle.state === 'debouncing' ? 15_000 : 60_000);
+  };
+  const consumeSourceScan = async () => {
+    try { await applyReadySourceScan(); } catch {
+      repositorySourceWatcher.invalidate();
+      repositorySourceFailures += 1;
+      repositorySourceState = 'blocked';
+      nextRepositorySourceScanAt = performance.now() + 60_000;
+    }
+  };
   try {
     const recoveredTaskTrajectories = await deferUnavailableRelayRetention(async () => finalizeRecoveredSignedTaskTrajectories(
       fabric,
@@ -5704,6 +5773,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       taskTrajectoriesRecovered += recoveredTaskTrajectories.value.length;
     }
     do {
+      await consumeSourceScan();
       if (Date.now() >= nextPolicyRefreshAt) {
         try {
           await syncWorkspacePolicy(fabric, canonicalWorkspace, policy.revision, true);
@@ -5714,7 +5784,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         }
         nextPolicyRefreshAt = Date.now() + 60_000;
       }
-      if (canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
+      if (!sourceScanFlight && canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
         try {
           const current = await pollRepositoryCandidate({ transport: fabric,
             outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
@@ -5791,91 +5861,53 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         }
         nextSkillActivationAt = performance.now() + 60_000;
       }
-      if (performance.now() >= nextRepositorySourceScanAt) {
-        try {
-          if (!repositorySourceBaselineAvailable) {
-            throw new Error('Repository source baseline is unavailable; refusing an unanchored update.');
-          }
-          if (!canonicalWorkspace.repositoryBindingId || !canonicalWorkspace.repositoryAgentId) {
-            throw new Error('Repository source synchronization requires a complete repository binding.');
-          }
-          const installedKnowledge = await installedRepositoryKnowledge(canonicalWorkspace);
-          if (!installedKnowledge && (canonicalWorkspace.repositoryPackage?.generation ?? 0) > 0) {
-            repositorySourceState = 'awaiting_signed_baseline';
-            nextRepositorySourceScanAt = performance.now() + 15_000;
-          } else {
-            if (canonicalWorkspace.repositoryPackage?.state === 'blocked' && canonicalWorkspace.repositoryPackage.snapshotHash) {
-              const blocked = await readRepositorySourceBaselineSnapshot(canonicalWorkspace.path,
-                canonicalWorkspace.repositoryPackage.snapshotHash);
-              if (blockedRepositorySourceRetry.consider(canonicalWorkspace.repositoryPackage.candidateId ?? '',
-                blocked.manifest.knowledge, installedKnowledge)) repositorySourceWatcher.invalidate();
+      if (!sourceScanFlight && performance.now() >= nextRepositorySourceScanAt) {
+        const sourceWorkspace = canonicalWorkspace;
+        const sourceBaselineHash = publishedLocalSnapshotHash;
+        sourceScanFlight = (async () => {
+          try {
+            if (!repositorySourceBaselineAvailable) {
+              throw new Error('Repository source baseline is unavailable; refusing an unanchored update.');
             }
-            const sourceCycle = await scanRepositorySourceChanges({
-              workspace: canonicalWorkspace.path, organizationId: canonicalWorkspace.organizationId,
-              workspaceId: canonicalWorkspace.workspaceId, repositoryBindingId: canonicalWorkspace.repositoryBindingId,
-              repositoryAgentId: canonicalWorkspace.repositoryAgentId, transport: fabric, watcher: repositorySourceWatcher,
-              loadRetainedKnowledge: () => installedRepositoryKnowledge(canonicalWorkspace),
-              loadPublishedLocalBaseline: () => publishedLocalSnapshotHash
-                ? readRepositoryPackageSnapshot(canonicalWorkspace.path, publishedLocalSnapshotHash) : Promise.resolve(null),
-              submitCandidate: (snapshot, expectedLatestSourceFingerprint) => synchronizeRepositoryCandidate({ transport: fabric,
-                outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
-                scope: { organizationId: canonicalWorkspace.organizationId,
-                  workspaceId: canonicalWorkspace.workspaceId,
-                  repositoryBindingId: canonicalWorkspace.repositoryBindingId!,
-                  repositoryAgentId: canonicalWorkspace.repositoryAgentId! },
-                snapshot, initialRepository: false, expectedLatestSourceFingerprint }),
-            });
-            repositorySourceState = sourceCycle.state;
-            if (sourceCycle.localMutation) {
-              repositorySourceCandidates += 1;
-              if (canonicalWorkspace.repositoryPackage && sourceCycle.persisted) {
-                canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash = sourceCycle.persisted.snapshotHash;
-                if (sourceCycle.state === 'source_already_published') {
-                  canonicalWorkspace.repositoryPackage.publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
-                  canonicalWorkspace.repositoryPackage.pendingLocalSnapshotHash = null;
-                  canonicalWorkspace.repositoryPackage.pendingLocalOperationId = null;
-                  publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
-                } else if (sourceCycle.candidate) {
-                  const receipt = sourceCycle.candidate;
-                  if (typeof receipt.candidateId === 'string' && typeof receipt.operationId === 'string'
-                    && typeof receipt.snapshotHash === 'string' && sourceCycle.submittedManifestHash) {
-                    Object.assign(canonicalWorkspace.repositoryPackage, {
-                      state: receipt.state, candidateId: receipt.candidateId, operationId: receipt.operationId,
-                      snapshotHash: receipt.snapshotHash, sourceManifestHash: sourceCycle.submittedManifestHash,
-                      releaseId: typeof receipt.releaseId === 'string' ? receipt.releaseId : null,
-                      consolidationMode: 'repository_update',
-                    });
-                  }
-                  if (receipt.state === 'published') {
-                    canonicalWorkspace.repositoryPackage.publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
-                    canonicalWorkspace.repositoryPackage.pendingLocalSnapshotHash = null;
-                    canonicalWorkspace.repositoryPackage.pendingLocalOperationId = null;
-                    publishedLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
-                  } else if ((receipt.state === 'accepted' || receipt.state === 'processing')
-                    && typeof receipt.operationId === 'string') {
-                    canonicalWorkspace.repositoryPackage.pendingLocalSnapshotHash = sourceCycle.persisted.snapshotHash;
-                    canonicalWorkspace.repositoryPackage.pendingLocalOperationId = receipt.operationId;
-                  } else if (receipt.state === 'blocked') {
-                    canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash = publishedLocalSnapshotHash;
-                    repositorySourceWatcher.invalidate();
-                  }
-                }
-                await saveWorkspaceRecord(canonicalWorkspace);
+            if (!sourceWorkspace.repositoryBindingId || !sourceWorkspace.repositoryAgentId) {
+              throw new Error('Repository source synchronization requires a complete repository binding.');
+            }
+            const installedKnowledge = await installedRepositoryKnowledge(sourceWorkspace);
+            if (!installedKnowledge && (sourceWorkspace.repositoryPackage?.generation ?? 0) > 0) {
+              sourceScanReady = { state: 'awaiting_signed_baseline' };
+            } else {
+              if (sourceWorkspace.repositoryPackage?.state === 'blocked' && sourceWorkspace.repositoryPackage.snapshotHash) {
+                const blocked = await readRepositorySourceBaselineSnapshot(sourceWorkspace.path,
+                  sourceWorkspace.repositoryPackage.snapshotHash);
+                if (blockedRepositorySourceRetry.consider(sourceWorkspace.repositoryPackage.candidateId ?? '',
+                  blocked.manifest.knowledge, installedKnowledge)) repositorySourceWatcher.invalidate();
               }
+              const sourceCycle = await scanRepositorySourceChanges({
+                workspace: sourceWorkspace.path, organizationId: sourceWorkspace.organizationId,
+                workspaceId: sourceWorkspace.workspaceId, repositoryBindingId: sourceWorkspace.repositoryBindingId,
+                repositoryAgentId: sourceWorkspace.repositoryAgentId, transport: fabric, watcher: repositorySourceWatcher,
+                loadRetainedKnowledge: () => installedRepositoryKnowledge(sourceWorkspace),
+                loadPublishedLocalBaseline: () => sourceBaselineHash
+                  ? readRepositoryPackageSnapshot(sourceWorkspace.path, sourceBaselineHash) : Promise.resolve(null),
+                submitCandidate: (snapshot, expectedLatestSourceFingerprint) => synchronizeRepositoryCandidate({ transport: fabric,
+                  outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
+                  scope: { organizationId: sourceWorkspace.organizationId,
+                    workspaceId: sourceWorkspace.workspaceId,
+                    repositoryBindingId: sourceWorkspace.repositoryBindingId!,
+                    repositoryAgentId: sourceWorkspace.repositoryAgentId! },
+                  snapshot, initialRepository: false, expectedLatestSourceFingerprint }),
+              });
+              sourceScanReady = { cycle: sourceCycle };
             }
-            nextRepositorySourceScanAt = performance.now() + (sourceCycle.state === 'debouncing' ? 15_000 : 60_000);
-          }
-        } catch {
-          repositorySourceWatcher.invalidate();
-          repositorySourceFailures += 1;
-          repositorySourceState = 'blocked';
-          nextRepositorySourceScanAt = performance.now() + 60_000;
-        }
+          } catch (error) { sourceScanReady = { error }; }
+        })();
       }
       if (flags.has('once')) break;
       if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
     } while (!stopping);
   } finally {
+    if (sourceScanFlight) await sourceScanFlight;
+    await consumeSourceScan();
     await skillPreparationPump.stop();
     vault.close();
     process.removeListener('SIGINT', stop);
