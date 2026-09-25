@@ -167,6 +167,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     required: (options: Map<string, string | boolean>, name: string) => options.get(name),
     registry: async () => [workspace], loadVerifiedWorkspacePolicy: async () => policy,
     client: async () => Object.freeze({ fixture: true }), dharmaHome: () => f.home,
+    acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },
     loadVaultModule: async () => ({ LocalVault: { open: async () => ({ close: () => { vaultCloses++; } }) },

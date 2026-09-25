@@ -53,6 +53,7 @@ import {
   recoverLegacySkillBundleIdAfterAuthorizationFailure,
   installedBundleIdForSkillPollAfterAuthorizationFailure,
   recoveredTaskPolicyWasSuperseded,
+  acquireRelayProcessLease,
   relayProcessState,
   releaseDailyContentUpload,
   reserveDailyContentUpload,
@@ -168,6 +169,47 @@ test('bootstrap relay readiness fails closed when acknowledgement never arrives'
     }),
     /relay_session_unacknowledged/,
   );
+});
+
+test('bootstrap rejects a connected relay from an older CLI release', async () => {
+  await assert.rejects(
+    () => waitForRelayReadiness({
+      processState: async () => 'running',
+      probe: async () => ({ ok: true, connected: true, organizationId: 'org_test',
+        deviceId: 'device_test', relayVersion: '0.2.80' }),
+      expectedVersion: '0.2.97',
+      attempts: 1,
+    }),
+    /relay_version_mismatch:0\.2\.80:0\.2\.97/,
+  );
+  await assert.rejects(
+    () => waitForRelayReadiness({
+      processState: async () => 'running',
+      probe: async () => ({ ok: true, connected: false, organizationId: 'org_test',
+        deviceId: 'device_test', relayVersion: '0.2.97' }),
+      expectedVersion: '0.2.97',
+      attempts: 1,
+    }),
+    /relay_session_unacknowledged/,
+  );
+});
+
+test('relay process lease rejects concurrent starts and preserves a successor PID', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-relay-lease-'));
+  const pidPath = join(home, 'relay', 'relay.pid');
+  await mkdir(join(home, 'relay'), { recursive: true });
+  await writeFile(pidPath, '99999999\n');
+  const release = await acquireRelayProcessLease(home);
+  assert.equal(await relayProcessState(home), 'running');
+  assert.equal((await readFile(pidPath, 'utf8')).trim(), String(process.pid));
+  await assert.rejects(() => acquireRelayProcessLease(home), /Another relay process is already running/);
+  await writeFile(pidPath, '424242\n');
+  await release();
+  assert.equal((await readFile(pidPath, 'utf8')).trim(), '424242');
+  await unlink(pidPath);
+  const nextRelease = await acquireRelayProcessLease(home);
+  await nextRelease();
+  assert.equal(await relayProcessState(home), 'stopped');
 });
 
 test('bootstrap defers policy-rejected evidence without weakening the disclosure boundary', async () => {
