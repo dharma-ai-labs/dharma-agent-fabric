@@ -177,17 +177,17 @@ test('bootstrap rejects a connected relay from an older CLI release', async () =
       processState: async () => 'running',
       probe: async () => ({ ok: true, connected: true, organizationId: 'org_test',
         deviceId: 'device_test', relayVersion: '0.2.80' }),
-      expectedVersion: '0.2.97',
+      expectedVersion: '0.2.98',
       attempts: 1,
     }),
-    /relay_version_mismatch:0\.2\.80:0\.2\.97/,
+    /relay_version_mismatch:0\.2\.80:0\.2\.98/,
   );
   await assert.rejects(
     () => waitForRelayReadiness({
       processState: async () => 'running',
       probe: async () => ({ ok: true, connected: false, organizationId: 'org_test',
-        deviceId: 'device_test', relayVersion: '0.2.97' }),
-      expectedVersion: '0.2.97',
+        deviceId: 'device_test', relayVersion: '0.2.98' }),
+      expectedVersion: '0.2.98',
       attempts: 1,
     }),
     /relay_session_unacknowledged/,
@@ -1985,13 +1985,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.97');
+      assert.equal(version, '0.2.98');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.97',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.98',
   });
 });
 

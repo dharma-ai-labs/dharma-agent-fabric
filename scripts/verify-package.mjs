@@ -15,6 +15,7 @@ const required = [
   'plugins/dharma-agent-fabric/.mcp.json',
   'plugins/dharma-agent-fabric/skills/dharma-agent-fabric/SKILL.md',
   'packages/cli/dist/index.js',
+  'packages/provider-adapters/dist/knowledge-server.js',
   'packages/cli/dist/schemas/trajectory-capsule.schema.json',
   'packages/cli/dist/schemas/evidence-request.schema.json',
   'packages/cli/dist/schemas/evidence-response.schema.json',
@@ -93,6 +94,9 @@ for (const workspace of workspaceDirectories) {
   }
   if (!packedPaths.has('dist/index.js')) {
     throw new Error(`${manifest.name} tarball does not contain dist/index.js.`);
+  }
+  if (workspace === 'packages/provider-adapters' && !packedPaths.has('dist/knowledge-server.js')) {
+    throw new Error(`${manifest.name} tarball does not contain the task knowledge server.`);
   }
 }
 

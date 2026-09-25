@@ -3,8 +3,10 @@ import { execFile, spawn } from 'node:child_process';
 import { access, mkdtemp, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { validateTaskKnowledgeScope, type TaskKnowledgeScope } from './knowledge-server.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -83,6 +85,34 @@ export function providerFailureCategory(input: {
   if (/model not found|unknown model|model .* unavailable|unsupported model|model .* does not exist/i.test(diagnostic)) return 'model_unavailable';
   if (/connection refused|connection reset|network error|dns error|econnrefused|enotfound|fetch failed/i.test(diagnostic)) return 'transport';
   return 'unknown';
+}
+
+export function hasVerifiedCodexKnowledgeRead(stdout: string, scope: TaskKnowledgeScope): boolean {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.length > 131_072) continue;
+    let event: {
+      type?: unknown;
+      item?: { type?: unknown; server?: unknown; tool?: unknown; status?: unknown;
+        error?: unknown; result?: { content?: Array<{ type?: unknown; text?: unknown }> } };
+    };
+    try { event = JSON.parse(line); } catch { continue; }
+    const item = event.item;
+    if (event.type !== 'item.completed' || item?.type !== 'mcp_tool_call'
+      || item.server !== 'dharma_task_knowledge' || item.status !== 'completed'
+      || item.error || !Array.isArray(item.result?.content)
+      || !['read_document', 'catalog_search', 'catalog_concept'].includes(String(item.tool))) continue;
+    for (const block of item.result.content) {
+      if (block.type !== 'text' || typeof block.text !== 'string' || block.text.length > 65_536) continue;
+      try {
+        const value = JSON.parse(block.text) as { sha256?: unknown; catalogSha256?: unknown };
+        if (item.tool === 'read_document'
+          && (value.sha256 === scope.manifestSha256 || value.sha256 === scope.catalogSha256)) return true;
+        if ((item.tool === 'catalog_search' || item.tool === 'catalog_concept')
+          && value.catalogSha256 === scope.catalogSha256) return true;
+      } catch { /* Tool errors are not verified document reads. */ }
+    }
+  }
+  return false;
 }
 
 export type ProviderProcessRunner = (input: {
@@ -208,6 +238,7 @@ export async function executeProviderTask(input: {
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
   allowWrites: boolean;
+  taskKnowledge?: TaskKnowledgeScope;
   externalIdempotencyKey?: string;
   actionDigest?: string;
   signal?: AbortSignal;
@@ -215,6 +246,13 @@ export async function executeProviderTask(input: {
 }): Promise<ProviderExecutionResult> {
   if (!insideWorkspace(input.workspace, input.workspace)) throw new Error('Provider workspace is invalid.');
   if (!input.instructions.trim() || input.instructions.length > 20_000) throw new Error('Provider task instructions are invalid.');
+  if (input.taskKnowledge) {
+    validateTaskKnowledgeScope(input.taskKnowledge);
+    if (input.provider !== 'codex' || input.allowWrites
+      || resolve(input.taskKnowledge.directory) !== resolve(input.workspace, '.dharma-task-knowledge')) {
+      throw new Error('Task knowledge tool requires the bounded read-only Codex workspace.');
+    }
+  }
   const runner = input.runner || defaultProcessRunner;
   let command: string;
   let argv: string[];
@@ -227,9 +265,19 @@ export async function executeProviderTask(input: {
     if (configuredModel && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(configuredModel)) {
       throw new Error('DHARMA_CODEX_MODEL is invalid.');
     }
+    const knowledgeConfig = input.taskKnowledge ? [
+      '-c', `mcp_servers.dharma_task_knowledge.command=${JSON.stringify(process.execPath)}`,
+      '-c', `mcp_servers.dharma_task_knowledge.args=${JSON.stringify([
+        fileURLToPath(new URL('./knowledge-server.js', import.meta.url)),
+        input.taskKnowledge.directory, input.taskKnowledge.manifestSha256, input.taskKnowledge.catalogSha256,
+      ])}`,
+      '-c', 'mcp_servers.dharma_task_knowledge.required=true',
+      '-c', 'mcp_servers.dharma_task_knowledge.default_tools_approval_mode="auto"',
+      '-c', 'mcp_servers.dharma_task_knowledge.enabled_tools=["read_document","catalog_search","catalog_concept"]',
+    ] : [];
     argv = input.allowWrites
       ? ['exec', '--ignore-user-config', '--json', ...(configuredModel ? ['--model', configuredModel] : []), '--color', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=false', '-C', input.workspace, '-']
-      : ['exec', '--ignore-user-config', '--json', ...(configuredModel ? ['--model', configuredModel] : []), '--color', 'never', '--sandbox', 'read-only', '-C', input.workspace, '-'];
+      : ['exec', '--ignore-user-config', '--json', ...(configuredModel ? ['--model', configuredModel] : []), '--color', 'never', '--sandbox', 'read-only', ...knowledgeConfig, '-C', input.workspace, '-'];
   } else if (input.provider === 'claude') {
     command = 'claude';
     const configuredModel = (process.env.DHARMA_CLAUDE_MODEL || '').trim();
@@ -300,6 +348,11 @@ export async function executeProviderTask(input: {
     });
     let stderr = result.stderr.toString('utf8');
     let exitCode = result.exitCode;
+    if (input.provider === 'codex' && input.taskKnowledge && exitCode === 0
+      && !hasVerifiedCodexKnowledgeRead(result.stdout.toString('utf8'), input.taskKnowledge)) {
+      exitCode = 1;
+      stderr = `${stderr}${stderr ? '\n' : ''}task_knowledge_not_read: no completed, hash-verified task knowledge tool call.`;
+    }
     if (input.provider === 'agy') {
       let log = '';
       try { log = await readFile(agyLogPath!, 'utf8'); } catch {}
