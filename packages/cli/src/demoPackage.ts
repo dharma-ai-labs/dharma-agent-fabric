@@ -10,7 +10,7 @@ import { getActiveSkillBundleAuthorization, installSkillBundle, rollbackUnconfir
   verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { loadDemoSigningTrust, scopePath, verifyDemoDevice, type DemoDeviceScope } from './demoEnrollment.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
-import { inventoryRepositoryPackage } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { pollRepositoryCandidate, synchronizeRepositoryCandidate,
@@ -403,6 +403,7 @@ export async function demoRepositoryPackage(input: {
     organizationId: scope.organizationId, workspaceId: view.workspaceId,
     repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId,
     sourceAuthorization });
+  await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
   const candidate = await synchronizeRepositoryCandidate({ transport: candidateTransport,
     outboxRoot, scope: candidateScope, snapshot,
     initialRepository: view.repositoryPackageState !== 'published' });
