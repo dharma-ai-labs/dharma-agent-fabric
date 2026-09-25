@@ -296,6 +296,20 @@ test('approved repository inventory uploads once logically after a lost response
   assert.equal(f.uploads.length, 2);
   assert.equal(f.uploads[0]!.operationId, f.uploads[1]!.operationId);
   assert.match(await readFile(skillPath, 'utf8'), /Agent Fabric: repository onboarding/);
+  const snapshotHash = String(f.uploads[0]!.sourceSnapshotHash);
+  const snapshotPath = resolve(f.workspace, '.dharma/repository-source/snapshots',
+    `${snapshotHash.slice(7)}.json`);
+  const snapshot = await readFile(snapshotPath, 'utf8');
+  const stored = JSON.parse(snapshot) as { manifest: { snapshotHash: string;
+    files: Array<{ path: string; sha256: string }> };
+    blobs: Array<{ sha256: string; contentBase64: string }> };
+  assert.equal(stored.manifest.snapshotHash, snapshotHash);
+  const source = stored.manifest.files.find(file => file.path === 'README.md');
+  assert.ok(source);
+  const blob = stored.blobs.find(row => row.sha256 === source.sha256);
+  assert.ok(blob);
+  assert.equal(Buffer.from(blob.contentBase64, 'base64').toString('utf8'), 'Approved source evidence.\n');
+  assert.equal(snapshot.includes('grant'), false);
   const outbox = resolve(f.scope.stateRoot, 'demo-repository-candidates',
     organizationId, repositoryId, `${workspaceId}.json`);
   const bytes = await readFile(outbox, 'utf8');

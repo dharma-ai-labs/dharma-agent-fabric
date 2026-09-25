@@ -264,7 +264,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
           const child = path === '.' ? entry.name : `${path}/${entry.name}`;
           if (broadRoot && child === 'output') continue;
           if (!repositorySourcePathSafe(child)) {
-            if (child.split('/').some(part => ['.codex-pr-worktrees', '.worktrees', '.gitnexus', '.context'].includes(part.toLowerCase()))) continue;
+            if (child.split('/').some(part => ['.codex-pr-worktrees', '.worktrees', '.gitnexus', '.context', '.dharma'].includes(part.toLowerCase()))) continue;
             exclude(child, 'excluded_path'); continue;
           }
           if (entry.isFile() && !sourceContentType(child)) {
