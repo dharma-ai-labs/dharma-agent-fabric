@@ -38,6 +38,7 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { superviseRelay } from './relaySupervisor.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
@@ -62,7 +63,7 @@ import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from '
 import { demoRepositoryPackage } from './demoPackage.js';
 import { runDemoWatch } from './demoWatch.js';
 
-const VERSION = '0.2.99';
+const VERSION = '0.2.100';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -786,10 +787,10 @@ export async function releaseDailyContentUpload(
   });
 }
 
-export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
+async function pidProcessState(pidPath: string): Promise<'running' | 'stopped' | 'unknown'> {
   let pid: number;
   try {
-    pid = Number((await readFile(resolve(home, 'relay', 'relay.pid'), 'utf8')).trim());
+    pid = Number((await readFile(pidPath, 'utf8')).trim());
     if (!Number.isSafeInteger(pid) || pid < 1) return 'unknown';
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'stopped' : 'unknown';
@@ -804,6 +805,14 @@ export async function relayProcessState(home = dharmaHome()): Promise<'running' 
   }
 }
 
+export async function relayProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
+  return pidProcessState(resolve(home, 'relay', 'relay.pid'));
+}
+
+export async function relaySupervisorProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
+  return pidProcessState(resolve(home, 'relay', 'supervisor.pid'));
+}
+
 export async function acquireRelayProcessLease(home = dharmaHome()): Promise<() => Promise<void>> {
   const pidPath = resolve(home, 'relay', 'relay.pid');
   const releaseLock = await acquirePidLock(
@@ -812,6 +821,28 @@ export async function acquireRelayProcessLease(home = dharmaHome()): Promise<() 
   try {
     const state = await relayProcessState(home);
     if (state !== 'stopped') throw new Error(`Cannot start a second relay while process state is ${state}.`);
+    await writeFile(pidPath, `${process.pid}\n`, { mode: 0o600 });
+  } catch (error) {
+    await releaseLock();
+    throw error;
+  }
+  return async () => {
+    try {
+      if ((await readFile(pidPath, 'utf8').catch(() => '')).trim() === String(process.pid)) {
+        await rm(pidPath, { force: true });
+      }
+    } finally { await releaseLock(); }
+  };
+}
+
+export async function acquireRelaySupervisorLease(home = dharmaHome()): Promise<() => Promise<void>> {
+  const pidPath = resolve(home, 'relay', 'supervisor.pid');
+  const releaseLock = await acquirePidLock(
+    `${pidPath}.lock`, 250, 'Another relay supervisor is already running for this device.',
+  );
+  try {
+    const state = await relaySupervisorProcessState(home);
+    if (state !== 'stopped') throw new Error(`Cannot start a second relay supervisor while process state is ${state}.`);
     await writeFile(pidPath, `${process.pid}\n`, { mode: 0o600 });
   } catch (error) {
     await releaseLock();
@@ -1545,8 +1576,10 @@ export async function waitForRelayReadiness(options: {
 
 async function startRelayDaemon(policyPath: string) {
   const alreadyRunning = await relayProcessState() === 'running';
-  if (!alreadyRunning) {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
+  const supervisorState = await relaySupervisorProcessState();
+  if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
+  if (supervisorState === 'stopped') {
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
       cwd: dirname(dirname(policyPath)),
       detached: true,
       stdio: 'ignore',
@@ -1554,8 +1587,96 @@ async function startRelayDaemon(policyPath: string) {
     });
     child.unref();
   }
+  let supervisorReady = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await relaySupervisorProcessState() === 'running') {
+      const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
+        .catch(() => '0')).trim());
+      const binding = await readFile(resolve(dharmaHome(), 'relay', 'supervisor-workspace.json'), 'utf8')
+        .then(value => JSON.parse(value) as { pid: number; policyPath: string }).catch(() => null);
+      if (binding?.pid === pid) {
+        if (binding.policyPath !== policyPath) {
+          throw new Error('relay_workspace_conflict: the active relay supervisor belongs to another workspace.');
+        }
+        supervisorReady = true;
+        break;
+      }
+    }
+    if (attempt < 79) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  if (!supervisorReady) throw new Error('The relay supervisor did not become ready after bootstrap.');
   const readiness = await waitForRelayReadiness({ expectedVersion: VERSION });
-  return { started: !alreadyRunning, ...readiness };
+  return { started: !alreadyRunning, supervisor: 'running' as const, ...readiness };
+}
+
+async function relaySupervise(flags: Map<string, string | boolean>): Promise<Output> {
+  const policyPath = resolve(required(flags, 'policy'));
+  if (!await readDeviceConfig()) throw new Error('Relay supervision requires an enrolled device.');
+  const selectedWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
+  if (!selectedWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  const releaseLease = await acquireRelaySupervisorLease();
+  const bindingPath = resolve(dharmaHome(), 'relay', 'supervisor-workspace.json');
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  try {
+    await writeJsonAtomic(bindingPath, { pid: process.pid, workspaceId: selectedWorkspace.workspaceId, policyPath });
+    const result = await superviseRelay({
+      signal: controller.signal,
+      start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
+        cwd: dirname(dirname(policyPath)),
+        stdio: 'ignore',
+        env: process.env,
+      }),
+    });
+    return { ok: true, stopped: true, ...result };
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    const binding = await readFile(bindingPath, 'utf8')
+      .then(value => JSON.parse(value) as { pid: number }).catch(() => null);
+    if (binding?.pid === process.pid) await rm(bindingPath, { force: true });
+    await releaseLease();
+  }
+}
+
+async function relayStop(): Promise<Output> {
+  const home = dharmaHome();
+  const supervisor = await relaySupervisorProcessState(home);
+  const relay = await relayProcessState(home);
+  if (supervisor === 'unknown' || relay === 'unknown') {
+    throw new Error('Relay process state is unknown; refusing to signal an unverified process.');
+  }
+  const signalProcess = async (name: 'supervisor' | 'relay') => {
+    const pidPath = resolve(home, 'relay', `${name}.pid`);
+    const pid = Number((await readFile(pidPath, 'utf8')).trim());
+    if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Relay process identifier is invalid.');
+    try { process.kill(pid, 'SIGTERM'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+  };
+  let receiverSignaled = false;
+  if (supervisor === 'running') await signalProcess('supervisor');
+  else if (relay === 'running') {
+    await signalProcess('relay');
+    receiverSignaled = true;
+  }
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const currentSupervisor = await relaySupervisorProcessState(home);
+    const currentRelay = await relayProcessState(home);
+    if (currentSupervisor === 'unknown' || currentRelay === 'unknown') {
+      throw new Error('Relay process state became unknown while stopping.');
+    }
+    if (currentSupervisor === 'stopped' && currentRelay === 'running' && !receiverSignaled) {
+      await signalProcess('relay');
+      receiverSignaled = true;
+    }
+    if (currentSupervisor === 'stopped' && currentRelay === 'stopped') {
+      return { ok: true, stopped: true, vaultPreserved: true };
+    }
+    if (attempt < 119) await new Promise(resolveWait => setTimeout(resolveWait, 1_000));
+  }
+  return { ok: false, stage: 'stopping', vaultPreserved: true };
 }
 
 export function providerHintFromEnvironment(env: NodeJS.ProcessEnv = process.env): ProviderId | null {
@@ -6064,15 +6185,16 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'evidence' && subcommand === 'run-request') return runOneEvidenceRequest(flags);
   if (command === 'status') {
     const relay = await relayProcessState();
+    const supervisor = await relaySupervisorProcessState();
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay };
+      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor };
       if (flags.has('verbose') || flags.has('diagnostic')) {
         Object.assign(status, { home: dharmaHome(), organizationId: config.organizationId, deviceId: config.deviceId });
       }
       return status;
     } catch {
-      const status: Record<string, unknown> = { version: VERSION, enrolled: false, relay };
+      const status: Record<string, unknown> = { version: VERSION, enrolled: false, relay, supervisor };
       if (flags.has('verbose') || flags.has('diagnostic')) status.home = dharmaHome();
       return status;
     }
@@ -6093,6 +6215,8 @@ export async function run(argv: string[]): Promise<Output> {
   }
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'probe') return probeRelayConnection();
+  if (command === 'relay' && subcommand === 'stop') return relayStop();
+  if (command === 'relay' && subcommand === 'supervise') return relaySupervise(flags);
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
   if (command === 'skills' && subcommand === 'status') {

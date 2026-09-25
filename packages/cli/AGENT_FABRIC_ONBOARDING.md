@@ -73,7 +73,7 @@ To propose a new or corrected term, edit an approved repository source or regist
 
 ## 7. Maintain autonomous synchronization
 
-Keep the supported outbound relay operating with `dharma relay start --policy .dharma/approved-policy.json`. The relay receives signed tasks, policy refreshes, package releases, evidence requests, role questions, remediation skills, and rollback instructions.
+Completed onboarding starts a detached supervisor for the outbound relay. It restarts the receiver after an unexpected process exit while the machine is running. Verify both processes with `dharma status`; `dharma relay probe` verifies the signed connection. If an enrolled device reports a stopped relay or supervisor, use the supported grant-free onboarding resume from this bound repository. `dharma relay stop` intentionally stops both without deleting credentials or vault data. A machine reboot does not yet install an automatic OS startup service; report that limitation instead of claiming unattended reboot recovery. The relay receives signed tasks, policy refreshes, package releases, evidence requests, role questions, remediation skills, and rollback instructions.
 
 Watch approved source branches, repository skills, dependencies, and registered output folders. Debounce changes, hash stable snapshots, and publish only against the expected parent. Validated updates publish automatically under the standing policy. Permission expansion, secret detection, manifest corruption, unresolved conflicts, failed evaluation, or budget exhaustion blocks publication.
 
@@ -125,6 +125,7 @@ Report `complete` only when identity, shared package, native skill, role, first 
 - Ask a specific peer: `dharma repositories ask --workspace-id <workspace-id> --target-endpoint-id <endpoint-id> --category <category> --question "<question>"`.
 - Read a peer answer: `dharma repositories reply --workspace-id <workspace-id> --question-id <question-id>`.
 - Check relay connectivity: `dharma relay probe`.
-- Run the receiver and synchronization: `dharma relay start --policy .dharma/approved-policy.json`.
+- Resume a stopped supervised receiver from an enrolled checkout: `dharma onboard --resume --organization-id <organization-id> --workspace . --policy-revision <policy-revision> --providers <provider>`.
+- Stop the receiver intentionally, preserving enrollment and vault: `dharma relay stop`.
 
 Replace placeholders with IDs from the CLI receipt, not guessed names. Run commands from the bound checkout using the enrolled device's secure home. Use the exact CLI release pinned by the portal prompt. A recipient's browser approval is required for a new device; it is the only routine human action that the agent must not impersonate.
