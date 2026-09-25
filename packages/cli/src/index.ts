@@ -41,7 +41,8 @@ import { CLI_USAGE } from './usage.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
-import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
+import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher,
+  scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -59,7 +60,7 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 
-const VERSION = '0.2.92';
+const VERSION = '0.2.93';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -101,6 +102,7 @@ interface WorkspaceRecord {
     generation: number;
     consolidationMode: 'initial_repository' | 'repository_update' | null;
     sourcePolicyGenerationId?: string | null;
+    localBaselineSnapshotHash?: string | null;
   };
   repositoryRole?: { revision: number; profileHash: string } | null;
   repositoryAgentKey?: string | null;
@@ -2978,6 +2980,8 @@ async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRec
       ...canonicalRepositoryPackage(response.repositoryPackage),
       sourcePolicyGenerationId: canonicalRepositoryPackagePolicyGeneration(
         response.repositoryPackageSourcePolicyGenerationId),
+      localBaselineSnapshotHash: item.repositoryBindingId === repositoryAgent?.id
+        ? item.repositoryPackage?.localBaselineSnapshotHash : null,
     },
     repositoryRole: canonicalEndpointRole(response.endpointRole),
     repositoryAgentKey: String(repositoryAgent?.agent_key || ''),
@@ -3458,6 +3462,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const initialSnapshot = await staged('package_snapshot', async () => inventoryRepositoryPackage({ workspace, organizationId,
     workspaceId: boundRepository.workspaceId, repositoryAgentId: boundRepository.repositoryAgentId,
     repositoryBindingId: boundRepository.repositoryBindingId, sourceAuthorization }));
+  await staged('package_snapshot', async () => writeRepositoryPackageSnapshot({ workspace,
+    snapshot: initialSnapshot, candidateOnly: true }));
   const candidateScope = { organizationId, workspaceId: registered.workspaceId,
     repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId };
   const outboxRoot = resolve(dharmaHome(), 'relay', 'repository-candidates');
@@ -3483,6 +3489,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     consolidationMode: canonicalPackage.state === 'absent' ? 'initial_repository'
       : refreshPolicy ? 'repository_update' : canonicalPackage.consolidationMode,
     sourcePolicyGenerationId: refreshPolicy ? sourceAuthorization.generationId : canonicalPackage.sourcePolicyGenerationId,
+    localBaselineSnapshotHash: initialSnapshot.manifest.snapshotHash,
   } };
   await saveWorkspaceRecord(registered);
   const providers = await staged('role_registration', async () => receiptAwareProviderCapabilities(
@@ -5539,10 +5546,13 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   let repositorySourceBaselineAvailable = true;
   if (canonicalWorkspace.repositoryPackage?.snapshotHash) {
     try {
-      const prior = await readRepositorySourceBaselineSnapshot(canonicalWorkspace.path,
-        canonicalWorkspace.repositoryPackage.snapshotHash);
-      if (!prior.manifest.sourceFingerprint) throw new Error('Repository source baseline is incomplete.');
-      repositorySourceWatcher.seed(prior.manifest.sourceFingerprint);
+      await seedRepositorySourceWatcher({ workspace: canonicalWorkspace.path,
+        organizationId: canonicalWorkspace.organizationId, workspaceId: canonicalWorkspace.workspaceId,
+        repositoryBindingId: canonicalWorkspace.repositoryBindingId!,
+        repositoryAgentId: canonicalWorkspace.repositoryAgentId!,
+        publishedHash: canonicalWorkspace.repositoryPackage.snapshotHash,
+        localHash: canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash,
+        watcher: repositorySourceWatcher });
     } catch { repositorySourceBaselineAvailable = false; }
   }
   let nextRepositorySourceScanAt = 0;
@@ -5732,7 +5742,13 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
                 snapshot, initialRepository: false }),
             });
             repositorySourceState = sourceCycle.state;
-            if (sourceCycle.localMutation) repositorySourceCandidates += 1;
+            if (sourceCycle.localMutation) {
+              repositorySourceCandidates += 1;
+              if (canonicalWorkspace.repositoryPackage && sourceCycle.persisted) {
+                canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash = sourceCycle.persisted.snapshotHash;
+                await saveWorkspaceRecord(canonicalWorkspace);
+              }
+            }
             nextRepositorySourceScanAt = performance.now() + (sourceCycle.state === 'debouncing' ? 15_000 : 60_000);
           }
         } catch {
