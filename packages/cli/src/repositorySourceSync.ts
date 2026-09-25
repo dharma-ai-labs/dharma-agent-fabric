@@ -4,12 +4,36 @@ import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readReposito
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { parseRepositorySourcePolicyResponse, validateRepositorySourceAuthorization, type RepositorySourceScope } from './repositorySourceAuthorization.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
+import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
+import { reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
 
 type SourceTransport = { signedGet(route: string): Promise<Record<string, unknown>> };
 export type BoundRepositorySource = RepositorySourceScope & {
   repositoryBindingId: string;
   repositoryAgentId: string;
 };
+
+export function advanceRepositorySourceBaseline(record: {
+  localBaselineSnapshotHash?: string | null;
+  publishedLocalSnapshotHash?: string | null;
+  pendingLocalSnapshotHash?: string | null;
+  pendingLocalOperationId?: string | null;
+}, receipt: { state: string; operationId: string }) {
+  if (record.pendingLocalOperationId && record.pendingLocalOperationId !== receipt.operationId) {
+    throw new Error('Repository source candidate receipt does not match the pending operation.');
+  }
+  const matchesPending = record.pendingLocalOperationId === receipt.operationId;
+  const terminal = receipt.state === 'published' || receipt.state === 'blocked';
+  const publishedLocalSnapshotHash = receipt.state === 'published' && matchesPending
+    ? record.pendingLocalSnapshotHash ?? null : record.publishedLocalSnapshotHash ?? null;
+  return {
+    localBaselineSnapshotHash: receipt.state === 'blocked' && matchesPending
+      ? publishedLocalSnapshotHash : record.localBaselineSnapshotHash ?? null,
+    publishedLocalSnapshotHash,
+    pendingLocalSnapshotHash: terminal ? null : record.pendingLocalSnapshotHash ?? null,
+    pendingLocalOperationId: terminal ? null : record.pendingLocalOperationId ?? null,
+  };
+}
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$(?![\s\S])/i;
 const HASH = /^sha256:[a-f0-9]{64}$(?![\s\S])/;
 
@@ -101,7 +125,9 @@ export async function scanRepositorySourceChanges(input: BoundRepositorySource &
   watcher: RepositorySourceWatcher;
   monotonicNow?: () => number;
   loadRetainedKnowledge?: () => Promise<{ catalogBytes: Buffer; manifestBytes: Buffer } | null>;
-  submitCandidate?: (snapshot: RepositoryPackageSnapshot) => Promise<Record<string, unknown>>;
+  loadPublishedLocalBaseline?: () => Promise<RepositoryPackageSnapshot | null>;
+  submitCandidate?: (snapshot: RepositoryPackageSnapshot,
+    expectedLatestSourceFingerprint?: string) => Promise<Record<string, unknown>>;
 }) {
   try {
     const authorization = await fetchRepositorySourceAuthorization(input.transport, input);
@@ -110,8 +136,8 @@ export async function scanRepositorySourceChanges(input: BoundRepositorySource &
       throw new Error('Verified repository knowledge byte limit exceeded.');
     }
     const retainedKnowledge = observed ? { catalogBytes: Buffer.from(observed.catalogBytes), manifestBytes: Buffer.from(observed.manifestBytes) } : null;
-    const snapshot = await inventoryRepositoryPackage({ ...input, retainedKnowledge, sourceAuthorization: authorization });
-    const fingerprint = snapshot.manifest.sourceFingerprint;
+    const local = await inventoryRepositoryPackage({ ...input, retainedKnowledge, sourceAuthorization: authorization });
+    const fingerprint = local.manifest.sourceFingerprint;
     if (!fingerprint) throw new Error('Governed repository source scan returned no fingerprint.');
     const state = input.watcher.observe(fingerprint, (input.monotonicNow || (() => performance.now()))());
     if (state !== 'stable') return { state, localMutation: false, sharedAuthority: 'pending' as const };
@@ -125,11 +151,29 @@ export async function scanRepositorySourceChanges(input: BoundRepositorySource &
         throw new Error('Verified repository knowledge release changed during collection.');
       }
     }
-    const persisted = await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
-    const candidate = input.submitCandidate ? await input.submitCandidate(snapshot) : null;
+    const published = input.loadPublishedLocalBaseline
+      ? await fetchPublishedRepositorySource({ transport: input.transport, scope: input,
+        authorization, local }) : null;
+    const snapshot = input.loadPublishedLocalBaseline
+      ? reconcileRepositorySourceSnapshot({ local,
+        previousLocal: await input.loadPublishedLocalBaseline(), published }) : local;
+    const persisted = await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot: local,
+      candidateOnly: true });
+    if (published && snapshot.manifest.sourceFingerprint === published.sourceFingerprint) {
+      input.watcher.complete(fingerprint);
+      return { state: 'source_already_published' as const, localMutation: true,
+        sharedAuthority: 'verified_existing' as const, snapshotId: snapshot.manifest.snapshotId,
+        fingerprint, persisted, candidate: null };
+    }
+    if (snapshot.manifest.snapshotHash !== local.manifest.snapshotHash) {
+      await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
+    }
+    const candidate = input.submitCandidate
+      ? await input.submitCandidate(snapshot, published?.sourceFingerprint) : null;
     input.watcher.complete(fingerprint);
     return { state: 'local_candidate_collected' as const, localMutation: true, sharedAuthority: 'pending' as const,
-      snapshotId: snapshot.manifest.snapshotId, fingerprint, persisted, candidate };
+      snapshotId: snapshot.manifest.snapshotId, fingerprint, persisted, candidate,
+      submittedManifestHash: `sha256:${createHash('sha256').update(canonicalize(snapshot.manifest)).digest('hex')}` };
   } catch (error) {
     input.watcher.invalidate();
     throw error;
