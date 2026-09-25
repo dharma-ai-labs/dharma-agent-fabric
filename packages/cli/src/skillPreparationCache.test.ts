@@ -148,6 +148,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   let preparedCount = 0; let flight: Promise<void> | undefined; let stopped = false;
   let vaultCloses = 0; let transportCalls = 0; let sourceScans = 0; let candidatePolls = 0;
   let releaseSourceScan: (() => void) | undefined;
+  let elapsedMs = 0; let activations = 0;
   const events: string[] = [];
   const flags = new Map<string, string | boolean>([['policy', join(f.home, '.dharma', 'approved-policy.json')]]);
   if (!holdSourceScan) flags.set('once', true);
@@ -162,7 +163,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     return resolved;
   };
   const result = await new Script(`${declaration}\nrelayStart(flags);`, { filename: 'synthetic-relay-staging-fixture.js' }).runInNewContext({
-    flags, process: processFixture, performance, Date, Map, Promise, Number, Error,
+    flags, process: processFixture, performance: { now: () => elapsedMs }, Date, Map, Promise, Number, Error,
     resolve, mkdir: (path: string, options: Parameters<typeof mkdir>[1]) => mkdir(checkedPath(path), options),
     writeFile: (path: string, bytes: string, options: Parameters<typeof writeFile>[2]) => writeFile(checkedPath(path), bytes, options),
     rm: (path: string, options: Parameters<typeof rm>[1]) => rm(checkedPath(path), options),
@@ -201,7 +202,13 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       events.push('scan-end');
       return { state: 'fixture_unchanged', localMutation: false };
     },
-    withWorkspaceSkillActivationLock: async () => { events.push('activate'); },
+    withWorkspaceSkillActivationLock: async () => {
+      activations++; events.push(`activate-${activations}`);
+      if (holdSourceScan && activations === 2) {
+        processFixture.emit('SIGINT');
+        releaseSourceScan?.();
+      }
+    },
     repositorySharedReady: async () => false,
     installedRepositoryKnowledge: async () => null, syncPendingRetentionCapsules: async () => 0,
     processEvidenceRequest: async () => ({}),
@@ -209,8 +216,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       transportCalls++; events.push(`task-${transportCalls}`); await flight;
       if (holdSourceScan && transportCalls === 2) {
         assert.ok(releaseSourceScan, 'second task poll must run while source scan is pending');
-        processFixture.emit('SIGINT');
-        releaseSourceScan();
+        elapsedMs = 61_000;
       }
       return {};
     },
@@ -218,11 +224,12 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   assert.equal(vaultCloses, 1); assert.equal(transportCalls, holdSourceScan ? 2 : 1);
   assert.equal(sourceScans, 1, 'source scan must remain single-flight');
   assert.equal(candidatePolls, 1, 'candidate polling must wait until the in-flight scan is applied');
-  assert.ok(events.indexOf('task-1') < events.indexOf('activate') && events.indexOf('activate') < events.indexOf('scan-start'),
+  assert.ok(events.indexOf('task-1') < events.indexOf('activate-1') && events.indexOf('activate-1') < events.indexOf('scan-start'),
     'signed activation must precede source publication at the safe task boundary');
   if (holdSourceScan) assert.ok(events.indexOf('scan-start') < events.indexOf('task-2')
-    && events.indexOf('task-2') < events.indexOf('scan-end'),
-  'task polling must continue during source reconciliation');
+    && events.indexOf('task-2') < events.indexOf('activate-2')
+    && events.indexOf('activate-2') < events.indexOf('scan-end'),
+  'task polling and signed activation must continue during source reconciliation');
   assert.equal(preparedCount, cycles, 'production staging callback must actually execute');
   assert.equal(processFixture.listenerCount('SIGINT'), 0); assert.equal(processFixture.listenerCount('SIGTERM'), 0);
   return { result, roots };
