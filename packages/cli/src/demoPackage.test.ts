@@ -26,7 +26,7 @@ function memoryStore(): SecureSecretStore {
 }
 
 async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boolean;
-  loseFirstUpload?: boolean } = {}) {
+  loseFirstUpload?: boolean; packagePublished?: boolean; candidatePublished?: boolean } = {}) {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-package-'));
   const workspace = await mkdtemp(resolve(tmpdir(), 'dharma-demo-source-'));
   await writeFile(resolve(workspace, 'README.md'), 'Approved source evidence.\n');
@@ -84,7 +84,7 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
       return Response.json({ ok: true, organizationId, repositoryId,
         repositoryAgentId: repositoryId, normalizedRepository, workspaceId,
         sourceAuthorization: options.sourcePolicy ? sourceAuthorization : null,
-        repositoryPackageState: 'not_connected' });
+        repositoryPackageState: options.packagePublished ? 'published' : 'not_connected' });
     }
     if (url.pathname.endsWith('/package-candidates')) {
       const upload = JSON.parse(body) as Record<string, unknown>;
@@ -98,7 +98,10 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
         candidate: { candidateId: '80000000-0000-4000-8000-000000000001',
           operationId: upload.operationId,
           snapshotHash: upload.sourceSnapshotHash,
-          state: 'accepted', releaseId: null } }, { status: 202 });
+          state: options.candidatePublished ? 'published' : 'accepted',
+          releaseId: options.candidatePublished
+            ? '90000000-0000-4000-8000-000000000001' : null } },
+      { status: options.candidatePublished ? 200 : 202 });
     }
     throw new Error(`Unexpected package route: ${url.pathname}`);
   };
@@ -149,4 +152,24 @@ test('approved repository inventory uploads once logically after a lost response
   const bytes = await readFile(outbox, 'utf8');
   assert.equal(bytes.includes('Approved source evidence.'), false);
   assert.equal(bytes.includes('grant'), false);
+});
+
+test('a published shared repository waits for signed delivery without submitting a second candidate', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true });
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace },
+    { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.stage, 'demo_repository_package_delivery_pending');
+  assert.equal(result.ready, false);
+  assert.equal(result.activationState, 'signed_delivery_pending');
+  assert.equal(f.uploads.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
+});
+
+test('a published candidate is not ready until its signed release is installed', async () => {
+  const f = await fixture({ sourcePolicy: true, candidatePublished: true });
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace },
+    { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.candidate?.state, 'published');
+  assert.equal(result.ready, false);
+  assert.equal(result.activationState, 'signed_delivery_pending');
 });

@@ -161,7 +161,15 @@ export async function demoRepositoryPackage(input: {
     const candidate = await pollRepositoryCandidate({ transport: candidateTransport,
       outboxRoot, scope: candidateScope });
     return { ok: true, stage: 'demo_repository_package_status', repositoryId: scope.repositoryId,
-      repositoryPackageState: view.repositoryPackageState, candidate };
+      repositoryPackageState: view.repositoryPackageState, candidate, ready: false,
+      activationState: view.repositoryPackageState === 'published'
+        ? 'signed_delivery_pending' : 'candidate_pending' };
+  }
+  const ownership = await assertRepositoryInstallerOwnership(input.workspace, view.workspaceId);
+  if (view.repositoryPackageState === 'published' && ownership !== 'signed') {
+    return { ok: true, stage: 'demo_repository_package_delivery_pending',
+      repositoryId: scope.repositoryId, repositoryPackageState: view.repositoryPackageState,
+      candidate: null, ready: false, activationState: 'signed_delivery_pending' };
   }
   if (!view.sourceAuthorization) throw new Error('Demo repository has no active source authorization.');
   const sourceAuthorization = validateRepositorySourceAuthorization(view.sourceAuthorization,
@@ -179,5 +187,6 @@ export async function demoRepositoryPackage(input: {
     repositoryPackageState: view.repositoryPackageState, candidate,
     firstLearning: knowledge ? { disposition: knowledge.disposition,
       knowledgeBaseId: knowledge.catalog.knowledgeBaseId } : { disposition: 'signed_release_reused' },
-    ready: candidate.state === 'published' && view.repositoryPackageState === 'published' };
+    ready: false, activationState: candidate.state === 'published'
+      ? 'signed_delivery_pending' : 'candidate_pending' };
 }
