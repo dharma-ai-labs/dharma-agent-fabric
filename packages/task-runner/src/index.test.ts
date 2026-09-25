@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -91,6 +91,99 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   const recovered = await store.get(task.taskId);
   assert.equal(recovered?.commandResults[0]?.failureCategory, 'quota');
   assert.equal(recovered?.commandResults[0]?.stderr, '');
+});
+
+test('read-only signed tasks receive only matching verified knowledge and remove it afterward', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-knowledge-'));
+  const workspace = resolve(root, 'workspace');
+  await mkdir(workspace);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  const policy: OrganizationPolicy = {
+    schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
+    evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
+    tasks: { defaultNetwork: 'deny', defaultGit: 'task_branch', allowedCommands: {}, writePaths: [], requireLocalConfirmationFor: [] },
+    skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
+  };
+  const keys = generateKeyPairSync('ed25519');
+  const bundleId = randomUUID(), bundleHash = `sha256:${'a'.repeat(64)}`;
+  const unsigned = {
+    schema: 'dharma.task/v1' as const, taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace', taskType: 'external_request' as const,
+    target: { deviceId: 'device', provider: 'codex' as const }, skillBundle: { bundleId, bundleHash },
+    instructions: 'Answer from shared knowledge.', requiredSkills: [],
+    authority: { readPaths: ['.'], writePaths: [], commands: [], network: 'deny', git: 'task_branch' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [], requiredArtifacts: [] }, budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: randomUUID(),
+  };
+  const task = { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey) } as TaskEnvelope;
+  const knowledge = { organizationId: 'org_test', workspaceId: 'workspace', provider: 'codex' as const,
+    bundleId, bundleHash, catalogBytes: Buffer.from('{"concepts":[{"name":"canonical term"}]}'),
+    manifestBytes: Buffer.from('{"snapshotHash":"sha256:example"}') };
+  const state = resolve(root, 'state');
+  const receiptStore = new FileTaskReceiptStore(resolve(root, 'receipts'));
+  let providerCalls = 0;
+  const success = await executeTask({ task, policy, workspace, relayStateDirectory: state,
+    serverPublicKey: keys.publicKey, receiptStore, verifiedRepositoryKnowledge: knowledge,
+    providerExecutor: async input => {
+      providerCalls += 1;
+      assert.equal(input.allowWrites, false);
+      assert.match(input.instructions, /\.dharma-task-knowledge\/CATALOG\.json/);
+      assert.match(input.instructions, /isolated temporary task worktree, not the enrolled repository workspace/);
+      assert.match(input.instructions, /Do not run dharma skills verify --workspace \. here/);
+      assert.match(input.instructions, /generic-bootstrap result cannot describe the enrolled package/);
+      assert.match(input.instructions, /If a file read is denied, report the exact denied operation/);
+      assert.ok(input.instructions.includes(bundleId));
+      assert.ok(input.instructions.includes(bundleHash));
+      assert.equal(await readFile(resolve(input.workspace, '.dharma-task-knowledge/CATALOG.json'), 'utf8'), knowledge.catalogBytes.toString());
+      assert.equal(await readFile(resolve(input.workspace, '.dharma-task-knowledge/MANIFEST.json'), 'utf8'), knowledge.manifestBytes.toString());
+      return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'answer', stderr: '',
+        stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
+    },
+  });
+  assert.equal(success.status, 'completed');
+  assert.equal(providerCalls, 1);
+  await assert.rejects(readFile(resolve(success.worktree, '.dharma-task-knowledge/CATALOG.json')), /ENOENT/);
+  const wrongScopeUnsigned = { ...unsigned, taskId: randomUUID() };
+  const wrongScopeTask = { ...wrongScopeUnsigned,
+    signature: signCanonicalObject(wrongScopeUnsigned, keys.privateKey) } as TaskEnvelope;
+  await assert.rejects(executeTask({ task: wrongScopeTask, policy, workspace,
+    relayStateDirectory: state, serverPublicKey: keys.publicKey, receiptStore,
+    verifiedRepositoryKnowledge: { ...knowledge, organizationId: 'foreign_org' },
+    providerExecutor: async () => { providerCalls += 1; throw new Error('must not execute'); },
+  }), /signed task scope/);
+  assert.equal(providerCalls, 1);
+
+  const mutatedUnsigned = { ...unsigned, taskId: randomUUID() };
+  const mutatedTask = { ...mutatedUnsigned, signature: signCanonicalObject(mutatedUnsigned, keys.privateKey) } as TaskEnvelope;
+  const failure = await executeTask({ task: mutatedTask, policy, workspace, relayStateDirectory: state,
+    serverPublicKey: keys.publicKey, receiptStore, verifiedRepositoryKnowledge: knowledge,
+    providerExecutor: async input => {
+      const catalog = resolve(input.workspace, '.dharma-task-knowledge/CATALOG.json');
+      await rm(catalog);
+      await writeFile(catalog, '{"concepts":[]}');
+      return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'answer', stderr: '',
+        stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
+    },
+  });
+  assert.equal(failure.status, 'failed');
+  assert.match(failure.commandResults[0]?.stderr || '', /knowledge was changed/);
+  await assert.rejects(readFile(resolve(failure.worktree, '.dharma-task-knowledge/CATALOG.json')), /ENOENT/);
+
+  const extraUnsigned = { ...unsigned, taskId: randomUUID() };
+  const extraTask = { ...extraUnsigned, signature: signCanonicalObject(extraUnsigned, keys.privateKey) } as TaskEnvelope;
+  const extra = await executeTask({ task: extraTask, policy, workspace, relayStateDirectory: state,
+    serverPublicKey: keys.publicKey, receiptStore, verifiedRepositoryKnowledge: knowledge,
+    providerExecutor: async input => {
+      await writeFile(resolve(input.workspace, '.dharma-task-knowledge/EXTRA.json'), '{}');
+      return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'answer', stderr: '',
+        stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
+    },
+  });
+  assert.equal(extra.status, 'failed');
+  assert.match(extra.commandResults[0]?.stderr || '', /knowledge was changed/);
 });
 
 test('task signature tampering is rejected before worktree creation', async () => {

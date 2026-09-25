@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
-import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot,
+  writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { parseRepositorySourcePolicyResponse, validateRepositorySourceAuthorization, type RepositorySourceScope } from './repositorySourceAuthorization.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 
@@ -58,6 +59,23 @@ export class RepositorySourceWatcher {
     this.#candidate = null;
   }
   invalidate() { this.#candidate = null; this.#completed = null; this.#lastTime = 0; }
+}
+
+export async function seedRepositorySourceWatcher(input: BoundRepositorySource & {
+  workspace: string;
+  publishedHash: string;
+  localHash?: string | null;
+  watcher: RepositorySourceWatcher;
+}) {
+  const snapshot = input.localHash
+    ? await readRepositoryPackageSnapshot(input.workspace, input.localHash)
+    : await readRepositorySourceBaselineSnapshot(input.workspace, input.publishedHash);
+  const manifest = snapshot.manifest;
+  if (manifest.organizationId !== input.organizationId || manifest.workspaceId !== input.workspaceId
+    || manifest.sourceAuthorization?.repositoryBindingId !== input.repositoryBindingId
+    || manifest.sourceAuthorization?.repositoryAgentId !== input.repositoryAgentId
+    || !manifest.sourceFingerprint) throw new Error('Repository source baseline scope is invalid.');
+  input.watcher.seed(manifest.sourceFingerprint);
 }
 
 export class BlockedRepositorySourceRetry {

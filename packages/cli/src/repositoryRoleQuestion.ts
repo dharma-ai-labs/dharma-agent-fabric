@@ -9,6 +9,7 @@ export interface RepositoryQuestionTransport extends RepositoryRoleTransport {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
 const CATEGORY = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$(?![\s\S])/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
+const REPLY_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 function requireFact(value: unknown): asserts value {
   if (!value) throw new Error('Repository question response does not match its signed same-repository contract.');
@@ -30,19 +31,28 @@ function text(value: unknown, maximum: number) {
   return value;
 }
 
+function replyText(value: unknown) {
+  requireFact(typeof value === 'string' && value.length <= 8_000
+    && value.trim().length > 0 && !REPLY_CONTROL.test(value));
+  return value;
+}
+
 export async function askRepositoryRoleQuestion(input: {
   transport: RepositoryQuestionTransport;
   scope: RepositoryRoleScope;
   category: string;
   question: string;
+  targetEndpointId?: string;
 }) {
   requireFact(CATEGORY.test(input.category));
   const question = text(input.question, 2_000);
   const observed = await discoverRepositoryRoleMetadata(input.transport, input.scope, input.category);
   const discovery = observed.discovery as { peers: Array<{ endpointId: string; workspaceId: string; provider: string }> } | null;
   requireFact(discovery && discovery.peers.length > 0);
-  const target = discovery.peers.filter(peer => peer.endpointId !== input.scope.endpointId)
-    .sort((left, right) => left.endpointId.localeCompare(right.endpointId))[0];
+  const peers = discovery.peers.filter(peer => peer.endpointId !== input.scope.endpointId);
+  const target = input.targetEndpointId
+    ? peers.find(peer => peer.endpointId === input.targetEndpointId)
+    : peers.sort((left, right) => left.endpointId.localeCompare(right.endpointId))[0];
   requireFact(target);
   const response = record(await input.transport.signedPost('/agent-fabric/repository-questions', {
     workspaceId: input.scope.workspaceId, repositoryBindingId: input.scope.repositoryBindingId,
@@ -81,7 +91,7 @@ export async function readRepositoryRoleReply(input: {
     const reply = record(result.reply, ['taskId', 'targetEndpointId', 'body', 'receiptHash']);
     requireFact([reply.taskId, reply.targetEndpointId].every(value => typeof value === 'string' && UUID.test(value))
       && typeof reply.receiptHash === 'string' && /^sha256:[0-9a-f]{64}$(?![\s\S])/.test(reply.receiptHash));
-    return { state: 'answered' as const, body: text(reply.body, 8_000), receiptHash: reply.receiptHash as string };
+    return { state: 'answered' as const, body: replyText(reply.body), receiptHash: reply.receiptHash as string };
   }
   requireFact(result.reply === null);
   return { state: result.state as 'dispatched' | 'failed', body: null, receiptHash: null };

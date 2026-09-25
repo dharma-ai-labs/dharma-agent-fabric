@@ -6,8 +6,9 @@ import { dirname, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
-import { readRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, RepositorySourceWatcher,
+  scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
   repositoryBindingId: '73a95988-fd64-41ba-a0b9-6c8867d03788', repositoryAgentId: '57f61652-a5eb-46e4-930c-9478cd4a9c31' };
@@ -96,6 +97,27 @@ test('watcher resumes from an integrity-checked persisted source fingerprint', (
   assert.equal(watcher.observe(B, 1001), 'stable');
   assert.throws(() => watcher.seed(A), /Invalid repository source baseline/);
   assert.throws(() => new RepositorySourceWatcher(1000).seed('unverified'), /Invalid repository source baseline/);
+});
+test('a joining member seeds from its own scoped source snapshot when the shared hash is remote', async t => {
+  const f = await fixture(t);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const snapshot = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace,
+    sourceAuthorization: authorization });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot, candidateOnly: true });
+  const watcher = new RepositorySourceWatcher(1000);
+  await seedRepositorySourceWatcher({ ...scope, workspace: f.input.workspace, watcher,
+    publishedHash: `sha256:${'f'.repeat(64)}`, localHash: snapshot.manifest.snapshotHash });
+  assert.equal((await scanRepositorySourceChanges({ ...f.input, watcher })).state, 'unchanged');
+  await f.put('README.md', '# Shared repository\n\nNew approved source.');
+  f.setNow(1000);
+  assert.equal((await scanRepositorySourceChanges({ ...f.input, watcher })).state, 'debouncing');
+  const foreign = { ...scope, repositoryAgentId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
+  await assert.rejects(seedRepositorySourceWatcher({ ...foreign, workspace: f.input.workspace,
+    watcher: new RepositorySourceWatcher(1000), publishedHash: snapshot.manifest.snapshotHash,
+    localHash: snapshot.manifest.snapshotHash }), /scope/);
+  await assert.rejects(seedRepositorySourceWatcher({ ...scope, workspace: f.input.workspace,
+    watcher: new RepositorySourceWatcher(1000), publishedHash: snapshot.manifest.snapshotHash,
+    localHash: `sha256:${'e'.repeat(64)}` }), /ENOENT/);
 });
 test('blocked source retries once only after a distinct verified knowledge release is installed', () => {
   const gate = new BlockedRepositorySourceRetry();
