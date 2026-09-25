@@ -54,7 +54,9 @@ import {
   installedBundleIdForSkillPollAfterAuthorizationFailure,
   recoveredTaskPolicyWasSuperseded,
   acquireRelayProcessLease,
+  acquireRelaySupervisorLease,
   relayProcessState,
+  relaySupervisorProcessState,
   releaseDailyContentUpload,
   reserveDailyContentUpload,
   run,
@@ -210,6 +212,19 @@ test('relay process lease rejects concurrent starts and preserves a successor PI
   const nextRelease = await acquireRelayProcessLease(home);
   await nextRelease();
   assert.equal(await relayProcessState(home), 'stopped');
+});
+
+test('relay supervisor lease rejects a second supervisor and preserves the relay lease', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-relay-supervisor-lease-'));
+  const releaseSupervisor = await acquireRelaySupervisorLease(home);
+  const releaseRelay = await acquireRelayProcessLease(home);
+  assert.equal(await relaySupervisorProcessState(home), 'running');
+  assert.equal(await relayProcessState(home), 'running');
+  await assert.rejects(() => acquireRelaySupervisorLease(home), /Another relay supervisor is already running/);
+  await releaseSupervisor();
+  assert.equal(await relaySupervisorProcessState(home), 'stopped');
+  assert.equal(await relayProcessState(home), 'running');
+  await releaseRelay();
 });
 
 test('bootstrap defers policy-rejected evidence without weakening the disclosure boundary', async () => {
@@ -1019,7 +1034,7 @@ test('status reports verified relay state and hides local identifiers by default
     }));
     const status = await run(['status']) as Record<string, unknown>;
     const version = await run(['version']) as Record<string, unknown>;
-    assert.deepEqual(status, { version: version.version, enrolled: true, relay: 'running' });
+    assert.deepEqual(status, { version: version.version, enrolled: true, relay: 'running', supervisor: 'stopped' });
     const diagnostic = await run(['status', '--verbose']) as Record<string, unknown>;
     assert.equal(diagnostic.organizationId, 'org_private');
     assert.equal(diagnostic.deviceId, 'device_private');
@@ -1985,13 +2000,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.99');
+      assert.equal(version, '0.2.100');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.99',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.100',
   });
 });
 

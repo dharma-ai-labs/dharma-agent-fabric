@@ -105,13 +105,13 @@ No command broadens organization policy locally.
 ## Relay
 
 ```text
-dharma relay install --json
-dharma relay start --json
-dharma relay stop --json
-dharma relay status --json
-dharma relay logs --since 1h
-dharma relay uninstall --preserve-vault --json
+dharma relay start --policy .dharma/approved-policy.json
+dharma relay stop
+dharma relay probe
+dharma status
 ```
+
+Onboarding starts a detached, process-level supervisor. `relay start` is a foreground receiver; `relay stop` gracefully stops the supervisor and receiver without deleting enrolled identity or vault data. A reboot-time OS service installer is not yet shipped.
 
 ## Exit codes
 

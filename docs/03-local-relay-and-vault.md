@@ -6,21 +6,16 @@ The local relay is the durable edge of the system. It must remain useful when th
 
 ## Process model
 
-The product exposes:
+The released CLI exposes:
 
 ```text
 dharma <command>
 dharma relay start
 dharma relay stop
-dharma relay status --json
+dharma status
 ```
 
-The daemon runs as:
-
-- Windows user service or scheduled background task;
-- a WSL user service for repositories and providers inside WSL;
-- launchd user agent on macOS;
-- systemd user service on Linux.
+Completed onboarding starts a detached local supervisor. It restarts the relay after an unexpected process exit with bounded backoff and stops the relay when `dharma relay stop` is used. `dharma status` reports the relay and supervisor process states. This supervisor survives the initiating agent shell, but the CLI does not yet register a Windows scheduled task, WSL startup task, launchd agent, or systemd user service. After an operating-system restart, an enrolled agent must run the supported grant-free resume flow to start it again. Do not report reboot-time autonomous synchronization as ready until a login/startup service is installed and tested on that platform.
 
 Windows and WSL are separate device environments. A user may enroll both under the same Dharma identity, but each gets a distinct device ID, keypair, workspace registry, capability inventory, vault, and policy receipt.
 
