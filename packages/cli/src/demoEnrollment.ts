@@ -1,7 +1,8 @@
-import { createHash, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { loadOrCreateDeviceIdentity, normalizeHqUrl, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
+import { verifyInitialServerSigningKeyset, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE = /^[A-Za-z0-9_-]{43}$/;
@@ -35,6 +36,8 @@ interface DemoDeviceConfig {
   enrolledAt: string;
   signedReady: boolean;
   nextSequence: number;
+  serverPublicKeyEd25519?: string;
+  serverSigningKeyset?: TrustedServerSigningKeyset;
 }
 
 export interface DemoDeviceConnectDependencies {
@@ -92,6 +95,24 @@ export function scopePath(input: DemoDeviceScope, origin: string) {
   const scope = createHash('sha256').update(`${origin}\0${input.organizationId}\0${input.repositoryId}`)
     .digest('hex').slice(0, 32);
   return resolve(input.stateRoot, 'demo', scope, 'device.json');
+}
+
+export async function loadDemoSigningTrust(input: DemoDeviceScope) {
+  const config = JSON.parse(await readFile(scopePath(input, normalizeHqUrl(input.hqUrl)), 'utf8')) as DemoDeviceConfig;
+  if (config.schema !== 'dharma.demo-device/v1' || !config.signedReady
+    || config.organizationId !== input.organizationId || config.repositoryId !== input.repositoryId
+    || config.normalizedRepository !== input.normalizedRepository
+    || config.installationId !== input.installationId
+    || !/^[A-Za-z0-9_-]{43}$/.test(config.serverPublicKeyEd25519 || '')
+    || !config.serverSigningKeyset) {
+    throw new Error('Demo signing trust is not pinned to this approved device. Re-enroll through browser approval.');
+  }
+  const publicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
+    x: config.serverPublicKeyEd25519 }, format: 'jwk' });
+  const verification = verifyInitialServerSigningKeyset(
+    config.serverSigningKeyset, publicKey, input.organizationId);
+  if (!verification.ok) throw new Error(`Demo signing trust is invalid: ${verification.reason}.`);
+  return { publicKey, keyset: config.serverSigningKeyset, deviceId: config.deviceId };
 }
 
 async function writePrivateJson(path: string, value: unknown) {
@@ -253,6 +274,8 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
   const deadline = Math.min(Date.parse(String(started.expiresAt)),
     Date.now() + Math.min(Math.max(input.maximumWaitMs ?? 10 * 60_000, 1_000), 15 * 60_000));
   let deviceId = '';
+  let serverPublicKeyEd25519 = '';
+  let serverSigningKeyset: TrustedServerSigningKeyset | undefined;
   let transientFailures = 0;
   while (Date.now() < deadline) {
     let polled: Record<string, unknown>;
@@ -277,6 +300,15 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
         throw new Error('Approved Demo device does not match the requested repository.');
       }
       deviceId = String(polled.deviceId);
+      serverPublicKeyEd25519 = String(polled.serverPublicKeyEd25519 || '');
+      if (!/^[A-Za-z0-9_-]{43}$/.test(serverPublicKeyEd25519) || !polled.serverSigningKeyset) {
+        throw new Error('Approved Demo enrollment did not include server signing trust.');
+      }
+      serverSigningKeyset = polled.serverSigningKeyset as TrustedServerSigningKeyset;
+      const verification = verifyInitialServerSigningKeyset(serverSigningKeyset,
+        createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: serverPublicKeyEd25519 }, format: 'jwk' }),
+        input.organizationId);
+      if (!verification.ok) throw new Error(`Demo enrollment signing trust was rejected: ${verification.reason}.`);
       break;
     }
     if (polled.status !== 'pending') throw new Error(`Demo device approval ended: ${String(polled.status || 'unknown')}.`);
@@ -289,6 +321,10 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
     if (existing.deviceId !== deviceId || existing.publicKeyEd25519 !== identity.publicKeyEd25519) {
       throw new Error('Existing Demo device belongs to another approved identity.');
     }
+    if (existing.serverPublicKeyEd25519 && existing.serverPublicKeyEd25519 !== serverPublicKeyEd25519) {
+      throw new Error('Existing Demo signing root differs. Use supported browser-authorized recovery.');
+    }
+    await writePrivateJson(configPath, { ...existing, serverPublicKeyEd25519, serverSigningKeyset });
     return verifyDemoDevice(input, deps);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -297,6 +333,7 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
     hqUrl: origin, organizationId: input.organizationId, repositoryId: input.repositoryId,
     normalizedRepository: input.normalizedRepository, installationId: input.installationId,
     deviceId, publicKeyEd25519: identity.publicKeyEd25519,
-    enrolledAt: new Date().toISOString(), signedReady: false, nextSequence: 1 });
+    enrolledAt: new Date().toISOString(), signedReady: false, nextSequence: 1,
+    serverPublicKeyEd25519, serverSigningKeyset });
   return verifyDemoDevice(input, deps);
 }

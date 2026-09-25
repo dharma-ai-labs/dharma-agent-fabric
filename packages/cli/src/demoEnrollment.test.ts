@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
 import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
-import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
+import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { connectDemoDevice, loadDemoSigningTrust, scopePath, verifyDemoDevice } from './demoEnrollment.js';
 import { run } from './index.js';
 
 const orgId = 'org_fixture';
@@ -17,6 +18,21 @@ const deviceCode = 'B'.repeat(43);
 const browserCode = 'ABCDEF0123456789ABCD';
 const normalizedRepository = 'github.com/example/private';
 const hqUrl = 'https://dharma.example';
+const signer = generateKeyPairSync('ed25519');
+const serverPublicKeyEd25519 = (signer.publicKey.export({ format: 'jwk' }) as { x?: string }).x!;
+
+function approvedEnrollment() {
+  const issuedAt = new Date(Date.now() - 60_000).toISOString();
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+  const keyVersion = 'projects/test/locations/global/keyRings/demo/cryptoKeys/signing/cryptoKeyVersions/1';
+  const keyset = { schema: 'dharma.server-signing-keyset/v1' as const,
+    organizationId: orgId, generation: 1, keys: [{ keyVersion,
+      publicKeyEd25519: serverPublicKeyEd25519, status: 'active' as const,
+      notBefore: issuedAt, notAfter: expiresAt }], signedByKeyVersion: keyVersion,
+    issuedAt, expiresAt };
+  return { ok: true, status: 'approved', deviceId, repositoryId, serverPublicKeyEd25519,
+    serverSigningKeyset: { ...keyset, signature: signCanonicalObject(keyset, signer.privateKey) } };
+}
 
 function memoryStore(): SecureSecretStore {
   const values = new Map<string, string>();
@@ -52,8 +68,7 @@ test('Demo enrollment verifies the browser origin, waits for approval and signs 
     }
     if (url.pathname.endsWith('/poll')) {
       assert.deepEqual(JSON.parse(String(init?.body)), { orgId, deviceCode });
-      return new Response(JSON.stringify({ ok: true, status: 'approved',
-        deviceId, repositoryId }), { status: 200 });
+      return new Response(JSON.stringify(approvedEnrollment()), { status: 200 });
     }
     assert.equal(url.pathname,
       `/api/demo/fabric/repositories/${repositoryId}/status`);
@@ -91,7 +106,29 @@ test('Demo enrollment verifies the browser origin, waits for approval and signs 
   assert.equal(config.deviceId, deviceId);
   assert.equal(config.grant, undefined);
   assert.equal(config.privateKey, undefined);
+  assert.equal((await loadDemoSigningTrust(options(stateRoot))).deviceId, deviceId);
   if (process.platform !== 'win32') assert.equal((await stat(connected.configPath)).mode & 0o777, 0o600);
+});
+
+test('Demo enrollment rejects missing and foreign signing anchors before saving a device', async () => {
+  for (const response of [
+    { ok: true, status: 'approved', deviceId, repositoryId },
+    { ...approvedEnrollment(), serverPublicKeyEd25519: 'A'.repeat(43) },
+  ]) {
+    const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-trust-reject-'));
+    const fetcher: typeof fetch = async (resource) => {
+      const pathname = new URL(String(resource)).pathname;
+      if (pathname.endsWith('/enrollments')) return new Response(JSON.stringify({ ok: true,
+        status: 'pending', organizationId: orgId, repositoryId, deviceCode,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }),
+      { status: 202 });
+      return new Response(JSON.stringify(response), { status: 200 });
+    };
+    await assert.rejects(connectDemoDevice(options(stateRoot), { store: memoryStore(), fetcher }),
+      /signing trust|untrusted_initial_signer/i);
+    await assert.rejects(readFile(scopePath(options(stateRoot), hqUrl)), { code: 'ENOENT' });
+  }
 });
 
 test('Demo enrollment recovers from one transient poll failure without restarting enrollment', async () => {
@@ -111,7 +148,7 @@ test('Demo enrollment recovers from one transient poll failure without restartin
         return new Response(JSON.stringify({ ok: false, error: { code: 'internal_error',
           message: 'Temporary database failure.' } }), { status: 500 });
       }
-      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+      return new Response(JSON.stringify(approvedEnrollment()),
         { status: 200 });
     }
     return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
@@ -206,7 +243,7 @@ test('lost status response resumes grant-free with exact replay, then retries an
       { status: 202 });
     }
     if (url.pathname.endsWith('/poll')) {
-      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+      return new Response(JSON.stringify(approvedEnrollment()),
         { status: 200 });
     }
     signed.push(new Headers(init?.headers));
@@ -250,7 +287,7 @@ test('expired status advances once only after a typed sequence conflict', async 
       { status: 202 });
     }
     if (url.pathname.endsWith('/poll')) {
-      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+      return new Response(JSON.stringify(approvedEnrollment()),
         { status: 200 });
     }
     const sequence = Number(new Headers(init?.headers).get('x-dharma-sequence'));
@@ -293,7 +330,7 @@ test('a 0.2.81 pending sequence that skipped an unseen request recovers without 
       { status: 202 });
     }
     if (url.pathname.endsWith('/poll')) {
-      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+      return new Response(JSON.stringify(approvedEnrollment()),
         { status: 200 });
     }
     const sequence = Number(new Headers(init?.headers).get('x-dharma-sequence'));
@@ -331,7 +368,7 @@ test('expired status does not advance on an unrelated conflict', async () => {
       { status: 202 });
     }
     if (url.pathname.endsWith('/poll')) {
-      return new Response(JSON.stringify({ ok: true, status: 'approved', deviceId, repositoryId }),
+      return new Response(JSON.stringify(approvedEnrollment()),
         { status: 200 });
     }
     const sequence = Number(new Headers(init?.headers).get('x-dharma-sequence'));

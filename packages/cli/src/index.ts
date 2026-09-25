@@ -59,8 +59,9 @@ import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js'
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
+import { demoRepositoryPackage } from './demoPackage.js';
 
-const VERSION = '0.2.93';
+const VERSION = '0.2.94';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5784,7 +5785,8 @@ export async function run(argv: string[]): Promise<Output> {
   const [command, subcommand] = positional;
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
-  if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume']
+  if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
+    'package', 'package-status']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -5819,6 +5821,21 @@ export async function run(argv: string[]): Promise<Output> {
           } });
         const { configPath: _configPath, ...receipt } = connected;
         return receipt;
+      }
+      if (subcommand === 'package' || subcommand === 'package-status') {
+        const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+        const provider = subcommand === 'package-status' && requestedProvider === 'auto' ? 'codex'
+          : requestedProvider === 'auto'
+          ? await detectBootstrapProvider(workspace) : requestedProvider;
+        if (!isLocalProviderId(provider)) {
+          throw new Error('Demo package provider must be auto, codex, claude, agy, or hermes.');
+        }
+        const demoNativeSkillDirectory = provider === 'codex' ? resolve(workspace, '.agents', 'skills')
+          : provider === 'claude' ? resolve(workspace, '.claude', 'skills')
+            : nativeSkillDirectory(provider);
+        return demoRepositoryPackage({ scope, workspace,
+          statusOnly: subcommand === 'package-status', provider,
+          nativeSkillDirectory: demoNativeSkillDirectory });
       }
       let action: DemoPeerAction | null = null;
       if (subcommand === 'role') {
