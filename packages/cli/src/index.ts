@@ -61,7 +61,7 @@ import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
 
-const VERSION = '0.2.93';
+const VERSION = '0.2.94';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
