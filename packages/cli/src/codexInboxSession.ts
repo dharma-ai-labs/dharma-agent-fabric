@@ -7,7 +7,7 @@ import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js
 // chats must consume in their own session; knowing a thread ID is not ownership.
 export async function openCodexInboxSession(input: Parameters<typeof openCodexBoundSession>[0] & {
   channelTransport: Parameters<typeof createProviderSessionChannel>[0]['transport'];
-  expectedRevision: number;
+  expectedRevision?: number;
   authorizeContent: Parameters<typeof createProviderSessionChannel>[0]['authorizeContent'];
 }) {
   const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
@@ -31,9 +31,9 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
     },
   } });
   channel = createProviderSessionChannel({ transport: input.channelTransport, scope, mode: 'bridge_owned',
-    expectedRevision: input.expectedRevision, assertOwner: owner.assertActive,
+    expectedRevision: input.expectedRevision ?? 0, assertOwner: owner.assertActive,
     verifier: input.verifier, authorizeContent: input.authorizeContent });
-  try { await channel.attach(); }
+  try { await (input.expectedRevision === undefined ? channel.reconnect() : channel.attach()); }
   catch (error) { try { await owner.close(); } catch { /* Keep the fence if shutdown is unconfirmed. */ } throw error; }
 
   let stopped = false, running = false, closing: Promise<{ serverDetached: boolean; providerClosed: true }> | null = null;

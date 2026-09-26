@@ -112,6 +112,28 @@ async function fixture() {
   return { vault, binding, identity, verifier, now, root, masterKey, budget: { reserve: async () => true } };
 }
 
+test('default inbox startup recovers the server revision with its retained local owner and no provider turn', async () => {
+  const f = await fixture(), remote = fakeTransport(f.binding), actions: string[] = [];
+  let reserves = 0;
+  const transport = { async signedPost(_route: string, input: unknown) {
+    const body = input as Record<string, unknown>; actions.push(String(body.action));
+    if (body.action === 'attach') assert.equal(body.expectedRevision, 12);
+    return { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId, registration: {
+      bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+      repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+      deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+      revision: body.action === 'inspect' ? 12 : 13, state: 'attached',
+      leaseUntil: new Date(Date.now() + (body.action === 'inspect' ? -60_000 : 60_000)).toISOString(), replay: false } };
+  } };
+  const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId,
+    channelTransport: transport, authorizeContent: async () => true,
+    budget: { reserve: async () => { reserves += 1; return true; } }, openTransport: async () => remote.transport });
+  try {
+    assert.deepEqual(actions, ['inspect', 'attach']);
+    assert.equal(reserves, 0); assert.equal(remote.calls.includes('turn/start'), false);
+  } finally { await inbox.close(); f.vault.close(); }
+});
+
 test('reopened inbox reconciles retained answers without executing or reserving another provider turn', async t => {
   for (const remoteState of ['accepted', 'answered', 'conflicting', 'expired', 'lost_reply', 'denied_policy'] as const) {
     await t.test(remoteState, async () => {

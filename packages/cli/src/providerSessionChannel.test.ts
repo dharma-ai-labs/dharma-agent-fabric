@@ -35,6 +35,7 @@ function fixture() {
     const body = input as Record<string, unknown>;
     calls.push({ route, body }); afterSend?.();
     if (responseOverride instanceof Error) throw responseOverride;
+    if (typeof responseOverride === 'function') return responseOverride(body) as Record<string, unknown>;
     if (responseOverride) return responseOverride as Record<string, unknown>;
     if (route.endsWith('provider-sessions')) return { ok: true, organizationId: scope.organizationId, correlationId: uuid(90),
       registration: { bindingId: scope.bindingId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
@@ -64,6 +65,61 @@ test('registration, heartbeat and detach preserve scope and CAS without transmit
   assert.deepEqual(f.calls.map(call => call.body.expectedRevision), [0, 1, 2]);
   assert.ok(f.calls.every(call => !('sessionId' in call.body) && !('workspaceRoot' in call.body)));
   await assert.rejects(f.channel.attach(), /provider_session_channel_closed/);
+});
+test('reconnect inspects an existing expired registration before attaching its exact current revision', async () => {
+  const f = fixture();
+  f.setResponse((body: Record<string, unknown>) => ({ ok: true, organizationId: scope.organizationId, correlationId: uuid(90),
+    registration: { bindingId: scope.bindingId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
+      repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId, deviceId: scope.deviceId,
+      provider: 'codex', mode: 'bridge_owned', revision: body.action === 'inspect' ? 9 : Number(body.expectedRevision) + 1,
+      state: 'attached', leaseUntil: body.action === 'inspect' ? '2026-09-26T04:59:00.000Z' : '2026-09-26T05:01:00.000Z', replay: false } }));
+  assert.equal((await f.channel.reconnect()).revision, 10);
+  assert.deepEqual(f.calls.map(call => [call.body.action, call.body.expectedRevision]), [['inspect', 0], ['attach', 9]]);
+  assert.equal((await f.channel.heartbeat()).revision, 11);
+});
+test('absent registration reconnects at zero; inspection itself cannot advertise presence', async () => {
+  const f = fixture(); f.setResponse({ ok: true, organizationId: scope.organizationId, correlationId: uuid(90), registration: null });
+  assert.equal(await f.channel.inspect(), null);
+  await assert.rejects(f.channel.inbox(), /provider_session_channel_unavailable/);
+  f.setResponse((body: Record<string, unknown>) => ({ ok: true, organizationId: scope.organizationId, correlationId: uuid(90),
+    registration: body.action === 'inspect' ? null : { bindingId: scope.bindingId, workspaceId: scope.workspaceId,
+      endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId,
+      deviceId: scope.deviceId, provider: 'codex', mode: 'bridge_owned', revision: 1, state: 'attached',
+      leaseUntil: '2026-09-26T05:01:00.000Z', replay: false } }));
+  assert.equal((await f.channel.reconnect()).revision, 1);
+  assert.equal(f.calls.filter(call => call.body.action === 'attach').length, 1);
+});
+test('reconnect never revives a tombstone, adopts another owner, or advertises a stale replay as live', async () => {
+  for (const change of [{ state: 'detached' }, { membershipId: uuid(50) }, { mode: 'cooperative' }, { replay: true }, { revision: 0 }]) {
+    const f = fixture();
+    f.setResponse({ ok: true, organizationId: scope.organizationId, correlationId: uuid(90), registration: {
+      bindingId: scope.bindingId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
+      repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId, deviceId: scope.deviceId,
+      provider: 'codex', mode: 'bridge_owned', revision: 5, state: 'attached',
+      leaseUntil: '2026-09-26T04:59:00.000Z', replay: false, ...change } });
+    await assert.rejects(f.channel.reconnect(), /provider_session_channel_(response|revoked)/);
+    assert.equal(f.calls.length, 1);
+    await assert.rejects(f.channel.inbox(), /provider_session_channel_closed/);
+  }
+});
+test('inspection loses authority during the wait and never follows up with an attachment', async () => {
+  const f = fixture(); f.onSend(() => f.setHeld(false));
+  await assert.rejects(f.channel.reconnect(), /provider_session_channel_owner_lost/);
+  assert.equal(f.calls.length, 1);
+});
+test('a recovered revision cannot turn an expired attachment receipt or a competing CAS update into live presence', async () => {
+  for (const failure of ['expired', 'competing'] as const) {
+    const f = fixture();
+    f.setResponse((body: Record<string, unknown>) => ({ ok: true, organizationId: scope.organizationId, correlationId: uuid(90),
+      registration: { bindingId: scope.bindingId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
+        repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId, deviceId: scope.deviceId,
+        provider: 'codex', mode: 'bridge_owned', revision: body.action === 'inspect' ? 9 : failure === 'competing' ? 11 : 10,
+        state: 'attached', leaseUntil: failure === 'expired' || body.action === 'inspect'
+          ? '2026-09-26T04:59:00.000Z' : '2026-09-26T05:01:00.000Z', replay: false } }));
+    await assert.rejects(f.channel.reconnect(), /provider_session_channel_response/);
+    await assert.rejects(f.channel.inbox(), /provider_session_channel_closed/);
+    assert.deepEqual(f.calls.map(call => call.body.action), ['inspect', 'attach']);
+  }
 });
 test('inbox verifies signed offers and acceptance is not an answer', async () => {
   const f = fixture(); await f.channel.attach();

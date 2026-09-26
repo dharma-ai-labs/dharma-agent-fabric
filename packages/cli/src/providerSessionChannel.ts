@@ -122,10 +122,26 @@ export function createProviderSessionChannel(input: {
       .every(key => value[key] === scope[key as keyof SessionBindingScope]) && value.mode === mode
       && value.revision === revision + 1 && value.state === (action === 'detach' ? 'detached' : 'attached')
       && typeof value.leaseUntil === 'string' && Number.isFinite(Date.parse(value.leaseUntil))
+      && (action === 'detach' || Date.parse(value.leaseUntil) > now().getTime())
       && Date.parse(value.leaseUntil) <= now().getTime() + 120000 && typeof value.replay === 'boolean', 'response');
     registration = value as Registration; revision = registration.revision;
     if (action === 'detach') closed = true;
     return { ...registration, correlationId };
+  }
+  async function inspect() {
+    const result = await post('/agent-fabric/provider-sessions', { ...base,
+      schema: 'dharma.provider-session-registration/v1', action: 'inspect', provider: 'codex', mode,
+      expectedRevision: 0, leaseSeconds: 60 }, 'registration');
+    if (result === null) return null;
+    const value = record(result, ['bindingId', 'workspaceId', 'endpointId', 'repositoryBindingId',
+      'membershipId', 'deviceId', 'provider', 'mode', 'revision', 'state', 'leaseUntil', 'replay'], 'response');
+    fact(['bindingId', 'workspaceId', 'endpointId', 'repositoryBindingId', 'membershipId', 'deviceId', 'provider']
+      .every(key => value[key] === scope[key as keyof SessionBindingScope]) && value.mode === mode
+      && Number.isInteger(value.revision) && Number(value.revision) >= 1 && Number(value.revision) <= 2147483647
+      && ['attached', 'detached'].includes(value.state) && value.replay === false
+      && typeof value.leaseUntil === 'string' && Number.isFinite(Date.parse(value.leaseUntil))
+      && Date.parse(value.leaseUntil) <= now().getTime() + 120000, 'response');
+    return value as Registration;
   }
   function acknowledgement(value: unknown, expected: { questionId?: string; taskId: string; targetBindingId: string; state: string }) {
     const result = record(value, ['questionId', 'taskId', 'targetBindingId', 'state', 'replay'], 'response');
@@ -144,6 +160,16 @@ export function createProviderSessionChannel(input: {
     fact(await input.authorizeContent(value, kind), 'input'); await owner(true);
   }
   return {
+    inspect: () => operation(inspect),
+    reconnect: () => operation(async () => {
+      const observed = await inspect();
+      if (observed?.state === 'detached') { closed = true; throw new Error('provider_session_channel_revoked'); }
+      // Observation does not grant presence. Attachment still uses the server CAS
+      // and the same local owner fence; a competing update must fail, not retarget.
+      revision = observed?.revision || 0;
+      fact(revision <= 2147483646, 'response');
+      return register('attach');
+    }),
     attach: () => operation(() => register('attach')),
     heartbeat: () => operation(() => register('heartbeat')),
     detach: () => operation(() => register('detach')),
