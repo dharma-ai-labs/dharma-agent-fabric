@@ -14,6 +14,19 @@ for (const name of names) {
   ajv.addSchema(schema);
 }
 
+const validateDemoWatch = ajv.getSchema('https://schemas.dharma-ai.io/demo-watch-registration/v1');
+const demoWatch = { schema: 'dharma.demo-watch/v1', hqUrl: 'https://demo.example.test',
+  organizationId: 'org_schematest', repositoryId: '00000000-0000-4000-8000-000000000001',
+  normalizedRepository: 'github.com/example/repository', provider: 'codex', workspace: '/example/repository' };
+if (!validateDemoWatch?.(demoWatch)) {
+  throw new Error(`Demo watch registration is invalid: ${ajv.errorsText(validateDemoWatch?.errors)}`);
+}
+for (const override of [{ grant: 'never-persist' }, { provider: 'shell' }, { workspace: '/repo\ncommand' }]) {
+  if (validateDemoWatch({ ...demoWatch, ...override })) {
+    throw new Error('Demo watch schema accepted a credential, provider, or multiline path.');
+  }
+}
+
 const validateDeviceCapabilities = ajv.getSchema('https://schemas.dharma-ai.io/device-capabilities/v1');
 const deviceCapabilities = {
   schema: 'dharma.device-capabilities/v1',
