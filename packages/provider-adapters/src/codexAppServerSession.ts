@@ -115,6 +115,9 @@ export async function runCodexBridgeQuestion(input: {
   const inspected = inspectSessionQuestionForBinding(input.question, binding, input.verifier, now);
   if (!inspected.ok) throw new Error(inspected.reason);
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
+  // A declared permission profile did not enforce the native Windows boundary.
+  // Admit only the host whose read/write/network isolation was exercised live.
+  if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
   const question = input.question as SessionQuestion;
   const timeoutMs = input.timeoutMs ?? 60_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
