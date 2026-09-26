@@ -44,6 +44,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
 
   return {
     close,
+    async assertActive() { return !closing && !closed && await heldLease.assertHeld(); },
     async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');

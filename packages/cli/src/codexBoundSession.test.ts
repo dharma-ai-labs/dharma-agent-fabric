@@ -8,6 +8,7 @@ import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { openCodexBoundSession, runCodexBoundSessionQuestion } from './codexBoundSession.js';
+import { openCodexInboxSession } from './codexInboxSession.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const ids = {
@@ -108,6 +109,78 @@ async function fixture() {
   };
   return { vault, binding, identity, verifier, now, budget: { reserve: async () => true } };
 }
+
+test('signed inbox dispatch retains the selected thread and publishes answers without reopening a worker', async () => {
+  const f = await fixture(), remote = fakeTransport(f.binding);
+  let opens = 0, accepted = false, replyCalls = 0, failReply = false;
+  let offered = signedQuestion(f.binding, f.now);
+  const transport = { async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    if (route.endsWith('provider-sessions')) return { ok: true, organizationId: f.binding.organizationId,
+      correlationId: ids.threadId, registration: { bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId,
+        endpointId: f.binding.endpointId, repositoryBindingId: f.binding.repositoryBindingId,
+        membershipId: f.binding.membershipId, deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+        revision: Number(body.expectedRevision) + 1, state: body.action === 'detach' ? 'detached' : 'attached',
+        leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+    if (body.action === 'inbox') return { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId,
+      result: { offers: accepted ? [] : [offered] } };
+    if (body.action === 'accept') accepted = true;
+    if (body.action === 'reply') { replyCalls += 1; if (failReply) throw new Error('synthetic-lost-reply'); }
+    return { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId,
+      result: { questionId: offered.questionId, taskId: offered.taskId, targetBindingId: f.binding.bindingId,
+        state: body.action === 'accept' ? 'accepted' : body.outcome, replay: false } };
+  } };
+  const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+    channelTransport: transport, authorizeContent: async () => true,
+    openTransport: async () => { opens += 1; return remote.transport; } });
+  try {
+    assert.equal((await inbox.runNext()).state, 'answered');
+    assert.equal((await inbox.runNext()).state, 'idle');
+    assert.equal(opens, 1); assert.equal(replyCalls, 1);
+    assert.equal(remote.calls.filter(method => method === 'turn/start').length, 1);
+    assert.equal(remote.isClosed(), false);
+    offered = signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020');
+    accepted = false; failReply = true;
+    const pending = await inbox.runNext();
+    assert.equal(pending.state, 'reply_pending');
+    assert.ok('providerShutdownConfirmed' in pending && pending.providerShutdownConfirmed);
+    assert.ok('reasonCode' in pending && pending.reasonCode === 'delivery_unconfirmed');
+    assert.ok('completionHash' in pending);
+    const checkpoint = JSON.parse((await f.vault.getBlob(pending.completionHash)).toString('utf8'));
+    assert.equal(checkpoint.questionId, offered.questionId); assert.equal(checkpoint.bindingId, f.binding.bindingId);
+    assert.equal(checkpoint.answer, 'Catalog generation 13.'); assert.equal(checkpoint.organizationId, f.binding.organizationId);
+    assert.equal(opens, 1); assert.equal(replyCalls, 2);
+    await assert.rejects(inbox.runNext(), /codex_inbox_session_unavailable/);
+    assert.equal(remote.calls.filter(method => method === 'turn/start').length, 2);
+  } finally { await inbox.close(); f.vault.close(); }
+  assert.equal(remote.isClosed(), true);
+});
+
+test('signed inbox budget denial does not accept, execute, or replace the selected session', async () => {
+  const f = await fixture(), remote = fakeTransport(f.binding);
+  let accepts = 0;
+  const transport = { async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    if (route.endsWith('provider-sessions')) return { ok: true, organizationId: f.binding.organizationId,
+      correlationId: ids.threadId, registration: { bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId,
+        endpointId: f.binding.endpointId, repositoryBindingId: f.binding.repositoryBindingId,
+        membershipId: f.binding.membershipId, deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+        revision: Number(body.expectedRevision) + 1, state: body.action === 'detach' ? 'detached' : 'attached',
+        leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+    if (body.action === 'accept') accepts += 1;
+    return { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId,
+      result: { offers: [signedQuestion(f.binding, f.now)] } };
+  } };
+  const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+    budget: { reserve: async () => false }, channelTransport: transport, authorizeContent: async () => true,
+    openTransport: async () => remote.transport });
+  try {
+    assert.equal((await inbox.runNext()).state, 'budget_denied');
+    assert.equal((await inbox.runNext()).state, 'budget_denied');
+    assert.equal(accepts, 0); assert.equal(remote.calls.includes('turn/start'), false);
+    assert.equal(remote.isClosed(), false);
+  } finally { await inbox.close(); f.vault.close(); }
+});
 
 test('bound dispatch resolves one encrypted binding and releases a completed turn', async () => {
   const f = await fixture();
