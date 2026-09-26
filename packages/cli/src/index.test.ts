@@ -73,6 +73,7 @@ import {
   verifyAgentFabricSkillInstallation,
   waitForRelayReadiness,
   withWorkspacePolicyRefreshLock,
+  withRelayStartupMutation,
   withWorkspaceSkillActivationLock,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
@@ -427,6 +428,33 @@ test('managed POSIX launcher selects its pinned npm even under a minimal startup
   });
   assert.deepEqual(stdout.trim().split('\n'), ['verified-runtime', 'exec', '--yes', '--',
     '@dharma-ai-labs/agent-fabric@0.2.103', 'relay', 'supervise', '--demo-only']);
+});
+
+test('Demo watch controls support no-write plans through the actual CLI dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-watch-cli-plan-'));
+  await execFileAsync('git', ['init', root]);
+  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/example/repo']);
+  for (const command of ['watch-enable', 'watch-status', 'watch-disable']) {
+    const receipt = await run(['demo', command, '--dry-run', '--portal-url', 'https://example.com',
+      '--organization-id', 'org_test', '--repository-id', '00000000-0000-4000-8000-000000000001',
+      '--normalized-repository', 'github.com/example/repo', '--workspace', root]) as { stage: string };
+    assert.equal(receipt.stage, 'demo_watch_plan');
+  }
+  await assert.rejects(readFile(join(root, '.dharma', 'bin', 'dharma')), { code: 'ENOENT' });
+});
+
+test('all startup mutations share one user-level lock and release it on failure', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-startup-mutation-'));
+  let active = 0;
+  let maximum = 0;
+  await Promise.all(Array.from({ length: 5 }, () => withRelayStartupMutation(async () => {
+    maximum = Math.max(maximum, ++active);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    active -= 1;
+  }, home)));
+  assert.equal(maximum, 1);
+  await assert.rejects(withRelayStartupMutation(async () => { throw new Error('fixture'); }, home), /fixture/);
+  assert.equal(await withRelayStartupMutation(async () => 'released', home), 'released');
 });
 
 test('bootstrap validates stable repository identity before grant redemption', async () => {

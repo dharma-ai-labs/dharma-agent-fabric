@@ -39,7 +39,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { superviseRelay } from './relaySupervisor.js';
-import { disableRelayAutostart, enableRelayAutostart, relayAutostartStatus } from './relayAutostart.js';
+import { disableRelayAutostart, enableRelayAutostart, relayAutostartStatus, startRelayAutostart } from './relayAutostart.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
@@ -67,6 +67,8 @@ import { runDemoWatch } from './demoWatch.js';
 import { runDemoSupervisor } from './demoSupervisor.js';
 import { demoWatchRegistrationKey, listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
 import { createDemoWatchHealthRecorder } from './demoWatchHealth.js';
+import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSupervisor,
+  type DemoWatchControlDependencies } from './demoWatchControl.js';
 
 const VERSION = '0.2.103';
 const USAGE = CLI_USAGE;
@@ -971,6 +973,13 @@ async function withFileLock<T>(
   finally { await release(); }
 }
 
+export async function withRelayStartupMutation<T>(operation: () => Promise<T>, home = dharmaHome()): Promise<T> {
+  const release = await acquirePidLock(resolve(home, 'autostart-mutation.lock'), 30_000,
+    'demo_watch_startup_busy: another startup operation is still running.');
+  try { return await operation(); }
+  finally { await release(); }
+}
+
 export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
   if (!workspaceId) throw new Error('Content transmission requires a registered workspace ID.');
   return withFileLock(
@@ -1480,46 +1489,51 @@ export function requireCompletedBootstrapEvidence(
 }
 
 async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
-  const pidPath = resolve(dharmaHome(), 'relay', 'relay.pid');
-  let relayPid = 0;
-  try { relayPid = Number((await readFile(pidPath, 'utf8')).trim()); } catch {}
-  if (Number.isSafeInteger(relayPid) && relayPid > 0) {
-    try { process.kill(relayPid, 'SIGTERM'); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  return withRelayStartupMutation(async () => {
+    if ((await listDemoWatchRegistrations(dharmaHome())).length) {
+      throw new Error('demo_watch_standard_rebind_conflict: preserve Demo scopes; standard rebind needs a scoped recovery path.');
     }
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      try { process.kill(relayPid, 0); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') break;
+    const pidPath = resolve(dharmaHome(), 'relay', 'relay.pid');
+    let relayPid = 0;
+    try { relayPid = Number((await readFile(pidPath, 'utf8')).trim()); } catch {}
+    if (Number.isSafeInteger(relayPid) && relayPid > 0) {
+      try { process.kill(relayPid, 'SIGTERM'); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try { process.kill(relayPid, 0); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') break;
+        }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      }
+      try {
+        process.kill(relayPid, 0);
+        throw new Error('The previous organization relay did not stop; enrollment was not changed.');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
     }
-    try {
-      process.kill(relayPid, 0);
-      throw new Error('The previous organization relay did not stop; enrollment was not changed.');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-    }
-  }
 
-  const backupId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${createHash('sha256')
-    .update(`${existing.hqUrl}\0${existing.organizationId}`)
-    .digest('hex').slice(0, 12)}`;
-  const backupRoot = resolve(dirname(dharmaHome()), '.dharma-rebind-backups', backupId);
-  await disableRelayAutostart({ home: dharmaHome() });
-  await mkdir(backupRoot, { recursive: true, mode: 0o700 });
-  for (const relativePath of ['device.json', 'pending-enrollment.json', 'registry', 'relay', 'vault']) {
-    const source = resolve(dharmaHome(), relativePath);
-    if (!await pathExists(source)) continue;
-    await rename(source, resolve(backupRoot, relativePath));
-  }
-  await writeJsonAtomic(resolve(backupRoot, 'RECEIPT.json'), {
-    schema: 'dharma.local-enrollment-rebind-backup/v1',
-    previousOrganizationId: existing.organizationId,
-    previousPortalOrigin: existing.hqUrl,
-    createdAt: new Date().toISOString(),
+    const backupId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${createHash('sha256')
+      .update(`${existing.hqUrl}\0${existing.organizationId}`)
+      .digest('hex').slice(0, 12)}`;
+    const backupRoot = resolve(dirname(dharmaHome()), '.dharma-rebind-backups', backupId);
+    await disableRelayAutostart({ home: dharmaHome() });
+    await mkdir(backupRoot, { recursive: true, mode: 0o700 });
+    for (const relativePath of ['device.json', 'pending-enrollment.json', 'registry', 'relay', 'vault']) {
+      const source = resolve(dharmaHome(), relativePath);
+      if (!await pathExists(source)) continue;
+      await rename(source, resolve(backupRoot, relativePath));
+    }
+    await writeJsonAtomic(resolve(backupRoot, 'RECEIPT.json'), {
+      schema: 'dharma.local-enrollment-rebind-backup/v1',
+      previousOrganizationId: existing.organizationId,
+      previousPortalOrigin: existing.hqUrl,
+      createdAt: new Date().toISOString(),
+    });
+    return { changed: true, backupId, previousOrganizationId: existing.organizationId };
   });
-  return { changed: true, backupId, previousOrganizationId: existing.organizationId };
 }
 
 export function stableRepositoryLauncherContents(version = VERSION,
@@ -1990,11 +2004,11 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     ? { state: 'disabled' as const, backend: null }
     : await withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
-      () => enableRelayAutostart({
+      () => withRelayStartupMutation(() => enableRelayAutostart({
         home: dharmaHome(), workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
         launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
         version: VERSION,
-      }));
+      })));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
@@ -6151,7 +6165,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
-    'package', 'package-status', 'watch']
+    'package', 'package-status', 'watch', 'watch-enable', 'watch-status', 'watch-disable']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -6164,7 +6178,11 @@ export async function run(argv: string[]): Promise<Output> {
     if (!remote || normalizeGitRemoteIdentity(remote) !== normalizedRepository) {
       throw new Error('Local Git remote does not match the private Demo repository binding.');
     }
-    if (flags.has('dry-run')) return { ok: true, stage: 'demo_device_plan',
+    const watchControl = ['watch-enable', 'watch-status', 'watch-disable'].includes(String(subcommand));
+    if (watchControl && await realpath(root) !== workspace) {
+      throw new Error('Demo watch setup must select the exact Git repository root.');
+    }
+    if (flags.has('dry-run')) return { ok: true, stage: watchControl ? 'demo_watch_plan' : 'demo_device_plan',
       organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
       repositoryPackageState: 'not_connected' };
     const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
@@ -6172,6 +6190,34 @@ export async function run(argv: string[]): Promise<Output> {
       hqUrl, organizationId, repositoryId, normalizedRepository,
       installationId: await loadOrCreateInstallationId(), stateRoot: dharmaHome(),
     };
+    if (watchControl) {
+      const existing = (await listDemoWatchRegistrations(dharmaHome()))
+        .find(row => row.hqUrl === hqUrl && row.organizationId === organizationId && row.repositoryId === repositoryId);
+      const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+      const provider = requestedProvider !== 'auto' ? requestedProvider : existing?.provider
+        ?? (subcommand === 'watch-enable' ? await detectBootstrapProvider(workspace) : 'codex');
+      if (!isLocalProviderId(provider)) throw new Error('Demo watch provider must be auto, codex, claude, agy, or hermes.');
+      const registration: DemoWatchRegistration = { schema: 'dharma.demo-watch/v1',
+        hqUrl, organizationId, repositoryId, normalizedRepository, provider, workspace };
+      const input = { home: dharmaHome(), registration, version: VERSION };
+      const deps: DemoWatchControlDependencies = {
+        verify: async () => { await withDemoDeviceLock(scope, () => verifyDemoDevice(scope)); },
+        exclusive: operation => withRelayStartupMutation(operation),
+        prepareStartup: async () => {
+          const launcher = await installStableRepositoryLauncher(workspace);
+          await enableRelayAutostart({ home: dharmaHome(), workspace, policy: null, version: VERSION,
+            launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell) });
+        },
+        start: async () => { await startRelayAutostart({ home: dharmaHome() }); },
+        autostart: async () => (await relayAutostartStatus({ home: dharmaHome() })).state,
+        supervisor: () => inspectDemoWatchSupervisor(dharmaHome(), VERSION, async () => {
+          const supervisor = await relaySupervisorProcessState();
+          return supervisor === 'stopped' && await relayProcessState() !== 'stopped' ? 'unknown' : supervisor;
+        }),
+      };
+      return subcommand === 'watch-enable' ? enableDemoWatch(input, deps)
+        : subcommand === 'watch-disable' ? disableDemoWatch(input, deps) : demoWatchStatus(input, deps);
+    }
     if (['package', 'package-status', 'watch'].includes(String(subcommand))) {
       const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
       const provider = subcommand === 'package-status' && requestedProvider === 'auto' ? 'codex'
@@ -6334,7 +6380,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'relay' && subcommand === 'stop') return relayStop();
   if (command === 'relay' && subcommand === 'autostart') {
     if (positional[2] === 'status') return relayAutostartStatus({ home: dharmaHome() });
-    if (positional[2] === 'disable') return disableRelayAutostart({ home: dharmaHome() });
+    if (positional[2] === 'disable') return withRelayStartupMutation(() => disableRelayAutostart({ home: dharmaHome() }));
     throw new Error('Use dharma relay autostart status or dharma relay autostart disable.');
   }
   if (command === 'relay' && subcommand === 'supervise') return relaySupervise(flags);

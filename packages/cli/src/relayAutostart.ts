@@ -124,6 +124,21 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
   return await readFile(path, 'utf8').catch(() => null) === expected;
 }
 
+function windowsTaskGuard(registration: Registration, home: string) {
+  return `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); `
+    + `$actions = @($task.Actions); `
+    + `if ($null -eq $task -or $actions.Count -ne 1 `
+    + `-or $actions[0].Execute -cne 'powershell.exe' `
+    + `-or $actions[0].Arguments -cne ${psLiteral(`-NoProfile -NonInteractive -File "${scriptPath(home)}"`)} `
+    + `-or $actions[0].WorkingDirectory -cne ${psLiteral(registration.workspace)} `
+    + `-or ($task.Principal.UserId -ne $identity.Name -and $task.Principal.UserId -ne $identity.User.Value)) `
+    + `{ throw 'autostart_conflict' }; `;
+}
+
+function windowsTaskLookup(registration: Registration) {
+  return `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')} -ErrorAction SilentlyContinue; `;
+}
+
 export async function relayAutostartStatus(options: RelayAutostartOptions): Promise<RelayAutostartState> {
   let registration;
   try { registration = await readRegistration(options.home); }
@@ -143,9 +158,13 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
     const result = registration.backend === 'systemd-user'
       ? await run('systemctl', ['--user', 'is-enabled', UNIT_NAME])
       : await run('powershell.exe', encodedPowerShell(
-        `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')} -ErrorAction SilentlyContinue; `
-        + `if ($task -and $task.State -ne 'Disabled') { 'enabled' } else { 'disabled' }`,
+        windowsTaskLookup(registration)
+        + `if ($null -eq $task) { 'disabled'; exit 0 }; `
+        + `try { ${windowsTaskGuard(registration, options.home)} } catch { 'conflict'; exit 0 }; `
+        + `if ($task.State -ne 'Disabled') { 'enabled' } else { 'disabled' }`,
       ));
+    if (result.stdout.trim() === 'conflict') return { state: 'unavailable', backend: registration.backend,
+      version: registration.version, reason: 'autostart_conflict' };
     return { state: result.stdout.trim() === 'enabled' ? 'enabled' : 'disabled',
       backend: registration.backend, version: registration.version };
   } catch {
@@ -199,6 +218,10 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   if (existingContents !== null && existingContents !== ownedContents) {
     throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
   }
+  if (platform === 'win32' && previous) {
+    await run('powershell.exe', encodedPowerShell(windowsTaskLookup(previous)
+      + `if ($null -ne $task) { ${windowsTaskGuard(previous, options.home)} }`));
+  }
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   await mkdir(dirname(registrationPath(options.home)), { recursive: true, mode: 0o700 });
   await writeFile(destination, platform === 'linux'
@@ -245,10 +268,28 @@ export async function disableRelayAutostart(options: RelayAutostartOptions): Pro
   } else {
     if (registration.taskName !== taskName(options.home)) throw new Error('Relay autostart task identity is invalid.');
     await run('powershell.exe', encodedPowerShell(
-      `Unregister-ScheduledTask -TaskName ${psLiteral(registration.taskName)} -Confirm:$false -ErrorAction SilentlyContinue`,
+      windowsTaskLookup(registration) + `if ($null -ne $task) { ${windowsTaskGuard(registration, options.home)} `
+      + `Unregister-ScheduledTask -TaskName ${psLiteral(registration.taskName)} -Confirm:$false }`,
     ));
     await rm(scriptPath(options.home), { force: true });
   }
   await rm(registrationPath(options.home), { force: true });
   return { state: 'disabled', backend: registration.backend, version: registration.version };
+}
+
+export async function startRelayAutostart(options: RelayAutostartOptions) {
+  const registration = await readRegistration(options.home);
+  const status = await relayAutostartStatus(options);
+  if (!registration || status.state !== 'enabled') {
+    throw new Error(`autostart_conflict: an enabled owned startup entry is required (${status.reason ?? status.state}).`);
+  }
+  const run = options.run || defaultRunner;
+  if (registration.backend === 'systemd-user') {
+    await run('systemctl', ['--user', 'start', UNIT_NAME]);
+  } else {
+    await run('powershell.exe', encodedPowerShell(windowsTaskLookup(registration)
+      + windowsTaskGuard(registration, options.home)
+      + `Start-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')}`));
+  }
+  return { state: 'start_requested' as const, backend: registration.backend, version: registration.version };
 }

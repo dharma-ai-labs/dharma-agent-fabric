@@ -60,6 +60,21 @@ for (const override of [{ token: 'never-persist' }, { key: 'foreign' }, { pid: 0
 }
 
 const validateDeviceCapabilities = ajv.getSchema('https://schemas.dharma-ai.io/device-capabilities/v1');
+const validateWatchControl = ajv.getSchema('https://schemas.dharma-ai.io/demo-watch-control/v1');
+const watchControl = { schema: 'dharma.demo-watch-control/v1', ok: true, version: '0.2.103',
+  stage: 'demo_watch_cycle_observed', key: 'a'.repeat(64), registered: true, supervisor: 'running',
+  autostart: 'enabled', observation: demoHealth, fullWorkflowReady: false };
+if (!validateWatchControl?.(watchControl)
+  || !validateWatchControl({ ...watchControl, stage: 'demo_watch_pending', observation: null })
+  || !validateWatchControl({ ...watchControl, stage: 'demo_watch_disabled', registered: false, observation: null })) {
+  throw new Error(`Demo watch control receipt is invalid: ${ajv.errorsText(validateWatchControl?.errors)}`);
+}
+for (const override of [{ grant: 'never-persist' }, { fullWorkflowReady: true },
+  { stage: 'fully_ready' }, { registered: false }, { supervisor: 'stopped' }]) {
+  if (validateWatchControl({ ...watchControl, ...override })) {
+    throw new Error('Demo watch control accepted credentials, unsupported readiness, or a stale process observation.');
+  }
+}
 const deviceCapabilities = {
   schema: 'dharma.device-capabilities/v1',
   deviceId: 'device_schema_test',

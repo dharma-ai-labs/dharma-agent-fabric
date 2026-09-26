@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
+  startRelayAutostart,
 } from './relayAutostart.js';
 
 test('Linux startup invokes only the pinned launcher and canonical policy', () => {
@@ -227,4 +228,48 @@ test('invalid registration is unavailable and cannot be silently replaced or rem
   await assert.rejects(enableRelayAutostart(options), /autostart_receipt_invalid/);
   await assert.rejects(disableRelayAutostart(options), /autostart_receipt_invalid/);
   assert.equal(await readFile(receiptPath, 'utf8'), '{malformed-private');
+});
+
+test('start invokes the single owned service and refuses a modified startup file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-start-owned-'));
+  const calls: string[][] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
+    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
+    run: async (_file: string, args: string[]) => {
+      calls.push(args); return { stdout: args.includes('is-enabled') ? 'enabled\n' : '' };
+    } };
+  await enableRelayAutostart(options);
+  assert.equal((await startRelayAutostart(options)).state, 'start_requested');
+  assert.deepEqual(calls.at(-1), ['--user', 'start', 'dharma-agent-fabric.service']);
+  await writeFile(join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service'), 'foreign');
+  calls.length = 0;
+  await assert.rejects(startRelayAutostart(options), /autostart_conflict/);
+  assert.deepEqual(calls, []);
+});
+
+test('Windows owned operations guard the exact action, arguments, workspace and current user', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-start-task-owned-'));
+  const commands: string[] = [];
+  const options = { platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
+    workspace: 'C:\\Demo Repo', launcher: 'C:\\Demo Repo\\dharma.cmd', policy: null, version: '0.2.103',
+    run: async (_file: string, args: string[]) => {
+      const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
+      commands.push(decoded);
+      return { stdout: decoded.includes("'exists'") ? 'absent\n'
+        : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
+    } };
+  await enableRelayAutostart(options);
+  await enableRelayAutostart(options);
+  await startRelayAutostart(options);
+  await disableRelayAutostart(options);
+  for (const verb of ['Start-ScheduledTask', 'Unregister-ScheduledTask']) {
+    const command = commands.find(value => value.includes(verb))!;
+    assert.match(command, /Actions/);
+    assert.match(command, /Arguments/);
+    assert.match(command, /WorkingDirectory/);
+    assert.match(command, /Principal.UserId/);
+    assert.match(command, /WindowsIdentity/);
+    assert.match(command, /autostart_conflict/);
+    assert.ok(command.indexOf('autostart_conflict') < command.indexOf(verb));
+  }
 });
