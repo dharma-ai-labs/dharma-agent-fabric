@@ -11,8 +11,10 @@ import { getActiveSkillBundleAuthorization, installSkillBundle, rollbackUnconfir
 import { loadDemoSigningTrust, scopePath, verifyDemoDevice, type DemoDeviceScope } from './demoEnrollment.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepositoryPackageSnapshot,
+  type RepositoryPackageInventoryInput,
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
+import { initializeRepositoryKnowledge, REPOSITORY_KNOWLEDGE_CATALOG_PATH,
+  REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH } from './repositoryKnowledge.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { pollRepositoryCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateTransport } from './repositoryCandidateSync.js';
@@ -228,9 +230,6 @@ async function installActiveDemoPackage(input: {
     });
   if (!signingKey) throw new Error('Demo release is not signed by a currently trusted organization key.');
   const releaseId = String(published.releaseId);
-  if (descriptor.policyHash !== input.authorization.policyHash) {
-    return { policyTransition: true as const, releaseId, policyHash: descriptor.policyHash };
-  }
   const delivery = await receiveRepositoryPackageDelivery({
     envelope, bundle, serverPublicKey: signingKey,
     scope: { organizationId: scope.organizationId, repositoryBindingId: scope.repositoryId,
@@ -245,6 +244,18 @@ async function installActiveDemoPackage(input: {
       return response.chunk;
     },
   });
+  if (descriptor.policyHash !== input.authorization.policyHash) {
+    // Retain verified history for a replacement candidate, never activate stale authority.
+    delivery.assertCurrent();
+    const bytes = (path: string) => {
+      const file = delivery.files.find(row => row.path === path);
+      if (!file) throw new Error('Demo policy transition is missing its verified knowledge.');
+      return Buffer.from(file.contentBase64, 'base64');
+    };
+    return { policyTransition: true as const, releaseId, policyHash: descriptor.policyHash,
+      retainedKnowledge: { catalogBytes: bytes(REPOSITORY_KNOWLEDGE_CATALOG_PATH),
+        manifestBytes: bytes(REPOSITORY_KNOWLEDGE_RELEASE_MANIFEST_PATH) } };
+  }
   const installerWorkspaceId = scope.repositoryId;
   const config = { hqUrl: normalizeHqUrl(scope.hqUrl), organizationId: scope.organizationId,
     deviceId: trust.deviceId };
@@ -379,6 +390,7 @@ async function syncPublishedDemoSource(input: {
   outboxRoot: string;
   priorPolicyHash?: string;
   publishedAuthorization?: ReturnType<typeof validateRepositorySourceAuthorization>;
+  retainedKnowledge?: RepositoryPackageInventoryInput['retainedKnowledge'];
 }, deps: DemoPackageDependencies) {
   const { scope } = input;
   const baselineScope = { organizationId: scope.organizationId, repositoryId: scope.repositoryId,
@@ -386,7 +398,7 @@ async function syncPublishedDemoSource(input: {
   const snapshot = await inventoryRepositoryPackage({ workspace: input.workspace,
     organizationId: scope.organizationId, workspaceId: input.workspaceId,
     repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId,
-    sourceAuthorization: input.authorization });
+    sourceAuthorization: input.authorization, retainedKnowledge: input.retainedKnowledge });
   const fingerprint = snapshot.manifest.sourceFingerprint;
   if (!fingerprint) throw new Error('Demo source inventory has no fingerprint.');
   let baseline = await readDemoSourceBaseline(scope.stateRoot, baselineScope,
@@ -593,15 +605,12 @@ export async function demoRepositoryPackage(input: {
       if (!policyCoversPrior(previous, sourceAuthorization)) {
         throw new Error('Demo current source policy narrows the active release policy; suspend or replace the release before synchronization.');
       }
-      if (ownership !== 'signed') return { ok: true,
-        stage: 'demo_repository_package_policy_transition', repositoryId: scope.repositoryId,
-        repositoryPackageState: 'published', candidate: null, ready: false,
-        activationState: 'signed_delivery_pending' };
       const sourceSync = await syncPublishedDemoSource({ scope, workspace: input.workspace,
         workspaceId: view.workspaceId, authorization: sourceAuthorization,
         publishedSourceFingerprint: view.publishedSourceFingerprint,
         activeReleaseId: view.activeReleaseId, candidateTransport, outboxRoot,
-        priorPolicyHash: previous.policyHash, publishedAuthorization: previous }, deps);
+        priorPolicyHash: previous.policyHash, publishedAuthorization: previous,
+        retainedKnowledge: ownership === 'signed' ? undefined : installed.retainedKnowledge }, deps);
       return { ok: true, stage: 'demo_repository_package_policy_transition',
         repositoryId: scope.repositoryId, repositoryPackageState: 'published',
         candidate: null, sourceSync, ready: false, activationState: 'candidate_pending' };
