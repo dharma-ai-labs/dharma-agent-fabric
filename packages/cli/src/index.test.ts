@@ -393,6 +393,42 @@ test('repository launchers stay version-pinned without depending on the npm-exec
   assert.equal(launcher.windows.includes('node_modules'), false);
 });
 
+test('managed launchers pin the verified runtime directory without importing credentials', () => {
+  const linux = stableRepositoryLauncherContents('0.2.103', {
+    platform: 'linux', nodeDirectory: "/home/Agent's Runtime/bin",
+  });
+  assert.match(linux.shell, /export PATH='\/home\/Agent'\\''s Runtime\/bin':"\$PATH"/);
+  assert.match(linux.shell, /agent-fabric@0\.2\.103/);
+  const windows = stableRepositoryLauncherContents('0.2.103', {
+    platform: 'win32', nodeDirectory: 'C:\\Runtime % folder\\node',
+  });
+  assert.match(windows.windows, /setlocal DisableDelayedExpansion/);
+  assert.match(windows.windows, /set "PATH=C:\\Runtime %% folder\\node;%PATH%"/);
+  assert.doesNotMatch(linux.shell + windows.windows, /--grant|token|credential/);
+  for (const nodeDirectory of ['relative/bin', '/tmp/node\ncommand', '/tmp/node\0command']) {
+    assert.throws(() => stableRepositoryLauncherContents('0.2.103', { platform: 'linux', nodeDirectory }), /runtime/i);
+  }
+  assert.throws(() => stableRepositoryLauncherContents('0.2.103;command'), /version/i);
+});
+
+test('managed POSIX launcher selects its pinned npm even under a minimal startup PATH', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "dharma-launcher's-runtime-"));
+  const bin = join(root, 'bin');
+  await mkdir(bin);
+  await writeFile(join(bin, 'npm'), '#!/bin/sh\nprintf "%s\\n" "verified-runtime" "$@"\n', { mode: 0o700 });
+  const launcher = join(root, 'dharma');
+  await writeFile(launcher, stableRepositoryLauncherContents('0.2.103', {
+    platform: 'linux', nodeDirectory: bin,
+  }).shell, { mode: 0o700 });
+  const { stdout } = await execFileAsync('/bin/sh', [launcher, 'relay', 'supervise', '--demo-only'], {
+    env: { PATH: '/usr/bin:/bin' },
+  });
+  assert.deepEqual(stdout.trim().split('\n'), ['verified-runtime', 'exec', '--yes', '--',
+    '@dharma-ai-labs/agent-fabric@0.2.103', 'relay', 'supervise', '--demo-only']);
+});
+
 test('bootstrap validates stable repository identity before grant redemption', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-bootstrap-preflight-'));
   await execFileAsync('git', ['init', root]);

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { relayRestartDelayMs, superviseRelay } from './relaySupervisor.js';
 import { listDemoWatchRegistrations, registerDemoWatch } from './demoWatchRegistry.js';
+import { readDemoWatchHealth } from './demoWatchHealth.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,11 +34,16 @@ test('Demo-only supervisor consumes registrations without a standard device or s
   let observations = '';
   child.stderr!.on('data', (chunk: Buffer) => { observations = (observations + chunk.toString()).slice(-4096); });
   try {
-    let binding: { policyPath: null; demoWatches: boolean; version: string } | null = null;
+    let binding: { pid: number; policyPath: null; demoWatches: boolean; version: string } | null = null;
+    let health = null;
     for (let attempt = 0; attempt < 50; attempt += 1) {
       binding = await readFile(join(home, 'relay', 'supervisor-workspace.json'), 'utf8')
         .then(value => JSON.parse(value)).catch(() => null);
-      if (binding && observations.includes('demo_watch_cycle')) break;
+      if (binding && observations.includes('demo_watch_cycle')) {
+        const observation = JSON.parse(observations.trim());
+        health = await readDemoWatchHealth(home, observation.key, binding);
+        if (health) break;
+      }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(binding?.policyPath, null);
@@ -48,6 +54,9 @@ test('Demo-only supervisor consumes registrations without a standard device or s
     assert.equal(observation.state, 'failed');
     assert.equal(observation.code, 'demo_watch_cycle_failed');
     assert.equal(typeof observation.key, 'string');
+    assert.equal(health?.pid, child.pid);
+    assert.equal(health?.state, observation.state);
+    assert.equal(health?.code, observation.code);
     assert.equal(observations.includes(home), false);
     assert.equal(observations.includes('device.json'), false);
     await assert.rejects(readFile(join(home, 'relay', 'relay.pid')), { code: 'ENOENT' });
@@ -55,6 +64,8 @@ test('Demo-only supervisor consumes registrations without a standard device or s
     assert.deepEqual(JSON.parse(stdout), { ok: true, stopped: true, vaultPreserved: true });
     await assert.rejects(readFile(join(home, 'relay', 'supervisor-workspace.json')), { code: 'ENOENT' });
     assert.equal((await listDemoWatchRegistrations(home))[0]?.normalizedRepository, 'github.com/example/repo');
+    assert.equal(await readDemoWatchHealth(home, observation.key,
+      { pid: child.pid! + 1, version: binding!.version }), null);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
     await rm(root, { recursive: true, force: true });

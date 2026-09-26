@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/relay-autostart/v2",
+  "title": "Demo-only local relay startup ownership receipt",
+  "description": "Credential-free local OS startup configuration, not enrollment or repository authorization. Existing standard registrations retain v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "mode", "backend", "launcher", "policy", "workspace", "version", "taskName"],
+  "properties": {
+    "schema": { "const": "dharma.relay-autostart/v2" },
+    "mode": { "const": "demo-only" },
+    "backend": { "enum": ["systemd-user", "windows-task"] },
+    "launcher": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\r\\n\\u0000]+$" },
+    "policy": { "type": "null" },
+    "workspace": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\r\\n\\u0000]+$" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$" },
+    "taskName": { "type": ["string", "null"] }
+  },
+  "oneOf": [
+    { "properties": { "backend": { "const": "systemd-user" }, "taskName": { "type": "null" } } },
+    { "properties": { "backend": { "const": "windows-task" }, "taskName": { "type": "string", "pattern": "^DharmaAgentFabric-[a-f0-9]{12}$" } } }
+  ]
+}

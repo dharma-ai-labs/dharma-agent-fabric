@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const UNIT_NAME = 'dharma-agent-fabric.service';
+const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 
 type Runner = (file: string, args: string[]) => Promise<{ stdout: string }>;
 
@@ -17,15 +18,16 @@ export interface RelayAutostartOptions {
   run?: Runner;
 }
 
-interface Registration {
-  schema: 'dharma.relay-autostart/v1';
+interface RegistrationFields {
   backend: 'systemd-user' | 'windows-task';
   launcher: string;
-  policy: string;
   workspace: string;
   version: string;
   taskName: string | null;
 }
+
+type Registration = RegistrationFields & ({ schema: 'dharma.relay-autostart/v1'; policy: string }
+  | { schema: 'dharma.relay-autostart/v2'; mode: 'demo-only'; policy: null });
 
 export type RelayAutostartState = {
   state: 'enabled' | 'disabled' | 'unavailable' | 'unsupported';
@@ -40,7 +42,9 @@ const defaultRunner: Runner = async (file, args) => {
 };
 
 function safeLine(value: string) {
-  if (!value || /[\r\n\0]/.test(value)) throw new Error('Autostart paths must be nonempty single lines.');
+  if (!value || value.length > 4096 || /[\r\n\0]/.test(value)) {
+    throw new Error('Autostart paths must be bounded nonempty single lines.');
+  }
   return value;
 }
 
@@ -52,19 +56,21 @@ function psLiteral(value: string) {
   return `'${safeLine(value).replace(/'/g, "''")}'`;
 }
 
-export function linuxRelayUnit(launcher: string, policy: string, workspace: string, home?: string) {
+export function linuxRelayUnit(launcher: string, policy: string | null, workspace: string, home?: string) {
   return `[Unit]\nDescription=Dharma Agent Fabric relay\nAfter=network-online.target\nWants=network-online.target\n\n`
     + `[Service]\nType=simple\nWorkingDirectory=${systemdValue(workspace)}\n`
     + (home ? `Environment=${systemdValue(`DHARMA_HOME=${home}`)}\n` : '')
-    + `ExecStart=${systemdValue(launcher)} relay supervise --policy ${systemdValue(policy)}\n`
+    + `ExecStart=${systemdValue(launcher)} relay supervise `
+    + (policy === null ? '--demo-only\n' : `--policy ${systemdValue(policy)}\n`)
     + `Restart=on-failure\nRestartSec=10s\nTimeoutStopSec=30s\n\n`
     + `[Install]\nWantedBy=default.target\n`;
 }
 
-export function windowsRelayStartupScript(launcher: string, policy: string, home?: string) {
+export function windowsRelayStartupScript(launcher: string, policy: string | null, home?: string) {
   return `$ErrorActionPreference = 'Stop'\r\n`
     + (home ? `$env:DHARMA_HOME = ${psLiteral(home)}\r\n` : '')
-    + `& ${psLiteral(launcher)} relay supervise --policy ${psLiteral(policy)}\r\n`
+    + `& ${psLiteral(launcher)} relay supervise `
+    + (policy === null ? '--demo-only\r\n' : `--policy ${psLiteral(policy)}\r\n`)
     + `exit $LASTEXITCODE\r\n`;
 }
 
@@ -82,20 +88,56 @@ function taskName(home: string) {
 async function readRegistration(home: string): Promise<Registration | null> {
   try {
     const value = JSON.parse(await readFile(registrationPath(home), 'utf8')) as Registration;
-    if (value.schema !== 'dharma.relay-autostart/v1'
-      || !['systemd-user', 'windows-task'].includes(value.backend)) return null;
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || !['systemd-user', 'windows-task'].includes(value.backend)
+      || typeof value.version !== 'string' || !VERSION.test(value.version)
+      || typeof value.launcher !== 'string' || typeof value.workspace !== 'string'
+      || (value.backend === 'windows-task' ? value.taskName !== taskName(home) : value.taskName !== null)) {
+      throw new Error('Invalid startup receipt.');
+    }
+    const keys = ['schema', 'backend', 'launcher', 'policy', 'workspace', 'version', 'taskName'];
+    if (value.schema === 'dharma.relay-autostart/v1') {
+      if (typeof value.policy !== 'string') throw new Error('Invalid startup receipt.');
+      safeLine(value.policy);
+    } else if (value.schema === 'dharma.relay-autostart/v2') {
+      if (value.policy !== null || value.mode !== 'demo-only') throw new Error('Invalid startup receipt.');
+      keys.push('mode');
+    } else throw new Error('Invalid startup receipt.');
+    if (Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) {
+      throw new Error('Invalid startup receipt.');
+    }
+    safeLine(value.launcher);
+    safeLine(value.workspace);
     return value;
-  } catch { return null; }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new Error('autostart_receipt_invalid: startup ownership could not be verified.');
+  }
+}
+
+async function ownsStartupFile(options: RelayAutostartOptions, registration: Registration) {
+  const path = registration.backend === 'systemd-user'
+    ? unitPath(options.userHome || homedir()) : scriptPath(options.home);
+  const expected = registration.backend === 'systemd-user'
+    ? linuxRelayUnit(registration.launcher, registration.policy, registration.workspace, options.home)
+    : windowsRelayStartupScript(registration.launcher, registration.policy, options.home);
+  return await readFile(path, 'utf8').catch(() => null) === expected;
 }
 
 export async function relayAutostartStatus(options: RelayAutostartOptions): Promise<RelayAutostartState> {
-  const registration = await readRegistration(options.home);
+  let registration;
+  try { registration = await readRegistration(options.home); }
+  catch { return { state: 'unavailable', backend: null, reason: 'autostart_receipt_invalid' }; }
   if (!registration) return { state: 'disabled', backend: null };
   const platform = options.platform || process.platform;
   const run = options.run || defaultRunner;
   if ((platform === 'linux' && registration.backend !== 'systemd-user')
     || (platform === 'win32' && registration.backend !== 'windows-task')) {
     return { state: 'unavailable', backend: registration.backend, version: registration.version, reason: 'platform_mismatch' };
+  }
+  if (!await ownsStartupFile(options, registration)) {
+    return { state: 'unavailable', backend: registration.backend, version: registration.version,
+      reason: 'autostart_conflict' };
   }
   try {
     const result = registration.backend === 'systemd-user'
@@ -113,23 +155,28 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
 }
 
 export async function enableRelayAutostart(options: RelayAutostartOptions & {
-  workspace: string; launcher: string; policy: string; version: string;
+  workspace: string; launcher: string; policy: string | null; version: string;
 }): Promise<RelayAutostartState> {
   const platform = options.platform || process.platform;
   if (platform !== 'linux' && platform !== 'win32') {
     throw new Error(`Relay autostart is unsupported on ${platform}.`);
   }
+  if (!VERSION.test(options.version)) throw new Error('Autostart version must be a bounded release version.');
   const userHome = options.userHome || homedir();
   const run = options.run || defaultRunner;
   const previous = await readRegistration(options.home);
   if (previous && previous.backend !== (platform === 'linux' ? 'systemd-user' : 'windows-task')) {
     throw new Error('Existing relay autostart belongs to a different operating system.');
   }
+  // Demo scopes share a standard service when one already owns this user's startup entry.
+  const policy = options.policy ?? previous?.policy ?? null;
+  const workspace = options.policy === null && previous?.policy ? previous.workspace : options.workspace;
   const registration: Registration = {
-    schema: 'dharma.relay-autostart/v1',
+    ...(policy === null ? { schema: 'dharma.relay-autostart/v2' as const, mode: 'demo-only' as const, policy: null }
+      : { schema: 'dharma.relay-autostart/v1' as const, policy: safeLine(policy) }),
     backend: platform === 'linux' ? 'systemd-user' : 'windows-task',
-    launcher: safeLine(options.launcher), policy: safeLine(options.policy),
-    workspace: safeLine(options.workspace), version: options.version,
+    launcher: safeLine(options.launcher),
+    workspace: safeLine(workspace), version: options.version,
     taskName: platform === 'win32' ? taskName(options.home) : null,
   };
   if (platform === 'win32' && !previous) {
@@ -155,8 +202,8 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   await mkdir(dirname(registrationPath(options.home)), { recursive: true, mode: 0o700 });
   await writeFile(destination, platform === 'linux'
-    ? linuxRelayUnit(options.launcher, options.policy, options.workspace, options.home)
-    : windowsRelayStartupScript(options.launcher, options.policy, options.home), { mode: 0o600 });
+    ? linuxRelayUnit(registration.launcher, registration.policy, registration.workspace, options.home)
+    : windowsRelayStartupScript(registration.launcher, registration.policy, options.home), { mode: 0o600 });
   await writeFile(registrationPath(options.home), `${JSON.stringify(registration, null, 2)}\n`, { mode: 0o600 });
   if (platform === 'linux') {
     await run('systemctl', ['--user', 'daemon-reload']);
@@ -166,7 +213,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     const command = `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; `
       + `$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
       + `-Argument ${psLiteral(`-NoProfile -NonInteractive -File "${script}"`)} `
-      + `-WorkingDirectory ${psLiteral(options.workspace)}; `
+      + `-WorkingDirectory ${psLiteral(registration.workspace)}; `
       + `$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity; `
       + `$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited; `
       + `$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -183,6 +230,13 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
 export async function disableRelayAutostart(options: RelayAutostartOptions): Promise<RelayAutostartState> {
   const registration = await readRegistration(options.home);
   if (!registration) return { state: 'disabled', backend: null };
+  const platform = options.platform || process.platform;
+  if (platform !== (registration.backend === 'systemd-user' ? 'linux' : 'win32')) {
+    throw new Error('autostart_conflict: startup registration belongs to a different operating system.');
+  }
+  if (!await ownsStartupFile(options, registration)) {
+    throw new Error('autostart_conflict: the startup file no longer matches its ownership receipt.');
+  }
   const run = options.run || defaultRunner;
   if (registration.backend === 'systemd-user') {
     await run('systemctl', ['--user', 'disable', UNIT_NAME]);

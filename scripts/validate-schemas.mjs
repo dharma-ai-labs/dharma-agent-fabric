@@ -21,9 +21,41 @@ const demoWatch = { schema: 'dharma.demo-watch/v1', hqUrl: 'https://demo.example
 if (!validateDemoWatch?.(demoWatch)) {
   throw new Error(`Demo watch registration is invalid: ${ajv.errorsText(validateDemoWatch?.errors)}`);
 }
+
+const validateDemoAutostart = ajv.getSchema('https://schemas.dharma-ai.io/relay-autostart/v2');
+const demoAutostart = { schema: 'dharma.relay-autostart/v2', mode: 'demo-only', backend: 'systemd-user',
+  launcher: '/example/bin/dharma', policy: null, workspace: '/example/repository', version: '0.2.103', taskName: null };
+if (!validateDemoAutostart?.(demoAutostart)
+  || !validateDemoAutostart({ ...demoAutostart, backend: 'windows-task', taskName: 'DharmaAgentFabric-012345abcdef' })) {
+  throw new Error(`Demo startup registration is invalid: ${ajv.errorsText(validateDemoAutostart?.errors)}`);
+}
+for (const override of [{ grant: 'never-persist' }, { policy: '/unauthorized-policy' },
+  { mode: 'standard' }, { launcher: '/bin/dharma\ncommand' },
+  { backend: 'windows-task', taskName: null }, { backend: 'systemd-user', taskName: 'DharmaAgentFabric-012345abcdef' }]) {
+  if (validateDemoAutostart({ ...demoAutostart, ...override })) {
+    throw new Error('Demo startup schema accepted credentials, a mismatched mode/backend, or multiline path.');
+  }
+}
 for (const override of [{ grant: 'never-persist' }, { provider: 'shell' }, { workspace: '/repo\ncommand' }]) {
   if (validateDemoWatch({ ...demoWatch, ...override })) {
     throw new Error('Demo watch schema accepted a credential, provider, or multiline path.');
+  }
+}
+
+const validateDemoHealth = ajv.getSchema('https://schemas.dharma-ai.io/demo-watch-health/v1');
+const demoHealth = { schema: 'dharma.demo-watch-health/v1', key: 'a'.repeat(64), pid: 123,
+  version: '0.2.103', observedAt: '2026-09-26T03:00:00.000Z', state: 'completed',
+  stage: 'demo_repository_package_installed', sourceState: 'unchanged', code: null };
+if (!validateDemoHealth?.(demoHealth)
+  || !validateDemoHealth({ ...demoHealth, state: 'timed_out', stage: null, sourceState: null,
+    code: 'demo_watch_cycle_timeout' })) {
+  throw new Error(`Demo health receipt is invalid: ${ajv.errorsText(validateDemoHealth?.errors)}`);
+}
+for (const override of [{ token: 'never-persist' }, { key: 'foreign' }, { pid: 0 },
+  { observedAt: '2026-09-26' }, { state: 'ready' }, { stage: 'private content' },
+  { code: 'failure_on_completed' }, { state: 'failed', stage: null, sourceState: null, code: null }]) {
+  if (validateDemoHealth({ ...demoHealth, ...override })) {
+    throw new Error('Demo health schema accepted credentials, malformed state, or unbounded content.');
   }
 }
 

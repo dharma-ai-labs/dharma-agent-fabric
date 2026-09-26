@@ -4,7 +4,7 @@ import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:
 import { realpathSync } from 'node:fs';
 import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
@@ -66,6 +66,7 @@ import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { runDemoWatch } from './demoWatch.js';
 import { runDemoSupervisor } from './demoSupervisor.js';
 import { listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
+import { createDemoWatchHealthRecorder } from './demoWatchHealth.js';
 
 const VERSION = '0.2.103';
 const USAGE = CLI_USAGE;
@@ -1521,11 +1522,30 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
   return { changed: true, backupId, previousOrganizationId: existing.organizationId };
 }
 
-export function stableRepositoryLauncherContents(version = VERSION) {
+export function stableRepositoryLauncherContents(version = VERSION,
+  runtime?: { platform: NodeJS.Platform; nodeDirectory: string }) {
+  if (!/^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version)) {
+    throw new Error('Managed launcher version is invalid.');
+  }
+  let shellEnvironment = '';
+  let windowsEnvironment = '';
+  if (runtime) {
+    const directory = runtime.nodeDirectory;
+    if (!directory || directory.length > 4096 || /[\r\n\0]/.test(directory)
+      || !(runtime.platform === 'win32' ? win32 : posix).isAbsolute(directory)) {
+      throw new Error('Managed launcher runtime directory is invalid.');
+    }
+    if (runtime.platform === 'win32') {
+      if (directory.includes('"')) throw new Error('Managed launcher runtime directory is invalid.');
+      windowsEnvironment = `setlocal DisableDelayedExpansion\r\nset "PATH=${directory.replace(/%/g, '%%')};%PATH%"\r\n`;
+    } else {
+      shellEnvironment = `export PATH='${directory.replace(/'/g, "'\\''") }':"$PATH"\n`;
+    }
+  }
   const invocation = `npm exec --yes -- @dharma-ai-labs/agent-fabric@${version}`;
   return {
-    shell: `#!/bin/sh\nexec ${invocation} "$@"\n`,
-    windows: `@echo off\r\n${invocation} %*\r\n`,
+    shell: `#!/bin/sh\n${shellEnvironment}exec ${invocation} "$@"\n`,
+    windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n`,
   };
 }
 
@@ -1534,7 +1554,8 @@ async function installStableRepositoryLauncher(workspace: string) {
   await mkdir(launcherRoot, { recursive: true, mode: 0o700 });
   const shellPath = resolve(launcherRoot, 'dharma');
   const cmdPath = resolve(launcherRoot, 'dharma.cmd');
-  const contents = stableRepositoryLauncherContents();
+  const contents = stableRepositoryLauncherContents(VERSION,
+    { platform: process.platform, nodeDirectory: dirname(process.execPath) });
   await writeFile(shellPath, contents.shell, { mode: 0o700 });
   await chmod(shellPath, 0o700);
   await writeFile(cmdPath, contents.windows, { mode: 0o600 });
@@ -1659,12 +1680,20 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   const services: Promise<unknown>[] = [];
+  const health = createDemoWatchHealthRecorder({ home: dharmaHome(), pid: process.pid, version: VERSION });
   try {
     await writeJsonAtomic(bindingPath, { pid: process.pid, workspaceId: selectedWorkspace?.workspaceId ?? null,
       policyPath, demoWatches: true, version: VERSION });
     const demo = runDemoSupervisor({ signal: controller.signal,
-      list: () => listDemoWatchRegistrations(dharmaHome()), cycle: supervisedDemoCycle,
-      onObservation: observation => process.stderr.write(`${JSON.stringify({ event: 'demo_watch_cycle', ...observation })}\n`),
+      list: () => listDemoWatchRegistrations(dharmaHome()), cycle: (registration, signal) => {
+        if (!health.available()) throw Object.assign(new Error('Demo watch health storage is unavailable.'),
+          { code: 'demo_watch_health_unavailable' });
+        return supervisedDemoCycle(registration, signal);
+      },
+      onObservation: observation => {
+        health.record(observation);
+        process.stderr.write(`${JSON.stringify({ event: 'demo_watch_cycle', ...observation })}\n`);
+      },
     });
     services.push(demo);
     const standard = policyPath ? superviseRelay({
@@ -1681,6 +1710,7 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
   } finally {
     controller.abort();
     await Promise.allSettled(services);
+    await health.drain();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     const binding = await readFile(bindingPath, 'utf8')
