@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/lifecycle-event/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "eventId",
+    "revision",
+    "organizationId",
+    "repositoryBindingId",
+    "workspaceId",
+    "sourceEndpointId",
+    "targetEndpointId",
+    "targetWorkspaceId",
+    "sourceTaskId",
+    "workflow",
+    "boundary",
+    "sourceCommit",
+    "sourceHash",
+    "occurredAt",
+    "expiresAt",
+    "intent",
+    "summary",
+    "missing",
+    "evidenceReferences"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.lifecycle-event/v1"
+    },
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "organizationId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$(?![\\s\\S])"
+    },
+    "repositoryBindingId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "workspaceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sourceEndpointId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "targetEndpointId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "targetWorkspaceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sourceTaskId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "workflow": {
+      "enum": [
+        "coding",
+        "creative"
+      ]
+    },
+    "boundary": {
+      "enum": [
+        "reviewed_plan_to_implementation",
+        "implementation_to_review",
+        "approved_brief_to_draft",
+        "draft_to_review"
+      ]
+    },
+    "sourceCommit": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "sourceHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "missing": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "evidenceReferences": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "trajectoryId",
+          "revision",
+          "capsuleHash"
+        ],
+        "properties": {
+          "trajectoryId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "capsuleHash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "workflow": {
+            "const": "coding"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "boundary": {
+            "enum": [
+              "reviewed_plan_to_implementation",
+              "implementation_to_review"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "boundary": {
+            "enum": [
+              "approved_brief_to_draft",
+              "draft_to_review"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
