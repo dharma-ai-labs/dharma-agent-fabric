@@ -11,6 +11,7 @@ lines.on('line', line => {
   if (message.method === 'initialize') {
     process.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: 'test' } }) + '\\n');
   } else if (message.method === 'ping') {
+    if (mode === 'exit') process.exit(0);
     if (mode === 'timeout') return;
     if (mode === 'oversized') {
       process.stdout.write('x'.repeat(2_048));
@@ -74,6 +75,12 @@ test('stdio transport fails closed on oversized frames and provider-originated r
 test('stdio transport bounds a stalled provider request', async () => {
   const transport = await open('timeout', { requestTimeoutMs: 50 });
   try { await assert.rejects(transport.request('ping', {}), /codex_app_server_request_timeout:ping/); }
+  finally { await transport.close(); }
+});
+
+test('stdio transport fails a request when the provider exits', async () => {
+  const transport = await open('exit');
+  try { await assert.rejects(transport.request('ping', {}), /codex_app_server_closed|codex_app_server_write_failed/); }
   finally { await transport.close(); }
 });
 

@@ -115,6 +115,9 @@ export async function openCodexAppServerTransport(input: {
     }
     if (buffer.length > maximumFrameBytes) fail('codex_app_server_frame_too_large');
   });
+  child.stdin.on('error', () => fail('codex_app_server_write_failed'));
+  child.stdout.on('error', () => fail('codex_app_server_read_failed'));
+  child.stderr.on('error', () => fail('codex_app_server_stderr_failed'));
   child.on('error', () => fail('codex_app_server_spawn_failed'));
   child.on('close', () => fail('codex_app_server_closed'));
 
