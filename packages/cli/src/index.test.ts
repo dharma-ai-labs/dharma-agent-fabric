@@ -1109,10 +1109,15 @@ test('status reports verified relay state and hides local identifiers by default
     await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
       at: acknowledgedAt, workspaceId: 'workspace_private', version: '0.2.103',
     }));
+    const stale = await run(['status']) as Record<string, unknown>;
+    assert.deepEqual(stale.reconnect, { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null });
+    await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
+      at: acknowledgedAt, workspaceId: 'workspace_private', version: version.version,
+    }));
     const acknowledged = await run(['status']) as Record<string, unknown>;
     assert.deepEqual(acknowledged.reconnect, { state: 'acknowledged_recently', lastSuccessfulPollAt: acknowledgedAt });
     await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
-      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: '0.2.103',
+      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: version.version,
     }));
     const foreign = await run(['status']) as Record<string, unknown>;
     assert.deepEqual(foreign.reconnect, { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null });
@@ -2081,13 +2086,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.103');
+      assert.equal(version, '0.2.104');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.103',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.104',
   });
 });
 
