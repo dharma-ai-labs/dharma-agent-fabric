@@ -13,7 +13,7 @@ const binding: SessionBindingScope = {
   organizationId: 'org_test', repositoryBindingId: '40000000-0000-4000-8000-000000000001',
   workspaceId: '40000000-0000-4000-8000-000000000002',
   endpointId: '40000000-0000-4000-8000-000000000003',
-  memberId: '40000000-0000-4000-8000-000000000004',
+  membershipId: '40000000-0000-4000-8000-000000000004',
   deviceId: '40000000-0000-4000-8000-000000000005',
   bindingId: '40000000-0000-4000-8000-000000000006',
   provider: 'codex', expiresAt: '2026-09-26T02:00:00.000Z', maximumProviderCostCents: 25,
@@ -29,12 +29,12 @@ function signedQuestion(change: Record<string, unknown> = {}) {
     source: {
       workspaceId: '40000000-0000-4000-8000-000000000012',
       endpointId: '40000000-0000-4000-8000-000000000013',
-      memberId: '40000000-0000-4000-8000-000000000014',
+      membershipId: '40000000-0000-4000-8000-000000000014',
       deviceId: '40000000-0000-4000-8000-000000000015',
     },
     target: {
       workspaceId: binding.workspaceId, endpointId: binding.endpointId,
-      memberId: binding.memberId, deviceId: binding.deviceId,
+      membershipId: binding.membershipId, deviceId: binding.deviceId,
       bindingId: binding.bindingId, provider: binding.provider,
     },
     category: 'code-review', question: 'Which signed catalog applies to this repository?',
@@ -76,7 +76,7 @@ test('session question rejects foreign scope and forged provider session fields'
     assert.deepEqual(await verifySessionQuestionForBinding(question, binding, verifier(), new Date('2026-09-26T00:01:00.000Z')),
       { ok: false, reason: 'scope_mismatch' });
   }
-  for (const key of ['workspaceId', 'endpointId', 'memberId', 'deviceId', 'bindingId', 'provider'] as const) {
+  for (const key of ['workspaceId', 'endpointId', 'membershipId', 'deviceId', 'bindingId', 'provider'] as const) {
     const question = signedQuestion({ target: { ...signedQuestion().target, [key]: key === 'provider'
       ? 'foreign' : '50000000-0000-4000-8000-000000000001' } });
     const reason = key === 'provider' ? 'schema_invalid' : 'scope_mismatch';

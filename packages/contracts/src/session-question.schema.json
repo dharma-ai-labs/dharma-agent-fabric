@@ -15,11 +15,11 @@
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspaceId", "endpointId", "memberId", "deviceId", "bindingId", "provider"],
+      "required": ["workspaceId", "endpointId", "membershipId", "deviceId", "bindingId", "provider"],
       "properties": {
         "workspaceId": { "type": "string", "format": "uuid" },
         "endpointId": { "type": "string", "format": "uuid" },
-        "memberId": { "type": "string", "format": "uuid" },
+        "membershipId": { "type": "string", "format": "uuid" },
         "deviceId": { "type": "string", "format": "uuid" },
         "bindingId": { "type": "string", "format": "uuid" },
         "provider": { "enum": ["codex", "claude", "agy", "hermes"] }
@@ -48,11 +48,11 @@
     "peer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspaceId", "endpointId", "memberId", "deviceId"],
+      "required": ["workspaceId", "endpointId", "membershipId", "deviceId"],
       "properties": {
         "workspaceId": { "type": "string", "format": "uuid" },
         "endpointId": { "type": "string", "format": "uuid" },
-        "memberId": { "type": "string", "format": "uuid" },
+        "membershipId": { "type": "string", "format": "uuid" },
         "deviceId": { "type": "string", "format": "uuid" }
       }
     }

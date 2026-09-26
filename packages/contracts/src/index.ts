@@ -35,7 +35,7 @@ export interface SessionBindingScope {
   repositoryBindingId: string;
   workspaceId: string;
   endpointId: string;
-  memberId: string;
+  membershipId: string;
   deviceId: string;
   bindingId: string;
   provider: ProviderId;
@@ -49,8 +49,8 @@ export interface SessionQuestion {
   taskId: string;
   organizationId: string;
   repositoryBindingId: string;
-  source: { workspaceId: string; endpointId: string; memberId: string; deviceId: string };
-  target: { workspaceId: string; endpointId: string; memberId: string; deviceId: string; bindingId: string; provider: ProviderId };
+  source: { workspaceId: string; endpointId: string; membershipId: string; deviceId: string };
+  target: { workspaceId: string; endpointId: string; membershipId: string; deviceId: string; bindingId: string; provider: ProviderId };
   category: string;
   question: string;
   authority: { mode: 'read_only'; readPaths: ['.']; network: 'deny'; maximumProviderCostCents: number };
@@ -342,7 +342,7 @@ export async function verifySessionQuestionForBinding(
     || question.repositoryBindingId !== binding.repositoryBindingId
     || question.target.workspaceId !== binding.workspaceId
     || question.target.endpointId !== binding.endpointId
-    || question.target.memberId !== binding.memberId
+    || question.target.membershipId !== binding.membershipId
     || question.target.deviceId !== binding.deviceId
     || question.target.bindingId !== binding.bindingId
     || question.target.provider !== binding.provider) {
