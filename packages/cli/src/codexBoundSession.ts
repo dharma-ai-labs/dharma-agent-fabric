@@ -15,7 +15,9 @@ interface CodexBoundSessionInput {
 
 export async function openCodexBoundSession(input: CodexBoundSessionInput) {
   const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
-  if (!binding || binding.provider !== 'codex') throw new Error('codex_session_binding_unavailable');
+  if (!binding || binding.provider !== 'codex' || binding.owner !== 'dharma_bridge') {
+    throw new Error('codex_session_binding_unavailable');
+  }
   const codexBinding = { ...binding, threadId: binding.sessionId };
   const lease = input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
   if (!lease) throw new Error('codex_session_lease_unavailable');
@@ -79,7 +81,9 @@ export async function runCodexBoundSessionQuestion(input: CodexBoundSessionInput
   timeoutMs?: number;
 }) {
   const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
-  if (!binding || binding.provider !== 'codex') throw new Error('codex_session_binding_unavailable');
+  if (!binding || binding.provider !== 'codex' || binding.owner !== 'dharma_bridge') {
+    throw new Error('codex_session_binding_unavailable');
+  }
   const codexBinding = { ...binding, threadId: binding.sessionId };
   const inspected = inspectSessionQuestionForBinding(input.question, codexBinding,
     input.verifier, input.now ?? new Date());

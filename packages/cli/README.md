@@ -210,5 +210,20 @@ or unavailable evidence.
 - [CLI command contract](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/22-cli-command-contract.md)
 - [Security boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/10-security-privacy-and-threat-model.md)
 
+## Owning-runtime session integration
+
+The library exports `openCooperativeInboxSession` for an integration running in
+the intended Codex session. It requires that runtime's exact active-session hook,
+an enrolled identity, encrypted cooperative binding, signed channel, durable
+single-use replay claim, disclosure authorization and budget reservation. The
+runtime handles each bounded read-only question within its own existing turn.
+It must enforce the question's authorized paths and network limits.
+
+This consumer does not create/resume another thread or wake an idle desktop chat.
+It is not an installed native host hook or a CLI/MCP attachment command. Session
+IDs from environment variables or historical transcripts are not ownership proof.
+See [session routing](../../docs/24-provider-session-routing.md) for the exact
+contract, failure recovery and remaining live qualification boundaries.
+
 Licensed under MIT. Do not report security vulnerabilities in a public issue;
 use the private security-reporting channel in the GitHub repository.

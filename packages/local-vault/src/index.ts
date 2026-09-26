@@ -36,7 +36,7 @@ export interface VaultCaptureInput {
 
 export interface LocalProviderSessionBinding extends SessionBindingScope {
   schema: 'dharma.local-provider-session-binding/v1';
-  owner: 'dharma_bridge';
+  owner: 'dharma_bridge' | 'cooperative_session';
   sessionId: string;
   workspaceRoot: string;
   createdAt: string;
@@ -71,7 +71,7 @@ function assertLocalProviderSessionBinding(value: unknown): asserts value is Loc
     'sessionId', 'workspaceRoot', 'createdAt', 'expiresAt', 'maximumProviderCostCents',
   ].includes(key))
     || record.schema !== 'dharma.local-provider-session-binding/v1'
-    || record.owner !== 'dharma_bridge'
+    || (record.owner !== 'dharma_bridge' && record.owner !== 'cooperative_session')
     || typeof record.organizationId !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(record.organizationId)
     || ![record.repositoryBindingId, record.workspaceId, record.endpointId,

@@ -64,6 +64,8 @@ import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from '
 import { demoRepositoryPackage } from './demoPackage.js';
 import { runDemoWatch } from './demoWatch.js';
 
+export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
+
 const VERSION = '0.2.102';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);

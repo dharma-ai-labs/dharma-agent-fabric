@@ -116,6 +116,45 @@ The receiver moves each question through `accepted`, `executing`, `answered`, `f
 
 Production acceptance requires a real two-machine, two-member named-session exchange; offline and active-turn behavior; signed package access in the target repository; provider restart; revocation; and no answer attributed to the wrong chat. Generic one-prompt enrollment remains a separate gate.
 
+## Cooperative in-session consumer
+
+`openCooperativeInboxSession` is a programmatic integration surface for a provider's
+own active-session hook. Its `currentSession` callback must come from the owning
+runtime and attest the exact provider, private session ID, canonical workspace and
+active state. A copied environment variable or transcript locator alone is not a
+native ownership hook. The consumer and `CooperativeSessionContext` are exported
+through the CLI package's public library entrypoint; adapters must not import private
+helpers across package boundaries. No CLI/MCP attach command or idle-chat wake
+guarantee is implied by this API.
+
+The local vault distinguishes `cooperative_session` from `dharma_bridge` owners.
+Existing bridge bindings remain unchanged. Both bridge dispatch entrypoints reject
+cooperative bindings before creating a provider transport. The cooperative consumer
+never opens a transport, resumes a thread or starts a replacement worker: the
+embedding session executes the bounded read-only handler in its own turn.
+
+The consumer verifies signed exact-target offers and current ownership before and
+after every asynchronous boundary, reserves budget before acceptance, requires a
+durable single-use replay claim, rechecks question expiry before execution and
+answer disclosure, and holds the local fence until an in-progress handler settles.
+The embedding runtime must enforce the offer's read-only/path/network authority;
+this callback API is not an independent OS sandbox or an authority expansion.
+Handlers must treat question text as data and must not invoke broader product,
+deployment, secret, write or unrelated-repository authority.
+
+Completed answers are encrypted and staged before delivery. Unconfirmed delivery
+or denied disclosure stops new consumption; reopening reconciles that same result
+without reserving or executing another turn. Handler exceptions disclose only a
+typed `execution_failed` result. If that failure acknowledgement is lost, the
+consumer stops with `cooperative_session_failure_delivery_unconfirmed`; the replay
+claim remains consumed, and recovery must not rerun the handler. Explicit retirement
+revokes the local binding permanently. Ordinary close releases local ownership
+without manufacturing a remote detach receipt; presence expires normally.
+
+Current tests use synthetic signed offers and runtime callbacks. They do not prove
+this desktop chat is attached, that a supported provider hook is installed, or that
+the platform drafts are deployed. Those live acceptance gates remain separate.
+
 ## Sources
 
 - Current CLI source: `packages/provider-adapters/src/index.ts`, `packages/task-runner/src/index.ts`, `packages/contracts/src/task-envelope.schema.json` at `bc5682b`.
