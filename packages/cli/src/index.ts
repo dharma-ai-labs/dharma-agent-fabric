@@ -70,7 +70,7 @@ import { createDemoWatchHealthRecorder } from './demoWatchHealth.js';
 import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSupervisor,
   type DemoWatchControlDependencies } from './demoWatchControl.js';
 
-const VERSION = '0.2.104';
+const VERSION = '0.2.105';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;

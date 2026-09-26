@@ -57,8 +57,18 @@ function psLiteral(value: string) {
 }
 
 export function linuxRelayUnit(launcher: string, policy: string | null, workspace: string, home?: string) {
+  return renderLinuxRelayUnit(launcher, policy, workspace, home, false);
+}
+
+function renderLinuxRelayUnit(launcher: string, policy: string | null, workspace: string,
+  home: string | undefined, legacy: boolean) {
+  // WorkingDirectory is a literal path, unlike ExecStart/Environment word lists.
+  const directory = legacy ? systemdValue(workspace) : safeLine(workspace).replace(/%/g, '%%');
+  if (!legacy && (!workspace.startsWith('/') || /[\x00-\x1f]|\s$|\\$/.test(workspace))) {
+    throw new Error('Linux autostart working directory must be an absolute representable path.');
+  }
   return `[Unit]\nDescription=Dharma Agent Fabric relay\nAfter=network-online.target\nWants=network-online.target\n\n`
-    + `[Service]\nType=simple\nWorkingDirectory=${systemdValue(workspace)}\n`
+    + `[Service]\nType=simple\nWorkingDirectory=${directory}\n`
     + (home ? `Environment=${systemdValue(`DHARMA_HOME=${home}`)}\n` : '')
     + `ExecStart=${systemdValue(launcher)} relay supervise `
     + (policy === null ? '--demo-only\n' : `--policy ${systemdValue(policy)}\n`)
@@ -115,13 +125,16 @@ async function readRegistration(home: string): Promise<Registration | null> {
   }
 }
 
-async function ownsStartupFile(options: RelayAutostartOptions, registration: Registration) {
+async function ownsStartupFile(options: RelayAutostartOptions, registration: Registration, allowLegacy = false) {
   const path = registration.backend === 'systemd-user'
     ? unitPath(options.userHome || homedir()) : scriptPath(options.home);
   const expected = registration.backend === 'systemd-user'
     ? linuxRelayUnit(registration.launcher, registration.policy, registration.workspace, options.home)
     : windowsRelayStartupScript(registration.launcher, registration.policy, options.home);
-  return await readFile(path, 'utf8').catch(() => null) === expected;
+  const actual = await readFile(path, 'utf8').catch(() => null);
+  return actual === expected || (allowLegacy && registration.backend === 'systemd-user'
+    && actual === renderLinuxRelayUnit(registration.launcher, registration.policy,
+      registration.workspace, options.home, true));
 }
 
 function windowsTaskGuard(registration: Registration, home: string) {
@@ -221,7 +234,9 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   const ownedContents = previous && (platform === 'linux'
     ? linuxRelayUnit(previous.launcher, previous.policy, previous.workspace, options.home)
     : windowsRelayStartupScript(previous.launcher, previous.policy, options.home));
-  if (existingContents !== null && existingContents !== ownedContents) {
+  const ownedLegacyContents = previous && platform === 'linux'
+    ? renderLinuxRelayUnit(previous.launcher, previous.policy, previous.workspace, options.home, true) : null;
+  if (existingContents !== null && existingContents !== ownedContents && existingContents !== ownedLegacyContents) {
     throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
   }
   if (platform === 'win32' && previous) {
@@ -263,7 +278,7 @@ export async function disableRelayAutostart(options: RelayAutostartOptions): Pro
   if (platform !== (registration.backend === 'systemd-user' ? 'linux' : 'win32')) {
     throw new Error('autostart_conflict: startup registration belongs to a different operating system.');
   }
-  if (!await ownsStartupFile(options, registration)) {
+  if (!await ownsStartupFile(options, registration, true)) {
     throw new Error('autostart_conflict: the startup file no longer matches its ownership receipt.');
   }
   const run = options.run || defaultRunner;
