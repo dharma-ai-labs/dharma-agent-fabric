@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/provider-session-completion/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryBindingId", "membershipId", "deviceId", "workspaceId", "endpointId", "questionId", "taskId", "bindingId", "targetEndpointId", "answer", "answerHash"],
+  "properties": {
+    "schema": { "const": "dharma.provider-session-completion/v1" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "repositoryBindingId": { "type": "string", "format": "uuid" },
+    "membershipId": { "type": "string", "format": "uuid" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "endpointId": { "type": "string", "format": "uuid" },
+    "questionId": { "type": "string", "format": "uuid" },
+    "taskId": { "type": "string", "format": "uuid" },
+    "bindingId": { "type": "string", "format": "uuid" },
+    "targetEndpointId": { "type": "string", "format": "uuid" },
+    "answer": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "answerHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}
