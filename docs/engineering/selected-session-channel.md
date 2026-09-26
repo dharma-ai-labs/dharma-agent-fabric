@@ -1,7 +1,7 @@
 # Selected-session channel (draft)
 
 This is an internal integration contract, not a released CLI command or a
-production-readiness claim. Companion platform draft PR1166 provides the
+production-readiness claim. Companion platform PR1166 provides the deployed
 signed-device registry and inbox API. Legacy `repositories ask` starts a worker
 and must not be presented as delivery to a selected provider chat.
 
@@ -55,19 +55,37 @@ results remain pending and stop consumption. Recovery has no provider execution
 or budget-reservation API. The server must permit a question's recipient, as
 well as its sender, to read that exact question; unrelated bindings remain denied.
 
-## Still Required Before Release
+## Observed Production Compatibility
+
+On September 26, the reviewed platform deployment passed device-signed
+registration, foreign-owner rejection and unattached-inbox rejection. Two existing
+enrolled members then completed two production/KMS-signed questions through this
+channel. Actual Codex 0.147.0 turns returned a synthetic marker, then recalled it
+in the same retained conversation without the marker in the second question.
+The sender verified both answers and immutable reply hashes; both owned provider
+processes closed and their test bindings detached afterward.
+
+The enrolled identities and credential homes were distinct, but shared one Linux
+OS and existing provider authentication. This was neither a fresh onboarding run,
+two-machine qualification, Bob's physical endpoint nor this current desktop chat.
+Token observations remain separate from reconciled incremental provider costs.
+An earlier attach transport uncertainty remains recorded with no established
+root cause; subsequent successful probes do not establish general reliability.
+
+## Still Required Before Customer Release
 
 - Public CLI/MCP attachment and consumption commands and registration revision
   reconciliation after an ambiguous network acknowledgement. Local checkpoint
   recovery is implemented, but automatic live restart recovery remains unproven.
 - A supported cooperative integration for an already-running desktop chat.
   Knowing or storing its thread ID does not authorize external app-server resume.
-- Live server/KMS compatibility and actual provider turns against this channel.
-  Mock transport answers and fixture receipts are not real agent answers.
+- Published compatible client integration and complete two-machine evidence.
+  Development-branch probes are not proof that platform prompts install this code.
 - Native Windows restricted runtime compatibility; no broader filesystem access
   or unsandboxed fallback is allowed.
 - Fresh two-member onboarding, actual selected-session Q&A, autonomous signed
-  update use, restart recovery, revocation and EF's runtime/provider inventory.
+  update use, restart recovery and revocation. Current qualification scope is
+  Codex only; other providers are not implied supported.
 
 The consumer currently drives only `dharma_bridge`-owned Codex threads. It does
 not take over cooperative chats, this desktop session, or unrelated endpoints.
