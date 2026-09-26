@@ -9,6 +9,7 @@ import { loadOrCreateDeviceIdentity, type SecureSecretStore } from '@dharma-ai-l
 import { calculateBundleHash } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { scopePath } from './demoEnrollment.js';
 import { demoRepositoryPackage } from './demoPackage.js';
+import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { planRepositoryPackageTransferV2, type RepositoryTransferFile } from './repositoryPackageTransfer.js';
 
 const organizationId = 'org_fixture';
@@ -269,6 +270,52 @@ test('signed Demo package status reports no candidate and does not invent a rele
   assert.equal(result.candidate, null);
   assert.equal((JSON.parse(await readFile(f.configPath, 'utf8')) as { nextSequence: number }).nextSequence,
     f.sequence + 1);
+});
+
+test('signed Demo package status distinguishes a published release from local installation', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    statusOnly: true }, { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.repositoryPackageState, 'published');
+  assert.equal(result.activationState, 'signed_delivery_pending');
+  assert.equal(result.ready, false);
+  assert.equal(f.acknowledgements.length, 0);
+});
+
+test('Demo status reports a published repository without claiming local installation', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const result = await demoDeviceAndPackageStatus(f.scope, f.workspace,
+    { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.stage, 'device_signed_ready');
+  assert.equal(result.repositoryPackageState, 'published');
+  assert.equal(result.repositoryPackageStateSource, 'authenticated_server_scope');
+  assert.equal(result.packageInstallationCheck, 'not_run');
+  assert.equal(result.deviceId, deviceId);
+  assert.equal(f.acknowledgements.length, 0);
+});
+
+test('Demo status rejects a package scope from another repository', async () => {
+  const f = await fixture({ sourcePolicy: true });
+  const fetcher: typeof fetch = async (resource, init) => {
+    const response = await f.fetcher(resource, init);
+    if (!new URL(String(resource)).pathname.endsWith('/package-scope')) return response;
+    return Response.json({ ...await response.json() as Record<string, unknown>,
+      repositoryId: '20000000-0000-4000-8000-000000000002' });
+  };
+  await assert.rejects(demoDeviceAndPackageStatus(f.scope, f.workspace,
+    { store: f.store, fetcher }), /does not match this enrolled repository/);
+});
+
+test('Demo status rejects an unknown repository package state', async () => {
+  const f = await fixture({ sourcePolicy: true });
+  const fetcher: typeof fetch = async (resource, init) => {
+    const response = await f.fetcher(resource, init);
+    if (!new URL(String(resource)).pathname.endsWith('/package-scope')) return response;
+    return Response.json({ ...await response.json() as Record<string, unknown>,
+      repositoryPackageState: 'unexpected' });
+  };
+  await assert.rejects(demoDeviceAndPackageStatus(f.scope, f.workspace,
+    { store: f.store, fetcher }), /package state is invalid/);
 });
 
 test('lost acknowledgement response retries the identical anchored installation receipt', async () => {
