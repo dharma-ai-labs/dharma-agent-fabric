@@ -9,7 +9,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/provider-adapters" },
-  "exports": { ".": "./dist/index.js" },
+  "exports": {
+    ".": "./dist/index.js",
+    "./experimental/codex-session": "./dist/codexAppServerSession.js",
+    "./experimental/codex-transport": "./dist/codexAppServerTransport.js"
+  },
   "files": ["dist", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
