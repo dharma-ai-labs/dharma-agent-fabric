@@ -6,6 +6,7 @@ import type { ErrorObject } from 'ajv';
 import actionDecisionAcknowledgementSchema from './action-decision-acknowledgement.schema.json' with { type: 'json' };
 import actionDecisionReceiptSchema from './action-decision-receipt.schema.json' with { type: 'json' };
 import actionDecisionTaskRequestSchema from './action-decision-task-request.schema.json' with { type: 'json' };
+import sessionQuestionSchema from './session-question.schema.json' with { type: 'json' };
 import serverSigningKeysetSchema from './server-signing-keyset.schema.json' with { type: 'json' };
 import taskActionSchema from './task-action.schema.json' with { type: 'json' };
 import taskEnvelopeSchema from './task-envelope.schema.json' with { type: 'json' };
@@ -28,6 +29,42 @@ export type EvidenceState =
   | 'not_supported';
 
 export type ProviderId = 'codex' | 'claude' | 'agy' | 'hermes';
+
+export interface SessionBindingScope {
+  organizationId: string;
+  repositoryBindingId: string;
+  workspaceId: string;
+  endpointId: string;
+  memberId: string;
+  deviceId: string;
+  bindingId: string;
+  provider: ProviderId;
+  expiresAt: string;
+  maximumProviderCostCents: number;
+}
+
+export interface SessionQuestion {
+  schema: 'dharma.session-question/v1';
+  questionId: string;
+  taskId: string;
+  organizationId: string;
+  repositoryBindingId: string;
+  source: { workspaceId: string; endpointId: string; memberId: string; deviceId: string };
+  target: { workspaceId: string; endpointId: string; memberId: string; deviceId: string; bindingId: string; provider: ProviderId };
+  category: string;
+  question: string;
+  authority: { mode: 'read_only'; readPaths: ['.']; network: 'deny'; maximumProviderCostCents: number };
+  createdAt: string;
+  expiresAt: string;
+  nonce: string;
+  signerKeyVersion: string;
+  signature: string;
+}
+
+export interface SessionQuestionVerifier {
+  resolvePublicKey(keyVersion: string): KeyObject | null;
+  consume(questionId: string): Promise<boolean>;
+}
 
 export interface ProtocolEnvelope<T extends Record<string, unknown> = Record<string, unknown>> {
   schema: 'dharma.protocol-envelope/v1';
@@ -245,6 +282,7 @@ const taskActionValidator = actionDecisionAjv.compile(taskActionSchema);
 const actionDecisionReceiptValidator = actionDecisionAjv.compile(actionDecisionReceiptSchema);
 const actionDecisionAcknowledgementValidator = actionDecisionAjv.compile(actionDecisionAcknowledgementSchema);
 const actionDecisionTaskRequestValidator = actionDecisionAjv.compile(actionDecisionTaskRequestSchema);
+const sessionQuestionValidator = actionDecisionAjv.compile(sessionQuestionSchema);
 const serverSigningKeysetValidator = actionDecisionAjv.compile(serverSigningKeysetSchema);
 
 function contractResult(
@@ -282,6 +320,54 @@ export function validateActionDecisionTaskRequestContract(
   value: unknown,
 ): { ok: true } | { ok: false; errors: ErrorObject[] } {
   return contractResult(actionDecisionTaskRequestValidator, value);
+}
+
+export function validateSessionQuestionContract(
+  value: unknown,
+): { ok: true } | { ok: false; errors: ErrorObject[] } {
+  return contractResult(sessionQuestionValidator, value);
+}
+
+export async function verifySessionQuestionForBinding(
+  value: unknown,
+  binding: SessionBindingScope,
+  verifier: SessionQuestionVerifier,
+  now = new Date(),
+): Promise<{ ok: true } | { ok: false; reason:
+  'schema_invalid' | 'scope_mismatch' | 'not_yet_valid' | 'expired' | 'binding_expired' | 'validity_too_long'
+  | 'expiry_exceeds_binding' | 'budget_exceeded' | 'signer_untrusted' | 'signature_invalid' | 'replayed' }> {
+  if (!validateSessionQuestionContract(value).ok) return { ok: false, reason: 'schema_invalid' };
+  const question = value as SessionQuestion;
+  if (question.organizationId !== binding.organizationId
+    || question.repositoryBindingId !== binding.repositoryBindingId
+    || question.target.workspaceId !== binding.workspaceId
+    || question.target.endpointId !== binding.endpointId
+    || question.target.memberId !== binding.memberId
+    || question.target.deviceId !== binding.deviceId
+    || question.target.bindingId !== binding.bindingId
+    || question.target.provider !== binding.provider) {
+    return { ok: false, reason: 'scope_mismatch' };
+  }
+  const createdAt = Date.parse(question.createdAt);
+  const expiresAt = Date.parse(question.expiresAt);
+  const bindingExpiresAt = Date.parse(binding.expiresAt);
+  if (!Number.isFinite(bindingExpiresAt) || !Number.isFinite(now.getTime())
+    || expiresAt <= createdAt) return { ok: false, reason: 'schema_invalid' };
+  if (expiresAt - createdAt > 60 * 60 * 1000) return { ok: false, reason: 'validity_too_long' };
+  if (now.getTime() < createdAt) return { ok: false, reason: 'not_yet_valid' };
+  if (now.getTime() >= expiresAt) return { ok: false, reason: 'expired' };
+  if (now.getTime() >= bindingExpiresAt) return { ok: false, reason: 'binding_expired' };
+  if (expiresAt > bindingExpiresAt) return { ok: false, reason: 'expiry_exceeds_binding' };
+  if (!Number.isInteger(binding.maximumProviderCostCents) || binding.maximumProviderCostCents < 0
+    || question.authority.maximumProviderCostCents > binding.maximumProviderCostCents) {
+    return { ok: false, reason: 'budget_exceeded' };
+  }
+  const key = verifier.resolvePublicKey(question.signerKeyVersion);
+  if (!key) return { ok: false, reason: 'signer_untrusted' };
+  const { signature, ...signedPayload } = question;
+  if (!verifyCanonicalObject(signedPayload, signature, key)) return { ok: false, reason: 'signature_invalid' };
+  if (!await verifier.consume(question.questionId)) return { ok: false, reason: 'replayed' };
+  return { ok: true };
 }
 
 export function validateTrustedServerSigningKeysetContract(

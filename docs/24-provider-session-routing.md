@@ -1,6 +1,6 @@
 # Provider-session routing qualification
 
-Status: investigation for DIA-1178. This is not a production capability claim.
+Status: investigation. This is not a production capability claim.
 
 ## Observed boundary
 
@@ -24,7 +24,7 @@ The receiver moves each question through `accepted`, `executing`, `answered`, `f
 4. Qualify Claude through its documented native session API or CLI resume contract separately. If safe same-session continuation is unavailable, report `not_supported`; do not silently substitute `claude --print`.
 5. Test a desktop chat only through an approved app-owned integration that can attest thread ownership and turn state. Never use a rollout file path, shared local socket, or inferred recent-session ID as authorization.
 
-Production acceptance requires a real two-machine, two-member named-session exchange; offline and active-turn behavior; signed package access in the target repository; provider restart; revocation; and no answer attributed to the wrong chat. The generic one-prompt enrollment gate remains in DIA-1129.
+Production acceptance requires a real two-machine, two-member named-session exchange; offline and active-turn behavior; signed package access in the target repository; provider restart; revocation; and no answer attributed to the wrong chat. Generic one-prompt enrollment remains a separate gate.
 
 ## Sources
 
