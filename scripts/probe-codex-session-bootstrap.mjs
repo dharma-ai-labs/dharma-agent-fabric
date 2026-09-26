@@ -106,7 +106,10 @@ try {
       outsideReadDenied: outside.exitCode !== 0 && !outside.stdout.includes(marker),
       writeDenied: write.exitCode !== 0 && writeAbsent,
       networkDenied: curl.exitCode === 0 && network.exitCode !== 0 && requests === 0 };
-    if (Object.values(sandboxChecks).some(value => !value)) throw new Error('probe_sandbox_enforcement_failed');
+    if (Object.values(sandboxChecks).some(value => !value)) {
+      process.stdout.write(`${JSON.stringify({ sandboxChecks, modelTurnRequested: false })}\n`);
+      throw new Error('probe_sandbox_enforcement_failed');
+    }
   }
   const now = new Date();
   const binding = { organizationId: 'org_synthetic', repositoryBindingId: randomUUID(), workspaceId: randomUUID(),

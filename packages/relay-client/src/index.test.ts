@@ -50,6 +50,55 @@ test('repository candidate uploads are content-bearing but status reads are not'
   assert.equal(isContentBearingPath('/api/v1/orgs/org_a/agent-fabric/repository-agents'), false);
 });
 
+test('selected-session questions and answers require explicit disclosure revalidation before replay', () => {
+  assert.equal(isContentBearingPath('/api/v1/orgs/org_test/agent-fabric/provider-session-questions'), true);
+  assert.equal(isContentBearingPath('/api/v1/orgs/org_test/agent-fabric/provider-sessions'), false);
+});
+
+test('ambiguous selected-session content is never persisted or implicitly replayed on reconnect', async t => {
+  for (const action of ['ask', 'reply']) await t.test(action, async () => {
+    const store = memoryStore();
+    const root = await mkdtemp(resolve(tmpdir(), 'fabric-session-content-'));
+    const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+    const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+    await saveDeviceConfig(configPath, {
+      schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+      deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+      publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+      relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+    });
+    await anchorConfig(configPath, store);
+    const calls: string[] = [];
+    let fail = true;
+    const fetcher = async (url: string | URL | Request) => {
+      const path = new URL(String(url)).pathname; calls.push(path);
+      if (fail && path.endsWith('/provider-session-questions')) {
+        fail = false; throw new Error('unknown selected-session delivery');
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    };
+    const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+    await client.openSession();
+    await assert.rejects(client.signedPost('/agent-fabric/provider-session-questions', {
+      action, [action === 'ask' ? 'question' : 'answer']: 'previously-authorized-private-content',
+    }), /unknown selected-session delivery/);
+    const persisted = await readFile(statePath, 'utf8');
+    assert.doesNotMatch(persisted, /previously-authorized-private-content/);
+    assert.equal(JSON.parse(persisted).pending, null);
+    // A prior version may already have persisted an ambiguous request. Opening
+    // a new session must discard it, not revive stale content authority.
+    const state = JSON.parse(persisted);
+    state.pending = { method: 'POST', pathname: '/api/v1/orgs/org_a/agent-fabric/provider-session-questions',
+      body: JSON.stringify({ action, answer: 'previously-authorized-private-content' }), headers: {} };
+    await writeFile(statePath, JSON.stringify(state));
+    const restarted = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+    await restarted.openSession();
+    await restarted.registerWorkspace({ workspaceId: 'control-operation' });
+    assert.equal(calls.filter(path => path.endsWith('/provider-session-questions')).length, 1);
+    assert.doesNotMatch(await readFile(statePath, 'utf8'), /previously-authorized-private-content/);
+  });
+});
+
 test('repository connect is rebuilt after current workspace registration instead of replayed', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-repository-connect-rebuild-'));
