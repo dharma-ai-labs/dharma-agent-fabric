@@ -110,12 +110,14 @@ async function fixture() {
   return { vault, binding, identity, verifier, now, budget: { reserve: async () => true } };
 }
 
-test('signed inbox dispatch retains the selected thread and publishes answers without reopening a worker', async () => {
+test('signed inbox dispatch retains the selected thread and publishes answers without reopening a worker', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
   const f = await fixture(), remote = fakeTransport(f.binding);
-  let opens = 0, accepted = false, replyCalls = 0, failReply = false;
+  let opens = 0, accepted = false, replyCalls = 0, failReply = false, heartbeats = 0;
   let offered = signedQuestion(f.binding, f.now);
   const transport = { async signedPost(route: string, input: unknown) {
     const body = input as Record<string, unknown>;
+    if (body.action === 'heartbeat') heartbeats += 1;
     if (route.endsWith('provider-sessions')) return { ok: true, organizationId: f.binding.organizationId,
       correlationId: ids.threadId, registration: { bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId,
         endpointId: f.binding.endpointId, repositoryBindingId: f.binding.repositoryBindingId,
@@ -139,6 +141,9 @@ test('signed inbox dispatch retains the selected thread and publishes answers wi
     assert.equal(opens, 1); assert.equal(replyCalls, 1);
     assert.equal(remote.calls.filter(method => method === 'turn/start').length, 1);
     assert.equal(remote.isClosed(), false);
+    t.mock.timers.tick(20_000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(heartbeats, 1); assert.equal(opens, 1);
     offered = signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020');
     accepted = false; failReply = true;
     const pending = await inbox.runNext();
@@ -152,6 +157,9 @@ test('signed inbox dispatch retains the selected thread and publishes answers wi
     assert.equal(opens, 1); assert.equal(replyCalls, 2);
     await assert.rejects(inbox.runNext(), /codex_inbox_session_unavailable/);
     assert.equal(remote.calls.filter(method => method === 'turn/start').length, 2);
+    t.mock.timers.tick(40_000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(heartbeats, 1);
   } finally { await inbox.close(); f.vault.close(); }
   assert.equal(remote.isClosed(), true);
 });
