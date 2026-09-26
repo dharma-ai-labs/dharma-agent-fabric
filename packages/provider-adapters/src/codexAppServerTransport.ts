@@ -157,15 +157,19 @@ export async function openCodexAppServerTransport(input: {
       }
       child.stdin.end();
       if (closed) return;
+      let timer: NodeJS.Timeout | undefined;
       const graceful = await Promise.race([
         processClosed.then(() => true),
-        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2_000)),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2_000); }),
       ]);
+      if (timer) clearTimeout(timer);
       if (!graceful) child.kill('SIGKILL');
+      timer = undefined;
       const finished = await Promise.race([
         processClosed.then(() => true),
-        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2_000)),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2_000); }),
       ]);
+      if (timer) clearTimeout(timer);
       if (!finished) throw new Error('codex_app_server_close_timeout');
     },
   };
