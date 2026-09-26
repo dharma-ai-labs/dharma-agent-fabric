@@ -2,13 +2,16 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, posix } from 'node:path';
 import test from 'node:test';
 import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
   startRelayAutostart,
 } from './relayAutostart.js';
+
+// Mock Linux OS paths remain POSIX even when receipt files live on Windows.
+const linuxWorkspace = (root: string, name: string) => posix.join('/fixtures', basename(root), name);
 
 test('Linux startup invokes only the pinned launcher and canonical policy', () => {
   const unit = linuxRelayUnit('/home/a b/repo/.dharma/bin/dharma', '/home/a b/repo/.dharma/approved-policy.json', '/home/a b/repo');
@@ -39,7 +42,7 @@ test('Linux rejects nonabsolute or unrepresentable working directories before re
 test('Linux enable migrates only an exact owned legacy unit without enabling it prematurely', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-legacy-unit-'));
   const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo space'), launcher: '/bin/true', policy: null, version: '0.2.104',
+    workspace: linuxWorkspace(root, 'repo space'), launcher: '/bin/true', policy: null, version: '0.2.104',
     run: async () => ({ stdout: 'enabled\n' }) };
   await enableRelayAutostart(options);
   const file = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
@@ -75,7 +78,7 @@ test('Linux enable, status and disable preserve an explicit OS registration rece
   };
   const options = {
     platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', '.dharma', 'bin', 'dharma'),
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', '.dharma', 'bin', 'dharma'),
     policy: join(root, 'repo', '.dharma', 'approved-policy.json'), version: '0.2.102', run,
   };
   const installed = await enableRelayAutostart(options);
@@ -123,7 +126,7 @@ test('failed OS registration remains unavailable instead of reporting completion
   const root = await mkdtemp(join(tmpdir(), 'dharma-failed-autostart-'));
   const options = {
     platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', '.dharma', 'bin', 'dharma'),
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', '.dharma', 'bin', 'dharma'),
     policy: join(root, 'repo', '.dharma', 'approved-policy.json'), version: '0.2.102',
     run: async () => { throw new Error('No systemd user bus'); },
   };
@@ -138,7 +141,7 @@ test('registration refuses to replace an unmanaged user startup entry', async ()
   await writeFile(unit, '[Service]\nExecStart=/custom/relay\n');
   await assert.rejects(enableRelayAutostart({
     platform: 'linux', home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'),
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', 'dharma'),
     policy: join(root, 'repo', 'policy.json'), version: '0.2.102',
     run: async () => ({ stdout: '' }),
   }), /autostart_conflict/);
@@ -169,7 +172,7 @@ test('Linux Demo-only enable, repeat and disable use one owned versioned registr
   const root = await mkdtemp(join(tmpdir(), 'dharma-demo-autostart-'));
   const calls: string[] = [];
   const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'),
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', 'dharma'),
     policy: null, version: '0.2.103', run: async (file: string, args: string[]) => {
       calls.push(`${file} ${args.join(' ')}`);
       return { stdout: args.includes('is-enabled') ? 'enabled\n' : '' };
@@ -210,11 +213,11 @@ test('Windows Demo-only registration reuses the same task and verifies its scrip
 test('Demo enable preserves an existing standard policy and workspace rather than downgrading it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-demo-standard-preserved-'));
   const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'standard'), launcher: join(root, 'standard', 'dharma'),
+    workspace: linuxWorkspace(root, 'standard'), launcher: join(root, 'standard', 'dharma'),
     policy: join(root, 'standard', 'policy.json'), version: '0.2.102',
     run: async (_file: string, args: string[]) => ({ stdout: args.includes('is-enabled') ? 'enabled\n' : '' }) };
   await enableRelayAutostart(options);
-  await enableRelayAutostart({ ...options, workspace: join(root, 'demo'),
+  await enableRelayAutostart({ ...options, workspace: linuxWorkspace(root, 'demo'),
     launcher: join(root, 'demo', 'dharma'), policy: null, version: '0.2.103' });
   const receipt = JSON.parse(await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8'));
   assert.equal(receipt.schema, 'dharma.relay-autostart/v1');
@@ -229,11 +232,11 @@ test('Demo enable preserves an existing standard policy and workspace rather tha
 test('Demo-only registration can be promoted to a standard enrollment without a competing service', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-demo-standard-upgrade-'));
   const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
     run: async (_file: string, args: string[]) => ({ stdout: args.includes('is-enabled') ? 'enabled\n' : '' }) };
   await enableRelayAutostart(options);
   const policy = join(root, 'standard', 'policy.json');
-  await enableRelayAutostart({ ...options, policy, workspace: join(root, 'standard') });
+  await enableRelayAutostart({ ...options, policy, workspace: linuxWorkspace(root, 'standard') });
   const receipt = JSON.parse(await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8'));
   assert.equal(receipt.schema, 'dharma.relay-autostart/v1');
   assert.equal(receipt.policy, policy);
@@ -243,7 +246,7 @@ test('modified startup files cannot be reported enabled or removed through an ol
   const root = await mkdtemp(join(tmpdir(), 'dharma-startup-tampered-'));
   const calls: string[][] = [];
   const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
     run: async (_file: string, args: string[]) => {
       calls.push(args); return { stdout: args.includes('is-enabled') ? 'enabled\n' : '' };
     } };
@@ -265,7 +268,7 @@ test('invalid registration is unavailable and cannot be silently replaced or rem
   const receiptPath = join(home, 'relay', 'autostart.json');
   await writeFile(receiptPath, '{malformed-private');
   const options = { home, userHome: root, platform: 'linux' as const,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
     run: async () => { throw new Error('Must not query OS for invalid ownership'); } };
   assert.equal((await relayAutostartStatus(options)).reason, 'autostart_receipt_invalid');
   await assert.rejects(enableRelayAutostart(options), /autostart_receipt_invalid/);
@@ -277,7 +280,7 @@ test('start invokes the single owned service and refuses a modified startup file
   const root = await mkdtemp(join(tmpdir(), 'dharma-start-owned-'));
   const calls: string[][] = [];
   const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
-    workspace: join(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
+    workspace: linuxWorkspace(root, 'repo'), launcher: join(root, 'repo', 'dharma'), policy: null, version: '0.2.103',
     run: async (_file: string, args: string[]) => {
       calls.push(args); return { stdout: args.includes('is-enabled') ? 'enabled\n' : '' };
     } };
