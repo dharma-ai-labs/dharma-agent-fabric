@@ -7,7 +7,7 @@ import test from 'node:test';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
-import { runCodexBoundSessionQuestion } from './codexBoundSession.js';
+import { openCodexBoundSession, runCodexBoundSessionQuestion } from './codexBoundSession.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const ids = {
@@ -202,5 +202,146 @@ test('bound dispatch does not report success when provider shutdown is unconfirm
     await assert.rejects(runCodexBoundSessionQuestion({ ...f, bindingId: f.binding.bindingId,
       openTransport: async () => remote.transport, question: signedQuestion(f.binding, f.now) }), /process_still_running/);
     assert.equal(f.vault.tryAcquireProviderSessionLease(f.binding.bindingId, f.identity), null);
+  } finally { f.vault.close(); }
+});
+
+test('live owner keeps the same loaded thread and lease across two questions', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding);
+  let opens = 0;
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      openTransport: async () => { opens++; return remote.transport; } });
+    const first = await owner.runQuestion({ question: signedQuestion(f.binding, f.now) });
+    assert.equal(remote.isClosed(), false);
+    assert.equal(f.vault.tryAcquireProviderSessionLease(f.binding.bindingId, f.identity), null);
+    const second = await owner.runQuestion({
+      question: signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020'),
+    });
+    assert.equal(second.bindingId, first.bindingId);
+    assert.equal(opens, 1);
+    assert.equal(remote.calls.filter(method => method === 'turn/start').length, 2);
+    assert.equal(remote.calls.includes('thread/resume'), false);
+    await owner.close();
+    await owner.close();
+    assert.equal(remote.calls.filter(method => method === 'close').length, 1);
+    const next = f.vault.tryAcquireProviderSessionLease(f.binding.bindingId, f.identity);
+    assert.ok(next);
+    next.release();
+    await assert.rejects(owner.runQuestion({ question: signedQuestion(f.binding, f.now) }), /session_closed/);
+  } finally { f.vault.close(); }
+});
+
+test('live owner retains an empty session after budget denial without consuming the question', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding);
+  let permitted = false;
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      budget: { reserve: async () => permitted }, openTransport: async () => remote.transport });
+    const question = signedQuestion(f.binding, f.now);
+    await assert.rejects(owner.runQuestion({ question }), /budget_unavailable/);
+    assert.equal(remote.isClosed(), false);
+    assert.equal(remote.calls.includes('turn/start'), false);
+    permitted = true;
+    assert.equal((await owner.runQuestion({ question })).answer, 'Catalog generation 13.');
+    await owner.close();
+  } finally { f.vault.close(); }
+});
+
+test('live owner refuses overlapping questions without dispatching the second turn', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding);
+  let allowBudget!: (allowed: boolean) => void;
+  const budget = new Promise<boolean>(resolveBudget => { allowBudget = resolveBudget; });
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      budget: { reserve: async () => budget }, openTransport: async () => remote.transport });
+    const first = owner.runQuestion({ question: signedQuestion(f.binding, f.now) });
+    await assert.rejects(owner.runQuestion({
+      question: signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020'),
+    }), /session_busy/);
+    allowBudget(true);
+    await first;
+    assert.equal(remote.calls.filter(method => method === 'turn/start').length, 1);
+    await owner.close();
+  } finally { f.vault.close(); }
+});
+
+test('live owner rejects replay and tampering without discarding a healthy conversation', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding);
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      openTransport: async () => remote.transport });
+    const question = signedQuestion(f.binding, f.now);
+    await owner.runQuestion({ question });
+    await assert.rejects(owner.runQuestion({ question }), /replay/);
+    await assert.rejects(owner.runQuestion({ question: { ...question, question: 'Tampered' } }), /signature_invalid/);
+    assert.equal(remote.isClosed(), false);
+    assert.equal(remote.calls.filter(method => method === 'turn/start').length, 1);
+    await owner.close();
+  } finally { f.vault.close(); }
+});
+
+test('live owner stops after local revocation before another provider turn', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding);
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      openTransport: async () => remote.transport });
+    f.vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+    await assert.rejects(owner.runQuestion({ question: signedQuestion(f.binding, f.now) }), /lease_unavailable/);
+    assert.equal(remote.isClosed(), true);
+    assert.equal(remote.calls.includes('turn/start'), false);
+  } finally { f.vault.close(); }
+});
+
+test('live owner closes a failed turn and retains fencing if shutdown is unconfirmed', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding, { failedTurn: true, closeFails: true });
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      openTransport: async () => remote.transport });
+    await assert.rejects(owner.runQuestion({ question: signedQuestion(f.binding, f.now) }), /turn_failed/);
+    assert.equal(f.vault.tryAcquireProviderSessionLease(f.binding.bindingId, f.identity), null);
+    await assert.rejects(owner.runQuestion({ question: signedQuestion(f.binding, f.now) }), /session_closed/);
+    await assert.rejects(owner.close(), /process_still_running/);
+  } finally { f.vault.close(); }
+});
+
+test('live owner refuses a foreign enrollment before opening the provider', async () => {
+  const f = await fixture();
+  let opened = false;
+  try {
+    await assert.rejects(openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      identity: { ...f.identity, deviceId: '40000000-0000-4000-8000-000000000099' },
+      openTransport: async () => { opened = true; return fakeTransport(f.binding).transport; } }), /scope_mismatch/);
+    assert.equal(opened, false);
+  } finally { f.vault.close(); }
+});
+
+test('closing a live owner during budget wait prevents consumption and a subsequent turn', async () => {
+  const f = await fixture();
+  const remote = fakeTransport(f.binding);
+  let waiting!: () => void;
+  let releaseBudget!: (value: boolean) => void;
+  const entered = new Promise<void>(resolveEntered => { waiting = resolveEntered; });
+  const budget = new Promise<boolean>(resolveBudget => { releaseBudget = resolveBudget; });
+  let consumed = false;
+  try {
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      verifier: { ...f.verifier, consume: async () => { consumed = true; return true; } },
+      budget: { reserve: async () => { waiting(); return budget; } },
+      openTransport: async () => remote.transport });
+    const first = owner.runQuestion({ question: signedQuestion(f.binding, f.now) });
+    const rejection = assert.rejects(first, /lease_unavailable/);
+    await entered;
+    await owner.close();
+    releaseBudget(true);
+    await rejection;
+    assert.equal(consumed, false);
+    assert.equal(remote.calls.includes('turn/start'), false);
+    assert.equal(remote.isClosed(), true);
   } finally { f.vault.close(); }
 });

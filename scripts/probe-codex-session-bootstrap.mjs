@@ -1,4 +1,4 @@
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
@@ -7,7 +7,8 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { signCanonicalObject } from '../packages/contracts/dist/index.js';
-import { runCodexBridgeQuestion } from '../packages/provider-adapters/dist/codexAppServerSession.js';
+import { LocalVault } from '../packages/local-vault/dist/index.js';
+import { openCodexBoundSession } from '../packages/cli/dist/codexBoundSession.js';
 import { openCodexAppServerTransport } from '../packages/provider-adapters/dist/codexAppServerTransport.js';
 
 // No model turn is permitted: exercise only the first-thread path and budget denial.
@@ -121,27 +122,57 @@ try {
     authority: { mode: 'read_only', readPaths: ['.'], network: 'deny', maximumProviderCostCents: 0 },
     createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60000).toISOString(),
     nonce: randomUUID(), signerKeyVersion: 'synthetic-v1' };
-  let budgetChecked = false;
+  let budgetChecks = 0;
   let consumed = false;
   let modelTurnRequested = false;
-  const guarded = { onNotification: transport.onNotification,
+  const guarded = { onNotification: transport.onNotification, close: transport.close,
     request(method, params) {
       if (method === 'turn/start') { modelTurnRequested = true; throw new Error('probe_model_turn_forbidden'); }
       return transport.request(method, params);
     } };
-  let disposition;
+  const { threadId: _threadId, ...localScope } = binding;
+  const localBinding = { ...localScope, schema: 'dharma.local-provider-session-binding/v1',
+    sessionId: threadId, createdAt: now.toISOString() };
+  const { organizationId, repositoryBindingId, workspaceId, endpointId, membershipId, deviceId, provider } = binding;
+  const identity = { organizationId, repositoryBindingId, workspaceId, endpointId, membershipId, deviceId, provider };
+  const vault = await LocalVault.open({ root: join(root, 'vault'), masterKey: randomBytes(32) });
+  let owner;
+  const dispositions = [];
+  let leaseRetained = false;
+  let leaseReleased = false;
   try {
-    await runCodexBridgeQuestion({ transport: guarded, binding,
-      question: { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) },
+    vault.saveProviderSessionBinding(localBinding);
+    owner = await openCodexBoundSession({ vault, bindingId: binding.bindingId, identity,
+      openTransport: async () => guarded,
       verifier: { resolvePublicKey: () => publicKey, consume: async () => { consumed = true; return true; } },
-      exclusiveLease: { assertHeld: async () => true }, budget: { reserve: async () => { budgetChecked = true; return false; } } });
-    disposition = 'unexpected_success';
-  } catch (error) { disposition = error.message; }
+      budget: { reserve: async () => { budgetChecks++; return false; } } });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const candidate = { ...unsigned, questionId: randomUUID(), nonce: randomUUID() };
+      try {
+        await owner.runQuestion({ question: { ...candidate, signature: signCanonicalObject(candidate, privateKey) } });
+        dispositions.push('unexpected_success');
+      } catch (error) { dispositions.push(error.message); }
+    }
+    const sameThread = await transport.request('thread/read', { threadId, includeTurns: false });
+    if (sameThread.thread.id !== threadId || sameThread.thread.status?.type !== 'idle') throw new Error('probe_live_thread_lost');
+    const conflicting = vault.tryAcquireProviderSessionLease(binding.bindingId, identity);
+    leaseRetained = conflicting === null;
+    conflicting?.release();
+    await owner.close();
+    const reacquired = vault.tryAcquireProviderSessionLease(binding.bindingId, identity);
+    leaseReleased = reacquired !== null;
+    reacquired?.release();
+  } finally {
+    try { if (owner) await owner.close(); }
+    finally { vault.close(); }
+  }
   process.stdout.write(`${JSON.stringify({ createdStatus: created.thread.status?.type, readStatus: read.thread.status?.type,
-    matchingThread: read.thread.id === threadId, disposition, budgetChecked, consumed, modelTurnRequested,
+    matchingThread: read.thread.id === threadId, dispositions, budgetChecks, consumed, modelTurnRequested,
+    leaseRetained, leaseReleased,
     providerHomeMode: configuredHome ? 'configured' : 'disposable',
     sandboxChecks,
     profile: configured.config.permissions?.dharma_bridge,
     profileAvailability: listed.data?.filter(p => p.id === 'dharma_bridge') })}\n`);
-  if (disposition !== 'codex_session_budget_unavailable' || !budgetChecked || consumed || modelTurnRequested) process.exitCode = 1;
+  if (dispositions.length !== 2 || dispositions.some(value => value !== 'codex_session_budget_unavailable')
+    || budgetChecks !== 2 || !leaseRetained || !leaseReleased || consumed || modelTurnRequested) process.exitCode = 1;
 } finally { await transport.close(); }

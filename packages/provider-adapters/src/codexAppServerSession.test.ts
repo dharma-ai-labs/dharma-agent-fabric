@@ -194,3 +194,37 @@ test('first question uses its already loaded empty thread without resuming a non
   assert.equal(f.calls.some(call => call.method === 'thread/resume'), false);
   assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
 });
+
+test('bridge rechecks revocation after asynchronous budget reservation before consuming', async () => {
+  const f = fixture();
+  let held = true;
+  let consumed = false;
+  await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: { ...f.verifier, consume: async () => { consumed = true; return true; } },
+    exclusiveLease: { assertHeld: async () => held },
+    budget: { reserve: async () => { held = false; return true; } }, now }), /lease_unavailable/);
+  assert.equal(consumed, false);
+  assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('bridge rechecks revocation after asynchronous question claim before starting a turn', async () => {
+  const f = fixture();
+  let held = true;
+  await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: { ...f.verifier, consume: async () => { held = false; return true; } },
+    exclusiveLease: { assertHeld: async () => held }, budget, now }), /lease_unavailable/);
+  assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('bridge withholds an answer when the binding is revoked while the turn executes', async () => {
+  const f = fixture();
+  let held = true;
+  const transport = { ...f.transport, async request(method: string, params: Record<string, unknown>) {
+    const result = await f.transport.request(method, params);
+    if (method === 'turn/start') held = false;
+    return result;
+  } };
+  await assert.rejects(runCodexBridgeQuestion({ transport, binding, question: question(),
+    verifier: f.verifier, exclusiveLease: { assertHeld: async () => held }, budget, now }), /lease_unavailable/);
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+});

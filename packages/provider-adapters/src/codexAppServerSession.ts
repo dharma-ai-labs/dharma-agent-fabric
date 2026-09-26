@@ -139,8 +139,10 @@ export async function runCodexBridgeQuestion(input: {
   if (!await input.budget.reserve(question.questionId, question.authority.maximumProviderCostCents)) {
     throw new Error('codex_session_budget_unavailable');
   }
+  if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
   const claimed = await verifySessionQuestionForBinding(question, binding, input.verifier, input.now ?? new Date());
   if (!claimed.ok) throw new Error(claimed.reason);
+  if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
 
   const arrivals: unknown[] = [];
   let resolveArrival: ((value: unknown) => void) | null = null;
@@ -174,6 +176,7 @@ export async function runCodexBridgeQuestion(input: {
       if (event === null) break;
       const turn = completedTurn(event, binding.threadId, turnId);
       if (!turn) continue;
+      if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
       const answer = finalAnswer(turn);
       return {
         questionId: question.questionId, taskId: question.taskId,

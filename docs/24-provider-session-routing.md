@@ -18,6 +18,21 @@ An additive local-vault record now encrypts an explicit bridge-owned session ID 
 
 An internal CLI dispatch now joins encrypted binding lookup, exact enrolled identity, local lease acquisition, signed-question verification, and one dedicated app-server transport. It opens the provider only after scope and lease checks, closes the provider before releasing ownership on a completed turn, and retains the lease if process termination cannot be confirmed. A model answer from a real bridge-owned thread has not been observed. The dispatch has no CLI command, server registration route, relay consumer, or customer-facing availability claim.
 
+The internal `openCodexBoundSession` owner now retains one transport and lease across
+consecutive questions. An empty thread stays alive on budget denial; duplicate or
+invalid questions cannot create extra turns. Concurrent dispatch is rejected rather
+than queued invisibly. Explicit close disables new dispatch immediately and releases
+the lease only after confirmed child shutdown. Failed turns close the provider;
+unconfirmed shutdown retains its fence. The one-question helper still closes on exit.
+The caller must explicitly create and bind a bridge-owned thread using the same live
+transport before its first persisted turn; opening a different process cannot recover
+an empty rollout. This owner is not a desktop-chat attachment or server registration.
+
+Lease/revocation checks also run after budget reservation, after question consumption,
+and before returning an answer. A question consumed just before revocation remains
+consumed, without an unsafe automatic retry. Production still needs server-authoritative
+revocation, durable answer reconciliation, and cancellation of executing turns.
+
 ## First-thread wire qualification
 
 The no-model bootstrap probe exposed additional prototype defects: permission-profile
@@ -45,7 +60,9 @@ reads only its own thread, validates the profile, and denies the budget reservat
 It never supplies a real user thread ID, customer content, enrollment grant, or
 provider credentials. An additional guard refuses any `turn/start` request. Success
 means the exact newly created thread reaches `codex_session_budget_unavailable`
-with no question consumption or model turn. It is **not** a successful answer or
+twice through its encrypted local binding and retained owner, with no question
+consumption or model turn. A second lease is denied until explicit close, then
+reacquisition succeeds. It is **not** a successful answer or
 an enrolled Agent Fabric endpoint. Temporary probe directories are retained for
 diagnosis; `--diagnose-launch` reports only the disposable process's startup error.
 
@@ -91,7 +108,7 @@ The receiver moves each question through `accepted`, `executing`, `answered`, `f
 
 ## Safe implementation order
 
-1. Probe Codex app-server using a disposable `CODEX_HOME`: initialize, create a thread, resume the exact ID, and read it. Do not start a model turn or touch an existing user thread in this probe.
+1. Probe Codex app-server using a disposable `CODEX_HOME`: initialize, create and read its own exact thread while retaining the same transport. Resume only an unloaded persisted thread, never a new empty rollout. Do not start a model turn or touch an existing user thread in this probe.
 2. Implement a provider-owned session bridge with an explicit local attach command and a durable binding record. Add negative tests for wrong organization, repository, member, device, workspace, expired lease, duplicate question, unavailable owner, and revoked authority. Keep the current fresh-process task runner unchanged.
 3. In an isolated test account, run a bounded read-only question to a bridge-owned Codex thread and verify that `turn/start` returns an answer linked to that same thread. Prove a second question continues the same context and a different thread never receives it. Record actual provider cost.
 4. Qualify Claude through its documented native session API or CLI resume contract separately. If safe same-session continuation is unavailable, report `not_supported`; do not silently substitute `claude --print`.
