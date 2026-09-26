@@ -436,6 +436,9 @@ export async function demoRepositoryPackage(input: {
     || typeof view.workspaceId !== 'string' || !UUID.test(view.workspaceId)) {
     throw new Error('Demo package scope does not match this enrolled repository.');
   }
+  if (view.repositoryPackageState !== 'published' && view.repositoryPackageState !== 'not_connected') {
+    throw new Error('Demo repository package state is invalid.');
+  }
   const candidateScope = { organizationId: scope.organizationId, workspaceId: view.workspaceId,
     repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId };
   const candidateTransport = transport(scope, deps);
@@ -518,7 +521,7 @@ export async function demoRepositoryPackage(input: {
   await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
   const candidate = await synchronizeRepositoryCandidate({ transport: candidateTransport,
     outboxRoot, scope: candidateScope, snapshot,
-    initialRepository: view.repositoryPackageState !== 'published' });
+    initialRepository: true });
   if (candidate.state !== 'blocked' && snapshot.manifest.sourceFingerprint) {
     await writeDemoSourceBaseline(scope.stateRoot, {
       schema: 'dharma.demo-source-baseline/v1',

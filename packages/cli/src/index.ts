@@ -62,9 +62,10 @@ import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './re
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
+import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { runDemoWatch } from './demoWatch.js';
 
-const VERSION = '0.2.102';
+const VERSION = '0.2.103';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -6127,10 +6128,9 @@ export async function run(argv: string[]): Promise<Output> {
       }
     }
     return withDemoDeviceLock(scope, async () => {
-      if (subcommand === 'connect' || subcommand === 'status') {
-        const connected = subcommand === 'status'
-          ? await verifyDemoDevice(scope)
-          : await connectDemoDevice({
+      if (subcommand === 'status') return demoDeviceAndPackageStatus(scope, workspace);
+      if (subcommand === 'connect') {
+        const connected = await connectDemoDevice({
             ...scope, grant: grant!,
             deviceName: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
             platform: await platform(),
