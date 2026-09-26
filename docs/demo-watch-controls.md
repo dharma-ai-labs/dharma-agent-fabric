@@ -20,7 +20,7 @@ Enable and disable support `--dry-run`. A plan makes no registry, managed launch
 
 Enable verifies the exact already-enrolled identity before registering the scope or changing startup. It persists no grant or credential in the registry. Startup mutations share a user-level lock with standard bootstrap, enrollment recovery and global autostart removal. The single owned Linux user service or Windows login task is registered and started; an existing compatible supervisor is reused.
 
-The managed launcher remains package-version-pinned and selects the verified native Node runtime directory. Existing standard policy/workspace remain unchanged when a Demo scope joins the service. Windows start, replacement and removal check the task's exact action, arguments, working directory and current-user principal as well as its local ownership receipt.
+The managed launcher remains package-version-pinned and selects the verified native Node runtime directory. Existing standard policy/workspace remain unchanged when a Demo scope joins the service. Windows start, replacement and removal check the task's exact action, arguments, working directory and current-user principal as well as its local ownership receipt. Principal ownership uses the SID in the exported task definition, not its potentially shortened or ambiguous display name.
 
 Startup failure retains the scope for a grant-free retry. Report its bounded code and stage; resume the same command with the same scope once the reported condition is resolved. Never issue new credentials, edit a trust file, or move/delete customer work to work around failure.
 

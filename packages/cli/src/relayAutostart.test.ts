@@ -267,8 +267,11 @@ test('Windows owned operations guard the exact action, arguments, workspace and 
     assert.match(command, /Actions/);
     assert.match(command, /Arguments/);
     assert.match(command, /WorkingDirectory/);
-    assert.match(command, /Principal.UserId/);
+    assert.match(command, /definition\.Task\.Principals\.Principal/);
     assert.match(command, /WindowsIdentity/);
+    assert.match(command, /\[xml\]\(Export-ScheduledTask/);
+    assert.match(command, /-TaskPath \$task\.TaskPath -ErrorAction Stop/);
+    assert.match(command, /\$principals\.Count -eq 1 -and \$principals\[0\]\.UserId -eq \$identity\.User\.Value/);
     assert.match(command, /autostart_conflict/);
     assert.ok(command.indexOf('autostart_conflict') < command.indexOf(verb));
   }

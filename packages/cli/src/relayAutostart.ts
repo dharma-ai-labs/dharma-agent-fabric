@@ -126,12 +126,18 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
 
 function windowsTaskGuard(registration: Registration, home: string) {
   return `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); `
+    + `$principalMatches = $false; try { `
+    + `$definition = [xml](Export-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')} `
+    + `-TaskPath $task.TaskPath -ErrorAction Stop); `
+    + `$principals = @($definition.Task.Principals.Principal); `
+    + `$principalMatches = $principals.Count -eq 1 -and $principals[0].UserId -eq $identity.User.Value `
+    + `} catch { $principalMatches = $false }; `
     + `$actions = @($task.Actions); `
     + `if ($null -eq $task -or $actions.Count -ne 1 `
     + `-or $actions[0].Execute -cne 'powershell.exe' `
     + `-or $actions[0].Arguments -cne ${psLiteral(`-NoProfile -NonInteractive -File "${scriptPath(home)}"`)} `
     + `-or $actions[0].WorkingDirectory -cne ${psLiteral(registration.workspace)} `
-    + `-or ($task.Principal.UserId -ne $identity.Name -and $task.Principal.UserId -ne $identity.User.Value)) `
+    + `-or -not $principalMatches) `
     + `{ throw 'autostart_conflict' }; `;
 }
 
