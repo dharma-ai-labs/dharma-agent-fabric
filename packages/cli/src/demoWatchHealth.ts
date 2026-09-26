@@ -118,17 +118,27 @@ export function createDemoWatchHealthRecorder(input: {
   const pending = new Map<string, DemoWatchHealth>();
   const write = input.write ?? writeDemoWatchHealth;
   let worker: Promise<void> | null = null;
-  let available = true;
+  const failedScopes = new Set<string>();
+  let invalid = false;
   const flush = async () => {
     while (pending.size) {
       const [key, row] = pending.entries().next().value!;
       pending.delete(key);
-      try { await write(input.home, row); available = true; }
-      catch { available = false; }
+      try { await write(input.home, row); failedScopes.delete(key); }
+      catch {
+        if (failedScopes.has(key) || failedScopes.size < 32) failedScopes.add(key);
+        else invalid = true;
+      }
     }
   };
+  const schedule = () => {
+    worker ??= Promise.resolve().then(flush).finally(() => {
+      worker = null;
+      if (pending.size) schedule();
+    });
+  };
   return {
-    available: () => available,
+    available: (key?: string) => !invalid && (key ? !failedScopes.has(key) : failedScopes.size === 0),
     record(observation: DemoWatchObservation) {
       if (observation.key === null) return;
       try {
@@ -138,8 +148,8 @@ export function createDemoWatchHealthRecorder(input: {
           code: observation.code }, observation.key);
         if (!pending.has(row.key) && pending.size >= 32) throw new Error('Health queue is full.');
         pending.set(row.key, row);
-        worker ??= Promise.resolve().then(flush).finally(() => { worker = null; });
-      } catch { available = false; }
+        schedule();
+      } catch { invalid = true; }
     },
     async drain() { while (worker) await worker; },
   };

@@ -65,7 +65,7 @@ import { demoRepositoryPackage } from './demoPackage.js';
 import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { runDemoWatch } from './demoWatch.js';
 import { runDemoSupervisor } from './demoSupervisor.js';
-import { listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
+import { demoWatchRegistrationKey, listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
 import { createDemoWatchHealthRecorder } from './demoWatchHealth.js';
 
 const VERSION = '0.2.103';
@@ -1686,8 +1686,10 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       policyPath, demoWatches: true, version: VERSION });
     const demo = runDemoSupervisor({ signal: controller.signal,
       list: () => listDemoWatchRegistrations(dharmaHome()), cycle: (registration, signal) => {
-        if (!health.available()) throw Object.assign(new Error('Demo watch health storage is unavailable.'),
+        if (!health.available(demoWatchRegistrationKey(registration))) {
+          throw Object.assign(new Error('Demo watch health storage is unavailable.'),
           { code: 'demo_watch_health_unavailable' });
+        }
         return supervisedDemoCycle(registration, signal);
       },
       onObservation: observation => {

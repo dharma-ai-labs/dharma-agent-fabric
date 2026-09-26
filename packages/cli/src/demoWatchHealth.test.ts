@@ -37,6 +37,21 @@ test('health recorder serializes writes, coalesces pending scopes and drains bef
   assert.equal(recorder.available(), true);
 });
 
+test('a receipt arriving while the writer closes is drained rather than stranded', async () => {
+  const rows: DemoWatchHealth[] = [];
+  const recorder = createDemoWatchHealthRecorder({ home: '/unused', pid: 123, version: '0.2.103',
+    now: () => now, write: async (_home, row) => {
+      rows.push(row);
+      if (rows.length === 1) queueMicrotask(() => queueMicrotask(() => {
+        recorder.record({ ...receipt, key: 'b'.repeat(64) });
+      }));
+    } });
+  recorder.record(receipt);
+  await recorder.drain();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1]?.key, 'b'.repeat(64));
+});
+
 test('health write failure gates cycles and a later recorded observation restores the gate', async () => {
   let fail = true;
   const recorder = createDemoWatchHealthRecorder({ home: '/unused', pid: 123, version: '0.2.103',
@@ -47,6 +62,24 @@ test('health write failure gates cycles and a later recorded observation restore
   fail = false;
   recorder.record({ ...receipt, state: 'failed', stage: null, sourceState: null, code: 'demo_watch_health_unavailable' });
   await recorder.drain();
+  assert.equal(recorder.available(), true);
+});
+
+test('success on another repository cannot clear a failed scope receipt', async () => {
+  let fail = true;
+  const otherKey = 'b'.repeat(64);
+  const recorder = createDemoWatchHealthRecorder({ home: '/unused', pid: 123, version: '0.2.103',
+    now: () => now, write: async (_home, row) => {
+      if (row.key === key && fail) throw new Error('Single-scope write failed');
+    } });
+  recorder.record(receipt); await recorder.drain();
+  recorder.record({ ...receipt, key: otherKey }); await recorder.drain();
+  assert.equal(recorder.available(), false);
+  assert.equal(recorder.available(key), false);
+  assert.equal(recorder.available(otherKey), true);
+  fail = false;
+  recorder.record(receipt); await recorder.drain();
+  assert.equal(recorder.available(key), true);
   assert.equal(recorder.available(), true);
 });
 
