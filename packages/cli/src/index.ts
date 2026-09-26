@@ -64,6 +64,8 @@ import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from '
 import { demoRepositoryPackage } from './demoPackage.js';
 import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { runDemoWatch } from './demoWatch.js';
+import { runDemoSupervisor } from './demoSupervisor.js';
+import { listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
 
 const VERSION = '0.2.103';
 const USAGE = CLI_USAGE;
@@ -1612,29 +1614,73 @@ async function startRelayDaemon(policyPath: string) {
   return { started: !alreadyRunning, supervisor: 'running' as const, ...readiness };
 }
 
+async function supervisedDemoCycle(registration: DemoWatchRegistration, signal: AbortSignal) {
+  signal.throwIfAborted();
+  const workspace = await realpath(registration.workspace);
+  if (workspace !== registration.workspace) throw new Error('Demo watch checkout is no longer canonical.');
+  const root = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
+  const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+  if (!root || !remote || normalizeGitRemoteIdentity(remote) !== registration.normalizedRepository) {
+    throw Object.assign(new Error('Demo watch repository binding changed.'), { code: 'demo_watch_repository_changed' });
+  }
+  const scope = { hqUrl: registration.hqUrl, organizationId: registration.organizationId,
+    repositoryId: registration.repositoryId, normalizedRepository: registration.normalizedRepository,
+    installationId: await loadOrCreateInstallationId(), stateRoot: dharmaHome() };
+  const nativeDirectory = registration.provider === 'codex' ? resolve(workspace, '.agents', 'skills')
+    : registration.provider === 'claude' ? resolve(workspace, '.claude', 'skills')
+      : nativeSkillDirectory(registration.provider);
+  return withDemoDeviceLock(scope, () => {
+    signal.throwIfAborted();
+    return demoRepositoryPackage({ scope, workspace, provider: registration.provider,
+      nativeSkillDirectory: nativeDirectory }, { fetcher: (url, options) => {
+        signal.throwIfAborted();
+        return fetch(url, { ...options,
+          signal: options?.signal ? AbortSignal.any([options.signal, signal]) : signal });
+      } });
+  });
+}
+
 async function relaySupervise(flags: Map<string, string | boolean>): Promise<Output> {
-  const policyPath = resolve(required(flags, 'policy'));
-  if (!await readDeviceConfig()) throw new Error('Relay supervision requires an enrolled device.');
-  const selectedWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
-  if (!selectedWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  const demoOnly = flags.has('demo-only');
+  if (demoOnly && flags.has('policy')) throw new Error('Demo-only supervision cannot select a standard policy.');
+  const policyPath = demoOnly ? null : resolve(required(flags, 'policy'));
+  const selectedWorkspace = policyPath
+    ? (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath) : null;
+  if (policyPath) {
+    if (!await readDeviceConfig()) throw new Error('Relay supervision requires an enrolled device.');
+    if (!selectedWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  } else if (!(await listDemoWatchRegistrations(dharmaHome())).length) {
+    throw new Error('Relay supervision requires at least one registered Demo repository.');
+  }
   const releaseLease = await acquireRelaySupervisorLease();
   const bindingPath = resolve(dharmaHome(), 'relay', 'supervisor-workspace.json');
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  const services: Promise<unknown>[] = [];
   try {
-    await writeJsonAtomic(bindingPath, { pid: process.pid, workspaceId: selectedWorkspace.workspaceId, policyPath });
-    const result = await superviseRelay({
+    await writeJsonAtomic(bindingPath, { pid: process.pid, workspaceId: selectedWorkspace?.workspaceId ?? null,
+      policyPath, demoWatches: true, version: VERSION });
+    const demo = runDemoSupervisor({ signal: controller.signal,
+      list: () => listDemoWatchRegistrations(dharmaHome()), cycle: supervisedDemoCycle,
+      onObservation: observation => process.stderr.write(`${JSON.stringify({ event: 'demo_watch_cycle', ...observation })}\n`),
+    });
+    services.push(demo);
+    const standard = policyPath ? superviseRelay({
       signal: controller.signal,
       start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
         cwd: dirname(dirname(policyPath)),
         stdio: 'ignore',
         env: process.env,
       }),
-    });
-    return { ok: true, stopped: true, ...result };
+    }) : Promise.resolve({ restarts: 0 });
+    services.push(standard);
+    const [demoResult, standardResult] = await Promise.all([demo, standard]);
+    return { ok: true, stopped: true, ...standardResult, demo: demoResult };
   } finally {
+    controller.abort();
+    await Promise.allSettled(services);
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     const binding = await readFile(bindingPath, 'utf8')
