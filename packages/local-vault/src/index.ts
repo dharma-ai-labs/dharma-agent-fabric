@@ -1,9 +1,10 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, resolve } from 'node:path';
+import { hostname } from 'node:os';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, sha256, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
@@ -31,6 +32,77 @@ export interface VaultCaptureInput {
     status: string;
     observedAt: string;
   };
+}
+
+export interface LocalProviderSessionBinding extends SessionBindingScope {
+  schema: 'dharma.local-provider-session-binding/v1';
+  owner: 'dharma_bridge';
+  sessionId: string;
+  workspaceRoot: string;
+  createdAt: string;
+}
+
+export type LocalProviderSessionIdentity = Pick<SessionBindingScope,
+  'organizationId' | 'repositoryBindingId' | 'workspaceId' | 'endpointId'
+  | 'membershipId' | 'deviceId' | 'provider'>;
+
+export interface LocalProviderSessionLease {
+  assertHeld(): Promise<boolean>;
+  release(): void;
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid < 1) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function assertLocalProviderSessionBinding(value: unknown): asserts value is LocalProviderSessionBinding {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('provider_session_binding_invalid');
+  }
+  const record = value as Record<string, unknown>;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (Object.keys(record).some(key => ![
+    'schema', 'owner', 'organizationId', 'repositoryBindingId', 'workspaceId',
+    'endpointId', 'membershipId', 'deviceId', 'bindingId', 'provider',
+    'sessionId', 'workspaceRoot', 'createdAt', 'expiresAt', 'maximumProviderCostCents',
+  ].includes(key))
+    || record.schema !== 'dharma.local-provider-session-binding/v1'
+    || record.owner !== 'dharma_bridge'
+    || typeof record.organizationId !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(record.organizationId)
+    || ![record.repositoryBindingId, record.workspaceId, record.endpointId,
+      record.membershipId, record.deviceId, record.bindingId]
+      .every(id => typeof id === 'string' && uuid.test(id))
+    || typeof record.provider !== 'string'
+    || !['codex', 'claude', 'agy', 'hermes'].includes(record.provider)
+    || typeof record.sessionId !== 'string'
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(record.sessionId)
+    || typeof record.workspaceRoot !== 'string'
+    || !isAbsolute(record.workspaceRoot) || resolve(record.workspaceRoot) !== record.workspaceRoot
+    || typeof record.createdAt !== 'string' || typeof record.expiresAt !== 'string'
+    || !Number.isFinite(Date.parse(record.createdAt))
+    || !Number.isFinite(Date.parse(record.expiresAt))
+    || Date.parse(record.expiresAt) <= Date.parse(record.createdAt)
+    || !Number.isInteger(record.maximumProviderCostCents)
+    || Number(record.maximumProviderCostCents) < 0 || Number(record.maximumProviderCostCents) > 10_000) {
+    throw new Error('provider_session_binding_invalid');
+  }
+}
+
+function sameLocalProviderSessionIdentity(
+  record: LocalProviderSessionBinding, expected: LocalProviderSessionIdentity,
+): boolean {
+  return record.organizationId === expected.organizationId
+    && record.repositoryBindingId === expected.repositoryBindingId
+    && record.workspaceId === expected.workspaceId
+    && record.endpointId === expected.endpointId
+    && record.membershipId === expected.membershipId
+    && record.deviceId === expected.deviceId
+    && record.provider === expected.provider;
 }
 
 export class LocalVault {
@@ -104,6 +176,29 @@ export class LocalVault {
         blob_content_id text not null,
         created_at text not null
       );
+      create table if not exists provider_session_bindings (
+        binding_id text primary key,
+        session_locator_hash text not null unique,
+        nonce blob not null,
+        tag blob not null,
+        ciphertext blob not null,
+        revoked_at text
+      );
+      create table if not exists provider_session_leases (
+        binding_id text primary key references provider_session_bindings(binding_id),
+        holder_id text not null,
+        host_name text not null,
+        owner_pid integer not null,
+        acquired_at text not null
+      );
+      create table if not exists provider_session_replies (
+        binding_id text not null references provider_session_bindings(binding_id),
+        question_id text not null,
+        blob_content_id text not null references blobs(content_id),
+        created_at text not null,
+        acknowledged_at text,
+        primary key (binding_id, question_id)
+      );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -145,6 +240,56 @@ export class LocalVault {
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
     return (await this.#putBlob(plaintext, kind)).contentId;
+  }
+
+  async stageProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, plaintext: Uint8Array): Promise<string> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(questionId)
+      || plaintext.byteLength < 1 || plaintext.byteLength > 16384) throw new Error('provider_session_reply_invalid');
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const expectedHash = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
+    const existing = this.#database.prepare(`
+      select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string } | undefined;
+    if (existing) {
+      if (existing.blob_content_id !== expectedHash) throw new Error('provider_session_reply_conflict');
+      return existing.blob_content_id;
+    }
+    const hash = await this.putBlob(plaintext, 'provider-session-completion');
+    // Recheck revocation after the encrypted write; retain evidence on any failure.
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    this.#database.prepare(`
+      insert into provider_session_replies(binding_id, question_id, blob_content_id, created_at)
+      values (?, ?, ?, ?) on conflict(binding_id, question_id) do nothing
+    `).run(bindingId, questionId, hash, new Date().toISOString());
+    const staged = this.#database.prepare(`
+      select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string };
+    if (staged.blob_content_id !== hash) throw new Error('provider_session_reply_conflict');
+    return hash;
+  }
+
+  listProviderSessionReplies(bindingId: string, identity: LocalProviderSessionIdentity):
+    Array<{ questionId: string; completionHash: string }> {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const rows = this.#database.prepare(`
+      select question_id as questionId, blob_content_id as completionHash from provider_session_replies
+      where binding_id = ? and acknowledged_at is null order by created_at, question_id limit 100
+    `).all(bindingId) as Array<{ questionId: string; completionHash: string }>;
+    return rows.map(row => ({ questionId: row.questionId, completionHash: row.completionHash }));
+  }
+
+  acknowledgeProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, completionHash: string): void {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string } | undefined;
+    if (!row || row.blob_content_id !== completionHash) throw new Error('provider_session_reply_conflict');
+    this.#database.prepare(`
+      update provider_session_replies set acknowledged_at = coalesce(acknowledged_at, ?)
+      where binding_id = ? and question_id = ? and blob_content_id = ?
+    `).run(new Date().toISOString(), bindingId, questionId, completionHash);
   }
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
@@ -199,6 +344,130 @@ export class LocalVault {
     const actual = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
     if (actual !== contentId) throw new Error('Vault content hash mismatch.');
     return plaintext;
+  }
+
+  #readProviderSessionBinding(bindingId: string): LocalProviderSessionBinding | null {
+    const row = this.#database.prepare(`
+      select session_locator_hash, nonce, tag, ciphertext, revoked_at
+      from provider_session_bindings where binding_id = ?
+    `).get(bindingId) as {
+      session_locator_hash: string; nonce: Uint8Array; tag: Uint8Array;
+      ciphertext: Uint8Array; revoked_at: string | null;
+    } | undefined;
+    if (!row || row.revoked_at) return null;
+    const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.nonce);
+    decipher.setAuthTag(row.tag);
+    const record: unknown = JSON.parse(Buffer.concat([
+      decipher.update(row.ciphertext), decipher.final(),
+    ]).toString('utf8'));
+    assertLocalProviderSessionBinding(record);
+    const locatorHash = createHash('sha256')
+      .update(`${record.provider}\u0000${record.sessionId}`).digest('hex');
+    if (record.bindingId !== bindingId || row.session_locator_hash !== locatorHash) {
+      throw new Error('provider_session_binding_integrity_failed');
+    }
+    return record;
+  }
+
+  saveProviderSessionBinding(record: LocalProviderSessionBinding): void {
+    assertLocalProviderSessionBinding(record);
+    if (Date.now() >= Date.parse(record.expiresAt)) throw new Error('provider_session_binding_expired');
+    const existing = this.#readProviderSessionBinding(record.bindingId);
+    if (existing) {
+      if (canonicalize(existing) === canonicalize(record)) return;
+      throw new Error('provider_session_binding_conflict');
+    }
+    const plaintext = Buffer.from(canonicalize(record), 'utf8');
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const locatorHash = createHash('sha256')
+      .update(`${record.provider}\u0000${record.sessionId}`).digest('hex');
+    try {
+      this.#database.prepare(`
+        insert into provider_session_bindings
+          (binding_id, session_locator_hash, nonce, tag, ciphertext, revoked_at)
+        values (?, ?, ?, ?, ?, null)
+      `).run(record.bindingId, locatorHash, nonce, cipher.getAuthTag(), ciphertext);
+    } catch (error) {
+      const collision = this.#database.prepare(`
+        select binding_id from provider_session_bindings
+        where binding_id = ? or session_locator_hash = ? limit 1
+      `).get(record.bindingId, locatorHash);
+      if (!collision) throw error;
+      const concurrent = this.#readProviderSessionBinding(record.bindingId);
+      if (concurrent && canonicalize(concurrent) === canonicalize(record)) return;
+      throw new Error('provider_session_binding_conflict');
+    }
+  }
+
+  getProviderSessionBinding(bindingId: string, expected: LocalProviderSessionIdentity): LocalProviderSessionBinding | null {
+    const record = this.#readProviderSessionBinding(bindingId);
+    if (!record) return null;
+    if (!sameLocalProviderSessionIdentity(record, expected)) {
+      throw new Error('provider_session_binding_scope_mismatch');
+    }
+    return record;
+  }
+
+  revokeProviderSessionBinding(bindingId: string, expected: LocalProviderSessionIdentity): void {
+    const record = this.getProviderSessionBinding(bindingId, expected);
+    if (!record) return;
+    this.#database.prepare(`
+      update provider_session_bindings set revoked_at = ? where binding_id = ? and revoked_at is null
+    `).run(new Date().toISOString(), bindingId);
+  }
+
+  tryAcquireProviderSessionLease(
+    bindingId: string, expected: LocalProviderSessionIdentity,
+  ): LocalProviderSessionLease | null {
+    const record = this.getProviderSessionBinding(bindingId, expected);
+    if (!record || Date.now() >= Date.parse(record.expiresAt)) return null;
+    const holderId = randomUUID();
+    const currentHost = hostname();
+    this.#database.exec('begin immediate');
+    try {
+      const current = this.#database.prepare(`
+        select revoked_at from provider_session_bindings where binding_id = ?
+      `).get(bindingId) as { revoked_at: string | null } | undefined;
+      if (!current || current.revoked_at || Date.now() >= Date.parse(record.expiresAt)) {
+        this.#database.exec('commit');
+        return null;
+      }
+      const prior = this.#database.prepare(`
+        select host_name, owner_pid from provider_session_leases where binding_id = ?
+      `).get(bindingId) as { host_name: string; owner_pid: number } | undefined;
+      if (prior && (prior.host_name !== currentHost || processIsAlive(prior.owner_pid))) {
+        this.#database.exec('commit');
+        return null;
+      }
+      this.#database.prepare(`
+        insert into provider_session_leases (binding_id, holder_id, host_name, owner_pid, acquired_at)
+        values (?, ?, ?, ?, ?)
+        on conflict(binding_id) do update set holder_id = excluded.holder_id,
+          host_name = excluded.host_name, owner_pid = excluded.owner_pid,
+          acquired_at = excluded.acquired_at
+      `).run(bindingId, holderId, currentHost, process.pid, new Date().toISOString());
+      this.#database.exec('commit');
+    } catch (error) {
+      try { this.#database.exec('rollback'); } catch {}
+      throw error;
+    }
+    return {
+      assertHeld: async () => {
+        const active = this.getProviderSessionBinding(bindingId, expected);
+        if (!active || Date.now() >= Date.parse(active.expiresAt)) return false;
+        const row = this.#database.prepare(`
+          select holder_id, host_name, owner_pid from provider_session_leases where binding_id = ?
+        `).get(bindingId) as { holder_id: string; host_name: string; owner_pid: number } | undefined;
+        return row?.holder_id === holderId && row.host_name === currentHost && row.owner_pid === process.pid;
+      },
+      release: () => {
+        this.#database.prepare(`
+          delete from provider_session_leases where binding_id = ? and holder_id = ?
+        `).run(bindingId, holderId);
+      },
+    };
   }
 
   recordSession(input: {

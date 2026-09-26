@@ -1,13 +1,199 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import { LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey } from './index.js';
+import { LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey,
+  type LocalProviderSessionBinding } from './index.js';
+
+test('provider session binding is encrypted, scoped, immutable, and revocable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-binding-'));
+  const key = randomBytes(32);
+  const binding: LocalProviderSessionBinding = {
+    schema: 'dharma.local-provider-session-binding/v1', owner: 'dharma_bridge',
+    organizationId: 'org_test', repositoryBindingId: '40000000-0000-4000-8000-000000000001',
+    workspaceId: '40000000-0000-4000-8000-000000000002',
+    endpointId: '40000000-0000-4000-8000-000000000003',
+    membershipId: '40000000-0000-4000-8000-000000000004',
+    deviceId: '40000000-0000-4000-8000-000000000005',
+    bindingId: '40000000-0000-4000-8000-000000000006',
+    provider: 'codex', sessionId: 'private-thread-123', workspaceRoot: resolve(root, 'repo'),
+    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    maximumProviderCostCents: 25,
+  };
+  const expected = {
+    organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
+    workspaceId: binding.workspaceId, endpointId: binding.endpointId,
+    membershipId: binding.membershipId, deviceId: binding.deviceId, provider: binding.provider,
+  };
+  const vault = await LocalVault.open({ root, masterKey: key });
+  vault.saveProviderSessionBinding(binding);
+  vault.saveProviderSessionBinding(binding);
+  assert.deepEqual(vault.getProviderSessionBinding(binding.bindingId, expected), binding);
+  assert.throws(() => vault.getProviderSessionBinding(binding.bindingId,
+    { ...expected, organizationId: 'org_foreign' }), /scope_mismatch/);
+  assert.throws(() => vault.saveProviderSessionBinding({ ...binding, workspaceRoot: resolve(root, 'other') }),
+    /binding_conflict/);
+  assert.throws(() => vault.saveProviderSessionBinding({ ...binding, unexpected: 'extra' } as
+    LocalProviderSessionBinding), /binding_invalid/);
+  assert.throws(() => vault.saveProviderSessionBinding({ ...binding,
+    bindingId: '40000000-0000-4000-8000-000000000007' }), /binding_conflict/);
+  const db = new DatabaseSync(join(root, 'vault.sqlite'));
+  const row = db.prepare('select nonce, ciphertext from provider_session_bindings where binding_id = ?')
+    .get(binding.bindingId) as { nonce: Uint8Array; ciphertext: Uint8Array };
+  assert.equal(row.nonce.length, 12);
+  assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from(binding.sessionId)), false);
+  db.close();
+  vault.close();
+
+  const reopened = await LocalVault.open({ root, masterKey: key });
+  assert.deepEqual(reopened.getProviderSessionBinding(binding.bindingId, expected), binding);
+  reopened.revokeProviderSessionBinding(binding.bindingId, expected);
+  assert.equal(reopened.getProviderSessionBinding(binding.bindingId, expected), null);
+  assert.throws(() => reopened.saveProviderSessionBinding(binding), /binding_conflict/);
+  reopened.close();
+});
+
+test('pending session replies survive reopening, retain evidence, and reject foreign or changed records', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-session-reply-'));
+  const key = randomBytes(32);
+  const binding: LocalProviderSessionBinding = {
+    schema: 'dharma.local-provider-session-binding/v1', owner: 'dharma_bridge',
+    organizationId: 'org_test', repositoryBindingId: '40000000-0000-4000-8000-000000000001',
+    workspaceId: '40000000-0000-4000-8000-000000000002',
+    endpointId: '40000000-0000-4000-8000-000000000003',
+    membershipId: '40000000-0000-4000-8000-000000000004',
+    deviceId: '40000000-0000-4000-8000-000000000005',
+    bindingId: '40000000-0000-4000-8000-000000000006',
+    provider: 'codex', sessionId: 'private-thread', workspaceRoot: resolve(root, 'repo'),
+    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    maximumProviderCostCents: 25,
+  };
+  const identity = { organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
+    workspaceId: binding.workspaceId, endpointId: binding.endpointId, membershipId: binding.membershipId,
+    deviceId: binding.deviceId, provider: binding.provider };
+  const questionId = '40000000-0000-4000-8000-000000000010';
+  let vault = await LocalVault.open({ root, masterKey: key });
+  vault.saveProviderSessionBinding(binding);
+  const plaintext = Buffer.from('private answer retained for recovery');
+  const hash = await vault.stageProviderSessionReply(binding.bindingId, identity, questionId, plaintext);
+  assert.equal(await vault.stageProviderSessionReply(binding.bindingId, identity, questionId, plaintext), hash);
+  await assert.rejects(vault.stageProviderSessionReply(binding.bindingId, identity, questionId,
+    Buffer.from('changed answer')), /reply_conflict/);
+  assert.throws(() => vault.listProviderSessionReplies(binding.bindingId,
+    { ...identity, organizationId: 'org_foreign' }), /scope_mismatch/);
+  const rows = vault.listProviderSessionReplies(binding.bindingId, identity);
+  assert.deepEqual(rows, [{ questionId, completionHash: hash }]);
+  vault.close();
+  vault = await LocalVault.open({ root, masterKey: key });
+  try {
+    assert.deepEqual(vault.listProviderSessionReplies(binding.bindingId, identity), rows);
+    assert.deepEqual(await vault.getBlob(hash), plaintext);
+    assert.throws(() => vault.acknowledgeProviderSessionReply(binding.bindingId, identity, questionId,
+      `sha256:${'0'.repeat(64)}`), /reply_conflict/);
+    vault.acknowledgeProviderSessionReply(binding.bindingId, identity, questionId, hash);
+    assert.deepEqual(vault.listProviderSessionReplies(binding.bindingId, identity), []);
+    assert.deepEqual(await vault.getBlob(hash), plaintext);
+    assert.equal(await vault.stageProviderSessionReply(binding.bindingId, identity, questionId, plaintext), hash);
+    assert.deepEqual(vault.listProviderSessionReplies(binding.bindingId, identity), []);
+    await assert.rejects(vault.stageProviderSessionReply(binding.bindingId, identity, questionId,
+      Buffer.from('change after acknowledgement')), /reply_conflict/);
+    vault.revokeProviderSessionBinding(binding.bindingId, identity);
+    await assert.rejects(vault.stageProviderSessionReply(binding.bindingId, identity, questionId, plaintext), /binding_unavailable/);
+  } finally { vault.close(); }
+});
+
+test('provider session lease fences concurrent local owners and observes revocation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-lease-'));
+  const key = randomBytes(32);
+  const binding: LocalProviderSessionBinding = {
+    schema: 'dharma.local-provider-session-binding/v1', owner: 'dharma_bridge',
+    organizationId: 'org_test', repositoryBindingId: '40000000-0000-4000-8000-000000000011',
+    workspaceId: '40000000-0000-4000-8000-000000000012',
+    endpointId: '40000000-0000-4000-8000-000000000013',
+    membershipId: '40000000-0000-4000-8000-000000000014',
+    deviceId: '40000000-0000-4000-8000-000000000015',
+    bindingId: '40000000-0000-4000-8000-000000000016',
+    provider: 'codex', sessionId: 'private-thread-lease', workspaceRoot: resolve(root, 'repo'),
+    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    maximumProviderCostCents: 25,
+  };
+  const expected = {
+    organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
+    workspaceId: binding.workspaceId, endpointId: binding.endpointId,
+    membershipId: binding.membershipId, deviceId: binding.deviceId, provider: binding.provider,
+  };
+  const first = await LocalVault.open({ root, masterKey: key });
+  const second = await LocalVault.open({ root, masterKey: key });
+  try {
+    first.saveProviderSessionBinding(binding);
+    const owner = first.tryAcquireProviderSessionLease(binding.bindingId, expected);
+    assert.ok(owner);
+    assert.equal(await owner.assertHeld(), true);
+    assert.equal(second.tryAcquireProviderSessionLease(binding.bindingId, expected), null);
+    owner.release();
+    assert.equal(await owner.assertHeld(), false);
+    const successor = second.tryAcquireProviderSessionLease(binding.bindingId, expected);
+    assert.ok(successor);
+    assert.equal(await successor.assertHeld(), true);
+    first.revokeProviderSessionBinding(binding.bindingId, expected);
+    assert.equal(await successor.assertHeld(), false);
+    assert.equal(first.tryAcquireProviderSessionLease(binding.bindingId, expected), null);
+    successor.release();
+  } finally { first.close(); second.close(); }
+});
+
+test('provider session lease recovers only after the recorded process has exited', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-lease-recovery-'));
+  const key = randomBytes(32);
+  const binding: LocalProviderSessionBinding = {
+    schema: 'dharma.local-provider-session-binding/v1', owner: 'dharma_bridge',
+    organizationId: 'org_test', repositoryBindingId: '40000000-0000-4000-8000-000000000021',
+    workspaceId: '40000000-0000-4000-8000-000000000022',
+    endpointId: '40000000-0000-4000-8000-000000000023',
+    membershipId: '40000000-0000-4000-8000-000000000024',
+    deviceId: '40000000-0000-4000-8000-000000000025',
+    bindingId: '40000000-0000-4000-8000-000000000026',
+    provider: 'codex', sessionId: 'private-thread-recovery', workspaceRoot: resolve(root, 'repo'),
+    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    maximumProviderCostCents: 25,
+  };
+  const expected = {
+    organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
+    workspaceId: binding.workspaceId, endpointId: binding.endpointId,
+    membershipId: binding.membershipId, deviceId: binding.deviceId, provider: binding.provider,
+  };
+  const first = await LocalVault.open({ root, masterKey: key });
+  const second = await LocalVault.open({ root, masterKey: key });
+  try {
+    first.saveProviderSessionBinding(binding);
+    const original = first.tryAcquireProviderSessionLease(binding.bindingId, expected);
+    assert.ok(original);
+    assert.equal(second.tryAcquireProviderSessionLease(binding.bindingId, expected), null);
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    assert.ok(child.pid);
+    await new Promise<void>((resolveChild, reject) => {
+      child.once('error', reject);
+      child.once('close', () => resolveChild());
+    });
+    const db = new DatabaseSync(join(root, 'vault.sqlite'));
+    db.prepare('update provider_session_leases set owner_pid = ? where binding_id = ?')
+      .run(child.pid, binding.bindingId);
+    db.close();
+    assert.equal(await original.assertHeld(), false);
+    const recovered = second.tryAcquireProviderSessionLease(binding.bindingId, expected);
+    assert.ok(recovered);
+    assert.equal(await recovered.assertHeld(), true);
+    original.release();
+    assert.equal(await recovered.assertHeld(), true);
+    recovered.release();
+  } finally { first.close(); second.close(); }
+});
 
 test('vault encrypts content and verifies it on read', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-'));

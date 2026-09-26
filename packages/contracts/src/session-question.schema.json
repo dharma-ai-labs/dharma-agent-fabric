@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/session-question/v1",
+  "title": "Repository-scoped provider session question",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "questionId", "taskId", "organizationId", "repositoryBindingId", "source", "target", "category", "question", "authority", "createdAt", "expiresAt", "nonce", "signerKeyVersion", "signature"],
+  "properties": {
+    "schema": { "const": "dharma.session-question/v1" },
+    "questionId": { "type": "string", "format": "uuid" },
+    "taskId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "repositoryBindingId": { "type": "string", "format": "uuid" },
+    "source": { "$ref": "#/$defs/peer" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceId", "endpointId", "membershipId", "deviceId", "bindingId", "provider"],
+      "properties": {
+        "workspaceId": { "type": "string", "format": "uuid" },
+        "endpointId": { "type": "string", "format": "uuid" },
+        "membershipId": { "type": "string", "format": "uuid" },
+        "deviceId": { "type": "string", "format": "uuid" },
+        "bindingId": { "type": "string", "format": "uuid" },
+        "provider": { "enum": ["codex", "claude", "agy", "hermes"] }
+      }
+    },
+    "category": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", "maxLength": 80 },
+    "question": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "^[^\\s\\u0000-\\u001f\\u007f](?:[^\\u0000-\\u001f\\u007f]*[^\\s\\u0000-\\u001f\\u007f])?$" },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "readPaths", "network", "maximumProviderCostCents"],
+      "properties": {
+        "mode": { "const": "read_only" },
+        "readPaths": { "const": ["."] },
+        "network": { "const": "deny" },
+        "maximumProviderCostCents": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "nonce": { "type": "string", "format": "uuid" },
+    "signerKeyVersion": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{80,100}$" }
+  },
+  "$defs": {
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceId", "endpointId", "membershipId", "deviceId"],
+      "properties": {
+        "workspaceId": { "type": "string", "format": "uuid" },
+        "endpointId": { "type": "string", "format": "uuid" },
+        "membershipId": { "type": "string", "format": "uuid" },
+        "deviceId": { "type": "string", "format": "uuid" }
+      }
+    }
+  }
+}
