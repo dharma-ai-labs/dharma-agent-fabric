@@ -569,6 +569,71 @@ test('an expanded policy publishes a replacement without installing the stale si
   assert.equal(f.acknowledgements.length, 1);
 });
 
+test('a fresh client can publish an expanded-policy replacement without activating stale skills', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  f.advancePolicy(['README.md']);
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  let now = 1_000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  const first = await demoRepositoryPackage(input, deps);
+  assert.equal(first.stage, 'demo_repository_package_policy_transition');
+  assert.equal(first.sourceSync?.state, 'debouncing');
+  now = 17_000;
+  const updated = await demoRepositoryPackage(input, deps);
+  assert.equal(updated.sourceSync?.state, 'submitted');
+  assert.equal(updated.ready, false);
+  assert.equal(f.uploads.length, 1);
+  const uploaded = f.uploads[0]!.snapshot as { manifest: { schema: string;
+    knowledge: { authority: string; priorRelease: { catalogHash: string; manifestHash: string } } } };
+  assert.equal(uploaded.manifest.schema, 'dharma.repository-package/v3');
+  assert.equal(uploaded.manifest.knowledge.authority, 'unverified_prior_release_reference');
+  assert.equal(uploaded.manifest.knowledge.priorRelease.catalogHash,
+    f.release!.envelope.descriptor.catalogHash);
+  assert.equal(uploaded.manifest.knowledge.priorRelease.manifestHash,
+    f.release!.envelope.descriptor.manifestHash);
+  assert.deepEqual(f.uploads[0]!.consolidation, { mode: 'repository_update',
+    includeApprovedOutputs: true, requireAtlasAssociation: true,
+    expectedLatestSourceFingerprint: f.publishedSourceFingerprint });
+  now = 32_000;
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'submitted');
+  assert.equal(f.uploads.length, 1);
+  assert.equal(f.acknowledgements.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/knowledge/CATALOG.json')));
+});
+
+test('a fresh policy transition rejects corrupted signed delivery before publication', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  f.advancePolicy(['README.md']);
+  f.release!.chunks[0]!.contentBase64 = Buffer.from('corrupt').toString('base64');
+  await assert.rejects(demoRepositoryPackage({ scope: f.scope, workspace: f.workspace },
+    { store: f.store, fetcher: f.fetcher }));
+  assert.equal(f.uploads.length, 0);
+  assert.equal(f.acknowledgements.length, 0);
+});
+
+test('a fresh policy transition resumes the exact candidate after a lost response', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true,
+    activePackage: 'valid', loseFirstUpload: true, remoteSkill: true });
+  f.advancePolicy(['.claude/skills/verifier/SKILL.md', 'README.md']);
+  const input = { scope: f.scope, workspace: f.workspace };
+  let now = 1_000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  await demoRepositoryPackage(input, deps);
+  now = 17_000;
+  await assert.rejects(demoRepositoryPackage(input, deps), /connection lost after upload/);
+  await writeFile(resolve(f.workspace, 'README.md'), 'New local edit after upload.\n');
+  now = 32_000;
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'submitted');
+  assert.equal(f.uploads.length, 2);
+  assert.equal(f.uploads[0]!.operationId, f.uploads[1]!.operationId);
+  assert.deepEqual(f.uploads[0]!.snapshot, f.uploads[1]!.snapshot);
+  const snapshot = f.uploads[0]!.snapshot as { manifest: { files: Array<{ path: string }> } };
+  assert.ok(snapshot.manifest.files.some(file => file.path === '.claude/skills/verifier/SKILL.md'));
+  assert.equal(f.acknowledgements.length, 0);
+});
+
 test('a narrowed or unverifiable policy transition cannot publish a replacement', async () => {
   const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
   const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
