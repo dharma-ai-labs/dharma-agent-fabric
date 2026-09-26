@@ -2,6 +2,35 @@
 
 Status: investigation. This is not a production capability claim.
 
+## September 26 retained-conversation proof
+
+The earlier no-model observations below are historical. A bounded Linux test on
+September 26 used Codex 0.147.0, `gpt-5.6-luna`, an authenticated existing local
+provider store, and a new synthetic workspace. `openCodexBoundSession` retained
+one bridge-owned app-server conversation across two completed turns. The first
+turn read a random code from an approved file; the second recalled the same code
+without receiving it in its question or using tools. Both answers and their
+hashes matched. Neither turn resumed an unrelated user chat.
+
+All four positive/negative sandbox controls passed before dispatch: approved
+read, outside-workspace read denial, write denial and localhost network denial.
+The PATH-default Codex 0.144.1 failed the positive-read/network controls and was
+not dispatched. Provider version and a working positive control are release
+requirements, not permission-profile syntax alone.
+
+The final cumulative provider notification reported 62,079 input tokens,
+50,432 cached input tokens, 186 output tokens and 50 reasoning tokens. These
+cumulative observations must not be summed across notifications. A USD 10
+reservation covered the bounded two-turn test; incremental provider actuals are
+unsettled. The authentication store was shared with the existing local provider,
+so this is not independent customer-credential or two-machine qualification.
+
+This proves real same-conversation execution for a bridge-owned Linux session.
+It does not prove production signed routing, Windows model execution, a native
+desktop attachment, idle-chat wakeup or customer provider compatibility. Those
+remain separate gates. The cooperative API's synthetic callback tests likewise
+cannot attest that this Codex desktop chat is attached.
+
 ## Observed boundary
 
 At CLI `0.2.102` source commit `bc5682b`, the relay targets a device and endpoint, then the task runner creates an isolated Git worktree. The Codex adapter starts `codex exec`; the Claude adapter starts `claude --print --no-session-persistence`. Both advertise `sessionContinuation: unavailable`. Provider session discovery reads historical transcripts. None of these paths binds a task to a particular running chat. A signed delivery or a new provider process must not be described as a response from the user's selected chat.
