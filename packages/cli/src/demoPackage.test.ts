@@ -125,7 +125,8 @@ function memoryStore(): SecureSecretStore {
 
 async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boolean;
   loseFirstUpload?: boolean; packagePublished?: boolean; candidatePublished?: boolean;
-  activePackage?: boolean | 'valid'; loseFirstAck?: boolean; automaticPublication?: boolean } = {}) {
+  activePackage?: boolean | 'valid'; loseFirstAck?: boolean; automaticPublication?: boolean;
+  remoteSkill?: boolean; corruptSource?: boolean } = {}) {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-package-'));
   const workspace = await mkdtemp(resolve(tmpdir(), 'dharma-demo-source-'));
   await writeFile(resolve(workspace, 'README.md'), 'Approved source evidence.\n');
@@ -144,7 +145,8 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
   const policy = { action: 'authorize', confirmed: true,
     requestId: '70000000-0000-4000-8000-000000000001', repositoryBindingId: repositoryId,
     expectedRevision: 0, allowedContentClasses: ['approved_outputs', 'repository_content', 'repository_skills'],
-    approvedRepositoryPaths: ['README.md'], approvedOutputFolders: [],
+    approvedRepositoryPaths: options.remoteSkill
+      ? ['.claude/skills/verifier/SKILL.md', 'README.md'] : ['README.md'], approvedOutputFolders: [],
     automaticValidatedPublication: options.automaticPublication !== false,
     retentionDays: 30, maximumFileBytes: 262144, maximumSnapshotBytes: 4194304,
     maximumDailyUploadBytes: 8388608, expiresAt: null };
@@ -167,6 +169,20 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
       policyHash: digest(canonicalize(next)), policy: next };
   };
   const release = options.activePackage === 'valid' ? signedPackage(sourceAuthorization.policyHash) : null;
+  const sourceFiles = [{ path: 'README.md', sha256: digest('Approved source evidence.\n'),
+    sizeBytes: Buffer.byteLength('Approved source evidence.\n'), role: 'repository_content' },
+  ...(options.remoteSkill ? [{ path: '.claude/skills/verifier/SKILL.md',
+    managedPath: 'skills/source/.claude/skills/verifier/SKILL.md',
+    sha256: digest('# Verifier\n'), sizeBytes: Buffer.byteLength('# Verifier\n'), role: 'skill' }] : [])]
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const sourceSkills = options.remoteSkill ? [{ path: '.claude/skills/verifier',
+    providerRoot: '.claude/skills', entryPath: '.claude/skills/verifier/SKILL.md',
+    contentHash: digest(canonicalize([{ path: '.claude/skills/verifier/SKILL.md', sha256: digest('# Verifier\n') }])),
+    availability: 'available', filePaths: ['.claude/skills/verifier/SKILL.md'],
+    observation: { state: 'not_observed', authority: 'caller_supplied_not_runtime_verified', references: [] } }] : [];
+  const publishedSourceFingerprint = digest(canonicalize({ organizationId,
+    repositoryBindingId: repositoryId, repositoryAgentId: repositoryId,
+    generationId, policyHash: sourceAuthorization.policyHash, files: sourceFiles, skills: sourceSkills }));
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, JSON.stringify({ schema: 'dharma.demo-device/v1',
     ...scope, deviceId, publicKeyEd25519: identity.publicKeyEd25519,
@@ -203,7 +219,22 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
         repositoryPackageState: options.packagePublished ? 'published' : 'not_connected',
         activeReleaseId: options.packagePublished ? release?.releaseId
           ?? '90000000-0000-4000-8000-000000000001' : null,
-        publishedSourceFingerprint: options.packagePublished ? digest('published source') : null });
+        publishedSourceFingerprint: options.packagePublished ? publishedSourceFingerprint : null });
+    }
+    if (url.pathname.endsWith('/source-inventory')) return Response.json({ ok: true,
+      organizationId, repositoryBindingId: repositoryId, repositoryAgentId: repositoryId,
+      policyGenerationId: currentAuthorization.generationId, workspaceBaseline: null,
+      source: { candidateId: '80000000-0000-4000-8000-000000000002', workspaceId,
+        sourceSnapshotHash: digest('source snapshot'), sourceManifestHash: digest('source manifest'),
+        sourceFingerprint: publishedSourceFingerprint, files: sourceFiles, skills: sourceSkills } });
+    if (url.pathname.includes('/source-inventory/') && url.pathname.includes('/blobs/')) {
+      const path = url.searchParams.get('path');
+      const file = sourceFiles.find(row => row.path === path)!;
+      return Response.json({ ok: true, organizationId, repositoryBindingId: repositoryId,
+        repositoryAgentId: repositoryId, candidateId: '80000000-0000-4000-8000-000000000002',
+        sourceSnapshotHash: digest('source snapshot'), sourceFingerprint: publishedSourceFingerprint,
+        ...file, contentBase64: Buffer.from(options.corruptSource ? 'corrupt'
+          : path === 'README.md' ? 'Approved source evidence.\n' : '# Verifier\n').toString('base64') });
     }
     if (url.pathname.endsWith('/packages/active')) return Response.json({ ok: true,
       organizationId, repositoryId, repositoryPackageState: options.activePackage ? 'published' : 'pending',
@@ -254,10 +285,17 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
             ? '90000000-0000-4000-8000-000000000001' : null } },
       { status: options.candidatePublished ? 200 : 202 });
     }
+    if (url.pathname.includes('/package-candidates/')) {
+      const upload = uploads.at(-1)!;
+      return Response.json({ ok: true, organizationId, repositoryId,
+        candidate: { candidateId: '80000000-0000-4000-8000-000000000001',
+          operationId: upload.operationId, snapshotHash: upload.sourceSnapshotHash,
+          state: 'accepted', releaseId: null } });
+    }
     throw new Error(`Unexpected package route: ${url.pathname}`);
   };
   return { scope, workspace, store, fetcher, configPath, uploads, acknowledgements, release,
-    advancePolicy, hideReleaseAuthorization: () => { releaseAuthorization = null; },
+    advancePolicy, publishedSourceFingerprint, hideReleaseAuthorization: () => { releaseAuthorization = null; },
     get sequence() { return sequence; } };
 }
 
@@ -443,8 +481,64 @@ test('a stable approved source edit submits one scoped repository update candida
   assert.equal(f.uploads.length, 1);
   assert.deepEqual(f.uploads[0]!.consolidation, { mode: 'repository_update',
     includeApprovedOutputs: true, requireAtlasAssociation: true,
-    expectedLatestSourceFingerprint: digest('published source') });
+    expectedLatestSourceFingerprint: f.publishedSourceFingerprint });
   assert.equal(f.uploads[0]!.repositoryBindingId, repositoryId);
+});
+
+test('an unrelated Demo edit retains the teammate source skill, without writing customer source files', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid', remoteSkill: true });
+  const input = { scope: f.scope, workspace: f.workspace };
+  let now = 1000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  await demoRepositoryPackage(input, deps);
+  await writeFile(resolve(f.workspace, 'README.md'), 'Approved source revision.\n');
+  now = 2000;
+  await demoRepositoryPackage(input, deps);
+  now = 17000;
+  await demoRepositoryPackage(input, deps);
+  assert.equal(f.uploads.length, 1);
+  const upload = f.uploads[0] as { snapshot: { manifest: { files: Array<{ path: string }> } } };
+  assert.ok(upload.snapshot.manifest.files.some(file => file.path === '.claude/skills/verifier/SKILL.md'),
+    'candidate omitted a verified remote-only skill');
+  now = 32000;
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'submitted');
+  assert.equal(f.uploads.length, 1, 'pending delivery must not dispatch a second candidate');
+  await assert.rejects(readFile(resolve(f.workspace, '.claude/skills/verifier/SKILL.md')), { code: 'ENOENT' });
+});
+
+test('corrupted remote Demo source cannot authorize an update', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid',
+    remoteSkill: true, corruptSource: true });
+  const input = { scope: f.scope, workspace: f.workspace };
+  let now = 1000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  await demoRepositoryPackage(input, deps);
+  await writeFile(resolve(f.workspace, 'README.md'), 'Approved source revision.\n');
+  now = 2000;
+  await demoRepositoryPackage(input, deps);
+  now = 17000;
+  await assert.rejects(demoRepositoryPackage(input, deps), /blob integrity/);
+  assert.equal(f.uploads.length, 0);
+});
+
+test('lost reconciled Demo upload retries the same snapshot and operation after restart', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid',
+    remoteSkill: true, loseFirstUpload: true });
+  const input = { scope: f.scope, workspace: f.workspace };
+  let now = 1000;
+  const deps = { store: f.store, fetcher: f.fetcher, now: () => now };
+  await demoRepositoryPackage(input, deps);
+  await writeFile(resolve(f.workspace, 'README.md'), 'Approved source revision.\n');
+  now = 2000;
+  await demoRepositoryPackage(input, deps);
+  now = 17000;
+  await assert.rejects(demoRepositoryPackage(input, deps), /connection lost after upload/);
+  await writeFile(resolve(f.workspace, 'README.md'), 'Another revision while delivery is pending.\n');
+  now = 32000;
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'submitted');
+  assert.equal(f.uploads.length, 2);
+  assert.equal(f.uploads[0]?.operationId, f.uploads[1]?.operationId);
+  assert.deepEqual(f.uploads[0]?.snapshot, f.uploads[1]?.snapshot);
 });
 
 test('an expanded policy publishes a replacement without installing the stale signed release', async () => {
@@ -471,7 +565,7 @@ test('an expanded policy publishes a replacement without installing the stale si
   assert.equal(f.uploads.length, 1);
   assert.deepEqual(f.uploads[0]!.consolidation, { mode: 'repository_update',
     includeApprovedOutputs: true, requireAtlasAssociation: true,
-    expectedLatestSourceFingerprint: digest('published source') });
+    expectedLatestSourceFingerprint: f.publishedSourceFingerprint });
   assert.equal(f.acknowledgements.length, 1);
 });
 
