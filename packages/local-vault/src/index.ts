@@ -191,6 +191,14 @@ export class LocalVault {
         owner_pid integer not null,
         acquired_at text not null
       );
+      create table if not exists provider_session_replies (
+        binding_id text not null references provider_session_bindings(binding_id),
+        question_id text not null,
+        blob_content_id text not null references blobs(content_id),
+        created_at text not null,
+        acknowledged_at text,
+        primary key (binding_id, question_id)
+      );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -232,6 +240,56 @@ export class LocalVault {
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
     return (await this.#putBlob(plaintext, kind)).contentId;
+  }
+
+  async stageProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, plaintext: Uint8Array): Promise<string> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(questionId)
+      || plaintext.byteLength < 1 || plaintext.byteLength > 16384) throw new Error('provider_session_reply_invalid');
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const expectedHash = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
+    const existing = this.#database.prepare(`
+      select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string } | undefined;
+    if (existing) {
+      if (existing.blob_content_id !== expectedHash) throw new Error('provider_session_reply_conflict');
+      return existing.blob_content_id;
+    }
+    const hash = await this.putBlob(plaintext, 'provider-session-completion');
+    // Recheck revocation after the encrypted write; retain evidence on any failure.
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    this.#database.prepare(`
+      insert into provider_session_replies(binding_id, question_id, blob_content_id, created_at)
+      values (?, ?, ?, ?) on conflict(binding_id, question_id) do nothing
+    `).run(bindingId, questionId, hash, new Date().toISOString());
+    const staged = this.#database.prepare(`
+      select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string };
+    if (staged.blob_content_id !== hash) throw new Error('provider_session_reply_conflict');
+    return hash;
+  }
+
+  listProviderSessionReplies(bindingId: string, identity: LocalProviderSessionIdentity):
+    Array<{ questionId: string; completionHash: string }> {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const rows = this.#database.prepare(`
+      select question_id as questionId, blob_content_id as completionHash from provider_session_replies
+      where binding_id = ? and acknowledged_at is null order by created_at, question_id limit 100
+    `).all(bindingId) as Array<{ questionId: string; completionHash: string }>;
+    return rows.map(row => ({ questionId: row.questionId, completionHash: row.completionHash }));
+  }
+
+  acknowledgeProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, completionHash: string): void {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string } | undefined;
+    if (!row || row.blob_content_id !== completionHash) throw new Error('provider_session_reply_conflict');
+    this.#database.prepare(`
+      update provider_session_replies set acknowledged_at = coalesce(acknowledged_at, ?)
+      where binding_id = ? and question_id = ? and blob_content_id = ?
+    `).run(new Date().toISOString(), bindingId, questionId, completionHash);
   }
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {

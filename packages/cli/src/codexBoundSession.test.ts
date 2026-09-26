@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { openCodexBoundSession, runCodexBoundSessionQuestion } from './codexBoundSession.js';
 import { openCodexInboxSession } from './codexInboxSession.js';
+import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const ids = {
@@ -100,24 +101,86 @@ async function fixture() {
     workspaceId: binding.workspaceId, endpointId: binding.endpointId,
     membershipId: binding.membershipId, deviceId: binding.deviceId, provider: binding.provider,
   };
-  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const masterKey = randomBytes(32);
+  const vault = await LocalVault.open({ root, masterKey });
   vault.saveProviderSessionBinding(binding);
   const used = new Set<string>();
   const verifier = {
     resolvePublicKey: (version: string) => version === 'test-v1' ? publicKey : null,
     consume: async (id: string) => { if (used.has(id)) return false; used.add(id); return true; },
   };
-  return { vault, binding, identity, verifier, now, budget: { reserve: async () => true } };
+  return { vault, binding, identity, verifier, now, root, masterKey, budget: { reserve: async () => true } };
 }
+
+test('reopened inbox reconciles retained answers without executing or reserving another provider turn', async t => {
+  for (const remoteState of ['accepted', 'answered', 'conflicting', 'expired', 'lost_reply', 'denied_policy'] as const) {
+    await t.test(remoteState, async () => {
+      const f = await fixture(), remote = fakeTransport(f.binding);
+      const question = signedQuestion(f.binding, f.now);
+      const answer = 'Catalog generation 13.';
+      const completion = {
+        schema: 'dharma.provider-session-completion/v1', organizationId: f.binding.organizationId,
+        repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+        deviceId: f.binding.deviceId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+        questionId: question.questionId, taskId: question.taskId, bindingId: f.binding.bindingId,
+        targetEndpointId: f.binding.endpointId, answer, answerHash: `sha256:${createHash('sha256').update(answer).digest('hex')}`,
+      };
+      const hash = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity,
+        question.questionId, Buffer.from(canonicalize(completion)));
+      f.vault.close();
+      f.vault = await LocalVault.open({ root: f.root, masterKey: f.masterKey });
+      let replies = 0, reads = 0, reserves = 0;
+      const transport = { async signedPost(route: string, input: unknown) {
+        const body = input as Record<string, unknown>;
+        const envelope = { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId };
+        if (route.endsWith('provider-sessions')) return { ...envelope, registration: {
+          bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+          repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+          deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+          revision: Number(body.expectedRevision) + 1, state: body.action === 'detach' ? 'detached' : 'attached',
+          leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+        if (body.action === 'reply') {
+          replies += 1;
+          assert.equal(body.answer, answer);
+          if (remoteState === 'lost_reply') throw new Error('synthetic lost acknowledgement');
+          return { ...envelope, result: { questionId: question.questionId, taskId: question.taskId,
+            targetBindingId: f.binding.bindingId, state: 'answered', replay: false } };
+        }
+        assert.equal(body.action, 'read'); reads += 1;
+        const state = remoteState === 'expired' ? 'expired'
+          : ['accepted', 'lost_reply', 'denied_policy'].includes(remoteState) && replies === 0 ? 'accepted' : 'answered';
+        return { ...envelope, result: { questionId: question.questionId, taskId: question.taskId,
+          targetBindingId: f.binding.bindingId, state, failureCode: null,
+          answer: state === 'answered' ? remoteState === 'conflicting' ? 'Different answer.' : answer : null,
+          replyReceiptHash: state === 'answered' ? `sha256:${'a'.repeat(64)}` : null } };
+      } };
+      const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+        channelTransport: transport, authorizeContent: async () => remoteState !== 'denied_policy',
+        budget: { reserve: async () => { reserves += 1; return true; } }, openTransport: async () => remote.transport });
+      try {
+        const result = await inbox.runNext();
+        const remainsPending = ['conflicting', 'expired', 'lost_reply', 'denied_policy'].includes(remoteState);
+        assert.equal(result.state, remainsPending ? 'reply_pending' : 'reply_reconciled');
+        assert.equal(replies, ['accepted', 'lost_reply'].includes(remoteState) ? 1 : 0);
+        assert.equal(reads, remoteState === 'accepted' ? 2 : 1);
+        assert.equal(reserves, 0); assert.equal(remote.calls.includes('turn/start'), false);
+        assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length,
+          remainsPending ? 1 : 0);
+        assert.deepEqual(await f.vault.getBlob(hash), Buffer.from(canonicalize(completion)));
+      } finally { await inbox.close(); f.vault.close(); }
+    });
+  }
+});
 
 test('signed inbox dispatch retains the selected thread and publishes answers without reopening a worker', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const f = await fixture(), remote = fakeTransport(f.binding);
-  let opens = 0, accepted = false, replyCalls = 0, failReply = false, heartbeats = 0;
+  let opens = 0, accepted = false, replyCalls = 0, failReply = false, heartbeats = 0, detaches = 0;
   let offered = signedQuestion(f.binding, f.now);
   const transport = { async signedPost(route: string, input: unknown) {
     const body = input as Record<string, unknown>;
     if (body.action === 'heartbeat') heartbeats += 1;
+    if (body.action === 'detach') detaches += 1;
     if (route.endsWith('provider-sessions')) return { ok: true, organizationId: f.binding.organizationId,
       correlationId: ids.threadId, registration: { bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId,
         endpointId: f.binding.endpointId, repositoryBindingId: f.binding.repositoryBindingId,
@@ -162,6 +225,35 @@ test('signed inbox dispatch retains the selected thread and publishes answers wi
     assert.equal(heartbeats, 1);
   } finally { await inbox.close(); f.vault.close(); }
   assert.equal(remote.isClosed(), true);
+  assert.equal(detaches, 0);
+});
+
+test('completion recovery rejects corrupted contracts and foreign scope before requesting or executing work', async t => {
+  for (const mutation of ['foreign', 'hash', 'extra', 'revoked'] as const) {
+    await t.test(mutation, async () => {
+      const f = await fixture(), question = signedQuestion(f.binding, f.now), answer = 'Saved answer.';
+      const completion = { schema: 'dharma.provider-session-completion/v1', organizationId: f.binding.organizationId,
+        repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+        deviceId: f.binding.deviceId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+        questionId: question.questionId, taskId: question.taskId, bindingId: f.binding.bindingId,
+        targetEndpointId: f.binding.endpointId, answer, answerHash: `sha256:${createHash('sha256').update(answer).digest('hex')}`,
+        ...(mutation === 'extra' ? { providerThread: 'must-not-be-shared' } : {}) };
+      if (mutation === 'foreign') completion.organizationId = 'org_foreign';
+      if (mutation === 'hash') completion.answerHash = `sha256:${'0'.repeat(64)}`;
+      const hash = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity,
+        question.questionId, Buffer.from(canonicalize(completion)));
+      if (mutation === 'revoked') f.vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+      let requests = 0;
+      try {
+        await assert.rejects(reconcileProviderSessionReply({ vault: f.vault, bindingId: f.binding.bindingId,
+          identity: f.identity, channel: {
+            read: async () => { requests += 1; throw new Error('unexpected read'); },
+            reply: async () => { requests += 1; throw new Error('unexpected reply'); },
+          } }), /provider_session_(?:completion_(?:invalid|scope_mismatch)|binding_unavailable)/);
+        assert.equal(requests, 0); assert.ok((await f.vault.getBlob(hash)).length > 0);
+      } finally { f.vault.close(); }
+    });
+  }
 });
 
 test('signed inbox budget denial does not accept, execute, or replace the selected session', async () => {
@@ -187,6 +279,8 @@ test('signed inbox budget denial does not accept, execute, or replace the select
     assert.equal((await inbox.runNext()).state, 'budget_denied');
     assert.equal(accepts, 0); assert.equal(remote.calls.includes('turn/start'), false);
     assert.equal(remote.isClosed(), false);
+    const retired = await inbox.retire();
+    assert.equal(retired.serverDetached, true); assert.equal(retired.providerClosed, true);
   } finally { await inbox.close(); f.vault.close(); }
 });
 

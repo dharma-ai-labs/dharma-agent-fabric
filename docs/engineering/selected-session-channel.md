@@ -36,18 +36,30 @@ after the existing provider checks and budget reservation succeed. `runNext`
 performs one inbox iteration using the same selected thread. It does not open a
 new worker for each question. A denied budget leaves the question unaccepted.
 
-Completed results are encrypted into the local vault before upload. If disclosure
+Completed results are encrypted and indexed by binding and question in the local
+vault before upload. The immutable index survives reopening the vault and retains
+acknowledged history without deleting completed evidence. If disclosure
 or delivery prevents a confirmed reply, the consumer stops and reports
 `reply_pending`, the encrypted completion hash, a bounded reason, and whether
 provider shutdown was confirmed. It never repeats the provider turn to recover
-an upload. Failed shutdown keeps the local fence. Remote detach is acknowledged
-separately from local provider shutdown; absent acknowledgement, the remote
-presence lease expires rather than being described as detached.
+an upload. Failed shutdown keeps the local fence. Ordinary `close` stops the
+local provider and lets remote presence expire; it does not create a permanent
+detach tombstone. Explicit `retire` requests server detach and reports its
+acknowledgement separately from provider shutdown.
+
+Before admitting new work, a reopened consumer reconciles one pending result.
+It reads the original question, uploads only when that question is still accepted,
+and requires an identical answered result with its immutable receipt hash before
+marking recovery complete. Conflicting, expired, unavailable, or unconfirmed
+results remain pending and stop consumption. Recovery has no provider execution
+or budget-reservation API. The server must permit a question's recipient, as
+well as its sender, to read that exact question; unrelated bindings remain denied.
 
 ## Still Required Before Release
 
-- Public CLI/MCP attachment and consumption commands, registration revision
-  reconciliation and restart-safe checkpoint lookup/upload without execution.
+- Public CLI/MCP attachment and consumption commands and registration revision
+  reconciliation after an ambiguous network acknowledgement. Local checkpoint
+  recovery is implemented, but automatic live restart recovery remains unproven.
 - A supported cooperative integration for an already-running desktop chat.
   Knowing or storing its thread ID does not authorize external app-server resume.
 - Live server/KMS compatibility and actual provider turns against this channel.

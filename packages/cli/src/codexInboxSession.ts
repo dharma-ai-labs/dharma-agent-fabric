@@ -1,6 +1,7 @@
 import { canonicalize, type SessionBindingScope, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexBoundSession } from './codexBoundSession.js';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
+import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
 
 // Only a bridge-owned thread can be driven through app-server. Cooperative desktop
 // chats must consume in their own session; knowing a thread ID is not ownership.
@@ -45,13 +46,15 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
     }).finally(() => { pulse = null; });
   }, 20_000);
   timer.unref();
-  async function close() {
+  async function close(options: { retire?: boolean } = {}) {
     if (closing) return closing;
     stopped = true; clearInterval(timer);
     closing = (async () => {
       if (pulse) await pulse;
       let serverDetached = false;
-      try { await channel.detach(); serverDetached = true; } catch { /* Remote presence expires; it is not reported as detached. */ }
+      if (options.retire) {
+        try { await channel.detach(); serverDetached = true; } catch { /* Remote presence expires; it is not reported as detached. */ }
+      }
       await owner.close();
       return { serverDetached, providerClosed: true as const };
     })();
@@ -59,11 +62,18 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   }
   return {
     close,
+    retire: () => close({ retire: true }),
     async runNext() {
       if (stopped) throw new Error('codex_inbox_session_unavailable');
       if (running) throw new Error('codex_inbox_session_busy');
       running = true;
       try {
+        const recovered = await reconcileProviderSessionReply({ vault: input.vault, bindingId: input.bindingId,
+          identity: input.identity, channel });
+        if (recovered) {
+          if (recovered.state === 'reply_pending') await close();
+          return recovered;
+        }
         const offers = await channel.inbox();
         const offer = offers[0];
         if (!offer) return { state: 'idle' as const };
@@ -76,15 +86,17 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
           }
           throw error;
         }
-        const completionHash = await input.vault.putBlob(Buffer.from(canonicalize({
+        const completionHash = await input.vault.stageProviderSessionReply(input.bindingId, input.identity,
+          offer.questionId, Buffer.from(canonicalize({
           schema: 'dharma.provider-session-completion/v1', organizationId: scope.organizationId,
           repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId,
           deviceId: scope.deviceId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
           ...result,
-        }), 'utf8'), 'provider-session-completion');
+        }), 'utf8'));
         try {
           const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
             outcome: 'answered', answer: result.answer, failureCode: null });
+          input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, offer.questionId, completionHash);
           return { ...receipt, completionHash };
         } catch (error) {
           // Preserve the encrypted completed result. Never repeat the provider turn
