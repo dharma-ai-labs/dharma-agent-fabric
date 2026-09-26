@@ -1,0 +1,33 @@
+# Provider-session routing qualification
+
+Status: investigation for DIA-1178. This is not a production capability claim.
+
+## Observed boundary
+
+At CLI `0.2.102` source commit `bc5682b`, the relay targets a device and endpoint, then the task runner creates an isolated Git worktree. The Codex adapter starts `codex exec`; the Claude adapter starts `claude --print --no-session-persistence`. Both advertise `sessionContinuation: unavailable`. Provider session discovery reads historical transcripts. None of these paths binds a task to a particular running chat. A signed delivery or a new provider process must not be described as a response from the user's selected chat.
+
+Codex's documented app-server protocol has `thread/start`, `thread/resume`, and `turn/start` for a recorded thread. The local CLI also exposes `codex exec resume`. These are candidate transports for a **bridge-owned** conversation, not evidence that an unrelated Codex desktop chat is remotely writable. A no-model disposable-thread probe on Windows Codex 0.157 and WSL Codex 0.147 found that `thread/start` returns an ID but `thread/resume` reports `no rollout found` before the first turn. A persisted-turn test is therefore still required; the probe establishes no live answer capability. In particular, this active desktop task may have an owner, permission context, and pending turn that a separately spawned app-server cannot assume. A customer-controlled ChatGPT or Claude web conversation is unsupported until its provider supplies an authorized session API or an explicit in-session integration.
+
+## Required binding
+
+Separate the logical repository agent, provider endpoint, and provider session. The device owner must explicitly attach a provider session to one endpoint and one normalized repository/workspace. Persist only the provider's opaque session ID and a local binding ID in the device vault; server-visible identity is a pseudonymous binding ID. Never discover the newest transcript and infer that it is the intended receiver.
+
+A binding records organization, member, device, endpoint, repository, workspace, provider, provider version, capabilities, allowed question categories, creation and expiry, and the owning local process. A short lease with heartbeat describes **availability of the bridge**, not whether a model is executing. Only the local bridge may convert a signed, policy-authorized question into a provider turn. The sender cannot supply arbitrary provider session IDs or widen the receiver's authority. A session already controlled by another process must fail closed instead of being resumed concurrently.
+
+The receiver moves each question through `accepted`, `executing`, `answered`, `failed`, `expired`, or `unavailable`. A delivery acknowledgment is not an answer. Preserve task ID, source and target endpoint IDs, binding ID, question ID, expiry, and answer receipt across retries. De-duplicate before provider invocation. On reconnect, replay only unfinished questions whose lease and authority remain valid. Disclose provider cost before execution and enforce the applicable local and organization budget.
+
+## Safe implementation order
+
+1. Probe Codex app-server using a disposable `CODEX_HOME`: initialize, create a thread, resume the exact ID, and read it. Do not start a model turn or touch an existing user thread in this probe.
+2. Implement a provider-owned session bridge with an explicit local attach command and a durable binding record. Add negative tests for wrong organization, repository, member, device, workspace, expired lease, duplicate question, unavailable owner, and revoked authority. Keep the current fresh-process task runner unchanged.
+3. In an isolated test account, run a bounded read-only question to a bridge-owned Codex thread and verify that `turn/start` returns an answer linked to that same thread. Prove a second question continues the same context and a different thread never receives it. Record actual provider cost.
+4. Qualify Claude through its documented native session API or CLI resume contract separately. If safe same-session continuation is unavailable, report `not_supported`; do not silently substitute `claude --print`.
+5. Test a desktop chat only through an approved app-owned integration that can attest thread ownership and turn state. Never use a rollout file path, shared local socket, or inferred recent-session ID as authorization.
+
+Production acceptance requires a real two-machine, two-member named-session exchange; offline and active-turn behavior; signed package access in the target repository; provider restart; revocation; and no answer attributed to the wrong chat. The generic one-prompt enrollment gate remains in DIA-1129.
+
+## Sources
+
+- Current CLI source: `packages/provider-adapters/src/index.ts`, `packages/task-runner/src/index.ts`, `packages/contracts/src/task-envelope.schema.json` at `bc5682b`.
+- Codex app-server protocol: https://developers.openai.com/codex/app-server
+- Codex CLI: `codex exec resume --help` and `codex app-server --help`, inspected September 25, 2026.
