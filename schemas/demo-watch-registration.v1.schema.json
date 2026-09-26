@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-watch-registration/v1",
+  "title": "Local Demo Watch Registration",
+  "description": "A non-authoritative local supervisor scope. It contains no grant or device credential; every cycle must verify the existing enrollment and repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "hqUrl", "organizationId", "repositoryId", "normalizedRepository", "provider", "workspace"],
+  "properties": {
+    "schema": { "const": "dharma.demo-watch/v1" },
+    "hqUrl": { "type": "string", "format": "uri" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9]+$" },
+    "repositoryId": { "type": "string", "format": "uuid" },
+    "normalizedRepository": { "type": "string", "maxLength": 500, "pattern": "^[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$" },
+    "provider": { "enum": ["codex", "claude", "agy", "hermes"] },
+    "workspace": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\r\\n\\u0000]+$" }
+  }
+}

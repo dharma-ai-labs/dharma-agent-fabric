@@ -19,7 +19,8 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function checkedInventory(value: unknown, scope: BoundRepositorySource,
-  authorization: RepositorySourceAuthorization) {
+  authorization: RepositorySourceAuthorization,
+  fingerprintAuthorization: RepositorySourceAuthorization = authorization) {
   const row = record(value, 'inventory');
   if (!UUID.test(String(row.candidateId)) || !UUID.test(String(row.workspaceId))
     || !HASH.test(String(row.sourceSnapshotHash)) || !HASH.test(String(row.sourceManifestHash))
@@ -56,7 +57,8 @@ function checkedInventory(value: unknown, scope: BoundRepositorySource,
   }
   const fingerprint = digest(canonicalize({ organizationId: scope.organizationId,
     repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
-    generationId: authorization.generationId, policyHash: authorization.policyHash, files, skills }));
+    generationId: fingerprintAuthorization.generationId,
+    policyHash: fingerprintAuthorization.policyHash, files, skills }));
   if (fingerprint !== row.sourceFingerprint) throw new Error('Repository source fingerprint integrity failed.');
   return { candidateId: String(row.candidateId), workspaceId: String(row.workspaceId),
     sourceSnapshotHash: String(row.sourceSnapshotHash), sourceFingerprint: fingerprint,
@@ -67,6 +69,7 @@ export async function fetchPublishedRepositorySource(input: {
   transport: Transport;
   scope: BoundRepositorySource;
   authorization: RepositorySourceAuthorization;
+  publishedAuthorization?: RepositorySourceAuthorization;
   local: RepositoryPackageSnapshot;
 }): Promise<PublishedRepositorySource | null> {
   const { transport, scope, authorization, local } = input;
@@ -79,7 +82,14 @@ export async function fetchPublishedRepositorySource(input: {
     throw new Error('Repository source inventory authority does not match this device.');
   }
   if (response.source === null) return null;
-  const source = checkedInventory(response.source, scope, authorization);
+  const fingerprintAuthorization = input.publishedAuthorization ?? authorization;
+  if (fingerprintAuthorization.organizationId !== scope.organizationId
+    || fingerprintAuthorization.workspaceId !== scope.workspaceId
+    || fingerprintAuthorization.repositoryBindingId !== scope.repositoryBindingId
+    || fingerprintAuthorization.repositoryAgentId !== scope.repositoryAgentId) {
+    throw new Error('Repository source fingerprint authority does not match this device.');
+  }
+  const source = checkedInventory(response.source, scope, authorization, fingerprintAuthorization);
   if (response.workspaceBaseline !== null && response.workspaceBaseline !== undefined) {
     const baseline = checkedInventory(response.workspaceBaseline, scope, authorization);
     if (baseline.workspaceId !== scope.workspaceId || baseline.candidateId === source.candidateId) {
