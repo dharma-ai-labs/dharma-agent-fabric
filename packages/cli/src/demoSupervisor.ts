@@ -28,6 +28,7 @@ export async function runDemoSupervisor(input: {
   concurrency?: number;
   once?: boolean;
   signal?: AbortSignal;
+  now?: () => number;
   wait?: (durationMs: number, signal?: AbortSignal) => Promise<void>;
   onObservation?: (observation: DemoWatchObservation) => void;
 }) {
@@ -44,7 +45,11 @@ export async function runDemoSupervisor(input: {
     throw new Error('Demo supervisor concurrency must be between 1 and 32.');
   }
   const wait = input.wait ?? ((durationMs, signal) => delay(durationMs, undefined, { signal }));
+  const now = input.now ?? (() => performance.now());
+  const pollIntervalMs = Math.min(intervalMs, 2_000);
   const flights = new Map<string, Flight>();
+  const nextEligible = new Map<string, number>();
+  let lastTime = 0;
   let cursor = 0;
   let completed = 0;
   let failures = 0;
@@ -120,6 +125,15 @@ export async function runDemoSupervisor(input: {
           sourceState: null, code: 'demo_watch_registry_invalid' });
       }
       if (input.signal?.aborted || observationFailed) break;
+      const currentTime = now();
+      if (!Number.isFinite(currentTime) || currentTime < lastTime
+        || currentTime > Number.MAX_SAFE_INTEGER - intervalMs) {
+        throw new Error('Demo supervisor clock must be finite and monotonic.');
+      }
+      lastTime = currentTime;
+      for (const key of nextEligible.keys()) {
+        if (!registrations.has(key)) nextEligible.delete(key);
+      }
       for (const [key, flight] of flights) {
         const row = registrations.get(key);
         if (!row || !sameRegistration(row, flight.registration)) flight.controller.abort();
@@ -130,13 +144,14 @@ export async function runDemoSupervisor(input: {
       for (let offset = 0; offset < rows.length && flights.size < concurrency; offset += 1) {
         const index = (startAt + offset) % rows.length;
         const [key, row] = rows[index]!;
-        if (!flights.has(key)) {
+        if (!flights.has(key) && currentTime >= (nextEligible.get(key) ?? 0)) {
+          nextEligible.set(key, currentTime + intervalMs);
           launched.push(start(key, row));
           cursor = index + 1;
         }
       }
       if (input.once) { await Promise.all(launched.map(flight => flight.decision)); break; }
-      try { await wait(intervalMs, input.signal); }
+      try { await wait(pollIntervalMs, input.signal); }
       catch (error) { if (!input.signal?.aborted) throw error; }
     }
     if (observationFailed) throw new Error('Demo supervisor observation sink failed.');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { demoWatchRegistrationKey, listDemoWatchRegistrations,
   registerDemoWatch, unregisterDemoWatch, type DemoWatchRegistration } from './demoWatchRegistry.js';
@@ -12,8 +12,8 @@ const scope = {
   normalizedRepository: 'github.com/example/repository', provider: 'codex' as const,
 };
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-demo-watch-'));
+async function fixture(parent = tmpdir()) {
+  const root = await realpath(await mkdtemp(join(parent, 'dharma-demo-watch-')));
   const home = join(root, 'home');
   const workspace = join(root, 'workspace');
   await mkdir(home); await mkdir(workspace);
@@ -33,6 +33,22 @@ test('Demo watch registration is scoped, credential-free and idempotent', async 
     assert.equal(bytes.includes('privateKey'), false);
     assert.equal(bytes.includes('installationId'), false);
   } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('fixtures canonicalize an aliased temporary root without accepting an alias in a registration', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-watch-temp-alias-')));
+  const target = join(root, 'target');
+  const alias = join(root, 'alias');
+  try {
+    await mkdir(target);
+    await symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const f = await fixture(alias);
+    assert.equal(f.workspace, await realpath(f.workspace));
+    await registerDemoWatch(f.home, f.registration);
+    await assert.rejects(registerDemoWatch(f.home, { ...f.registration,
+      workspace: join(alias, basename(f.root), 'workspace') }), /canonical path/);
+    assert.deepEqual(await listDemoWatchRegistrations(f.home), [f.registration]);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('concurrent registration converges and never overwrites another checkout', async () => {

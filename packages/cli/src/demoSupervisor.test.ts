@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 import { runDemoSupervisor, type DemoWatchObservation } from './demoSupervisor.js';
 import type { DemoWatchRegistration } from './demoWatchRegistry.js';
 
 function registration(index = 0): DemoWatchRegistration {
   return { schema: 'dharma.demo-watch/v1', hqUrl: 'https://example.com',
     organizationId: 'org_test', repositoryId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
-    normalizedRepository: `github.com/example/repo${index}`, provider: 'codex', workspace: `/tmp/repo${index}` };
+    normalizedRepository: `github.com/example/repo${index}`, provider: 'codex', workspace: resolve(tmpdir(), `repo${index}`) };
 }
 
 test('supervisor records bounded package observations without private payloads', async () => {
@@ -89,7 +91,7 @@ test('a changed registration cancels old work and does not overlap it', async ()
   let starts = 0;
   let oldSignal!: AbortSignal;
   await runDemoSupervisor({ signal: controller.signal,
-    list: async () => [{ ...registration(), workspace: ++lists === 1 ? '/tmp/repo0' : '/tmp/other' }],
+    list: async () => [{ ...registration(), workspace: resolve(tmpdir(), ++lists === 1 ? 'repo0' : 'other') }],
     cycle: async (_row, signal) => { starts += 1; oldSignal = signal; return new Promise(() => {}); },
     wait: async () => { if (lists === 2) controller.abort(); await delay(0); } });
   assert.equal(oldSignal.aborted, true);
@@ -149,4 +151,92 @@ test('a failed status sink cancels work and rejects without an unhandled private
     cycle: async () => ({ stage: 'installed' }),
     onObservation: () => { throw new Error('private logging details'); } }),
   /^Error: Demo supervisor observation sink failed\.$/);
+});
+
+test('32 responsive scopes observe a publication within five minutes at bounded concurrency', async t => {
+  const controller = new AbortController();
+  let clock = 0;
+  let maximum = 0;
+  let pulses = 0;
+  const publicationAt = 1;
+  const pending = new Map<string, { finishAt: number; finish: () => void }>();
+  const observed = new Map<string, number>();
+  const input = {
+    signal: controller.signal, now: () => clock,
+    list: async () => Array.from({ length: 32 }, (_, index) => registration(index)),
+    cycle: async (row: DemoWatchRegistration) => {
+      const key = row.repositoryId;
+      const stage = clock >= publicationAt ? 'generation_2' : 'generation_1';
+      const operation = new Promise<{ stage: string }>(resolve => {
+        pending.set(key, { finishAt: clock + 29_500, finish: () => resolve({ stage }) });
+      });
+      maximum = Math.max(maximum, pending.size);
+      return operation;
+    },
+    onObservation: (value: DemoWatchObservation) => {
+      if (value.stage === 'generation_2' && value.key) observed.set(value.key, clock);
+      if (observed.size === 32) controller.abort();
+    },
+    wait: async (duration: number) => {
+      clock += duration;
+      for (const [key, operation] of pending) {
+        if (operation.finishAt <= clock) { pending.delete(key); operation.finish(); }
+      }
+      await delay(0);
+      if (++pulses > 200 || clock > 660_000) controller.abort();
+    },
+  };
+  await runDemoSupervisor(input);
+  assert.equal(maximum, 4);
+  assert.equal(observed.size, 32);
+  assert.ok(Math.max(...observed.values()) - publicationAt <= 300_000,
+    `Last scope observed after ${Math.max(...observed.values()) - publicationAt}ms`);
+  t.diagnostic(`All 32 scopes observed after ${Math.max(...observed.values()) - publicationAt}ms; maximum concurrency ${maximum}.`);
+});
+
+test('fast registry polling does not retry a failed scope before its interval', async () => {
+  const controller = new AbortController();
+  let clock = 0;
+  let starts = 0;
+  const input = { signal: controller.signal, now: () => clock,
+    list: async () => [registration()], cycle: async () => {
+      starts += 1; throw Object.assign(new Error('private'), { code: 'provider_unavailable' });
+    }, wait: async (duration: number) => {
+      clock += duration;
+      await delay(0);
+      if (clock >= 24_000) controller.abort();
+    } };
+  await runDemoSupervisor(input);
+  assert.equal(starts, 1);
+  assert.ok(clock < 60_000);
+});
+
+test('a failed scope retries at its configured interval without duplicate in-flight work', async () => {
+  const controller = new AbortController();
+  let clock = 0;
+  const starts: number[] = [];
+  await runDemoSupervisor({ signal: controller.signal, now: () => clock,
+    list: async () => [registration()], cycle: async () => {
+      starts.push(clock); throw new Error('private failure');
+    }, wait: async duration => {
+      clock += duration;
+      await delay(0);
+      if (starts.length === 2) controller.abort();
+    } });
+  assert.deepEqual(starts, [0, 60_000]);
+});
+
+test('an invalid or backwards scheduling clock fails closed', async () => {
+  for (const invalid of [NaN, Infinity, -1, Number.MAX_SAFE_INTEGER]) {
+    let starts = 0;
+    await assert.rejects(runDemoSupervisor({ once: true, now: () => invalid,
+      list: async () => [registration()], cycle: async () => {
+        starts += 1; return { stage: 'installed' };
+      } }), /clock must be finite and monotonic/);
+    assert.equal(starts, 0);
+  }
+  let clock = 10;
+  await assert.rejects(runDemoSupervisor({ now: () => clock,
+    list: async () => [registration()], cycle: async () => ({ stage: 'installed' }),
+    wait: async () => { clock -= 1; await delay(0); } }), /clock must be finite and monotonic/);
 });

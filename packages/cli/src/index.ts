@@ -663,10 +663,33 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const recoveryPath = `${lockPath}.recovery`;
       const recoveryCandidate = `${recoveryPath}.${process.pid}.${randomUUID()}.candidate`;
+      let windowsRecoveryOwner: number | undefined;
       try {
         await mkdir(recoveryCandidate);
         await writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 });
-        await rename(recoveryCandidate, recoveryPath);
+        for (let attempt = 0; ; attempt++) {
+          try { await rename(recoveryCandidate, recoveryPath); break; }
+          catch (renameError) {
+            if (process.platform !== 'win32' || (renameError as NodeJS.ErrnoException).code !== 'EPERM') throw renameError;
+            // Windows uses EPERM for an existing destination. Its owner can
+            // finish during inspection; retry publication, never ignore denial.
+            try {
+              const directory = await lstat(recoveryPath);
+              const ownerPath = resolve(recoveryPath, 'owner');
+              const ownerFile = await lstat(ownerPath);
+              const ownerText = (await readFile(ownerPath, 'utf8')).trim();
+              const owner = Number(ownerText);
+              if (!directory.isDirectory() || directory.isSymbolicLink()
+                || !ownerFile.isFile() || ownerFile.isSymbolicLink()
+                || !/^[1-9][0-9]*$/.test(ownerText) || !Number.isSafeInteger(owner)) throw renameError;
+              windowsRecoveryOwner = owner;
+            } catch (inspectionError) {
+              if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT' && attempt < 3) continue;
+              throw renameError;
+            }
+            throw renameError;
+          }
+        }
         try {
           let ownerPid = 0;
           try { ownerPid = Number((await readFile(lockPath, 'utf8')).trim()); }
@@ -693,9 +716,15 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
         }
       } catch (recoveryError) {
         await rm(recoveryCandidate, { recursive: true, force: true });
-        if (!['EEXIST', 'ENOTEMPTY'].includes((recoveryError as NodeJS.ErrnoException).code || '')) throw recoveryError;
+        const recoveryCode = (recoveryError as NodeJS.ErrnoException).code || '';
         let recoveryOwner = 0;
-        try { recoveryOwner = Number((await readFile(resolve(recoveryPath, 'owner'), 'utf8')).trim()); } catch {}
+        if (process.platform === 'win32' && recoveryCode === 'EPERM') {
+          if (windowsRecoveryOwner === undefined) throw recoveryError;
+          recoveryOwner = windowsRecoveryOwner;
+        } else {
+          if (!['EEXIST', 'ENOTEMPTY'].includes(recoveryCode)) throw recoveryError;
+          try { recoveryOwner = Number((await readFile(resolve(recoveryPath, 'owner'), 'utf8')).trim()); } catch {}
+        }
         let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
         if (recoveryOwnerAlive) {
           try { process.kill(recoveryOwner, 0); }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,7 +10,7 @@ import { demoWatchRegistrationKey, listDemoWatchRegistrations, registerDemoWatch
 import { writeDemoWatchHealth } from './demoWatchHealth.js';
 
 async function fixture() {
-  const home = await mkdtemp(join(tmpdir(), 'dharma-watch-control-'));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dharma-watch-control-')));
   const workspace = join(home, 'workspace');
   await mkdir(workspace);
   const registration: DemoWatchRegistration = { schema: 'dharma.demo-watch/v1', hqUrl: 'https://example.com',

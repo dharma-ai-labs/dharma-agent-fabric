@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 test('Demo-only supervisor consumes registrations without a standard device or second relay', {
   skip: process.platform === 'win32',
 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-demo-supervisor-process-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-demo-supervisor-process-')));
   const home = join(root, 'home');
   const workspace = join(root, 'repo');
   await mkdir(home);
