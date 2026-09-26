@@ -49,10 +49,35 @@ with no question consumption or model turn. It is **not** a successful answer or
 an enrolled Agent Fabric endpoint. Temporary probe directories are retained for
 diagnosis; `--diagnose-launch` reports only the disposable process's startup error.
 
+On Linux, `--check-sandbox` runs standalone `command/exec` requests using the same
+named profile: an allowed synthetic file is readable, a synthetic file outside the
+workspace is not, a workspace write is refused, and a working localhost service
+cannot be reached. The parent process verifies the service first and `curl --version`
+is a positive executable control. WSL Codex 0.147.0 passed all four checks. This is
+actual standalone-command enforcement, not proof of a completed model turn.
+
+Native Windows Codex 0.157.0 passes the focused unit tests but the real restricted
+thread creation fails. The disposable home's unelevated restricted-token sandbox
+reports that it cannot enforce split filesystem read restrictions. A no-model probe
+using the existing configured home first passed `windowsSandbox/readiness`, but
+thread creation still failed because the elevated helper requires effective root
+read access. The probe did not add that authority, change saved configuration,
+copy sandbox credentials, start setup, or fall back to unrestricted execution.
+Windows named-session restricted execution remains unavailable in this tested
+configuration; generic sandbox readiness alone cannot establish it.
+
+`--configured-home /absolute/provider/home` is an explicit diagnostic option for
+an existing local provider installation, not isolated-credential-store proof. It
+uses only a newly created synthetic thread and does not resume any existing user
+chat. `--diagnose-wire` reports a bounded startup error from that synthetic attempt;
+do not upload private diagnostic paths without redaction. Existing desktop-chat
+integration still requires an app-owned attachment or a supported in-session
+receive/reply path. Do not weaken repository scope to satisfy a platform limitation.
+
 Observed WSL Codex 0.147.0 created and read the same idle thread and reached the
 budget guard after the fixes. Separate unit regressions first failed for experimental
 opt-in, empty-thread resume, serialized profile defaults, and unknown post-resume
-status; all pass after correction. Live answers, actual restricted-profile behavior,
+status; all pass after correction. Live answers, restricted-profile model turns,
 recipient-approved server registration, and existing desktop-chat attachment are
 still unverified.
 
