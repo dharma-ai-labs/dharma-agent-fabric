@@ -2077,6 +2077,7 @@ test('Claude project permission bootstrap rejects malformed settings without rep
 
 test('relay probe opens an authenticated session without polling or leasing work', async () => {
   let sessions = 0;
+  const { version: packageVersion } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
   const result = await probeRelayConnection(async () => ({
     config: {
       schema: 'dharma.device-config/v1', hqUrl: 'https://www.dharma-ai.io',
@@ -2086,13 +2087,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.108');
+      assert.equal(version, packageVersion);
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.108',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: packageVersion,
   });
 });
 

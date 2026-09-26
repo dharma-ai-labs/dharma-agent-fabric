@@ -18,6 +18,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
   if (!binding || binding.provider !== 'codex' || binding.owner !== 'dharma_bridge') {
     throw new Error('codex_session_binding_unavailable');
   }
+  if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
   const codexBinding = { ...binding, threadId: binding.sessionId };
   const lease = input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
   if (!lease) throw new Error('codex_session_lease_unavailable');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { resolve } from 'node:path';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import { signCanonicalObject, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
 import { runCodexBridgeQuestion, type CodexAppServerTransport } from './codexAppServerSession.js';
 
@@ -100,6 +100,21 @@ const exclusiveLease = { assertHeld: async () => true };
 const budget = { reserve: async () => true };
 const now = new Date('2026-09-26T00:01:00.000Z');
 
+test('unqualified native host rejects before provider, reservation or replay claim',
+  { skip: process.platform === 'linux' }, async () => {
+    const f = fixture();
+    let reserved = false;
+    let consumed = false;
+    await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+      verifier: { ...f.verifier, consume: async () => { consumed = true; return true; } },
+      exclusiveLease, budget: { reserve: async () => { reserved = true; return true; } }, now }),
+    /codex_session_sandbox_unqualified/);
+    assert.equal(reserved, false);
+    assert.equal(consumed, false);
+    assert.equal(f.calls.length, 0);
+  });
+
+describe('qualified Linux sandbox bridge protocol', { skip: process.platform !== 'linux' }, () => {
 test('bridge asks only its explicit thread under restricted read-only authority', async () => {
   const f = fixture();
   const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
@@ -227,4 +242,5 @@ test('bridge withholds an answer when the binding is revoked while the turn exec
   await assert.rejects(runCodexBridgeQuestion({ transport, binding, question: question(),
     verifier: f.verifier, exclusiveLease: { assertHeld: async () => held }, budget, now }), /lease_unavailable/);
   assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+});
 });

@@ -20,4 +20,12 @@ execution is configured.
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/provider-adapters)
 - [Dharma AI](https://www.dharma-ai.io)
 
+The experimental retained Codex app-server session bridge is qualified on Linux
+only. Native Windows probes accepted a permission-profile declaration without
+enforcing it when the sandbox was not configured; the configured sandbox did not
+pass the permitted-read control. Other hosts therefore fail before provider
+dispatch with `codex_session_sandbox_unqualified`. Do not widen filesystem access
+or disable the sandbox to work around this gate. This restriction does not change
+ordinary enrollment, relay startup, or the separate provider task interfaces.
+
 Licensed under MIT.

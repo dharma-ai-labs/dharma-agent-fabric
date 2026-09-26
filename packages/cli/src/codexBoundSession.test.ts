@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
@@ -112,6 +112,22 @@ async function fixture() {
   return { vault, binding, identity, verifier, now, root, masterKey, budget: { reserve: async () => true } };
 }
 
+test('unqualified native host cannot open or advertise a bridge-owned provider',
+  { skip: process.platform === 'linux' }, async () => {
+    const f = await fixture();
+    let opened = false;
+    try {
+      await assert.rejects(openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+        openTransport: async () => { opened = true; return fakeTransport(f.binding).transport; } }),
+      /codex_session_sandbox_unqualified/);
+      assert.equal(opened, false);
+      const lease = f.vault.tryAcquireProviderSessionLease(f.binding.bindingId, f.identity);
+      assert.ok(lease);
+      lease.release();
+    } finally { f.vault.close(); }
+  });
+
+describe('qualified Linux retained Codex consumer', { skip: process.platform !== 'linux' }, () => {
 test('default inbox startup recovers the server revision with its retained local owner and no provider turn', async () => {
   const f = await fixture(), remote = fakeTransport(f.binding), actions: string[] = [];
   let reserves = 0;
@@ -541,4 +557,5 @@ test('closing a live owner during budget wait prevents consumption and a subsequ
     assert.equal(remote.calls.includes('turn/start'), false);
     assert.equal(remote.isClosed(), true);
   } finally { f.vault.close(); }
+});
 });

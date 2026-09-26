@@ -74,13 +74,31 @@ root cause; subsequent successful probes do not establish general reliability.
 
 ## Still Required Before Customer Release
 
+### Native Host Safety Gate
+
+CLI 0.2.109 and provider-adapters 0.1.22 reject bridge-owned retained Codex
+dispatch on non-Linux hosts with `codex_session_sandbox_unqualified`. The bound
+consumer rejects before opening the provider or registering presence. The lower
+adapter independently rejects before budget reservation, replay claim or turn
+execution. Ordinary relay and enrollment capabilities are unchanged.
+
+The September 26 native Windows Codex 0.147.0 no-model probe created a thread with
+the declared read-only/no-network profile. With a disposable, unconfigured home,
+outside reads, writes and loopback requests nevertheless succeeded. With the
+existing configured sandbox, even the permitted-read control was rejected.
+Thread creation, sandbox readiness and profile declarations are consequently
+not accepted as enforcement proof. No model turn was sent. Native host rejection
+tests pass; Linux bridge protocol fixtures are explicitly skipped on Windows.
+Changing versions, expanding read roots or disabling restrictions is not recovery.
+
 - Public CLI/MCP attachment and consumption commands and registration revision
   reconciliation after an ambiguous network acknowledgement. Local checkpoint
   recovery is implemented, but automatic live restart recovery remains unproven.
 - A supported cooperative integration for an already-running desktop chat.
   Knowing or storing its thread ID does not authorize external app-server resume.
-- Published compatible client integration and complete two-machine evidence.
-  Development-branch probes are not proof that platform prompts install this code.
+- Complete two-machine evidence and a qualified platform pin. CLI 0.2.108 was
+  published from reviewed commit `837fc1c96a7658ae8cfd8284727cb38915a1e8a1`, but
+  publication is not proof that platform prompts install this integration.
 - Native Windows restricted runtime compatibility; no broader filesystem access
   or unsandboxed fallback is allowed.
 - Fresh two-member onboarding, actual selected-session Q&A, autonomous signed
