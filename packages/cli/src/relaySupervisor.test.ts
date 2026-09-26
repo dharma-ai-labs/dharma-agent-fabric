@@ -1,15 +1,89 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { relayRestartDelayMs, superviseRelay } from './relaySupervisor.js';
+import { listDemoWatchRegistrations, registerDemoWatch } from './demoWatchRegistry.js';
+import { readDemoWatchHealth } from './demoWatchHealth.js';
 
 const execFileAsync = promisify(execFile);
+
+test('Demo-only supervisor consumes registrations without a standard device or second relay', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-demo-supervisor-process-')));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(home);
+  await mkdir(workspace);
+  await execFileAsync('git', ['init', workspace]);
+  await execFileAsync('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/example/repo']);
+  await registerDemoWatch(home, { schema: 'dharma.demo-watch/v1', hqUrl: 'https://example.com',
+    organizationId: 'org_test', repositoryId: '00000000-0000-4000-8000-000000000000',
+    normalizedRepository: 'github.com/example/repo', provider: 'codex', workspace });
+  const env = { ...process.env, DHARMA_HOME: home };
+  const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
+  const child = spawn(process.execPath, [bin, 'relay', 'supervise', '--demo-only'], {
+    env, stdio: ['ignore', 'ignore', 'pipe'], detached: true,
+  });
+  let observations = '';
+  child.stderr!.on('data', (chunk: Buffer) => { observations = (observations + chunk.toString()).slice(-4096); });
+  try {
+    let binding: { pid: number; policyPath: null; demoWatches: boolean; version: string } | null = null;
+    let health = null;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      binding = await readFile(join(home, 'relay', 'supervisor-workspace.json'), 'utf8')
+        .then(value => JSON.parse(value)).catch(() => null);
+      if (binding && observations.includes('demo_watch_cycle')) {
+        const observation = JSON.parse(observations.trim());
+        health = await readDemoWatchHealth(home, observation.key, binding);
+        if (health) break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(binding?.policyPath, null);
+    assert.equal(binding?.demoWatches, true);
+    assert.equal(typeof binding?.version, 'string');
+    const observation = JSON.parse(observations.trim());
+    assert.equal(observation.event, 'demo_watch_cycle');
+    assert.equal(observation.state, 'failed');
+    assert.equal(observation.code, 'demo_watch_cycle_failed');
+    assert.equal(typeof observation.key, 'string');
+    assert.equal(health?.pid, child.pid);
+    assert.equal(health?.state, observation.state);
+    assert.equal(health?.code, observation.code);
+    assert.equal(observations.includes(home), false);
+    assert.equal(observations.includes('device.json'), false);
+    await assert.rejects(readFile(join(home, 'relay', 'relay.pid')), { code: 'ENOENT' });
+    const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], { env, timeout: 10_000 });
+    assert.deepEqual(JSON.parse(stdout), { ok: true, stopped: true, vaultPreserved: true });
+    await assert.rejects(readFile(join(home, 'relay', 'supervisor-workspace.json')), { code: 'ENOENT' });
+    assert.equal((await listDemoWatchRegistrations(home))[0]?.normalizedRepository, 'github.com/example/repo');
+    assert.equal(await readDemoWatchHealth(home, observation.key,
+      { pid: child.pid! + 1, version: binding!.version }), null);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Demo-only supervision fails closed without registrations and rejects a standard policy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-demo-supervisor-empty-'));
+  try {
+    const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
+    const env = { ...process.env, DHARMA_HOME: root };
+    await assert.rejects(execFileAsync(process.execPath, [bin, 'relay', 'supervise', '--demo-only'], { env }),
+      error => /registered Demo repository/.test(String((error as { stderr: string }).stderr)));
+    await assert.rejects(execFileAsync(process.execPath,
+      [bin, 'relay', 'supervise', '--demo-only', '--policy', '/tmp/private-policy'], { env }),
+      error => /cannot select a standard policy/.test(String((error as { stderr: string }).stderr)));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('relay restart backoff is bounded', () => {
   assert.equal(relayRestartDelayMs(1), 1_000);

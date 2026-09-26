@@ -61,6 +61,9 @@ function bootstrapDependencies(onboarding: Onboarding) {
     dharmaHome: () => '/fixture-home',
     VERSION: '0.2.102',
     enableRelayAutostart: async () => { await record('autostart'); return { state: 'enabled', backend: 'systemd-user' }; },
+    withRelayStartupMutation: async (operation: () => Promise<unknown>) => {
+      await record('startup_lock'); return operation();
+    },
     verifyAgentFabricSkillInstallation: async () => ({ ready: true }),
     resolve, dirname,
     evidencePreview: async () => ({ trajectoryCount: 0, automaticDisclosure: { ready: false } }),
@@ -99,6 +102,7 @@ test('bootstrap passes recipient approval to the verified browser opener before 
   assert.equal(f.calls.filter(item => item === 'open_approval').length, 1);
   assert.ok(f.calls.indexOf('open_approval') < f.calls.indexOf('save_token'));
   assert.ok(f.calls.indexOf('launcher') < f.calls.indexOf('autostart'));
+  assert.ok(f.calls.indexOf('startup_lock') < f.calls.indexOf('autostart'));
 });
 function bootstrapFlags(complete = false) {
   const flags = new Map<string, string | boolean>([
@@ -108,6 +112,24 @@ function bootstrapFlags(complete = false) {
   if (complete) flags.set('complete', true);
   return flags;
 }
+
+test('standard account rebind cannot archive Demo watch state or signal its processes', async () => {
+  const calls: string[] = [];
+  const record = async (name: string) => { calls.push(name); };
+  const dependencies = { resolve, dirname, dharmaHome: () => '/fixture-home',
+    listDemoWatchRegistrations: async () => [{ repositoryId: 'existing-demo-scope' }],
+    withRelayStartupMutation: async (operation: () => Promise<unknown>) => operation(),
+    readFile: async () => '0', process: { kill: () => calls.push('kill') },
+    createHash: () => ({ update: () => ({ digest: () => 'a'.repeat(64) }) }),
+    disableRelayAutostart: async () => record('disable'), mkdir: async () => record('mkdir'),
+    pathExists: async () => false, rename: async () => record('rename'),
+    writeJsonAtomic: async () => record('receipt'),
+  };
+  await assert.rejects((await caller('archiveEnrollmentForAuthorizedRebind', dependencies))({
+    organizationId: 'org_previous', hqUrl: 'https://fixture.invalid',
+  }), /demo_watch_standard_rebind_conflict/);
+  assert.deepEqual(calls, []);
+});
 
 test('bootstrap propagates blocked repository onboarding without launcher or completion work', async () => {
   const onboarding = { ok: false, stage: 'repository_source_authorization_required',

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-watch-control/v1",
+  "title": "Scoped local Demo watch control receipt",
+  "description": "Operational registration and cycle evidence; never full-workflow or native activation proof.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "ok", "version", "stage", "key", "registered", "supervisor", "autostart", "observation", "fullWorkflowReady"],
+  "properties": {
+    "schema": { "const": "dharma.demo-watch-control/v1" },
+    "ok": { "const": true },
+    "version": { "type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$" },
+    "stage": { "enum": ["demo_watch_plan", "demo_watch_unregistered", "demo_watch_stopped", "demo_watch_unknown", "demo_watch_legacy", "demo_watch_version_mismatch", "demo_watch_health_invalid", "demo_watch_pending", "demo_watch_cycle_observed", "demo_watch_failed", "demo_watch_disabled"] },
+    "key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "registered": { "type": "boolean" },
+    "supervisor": { "enum": ["running", "stopped", "unknown", "legacy", "version_mismatch"] },
+    "autostart": { "enum": ["enabled", "disabled", "unavailable", "unsupported"] },
+    "observation": { "oneOf": [{ "type": "null" }, { "$ref": "https://schemas.dharma-ai.io/demo-watch-health/v1" }] },
+    "fullWorkflowReady": { "const": false }
+  },
+  "allOf": [
+    {
+      "if": { "anyOf": [{ "properties": { "registered": { "const": false } } }, { "properties": { "supervisor": { "not": { "const": "running" } } } }] },
+      "then": { "properties": { "observation": { "type": "null" } } }
+    }
+  ]
+}

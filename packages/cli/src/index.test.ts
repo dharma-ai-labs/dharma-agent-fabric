@@ -73,6 +73,7 @@ import {
   verifyAgentFabricSkillInstallation,
   waitForRelayReadiness,
   withWorkspacePolicyRefreshLock,
+  withRelayStartupMutation,
   withWorkspaceSkillActivationLock,
 } from './index.js';
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
@@ -391,6 +392,69 @@ test('repository launchers stay version-pinned without depending on the npm-exec
   );
   assert.equal(launcher.shell.includes('/_npx/'), false);
   assert.equal(launcher.windows.includes('node_modules'), false);
+});
+
+test('managed launchers pin the verified runtime directory without importing credentials', () => {
+  const linux = stableRepositoryLauncherContents('0.2.103', {
+    platform: 'linux', nodeDirectory: "/home/Agent's Runtime/bin",
+  });
+  assert.match(linux.shell, /export PATH='\/home\/Agent'\\''s Runtime\/bin':"\$PATH"/);
+  assert.match(linux.shell, /agent-fabric@0\.2\.103/);
+  const windows = stableRepositoryLauncherContents('0.2.103', {
+    platform: 'win32', nodeDirectory: 'C:\\Runtime % folder\\node',
+  });
+  assert.match(windows.windows, /setlocal DisableDelayedExpansion/);
+  assert.match(windows.windows, /set "PATH=C:\\Runtime %% folder\\node;%PATH%"/);
+  assert.doesNotMatch(linux.shell + windows.windows, /--grant|token|credential/);
+  for (const nodeDirectory of ['relative/bin', '/tmp/node\ncommand', '/tmp/node\0command']) {
+    assert.throws(() => stableRepositoryLauncherContents('0.2.103', { platform: 'linux', nodeDirectory }), /runtime/i);
+  }
+  assert.throws(() => stableRepositoryLauncherContents('0.2.103;command'), /version/i);
+});
+
+test('managed POSIX launcher selects its pinned npm even under a minimal startup PATH', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "dharma-launcher's-runtime-"));
+  const bin = join(root, 'bin');
+  await mkdir(bin);
+  await writeFile(join(bin, 'npm'), '#!/bin/sh\nprintf "%s\\n" "verified-runtime" "$@"\n', { mode: 0o700 });
+  const launcher = join(root, 'dharma');
+  await writeFile(launcher, stableRepositoryLauncherContents('0.2.103', {
+    platform: 'linux', nodeDirectory: bin,
+  }).shell, { mode: 0o700 });
+  const { stdout } = await execFileAsync('/bin/sh', [launcher, 'relay', 'supervise', '--demo-only'], {
+    env: { PATH: '/usr/bin:/bin' },
+  });
+  assert.deepEqual(stdout.trim().split('\n'), ['verified-runtime', 'exec', '--yes', '--',
+    '@dharma-ai-labs/agent-fabric@0.2.103', 'relay', 'supervise', '--demo-only']);
+});
+
+test('Demo watch controls support no-write plans through the actual CLI dispatch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-watch-cli-plan-'));
+  await execFileAsync('git', ['init', root]);
+  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/example/repo']);
+  for (const command of ['watch-enable', 'watch-status', 'watch-disable']) {
+    const receipt = await run(['demo', command, '--dry-run', '--portal-url', 'https://example.com',
+      '--organization-id', 'org_test', '--repository-id', '00000000-0000-4000-8000-000000000001',
+      '--normalized-repository', 'github.com/example/repo', '--workspace', root]) as { stage: string };
+    assert.equal(receipt.stage, 'demo_watch_plan');
+  }
+  await assert.rejects(readFile(join(root, '.dharma', 'bin', 'dharma')), { code: 'ENOENT' });
+});
+
+test('all startup mutations share one user-level lock and release it on failure', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-startup-mutation-'));
+  let active = 0;
+  let maximum = 0;
+  await Promise.all(Array.from({ length: 5 }, () => withRelayStartupMutation(async () => {
+    maximum = Math.max(maximum, ++active);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    active -= 1;
+  }, home)));
+  assert.equal(maximum, 1);
+  await assert.rejects(withRelayStartupMutation(async () => { throw new Error('fixture'); }, home), /fixture/);
+  assert.equal(await withRelayStartupMutation(async () => 'released', home), 'released');
 });
 
 test('bootstrap validates stable repository identity before grant redemption', async () => {
@@ -1045,10 +1109,15 @@ test('status reports verified relay state and hides local identifiers by default
     await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
       at: acknowledgedAt, workspaceId: 'workspace_private', version: '0.2.103',
     }));
+    const stale = await run(['status']) as Record<string, unknown>;
+    assert.deepEqual(stale.reconnect, { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null });
+    await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
+      at: acknowledgedAt, workspaceId: 'workspace_private', version: version.version,
+    }));
     const acknowledged = await run(['status']) as Record<string, unknown>;
     assert.deepEqual(acknowledged.reconnect, { state: 'acknowledged_recently', lastSuccessfulPollAt: acknowledgedAt });
     await writeFile(join(home, 'relay', 'last-successful-poll.json'), JSON.stringify({
-      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: '0.2.103',
+      at: acknowledgedAt, workspaceId: 'foreign_workspace', version: version.version,
     }));
     const foreign = await run(['status']) as Record<string, unknown>;
     assert.deepEqual(foreign.reconnect, { state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null });
@@ -2017,13 +2086,13 @@ test('relay probe opens an authenticated session without polling or leasing work
     },
     openSession: async (version?: string) => {
       sessions += 1;
-      assert.equal(version, '0.2.103');
+      assert.equal(version, '0.2.104');
       return { ok: true };
     },
   }));
   assert.equal(sessions, 1);
   assert.deepEqual(result, {
-    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.103',
+    ok: true, connected: true, organizationId: 'org_test', deviceId: 'device_test', relayVersion: '0.2.104',
   });
 });
 

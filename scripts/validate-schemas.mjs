@@ -14,7 +14,67 @@ for (const name of names) {
   ajv.addSchema(schema);
 }
 
+const validateDemoWatch = ajv.getSchema('https://schemas.dharma-ai.io/demo-watch-registration/v1');
+const demoWatch = { schema: 'dharma.demo-watch/v1', hqUrl: 'https://demo.example.test',
+  organizationId: 'org_schematest', repositoryId: '00000000-0000-4000-8000-000000000001',
+  normalizedRepository: 'github.com/example/repository', provider: 'codex', workspace: '/example/repository' };
+if (!validateDemoWatch?.(demoWatch)) {
+  throw new Error(`Demo watch registration is invalid: ${ajv.errorsText(validateDemoWatch?.errors)}`);
+}
+
+const validateDemoAutostart = ajv.getSchema('https://schemas.dharma-ai.io/relay-autostart/v2');
+const demoAutostart = { schema: 'dharma.relay-autostart/v2', mode: 'demo-only', backend: 'systemd-user',
+  launcher: '/example/bin/dharma', policy: null, workspace: '/example/repository', version: '0.2.103', taskName: null };
+if (!validateDemoAutostart?.(demoAutostart)
+  || !validateDemoAutostart({ ...demoAutostart, backend: 'windows-task', taskName: 'DharmaAgentFabric-012345abcdef' })) {
+  throw new Error(`Demo startup registration is invalid: ${ajv.errorsText(validateDemoAutostart?.errors)}`);
+}
+for (const override of [{ grant: 'never-persist' }, { policy: '/unauthorized-policy' },
+  { mode: 'standard' }, { launcher: '/bin/dharma\ncommand' },
+  { backend: 'windows-task', taskName: null }, { backend: 'systemd-user', taskName: 'DharmaAgentFabric-012345abcdef' }]) {
+  if (validateDemoAutostart({ ...demoAutostart, ...override })) {
+    throw new Error('Demo startup schema accepted credentials, a mismatched mode/backend, or multiline path.');
+  }
+}
+for (const override of [{ grant: 'never-persist' }, { provider: 'shell' }, { workspace: '/repo\ncommand' }]) {
+  if (validateDemoWatch({ ...demoWatch, ...override })) {
+    throw new Error('Demo watch schema accepted a credential, provider, or multiline path.');
+  }
+}
+
+const validateDemoHealth = ajv.getSchema('https://schemas.dharma-ai.io/demo-watch-health/v1');
+const demoHealth = { schema: 'dharma.demo-watch-health/v1', key: 'a'.repeat(64), pid: 123,
+  version: '0.2.103', observedAt: '2026-09-26T03:00:00.000Z', state: 'completed',
+  stage: 'demo_repository_package_installed', sourceState: 'unchanged', code: null };
+if (!validateDemoHealth?.(demoHealth)
+  || !validateDemoHealth({ ...demoHealth, state: 'timed_out', stage: null, sourceState: null,
+    code: 'demo_watch_cycle_timeout' })) {
+  throw new Error(`Demo health receipt is invalid: ${ajv.errorsText(validateDemoHealth?.errors)}`);
+}
+for (const override of [{ token: 'never-persist' }, { key: 'foreign' }, { pid: 0 },
+  { observedAt: '2026-09-26' }, { state: 'ready' }, { stage: 'private content' },
+  { code: 'failure_on_completed' }, { state: 'failed', stage: null, sourceState: null, code: null }]) {
+  if (validateDemoHealth({ ...demoHealth, ...override })) {
+    throw new Error('Demo health schema accepted credentials, malformed state, or unbounded content.');
+  }
+}
+
 const validateDeviceCapabilities = ajv.getSchema('https://schemas.dharma-ai.io/device-capabilities/v1');
+const validateWatchControl = ajv.getSchema('https://schemas.dharma-ai.io/demo-watch-control/v1');
+const watchControl = { schema: 'dharma.demo-watch-control/v1', ok: true, version: '0.2.103',
+  stage: 'demo_watch_cycle_observed', key: 'a'.repeat(64), registered: true, supervisor: 'running',
+  autostart: 'enabled', observation: demoHealth, fullWorkflowReady: false };
+if (!validateWatchControl?.(watchControl)
+  || !validateWatchControl({ ...watchControl, stage: 'demo_watch_pending', observation: null })
+  || !validateWatchControl({ ...watchControl, stage: 'demo_watch_disabled', registered: false, observation: null })) {
+  throw new Error(`Demo watch control receipt is invalid: ${ajv.errorsText(validateWatchControl?.errors)}`);
+}
+for (const override of [{ grant: 'never-persist' }, { fullWorkflowReady: true },
+  { stage: 'fully_ready' }, { registered: false }, { supervisor: 'stopped' }]) {
+  if (validateWatchControl({ ...watchControl, ...override })) {
+    throw new Error('Demo watch control accepted credentials, unsupported readiness, or a stale process observation.');
+  }
+}
 const deviceCapabilities = {
   schema: 'dharma.device-capabilities/v1',
   deviceId: 'device_schema_test',
