@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,48 @@ test('Linux startup invokes only the pinned launcher and canonical policy', () =
   assert.match(unit, /ExecStart="\/home\/a b\/repo\/\.dharma\/bin\/dharma" relay supervise --policy/);
   assert.match(unit, /Restart=on-failure/);
   assert.doesNotMatch(unit, /grant|token|password/i);
+  assert.match(unit, /^WorkingDirectory=\/home\/a b\/repo$/m);
+});
+
+test('Linux generated unit passes the actual systemd parser with spaces and literal specifiers', {
+  skip: process.platform !== 'linux' || spawnSync('systemd-analyze', ['--version']).status !== 0,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-unit-parser-'));
+  const workspace = join(root, 'repo space % quote"');
+  await mkdir(workspace);
+  const file = join(root, 'dharma-parser-test.service');
+  await writeFile(file, linuxRelayUnit('/bin/true', null, workspace, join(root, 'private home')));
+  const result = spawnSync('systemd-analyze', ['--user', 'verify', file], { encoding: 'utf8', timeout: 15_000 });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+});
+
+test('Linux rejects nonabsolute or unrepresentable working directories before registration', () => {
+  for (const workspace of ['relative/repo', '/tmp/repo ', '/tmp/repo\\', '/tmp/repo\t']) {
+    assert.throws(() => linuxRelayUnit('/bin/true', null, workspace), /working directory/i);
+  }
+});
+
+test('Linux enable migrates only an exact owned legacy unit without enabling it prematurely', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-legacy-unit-'));
+  const options = { platform: 'linux' as const, home: join(root, 'dharma'), userHome: root,
+    workspace: join(root, 'repo space'), launcher: '/bin/true', policy: null, version: '0.2.104',
+    run: async () => ({ stdout: 'enabled\n' }) };
+  await enableRelayAutostart(options);
+  const file = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const legacy = linuxRelayUnit(options.launcher, null, options.workspace, options.home)
+    .replace(/^WorkingDirectory=.*$/m, `WorkingDirectory="${options.workspace}"`);
+  await writeFile(file, legacy);
+  assert.equal((await relayAutostartStatus(options)).state, 'unavailable');
+  await assert.rejects(startRelayAutostart(options), /autostart_conflict/);
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  assert.match(await readFile(file, 'utf8'), /^WorkingDirectory=\//m);
+  assert.equal((await startRelayAutostart(options)).state, 'start_requested');
+  await writeFile(file, `${legacy}# foreign modification\n`);
+  await assert.rejects(enableRelayAutostart(options), /autostart_conflict/);
+  await assert.rejects(disableRelayAutostart(options), /autostart_conflict/);
+  assert.equal(await readFile(file, 'utf8'), `${legacy}# foreign modification\n`);
+  await writeFile(file, legacy);
+  assert.equal((await disableRelayAutostart(options)).state, 'disabled');
 });
 
 test('Windows startup escapes paths as PowerShell literals without embedding credentials', () => {
