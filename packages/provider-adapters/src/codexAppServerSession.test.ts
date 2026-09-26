@@ -40,7 +40,9 @@ function question(change: Record<string, unknown> = {}) {
 
 function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: boolean; emptyAnswer?: boolean;
   silentTurn?: boolean; profileDenied?: boolean; expandedProfile?: boolean; unknownProfileKey?: boolean;
-  unknownNetworkKey?: boolean; activeAfterResume?: boolean; wrongWorkspace?: boolean } = {}) {
+  unknownNetworkKey?: boolean; activeAfterResume?: boolean; wrongWorkspace?: boolean;
+  loadedEmpty?: boolean; unknownAfterResume?: boolean; wireDefaults?: boolean;
+  socketExpansion?: boolean } = {}) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const listeners = new Set<(event: unknown) => void>();
   const seen = new Set<string>();
@@ -52,18 +54,26 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
       if (method === 'permissionProfile/list') return { data: [{ id: 'dharma_bridge', allowed: !options.profileDenied }] };
       if (method === 'config/read') return { config: { permissions: { dharma_bridge: {
         extends: null, workspace_roots: null,
+        ...(options.wireDefaults ? { description: null } : {}),
         ...(options.unknownProfileKey ? { unrestricted: true } : {}),
         filesystem: { glob_scan_max_depth: null, ':minimal': 'read', ':workspace_roots': {
           '.': 'read', ...(options.expandedProfile ? { '..': 'read' } : {}),
         } },
         network: { enabled: false, domains: null, unix_sockets: null,
+          ...(options.wireDefaults ? { enable_socks5: null, enable_socks5_udp: null,
+            allow_upstream_proxy: null, dangerously_allow_non_loopback_proxy: null,
+            dangerously_allow_all_unix_sockets: null, mode: null, allow_local_binding: null, mitm: null } : {}),
+          ...(options.socketExpansion ? { dangerously_allow_all_unix_sockets: true } : {}),
           ...(options.unknownNetworkKey ? { fallbackAccess: true } : {}) },
       } } } };
       if (method === 'thread/read') return { thread: { id: threadId,
         cwd: options.wrongWorkspace ? resolve('other-repository') : workspaceRoot,
-        status: { type: options.active ? 'active' : 'notLoaded' } } };
-      if (method === 'thread/resume') return { thread: { id: options.wrongResume ? 'foreign-thread' : threadId,
-        cwd: workspaceRoot, status: { type: options.activeAfterResume ? 'active' : 'idle' } } };
+        status: { type: options.active ? 'active' : options.loadedEmpty ? 'idle' : 'notLoaded' } } };
+      if (method === 'thread/resume') {
+        if (options.loadedEmpty) throw new Error('no_rollout_before_first_turn');
+        return { thread: { id: options.wrongResume ? 'foreign-thread' : threadId,
+          cwd: workspaceRoot, status: { type: options.activeAfterResume ? 'active' : options.unknownAfterResume ? 'unknown' : 'idle' } } };
+      }
       if (method === 'turn/start') {
         emit({ method: 'turn/completed', params: { threadId: 'foreign-thread',
           turn: { id: 'foreign-turn', status: 'completed', items: [{ type: 'agentMessage',
@@ -111,6 +121,7 @@ test('bridge rejects foreign scope, active owner, mismatched resume and duplicat
     [fixture(), question({ organizationId: 'org_foreign' }), binding],
     [fixture({ active: true }), question(), binding],
     [fixture({ activeAfterResume: true }), question(), binding],
+    [fixture({ unknownAfterResume: true }), question(), binding],
     [fixture({ wrongResume: true }), question(), binding],
     [fixture({ wrongWorkspace: true }), question(), binding],
     [fixture(), question(), { ...binding, owner: 'desktop' as const }],
@@ -145,13 +156,20 @@ test('bridge rejects a missing exclusive lease before touching the provider', as
 
 test('bridge denies absent or expanded permission profiles before a model turn', async () => {
   for (const options of [{ profileDenied: true }, { expandedProfile: true },
-    { unknownProfileKey: true }, { unknownNetworkKey: true }]) {
+    { unknownProfileKey: true }, { unknownNetworkKey: true }, { socketExpansion: true }]) {
     const f = fixture(options);
     await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
       verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1_000 }),
     /codex_session_profile_unavailable/);
     assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
   }
+});
+
+test('restricted profile accepts serialized null defaults without allowing network expansion', async () => {
+  const f = fixture({ wireDefaults: true });
+  const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: f.verifier, exclusiveLease, budget, now });
+  assert.equal(result.answer, 'Use signed catalog generation 13.');
 });
 
 test('bridge requests interruption when the exact turn times out', async () => {
@@ -166,5 +184,13 @@ test('bridge denies an unreserved provider turn', async () => {
   await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
     verifier: f.verifier, exclusiveLease, budget: { reserve: async () => false }, now, timeoutMs: 1_000 }),
   /codex_session_budget_unavailable/);
+  assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('first question uses its already loaded empty thread without resuming a nonexistent rollout', async () => {
+  const f = fixture({ loadedEmpty: true });
+  await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: f.verifier, exclusiveLease, budget: { reserve: async () => false }, now }), /codex_session_budget_unavailable/);
+  assert.equal(f.calls.some(call => call.method === 'thread/resume'), false);
   assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
 });

@@ -5,12 +5,18 @@ import { openCodexAppServerTransport } from './codexAppServerTransport.js';
 const fakeServer = `
 const readline = require('node:readline');
 const mode = process.argv[1];
+let experimentalApi = false;
 const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') {
+    experimentalApi = message.params.capabilities?.experimentalApi === true;
     process.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: 'test' } }) + '\\n');
   } else if (message.method === 'ping') {
+    if (mode === 'handshake') {
+      process.stdout.write(JSON.stringify({ id: message.id, result: { experimentalApi } }) + '\\n');
+      return;
+    }
     if (mode === 'exit') process.exit(0);
     if (mode === 'timeout') return;
     if (mode === 'oversized') {
@@ -33,11 +39,12 @@ lines.on('line', line => {
 });
 `;
 
-function open(mode: string, options: { maximumFrameBytes?: number; requestTimeoutMs?: number } = {}) {
+function open(mode: string, options: { maximumFrameBytes?: number; requestTimeoutMs?: number; experimentalApi?: boolean } = {}) {
   return openCodexAppServerTransport({
     command: process.execPath, argv: ['-e', fakeServer, mode], cwd: process.cwd(),
     requestTimeoutMs: options.requestTimeoutMs ?? 1_000,
     maximumFrameBytes: options.maximumFrameBytes,
+    ...{ experimentalApi: options.experimentalApi },
   });
 }
 
@@ -52,6 +59,14 @@ test('stdio transport initializes, parses fragmented notifications, and matches 
     unsubscribe();
   } finally { await transport.close(); }
   await assert.rejects(transport.request('ping', {}), /codex_app_server_unavailable/);
+});
+
+test('experimental permission profiles require explicit transport capability opt-in', async () => {
+  for (const enabled of [undefined, false, true]) {
+    const transport = await open('handshake', { experimentalApi: enabled });
+    try { assert.deepEqual(await transport.request('ping', {}), { experimentalApi: enabled === true }); }
+    finally { await transport.close(); }
+  }
 });
 
 test('stdio transport rejects provider errors without exposing provider text', async () => {

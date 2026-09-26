@@ -51,14 +51,18 @@ async function assertRestrictedProfile(transport: CodexAppServerTransport, works
   const filesystem = object(profile.filesystem);
   const roots = object(filesystem[':workspace_roots']);
   const network = object(profile.network);
-  if (Object.keys(profile).some(key => !['extends', 'workspace_roots', 'filesystem', 'network'].includes(key))
+  const disabledNetworkOptions = ['domains', 'unix_sockets', 'proxy_url', 'socks_url', 'enable_socks5',
+    'enable_socks5_udp', 'allow_upstream_proxy', 'dangerously_allow_non_loopback_proxy',
+    'dangerously_allow_all_unix_sockets', 'mode', 'allow_local_binding', 'mitm'];
+  if (Object.keys(profile).some(key => !['description', 'extends', 'workspace_roots', 'filesystem', 'network'].includes(key))
+    || (profile.description != null && (typeof profile.description !== 'string' || profile.description.length > 1000))
     || profile.extends != null || profile.workspace_roots != null
     || filesystem[':minimal'] !== 'read'
     || Object.keys(filesystem).some(key => !['glob_scan_max_depth', ':minimal', ':workspace_roots'].includes(key))
     || Object.keys(roots).length !== 1 || roots['.'] !== 'read'
-    || Object.keys(network).some(key => !['enabled', 'domains', 'unix_sockets', 'proxy_url', 'socks_url'].includes(key))
-    || network.enabled !== false || network.domains != null || network.unix_sockets != null
-    || network.proxy_url != null || network.socks_url != null) {
+    || network.enabled !== false
+    || Object.keys(network).some(key => key !== 'enabled'
+      && (!disabledNetworkOptions.includes(key) || network[key] != null))) {
     throw new Error('codex_session_profile_unavailable');
   }
 }
@@ -123,12 +127,13 @@ export async function runCodexBridgeQuestion(input: {
   if (read.cwd !== binding.workspaceRoot) throw new Error('codex_session_workspace_mismatch');
   const status = object(read.status).type;
   if (status !== 'idle' && status !== 'notLoaded') throw new Error('codex_session_unavailable');
-  const resumed = scopedThread(await transport.request('thread/resume', {
-    threadId: binding.threadId,
-  }), binding.threadId);
-  if (resumed.cwd !== binding.workspaceRoot) throw new Error('codex_session_workspace_mismatch');
-  if (resumed.status != null && object(resumed.status).type === 'active') {
-    throw new Error('codex_session_unavailable');
+  // A thread created in this transport is already loaded, even before it has a rollout.
+  if (status === 'notLoaded') {
+    const resumed = scopedThread(await transport.request('thread/resume', {
+      threadId: binding.threadId,
+    }), binding.threadId);
+    if (resumed.cwd !== binding.workspaceRoot) throw new Error('codex_session_workspace_mismatch');
+    if (object(resumed.status).type !== 'idle') throw new Error('codex_session_unavailable');
   }
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
   if (!await input.budget.reserve(question.questionId, question.authority.maximumProviderCostCents)) {

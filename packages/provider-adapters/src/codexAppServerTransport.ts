@@ -20,11 +20,13 @@ export async function openCodexAppServerTransport(input: {
   environment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
   maximumFrameBytes?: number;
+  experimentalApi?: boolean;
 }): Promise<CodexStdioTransport> {
   const timeoutMs = input.requestTimeoutMs ?? 15_000;
   const maximumFrameBytes = input.maximumFrameBytes ?? 5_000_000;
   if (!isAbsolute(input.cwd) || !input.command || !Array.isArray(input.argv)
     || input.argv.some(arg => typeof arg !== 'string')
+    || (input.experimentalApi !== undefined && typeof input.experimentalApi !== 'boolean')
     || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000
     || !Number.isInteger(maximumFrameBytes) || maximumFrameBytes < 1_024 || maximumFrameBytes > 5_000_000) {
     throw new Error('codex_app_server_launch_invalid');
@@ -179,6 +181,7 @@ export async function openCodexAppServerTransport(input: {
   try {
     await transport.request('initialize', {
       clientInfo: { name: 'dharma-agent-fabric-bridge', title: 'Dharma Agent Fabric Bridge', version: '0.0.0' },
+      ...(input.experimentalApi === true ? { capabilities: { experimentalApi: true } } : {}),
     });
     send({ method: 'initialized', params: {} });
     return transport;

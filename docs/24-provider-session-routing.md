@@ -18,6 +18,44 @@ An additive local-vault record now encrypts an explicit bridge-owned session ID 
 
 An internal CLI dispatch now joins encrypted binding lookup, exact enrolled identity, local lease acquisition, signed-question verification, and one dedicated app-server transport. It opens the provider only after scope and lease checks, closes the provider before releasing ownership on a completed turn, and retains the lease if process termination cannot be confirmed. A model answer from a real bridge-owned thread has not been observed. The dispatch has no CLI command, server registration route, relay consumer, or customer-facing availability claim.
 
+## First-thread wire qualification
+
+The no-model bootstrap probe exposed additional prototype defects: permission-profile
+fields require explicit `capabilities.experimentalApi` opt-in during `initialize`;
+profile configuration also requires `default_permissions`. An idle newly created
+thread has no persisted rollout and must not be resumed before its first turn.
+The adapter now resumes only an unloaded, explicitly bound thread and rejects
+anything other than idle after resume. The transport opts into experimental APIs
+only when its caller explicitly requests `experimentalApi: true`; existing stable
+transport calls remain unchanged.
+
+Actual `config/read` responses include a nullable profile description and nullable
+disabled network settings. The validator permits only the enumerated null defaults,
+while rejecting enabled proxy/socket settings and unknown permission fields. This
+is configuration validation, not proof of sandbox enforcement during model execution.
+
+After build, run the guarded local probe:
+
+```sh
+node scripts/probe-codex-session-bootstrap.mjs /absolute/path/to/codex
+```
+
+It creates an empty synthetic workspace and disposable `CODEX_HOME`, creates and
+reads only its own thread, validates the profile, and denies the budget reservation.
+It never supplies a real user thread ID, customer content, enrollment grant, or
+provider credentials. An additional guard refuses any `turn/start` request. Success
+means the exact newly created thread reaches `codex_session_budget_unavailable`
+with no question consumption or model turn. It is **not** a successful answer or
+an enrolled Agent Fabric endpoint. Temporary probe directories are retained for
+diagnosis; `--diagnose-launch` reports only the disposable process's startup error.
+
+Observed WSL Codex 0.147.0 created and read the same idle thread and reached the
+budget guard after the fixes. Separate unit regressions first failed for experimental
+opt-in, empty-thread resume, serialized profile defaults, and unknown post-resume
+status; all pass after correction. Live answers, actual restricted-profile behavior,
+recipient-approved server registration, and existing desktop-chat attachment are
+still unverified.
+
 ## Required binding
 
 Separate the logical repository agent, provider endpoint, and provider session. The device owner must explicitly attach a provider session to one endpoint and one normalized repository/workspace. Persist only the provider's opaque session ID and a local binding ID in the device vault; server-visible identity is a pseudonymous binding ID. Never discover the newest transcript and infer that it is the intended receiver.
