@@ -68,6 +68,9 @@ try {
   const started = await request('thread/start', { cwd: home, approvalPolicy: 'never', sandbox: 'read-only' });
   const threadId = started?.thread?.id;
   if (typeof threadId !== 'string' || !threadId) throw new Error('thread/start returned no thread ID');
+  const source = started.thread.source ?? null;
+  const canAcceptDirectInput = started.thread.canAcceptDirectInput ?? null;
+  const originatorMatchesProbe = started.thread.originator === 'dharma-session-probe';
   let resumeDisposition = 'persisted';
   try {
     const resumed = await request('thread/resume', { threadId });
@@ -78,6 +81,7 @@ try {
   }
   process.stdout.write(`${JSON.stringify({
     status: 'partial', scope: 'disposable_thread_start_resume', resumeDisposition,
+    source, canAcceptDirectInput, originatorMatchesProbe,
     modelTurnStarted: false, activeDesktopChatTested: false,
   })}\n`);
 } catch (error) {

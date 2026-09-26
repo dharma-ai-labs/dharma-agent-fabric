@@ -328,14 +328,16 @@ export function validateSessionQuestionContract(
   return contractResult(sessionQuestionValidator, value);
 }
 
-export async function verifySessionQuestionForBinding(
+export type SessionQuestionAuthorizationResult = { ok: true } | { ok: false; reason:
+  'schema_invalid' | 'scope_mismatch' | 'not_yet_valid' | 'expired' | 'binding_expired' | 'validity_too_long'
+  | 'expiry_exceeds_binding' | 'budget_exceeded' | 'signer_untrusted' | 'signature_invalid' | 'replayed' };
+
+export function inspectSessionQuestionForBinding(
   value: unknown,
   binding: SessionBindingScope,
-  verifier: SessionQuestionVerifier,
+  verifier: Pick<SessionQuestionVerifier, 'resolvePublicKey'>,
   now = new Date(),
-): Promise<{ ok: true } | { ok: false; reason:
-  'schema_invalid' | 'scope_mismatch' | 'not_yet_valid' | 'expired' | 'binding_expired' | 'validity_too_long'
-  | 'expiry_exceeds_binding' | 'budget_exceeded' | 'signer_untrusted' | 'signature_invalid' | 'replayed' }> {
+): SessionQuestionAuthorizationResult {
   if (!validateSessionQuestionContract(value).ok) return { ok: false, reason: 'schema_invalid' };
   const question = value as SessionQuestion;
   if (question.organizationId !== binding.organizationId
@@ -366,6 +368,18 @@ export async function verifySessionQuestionForBinding(
   if (!key) return { ok: false, reason: 'signer_untrusted' };
   const { signature, ...signedPayload } = question;
   if (!verifyCanonicalObject(signedPayload, signature, key)) return { ok: false, reason: 'signature_invalid' };
+  return { ok: true };
+}
+
+export async function verifySessionQuestionForBinding(
+  value: unknown,
+  binding: SessionBindingScope,
+  verifier: SessionQuestionVerifier,
+  now = new Date(),
+): Promise<SessionQuestionAuthorizationResult> {
+  const inspected = inspectSessionQuestionForBinding(value, binding, verifier, now);
+  if (!inspected.ok) return inspected;
+  const question = value as SessionQuestion;
   if (!await verifier.consume(question.questionId)) return { ok: false, reason: 'replayed' };
   return { ok: true };
 }

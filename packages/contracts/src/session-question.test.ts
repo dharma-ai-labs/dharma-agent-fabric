@@ -3,6 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import {
   signCanonicalObject,
+  inspectSessionQuestionForBinding,
   validateSessionQuestionContract,
   verifySessionQuestionForBinding,
   type SessionBindingScope,
@@ -62,6 +63,10 @@ test('session question accepts only a signed, matching, unused and unexpired bin
   const question = signedQuestion();
   assert.deepEqual(validateSessionQuestionContract(question), { ok: true });
   const guard = verifier();
+  assert.deepEqual(inspectSessionQuestionForBinding(question, binding, guard, new Date('2026-09-26T00:01:00.000Z')),
+    { ok: true });
+  assert.deepEqual(inspectSessionQuestionForBinding(question, binding, guard, new Date('2026-09-26T00:01:00.000Z')),
+    { ok: true });
   assert.deepEqual(await verifySessionQuestionForBinding(question, binding, guard, new Date('2026-09-26T00:01:00.000Z')), { ok: true });
   assert.deepEqual(await verifySessionQuestionForBinding(question, binding, guard, new Date('2026-09-26T00:01:00.000Z')), { ok: false, reason: 'replayed' });
   const newNonce = signedQuestion({ nonce: '50000000-0000-4000-8000-000000000016' });
