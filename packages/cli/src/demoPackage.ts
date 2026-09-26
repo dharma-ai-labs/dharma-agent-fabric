@@ -2,7 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID,
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor,
   loadOrCreateDeviceIdentity, normalizeHqUrl,
   saveActiveSkillAuthorizationAnchor, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
@@ -10,7 +10,8 @@ import { getActiveSkillBundleAuthorization, installSkillBundle, rollbackUnconfir
   verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { loadDemoSigningTrust, scopePath, verifyDemoDevice, type DemoDeviceScope } from './demoEnrollment.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
-import { inventoryRepositoryPackage, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepositoryPackageSnapshot,
+  writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { pollRepositoryCandidate, synchronizeRepositoryCandidate,
@@ -18,6 +19,9 @@ import { pollRepositoryCandidate, synchronizeRepositoryCandidate,
 import { validateRepositorySourceAuthorization,
   type RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { observeDemoSource, readDemoSourceBaseline, writeDemoSourceBaseline } from './demoSourceBaseline.js';
+import { readDemoSourceHistory, writeDemoSourceHistory } from './demoSourceHistory.js';
+import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
+import { reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -374,6 +378,7 @@ async function syncPublishedDemoSource(input: {
   candidateTransport: RepositoryCandidateTransport;
   outboxRoot: string;
   priorPolicyHash?: string;
+  publishedAuthorization?: ReturnType<typeof validateRepositorySourceAuthorization>;
 }, deps: DemoPackageDependencies) {
   const { scope } = input;
   const baselineScope = { organizationId: scope.organizationId, repositoryId: scope.repositoryId,
@@ -384,8 +389,73 @@ async function syncPublishedDemoSource(input: {
     sourceAuthorization: input.authorization });
   const fingerprint = snapshot.manifest.sourceFingerprint;
   if (!fingerprint) throw new Error('Demo source inventory has no fingerprint.');
-  const baseline = await readDemoSourceBaseline(scope.stateRoot, baselineScope,
+  let baseline = await readDemoSourceBaseline(scope.stateRoot, baselineScope,
     { priorPolicyHash: input.priorPolicyHash });
+  let history = await readDemoSourceHistory(scope.stateRoot, baselineScope, input.priorPolicyHash);
+  if (!history) {
+    await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
+    history = { schema: 'dharma.demo-source-history/v1', ...baselineScope,
+      localSnapshotHash: snapshot.manifest.snapshotHash, pending: null };
+    await writeDemoSourceHistory(scope.stateRoot, history);
+    // Legacy fingerprints do not prove this client ever observed another client's files.
+    if (!input.priorPolicyHash) baseline = null;
+  }
+  let previousLocal = await readRepositoryPackageSnapshot(input.workspace, history.localSnapshotHash);
+  if (previousLocal.manifest.organizationId !== scope.organizationId
+    || previousLocal.manifest.workspaceId !== input.workspaceId
+    || previousLocal.manifest.sourceAuthorization?.repositoryBindingId !== scope.repositoryId
+    || previousLocal.manifest.sourceAuthorization?.repositoryAgentId !== scope.repositoryId) {
+    throw new Error('Demo source history has a different repository scope.');
+  }
+  if (previousLocal.manifest.sourceAuthorization?.generationId !== input.authorization.generationId) {
+    if (!input.priorPolicyHash
+      || previousLocal.manifest.sourceAuthorization?.policyHash !== input.priorPolicyHash) {
+      throw new Error('Demo source history has a different authority.');
+    }
+    previousLocal = rebuildRepositoryPackageSnapshot(snapshot, {
+      files: previousLocal.manifest.files, skills: previousLocal.manifest.skills, blobs: previousLocal.blobs });
+    await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot: previousLocal, candidateOnly: true });
+    history = { ...history, ...baselineScope, localSnapshotHash: previousLocal.manifest.snapshotHash };
+    await writeDemoSourceHistory(scope.stateRoot, history);
+  }
+  if (history.pending) {
+    const candidate = await pollRepositoryCandidate({ transport: input.candidateTransport,
+      outboxRoot: input.outboxRoot, scope: { organizationId: scope.organizationId,
+        workspaceId: input.workspaceId, repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId } });
+    if (candidate && candidate.snapshotHash !== history.pending.snapshotHash) {
+      throw new Error('Demo source receipt does not match its pending snapshot.');
+    }
+    if (candidate?.state === 'published') {
+      if (!candidate.releaseId || candidate.releaseId === input.activeReleaseId
+        && history.pending.sourceFingerprint !== input.publishedSourceFingerprint) {
+        throw new Error('Demo source completion does not match its published parent.');
+      }
+      previousLocal = await readRepositoryPackageSnapshot(input.workspace, history.pending.localSnapshotHash);
+      history = { ...history, ...baselineScope, localSnapshotHash: history.pending.localSnapshotHash, pending: null };
+      await writeDemoSourceHistory(scope.stateRoot, history);
+      baseline = { schema: 'dharma.demo-source-baseline/v1', ...baselineScope,
+        localFingerprint: previousLocal.manifest.sourceFingerprint!,
+        publishedFingerprint: input.publishedSourceFingerprint, pendingFingerprint: null, firstObservedAt: null };
+      await writeDemoSourceBaseline(scope.stateRoot, baseline);
+    } else if (candidate && candidate.state !== 'blocked') {
+      return { state: 'submitted', fingerprint, candidate };
+    } else if (candidate?.state === 'blocked') {
+      history = { ...history, pending: null };
+      await writeDemoSourceHistory(scope.stateRoot, history);
+    } else {
+      const pending = await readRepositoryPackageSnapshot(input.workspace, history.pending.snapshotHash);
+      const receipt = await synchronizeRepositoryCandidate({ transport: input.candidateTransport,
+        outboxRoot: input.outboxRoot, scope: { organizationId: scope.organizationId,
+          workspaceId: input.workspaceId, repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId },
+        snapshot: { ...pending, capturedAt: history.pending.capturedAt }, initialRepository: false,
+        expectedLatestSourceFingerprint: baseline?.publishedFingerprint ?? input.publishedSourceFingerprint });
+      return { state: receipt.state === 'blocked' ? 'blocked' : 'submitted', fingerprint, candidate: receipt };
+    }
+  }
+  if (baseline && baseline.policyHash === baselineScope.policyHash
+    && baseline.publishedFingerprint !== input.publishedSourceFingerprint) {
+    baseline = { ...baseline, publishedFingerprint: input.publishedSourceFingerprint };
+  }
   const scheduled = input.priorPolicyHash && (!baseline || baseline.policyHash !== baselineScope.policyHash)
     ? { schema: 'dharma.demo-source-baseline/v1' as const, ...baselineScope,
         localFingerprint: input.publishedSourceFingerprint,
@@ -410,12 +480,52 @@ async function syncPublishedDemoSource(input: {
   if (current.policyHash !== input.authorization.policyHash) {
     throw new Error('Demo source policy changed before submission.');
   }
+  const prefix = `/agent-fabric/repository-agents/${scope.repositoryId}/source-inventory`;
+  let sourceRequests: Promise<void> = Promise.resolve();
+  const published = await fetchPublishedRepositorySource({
+    transport: { signedGet: route => {
+      if (!route.startsWith(`${prefix}?`) && !route.startsWith(`${prefix}/`)) {
+        throw new Error('Demo source inventory route is outside this binding.');
+      }
+      // Demo signatures use a single monotonic device sequence, unlike the SDK transport.
+      const pending = sourceRequests.then(() => signedJson(scope, 'GET',
+        `/api/demo/fabric/repositories/${scope.repositoryId}/source-inventory${route.slice(prefix.length)}`, undefined, deps));
+      sourceRequests = pending.then(() => undefined, () => undefined);
+      return pending;
+    } },
+    scope: { organizationId: scope.organizationId, workspaceId: input.workspaceId,
+      repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId },
+    authorization: current, publishedAuthorization: input.publishedAuthorization,
+    local: snapshot });
+  if (!published || published.sourceFingerprint !== input.publishedSourceFingerprint) {
+    throw new Error('Demo published source parent changed during reconciliation.');
+  }
+  const reconciled = reconcileRepositorySourceSnapshot({ local: snapshot, previousLocal, published });
+  const rechecked = await signedJson(scope, 'GET',
+    `/api/demo/fabric/repositories/${scope.repositoryId}/package-scope`, undefined, deps);
+  if (rechecked.activeReleaseId !== input.activeReleaseId
+    || rechecked.publishedSourceFingerprint !== published.sourceFingerprint
+    || canonicalize(rechecked.sourceAuthorization) !== canonicalize(current)) {
+    throw new Error('Demo source parent or policy changed during reconciliation.');
+  }
   await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
+  if (reconciled.manifest.sourceFingerprint === published.sourceFingerprint) {
+    await writeDemoSourceHistory(scope.stateRoot, { ...history, ...baselineScope,
+      localSnapshotHash: snapshot.manifest.snapshotHash, pending: null });
+    await writeDemoSourceBaseline(scope.stateRoot, { ...observed.baseline,
+      localFingerprint: fingerprint, pendingFingerprint: null, firstObservedAt: null });
+    return { state: 'source_already_published', fingerprint, candidate: null };
+  }
+  await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot: reconciled, candidateOnly: true });
+  await writeDemoSourceHistory(scope.stateRoot, { ...history, ...baselineScope,
+    pending: { localSnapshotHash: snapshot.manifest.snapshotHash,
+      snapshotHash: reconciled.manifest.snapshotHash, sourceFingerprint: reconciled.manifest.sourceFingerprint!,
+      capturedAt: reconciled.capturedAt } });
   const candidate = await synchronizeRepositoryCandidate({ transport: input.candidateTransport,
     outboxRoot: input.outboxRoot,
     scope: { organizationId: scope.organizationId, workspaceId: input.workspaceId,
       repositoryBindingId: scope.repositoryId, repositoryAgentId: scope.repositoryId },
-    snapshot, initialRepository: false,
+    snapshot: reconciled, initialRepository: false,
     expectedLatestSourceFingerprint: input.publishedSourceFingerprint });
   return { state: candidate.state === 'blocked' ? 'blocked' : 'submitted', fingerprint, candidate };
 }
@@ -491,7 +601,7 @@ export async function demoRepositoryPackage(input: {
         workspaceId: view.workspaceId, authorization: sourceAuthorization,
         publishedSourceFingerprint: view.publishedSourceFingerprint,
         activeReleaseId: view.activeReleaseId, candidateTransport, outboxRoot,
-        priorPolicyHash: previous.policyHash }, deps);
+        priorPolicyHash: previous.policyHash, publishedAuthorization: previous }, deps);
       return { ok: true, stage: 'demo_repository_package_policy_transition',
         repositoryId: scope.repositoryId, repositoryPackageState: 'published',
         candidate: null, sourceSync, ready: false, activationState: 'candidate_pending' };
