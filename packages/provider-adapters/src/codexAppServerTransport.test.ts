@@ -73,7 +73,7 @@ test('stdio transport fails closed on oversized frames and provider-originated r
 });
 
 test('stdio transport bounds a stalled provider request', async () => {
-  const transport = await open('timeout', { requestTimeoutMs: 50 });
+  const transport = await open('timeout');
   try { await assert.rejects(transport.request('ping', {}), /codex_app_server_request_timeout:ping/); }
   finally { await transport.close(); }
 });
