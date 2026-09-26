@@ -59,6 +59,17 @@ function verifier() {
   };
 }
 
+test('session questions support full KMS resource names without unbounded identifiers', async () => {
+  const keyVersion = 'projects/customer-production-project/locations/us-central1/keyRings/agent-fabric-server-signing/cryptoKeys/session-questions/cryptoKeyVersions/1';
+  assert.ok(keyVersion.length > 100);
+  const question = signedQuestion({ signerKeyVersion: keyVersion });
+  assert.deepEqual(validateSessionQuestionContract(question), { ok: true });
+  assert.deepEqual(await verifySessionQuestionForBinding(question, binding, {
+    ...verifier(), resolvePublicKey: version => version === keyVersion ? publicKey : null,
+  }, new Date('2026-09-26T00:01:00.000Z')), { ok: true });
+  assert.equal(validateSessionQuestionContract(signedQuestion({ signerKeyVersion: 'x'.repeat(501) })).ok, false);
+});
+
 test('session question accepts only a signed, matching, unused and unexpired binding', async () => {
   const question = signedQuestion();
   assert.deepEqual(validateSessionQuestionContract(question), { ok: true });

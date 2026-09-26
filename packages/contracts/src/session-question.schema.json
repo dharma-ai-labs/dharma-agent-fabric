@@ -41,7 +41,7 @@
     "createdAt": { "type": "string", "format": "date-time" },
     "expiresAt": { "type": "string", "format": "date-time" },
     "nonce": { "type": "string", "format": "uuid" },
-    "signerKeyVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "signerKeyVersion": { "type": "string", "minLength": 1, "maxLength": 500 },
     "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{80,100}$" }
   },
   "$defs": {
