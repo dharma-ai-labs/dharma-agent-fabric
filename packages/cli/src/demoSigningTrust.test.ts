@@ -147,3 +147,37 @@ test('Demo preload rejects a successor that is not yet valid or has no transitio
     await assert.rejects(acceptDemoSigningKeysets(f.config, [candidate], { store: f.store, now }), /Demo signing/);
   }
 });
+
+test('an active generation cannot reactivate a retained old key without a new preload', async () => {
+  const f = fixture();
+  const active = await acceptDemoSigningKeysets(f.config, [f.preload, f.active], { store: f.store, now });
+  const rollback = signed(4, f.preload.keys.map(k => ({ ...k,
+    status: k.keyVersion === 'original' ? 'active' as const : 'overlap' as const })));
+  await assert.rejects(acceptDemoSigningKeysets(active, [rollback], { store: f.store, now }), /Demo signing/);
+});
+
+test('a pending preload cannot be replaced by another preload', async () => {
+  const f = fixture();
+  const current = await acceptDemoSigningKeysets(f.config, [f.preload], { store: f.store, now });
+  const third = generateKeyPairSync('ed25519');
+  const repeated = signed(3, [...f.preload.keys, { ...f.preload.keys[1]!, keyVersion: 'third',
+    publicKeyEd25519: third.publicKey.export({ format: 'jwk' }).x! }]);
+  await assert.rejects(acceptDemoSigningKeysets(current, [repeated], { store: f.store, now }), /Demo signing/);
+});
+
+test('a restarted client activates only the successor recorded in protected preload state', async () => {
+  const f = fixture();
+  await acceptDemoSigningKeysets(f.config, [f.preload], { store: f.store, now });
+  const restarted = await resolveDemoSigningTrust(f.config, { store: f.store, now });
+  const activated = await acceptDemoSigningKeysets(restarted, [f.active], { store: f.store, now });
+  assert.equal(activated.serverSigningKeyset?.generation, 3);
+  const third = generateKeyPairSync('ed25519');
+  const body = { ...f.active, generation: 4, keys: [...f.active.keys, { ...f.preload.keys[1]!,
+    keyVersion: 'third', publicKeyEd25519: third.publicKey.export({ format: 'jwk' }).x! }] };
+  const { signature: _signature, ...unsigned } = body;
+  const preload = { ...unsigned, signature: signCanonicalObject(unsigned, next.privateKey) };
+  const pending = await acceptDemoSigningKeysets(activated, [preload], { store: f.store, now });
+  const wrong = signed(5, preload.keys.map(k => ({ ...k,
+    status: k.keyVersion === 'original' ? 'active' as const : 'overlap' as const })));
+  await assert.rejects(acceptDemoSigningKeysets(pending, [wrong], { store: f.store, now }), /Demo signing/);
+});

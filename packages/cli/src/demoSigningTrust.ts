@@ -61,8 +61,8 @@ function checkKeyset(keyset: TrustedServerSigningKeyset, org: string, now: Date,
   const verification = verifyInitialServerSigningKeyset(keyset, key, org, now);
   if (!verification.ok) failure(verification.reason ?? 'invalid_keyset');
 }
-async function saveAnchor(config: DemoSigningConfig, store: SecureSecretStore) {
-  const serialized = canonicalize({ ...binding(config), serverSigningKeyset: config.serverSigningKeyset });
+async function saveAnchor(config: DemoSigningConfig, store: SecureSecretStore, nextKeyVersion: string | null) {
+  const serialized = canonicalize({ ...binding(config), serverSigningKeyset: config.serverSigningKeyset, nextKeyVersion });
   const account = accountFor(config);
   await store.put(account, serialized);
   if (await store.get(account) !== serialized) failure('secure_store_write_not_confirmed');
@@ -79,14 +79,16 @@ export async function resolveDemoSigningTrust<T extends DemoSigningConfig>(confi
     // Compatibility migration is allowed only while the originally pinned
     // bootstrap is valid. An expired or already-rotated disk file cannot bootstrap.
     checkKeyset(config.serverSigningKeyset, config.organizationId, now, config.serverPublicKeyEd25519);
-    await saveAnchor(config, store);
+    await saveAnchor(config, store, null);
     return config;
   }
-  let anchor: ReturnType<typeof binding> & { serverSigningKeyset?: TrustedServerSigningKeyset };
+  let anchor: ReturnType<typeof binding> & { serverSigningKeyset?: TrustedServerSigningKeyset; nextKeyVersion: string | null };
   try { anchor = JSON.parse(serialized); }
   catch { failure('protected_anchor_malformed'); }
-  const { serverSigningKeyset, ...base } = anchor;
+  const { serverSigningKeyset, nextKeyVersion, ...base } = anchor;
   if (canonicalize(base) !== canonicalize(binding(config)) || !serverSigningKeyset) failure('protected_anchor_binding_mismatch');
+  if (nextKeyVersion !== null && (typeof nextKeyVersion !== 'string'
+    || !serverSigningKeyset.keys.some(k => k.keyVersion === nextKeyVersion && k.status === 'overlap'))) failure('protected_preload_invalid');
   checkKeyset(serverSigningKeyset, config.organizationId, now);
   if (!validateTrustedServerSigningKeysetContract(config.serverSigningKeyset).ok
     || config.serverSigningKeyset.generation > serverSigningKeyset.generation
@@ -103,6 +105,7 @@ export async function acceptDemoSigningKeysets<T extends DemoSigningConfig>(conf
   const now = deps.now ?? new Date();
   const store = deps.store ?? await createSystemSecureStore();
   let updated = await resolveDemoSigningTrust(config, { ...deps, store, now });
+  let nextKeyVersion = (JSON.parse((await store.get(accountFor(config)))!) as { nextKeyVersion: string | null }).nextKeyVersion;
   for (const candidate of chain) {
     const current = updated.serverSigningKeyset!;
     if (canonicalize(current) === canonicalize(candidate)) continue;
@@ -122,24 +125,27 @@ export async function acceptDemoSigningKeysets<T extends DemoSigningConfig>(conf
     const previousActive = current.keys.find(k => k.status === 'active')!;
     const introduced = candidate.keys.filter(k => !current.keys.some(old => old.keyVersion === k.keyVersion));
     if (active.keyVersion === previousActive.keyVersion) {
-      if (introduced.length !== 1 || introduced[0]!.status !== 'overlap'
+      if (nextKeyVersion !== null || introduced.length !== 1 || introduced[0]!.status !== 'overlap'
         || Date.parse(introduced[0]!.notBefore) > now.getTime()
         || Date.parse(introduced[0]!.notAfter) <= now.getTime() + 600_000
         || candidate.keys.length !== current.keys.length + 1
         || current.keys.some(old => candidate.keys.find(k => k.keyVersion === old.keyVersion)!.status !== old.status)) {
         failure('preload_invalid');
       }
+      nextKeyVersion = introduced[0]!.keyVersion;
     } else {
-      if (introduced.length !== 0 || current.keys.find(k => k.keyVersion === active.keyVersion)?.status !== 'overlap'
+      if (active.keyVersion !== nextKeyVersion || introduced.length !== 0
+        || current.keys.find(k => k.keyVersion === active.keyVersion)?.status !== 'overlap'
         || candidate.keys.length !== current.keys.length
         || current.keys.some(old => candidate.keys.find(k => k.keyVersion === old.keyVersion)!.status
           !== (old.keyVersion === active.keyVersion ? 'active' : old.keyVersion === previousActive.keyVersion ? 'overlap' : old.status))) {
         failure('activation_without_preload');
       }
+      nextKeyVersion = null;
     }
     updated = { ...updated, serverSigningKeyset: structuredClone(candidate) };
   }
-  if (canonicalize(updated.serverSigningKeyset) !== canonicalize(config.serverSigningKeyset)) await saveAnchor(updated, store);
+  if (canonicalize(updated.serverSigningKeyset) !== canonicalize(config.serverSigningKeyset)) await saveAnchor(updated, store, nextKeyVersion);
   return updated;
 }
 

@@ -22,6 +22,12 @@ must independently enforce compatibility, client acknowledgements and operator
 delivery/acknowledgement gates before publishing that active generation; reading
 or installing this response does not satisfy those server gates.
 
+The protected anchor also records the exact pending successor introduced by a
+preload. A second preload cannot replace it, and activation cannot promote a
+retained historical key. Clients freshly enrolled during a preload still require
+qualification of the enrollment's pending-successor metadata or authenticated
+predecessor history; this client patch must not be reported as that live proof.
+
 The caller holds the existing per-device operation lock. Protected storage is
 written and read back before the disk configuration changes. A restart repairs a
 stale disk generation from the protected anchor; an ahead or conflicting disk
