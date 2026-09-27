@@ -39,15 +39,21 @@ function scopedThread(value: unknown, threadId: string) {
   return thread;
 }
 
-async function assertRestrictedProfile(transport: CodexAppServerTransport, workspaceRoot: string) {
+async function assertRestrictedProfile(transport: CodexAppServerTransport, workspaceRoot: string,
+  name: 'dharma_bridge' | 'dharma_work' = 'dharma_bridge', writeRoots: string[] = []) {
+  const expectedRoots: Record<string, string> = { '.': 'read' };
+  for (const root of writeRoots) {
+    if (!/^(?:\.|[a-zA-Z0-9_-]+)$/.test(root)) throw new Error('codex_session_profile_unavailable');
+    expectedRoots[root] = 'write';
+  }
   const listed = object(await transport.request('permissionProfile/list', { cwd: workspaceRoot }));
   if (!Array.isArray(listed.data)
     || !listed.data.some(item => {
-      try { const profile = object(item); return profile.id === 'dharma_bridge' && profile.allowed === true; }
+      try { const profile = object(item); return profile.id === name && profile.allowed === true; }
       catch { return false; }
     })) throw new Error('codex_session_profile_unavailable');
   const config = object(object(await transport.request('config/read', { includeLayers: false })).config);
-  const profile = object(object(config.permissions).dharma_bridge);
+  const profile = object(object(config.permissions)[name]);
   const filesystem = object(profile.filesystem);
   const roots = object(filesystem[':workspace_roots']);
   const network = object(profile.network);
@@ -59,7 +65,8 @@ async function assertRestrictedProfile(transport: CodexAppServerTransport, works
     || profile.extends != null || profile.workspace_roots != null
     || filesystem[':minimal'] !== 'read'
     || Object.keys(filesystem).some(key => !['glob_scan_max_depth', ':minimal', ':workspace_roots'].includes(key))
-    || Object.keys(roots).length !== 1 || roots['.'] !== 'read'
+    || Object.keys(roots).length !== Object.keys(expectedRoots).length
+    || Object.entries(expectedRoots).some(([key, access]) => roots[key] !== access)
     || network.enabled !== false
     || Object.keys(network).some(key => key !== 'enabled'
       && (!disabledNetworkOptions.includes(key) || network[key] != null))) {
@@ -93,6 +100,34 @@ function finalAnswer(turn: Record<string, unknown>): string {
     throw new Error('codex_session_answer_missing_or_invalid');
   }
   return answer;
+}
+
+export interface CodexTokenUsageBreakdown {
+  inputTokens: number; cachedInputTokens: number; outputTokens: number;
+  reasoningOutputTokens: number; totalTokens: number; cacheWriteInputTokens?: number;
+}
+
+export interface CodexProviderUsage {
+  total: CodexTokenUsageBreakdown; last: CodexTokenUsageBreakdown; modelContextWindow: number | null;
+}
+
+function providerUsage(value: unknown): CodexProviderUsage | null {
+  try {
+    const usage = object(value);
+    const breakdown = (value: unknown): CodexTokenUsageBreakdown => {
+      const counters = object(value);
+      const keys = ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens', 'totalTokens'];
+      if (keys.some(key => !Number.isSafeInteger(counters[key]) || Number(counters[key]) < 0)
+        || counters.cacheWriteInputTokens != null && (!Number.isSafeInteger(counters.cacheWriteInputTokens)
+          || Number(counters.cacheWriteInputTokens) < 0)) throw new Error('invalid_usage');
+      return Object.fromEntries([...keys, ...(counters.cacheWriteInputTokens != null ? ['cacheWriteInputTokens'] : [])]
+        .map(key => [key, counters[key]])) as unknown as CodexTokenUsageBreakdown;
+    };
+    if (usage.modelContextWindow != null && (!Number.isSafeInteger(usage.modelContextWindow)
+      || Number(usage.modelContextWindow) < 1)) return null;
+    return { total: breakdown(usage.total), last: breakdown(usage.last),
+      modelContextWindow: usage.modelContextWindow == null ? null : Number(usage.modelContextWindow) };
+  } catch { return null; }
 }
 
 export async function runCodexBridgeQuestion(input: {
@@ -147,9 +182,82 @@ export async function runCodexBridgeQuestion(input: {
   if (!claimed.ok) throw new Error(claimed.reason);
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
 
+  const result = await runScopedTurn({ ...input, timeoutMs, permissions: 'dharma_bridge',
+    prompt: `Repository question (${question.category}; task ${question.taskId}): ${question.question}\nAnswer only from authorized repository material in at most 2000 characters. Do not modify files, use network access, or request broader permissions.` });
+  if (result.answer.length > 2000) throw new Error('codex_session_answer_too_large');
+  return { questionId: question.questionId, taskId: question.taskId,
+    bindingId: binding.bindingId, targetEndpointId: binding.endpointId, ...result };
+}
+
+export async function runCodexLocalWork(input: {
+  transport: CodexAppServerTransport;
+  binding: CodexBridgeBinding;
+  exclusiveLease: CodexSessionExclusiveLease;
+  budget: CodexSessionBudget;
+  workId: string;
+  prompt: string;
+  maximumProviderCostCents: number;
+  writeRoots: string[];
+  timeoutMs?: number;
+}) {
+  const { binding, transport } = input;
+  if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
+  if (binding.owner !== 'dharma_bridge' || binding.provider !== 'codex'
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(binding.threadId)
+    || !isAbsolute(binding.workspaceRoot) || resolve(binding.workspaceRoot) !== binding.workspaceRoot
+    || !Number.isFinite(Date.parse(binding.expiresAt)) || Date.parse(binding.expiresAt) <= Date.now()) {
+    throw new Error('codex_session_binding_invalid');
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.workId) || !input.prompt.trim() || input.prompt.length > 16000
+    || !Number.isInteger(input.maximumProviderCostCents) || input.maximumProviderCostCents < 1
+    || input.maximumProviderCostCents > binding.maximumProviderCostCents) throw new Error('codex_session_work_invalid');
+  const timeoutMs = input.timeoutMs ?? 300_000;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) throw new Error('codex_session_timeout_invalid');
+  if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
+  if (!Array.isArray(input.writeRoots) || !input.writeRoots.length) throw new Error('codex_session_work_invalid');
+  await assertRestrictedProfile(transport, binding.workspaceRoot, 'dharma_work', input.writeRoots);
+  const read = scopedThread(await transport.request('thread/read', {
+    threadId: binding.threadId, includeTurns: false,
+  }), binding.threadId);
+  if (read.cwd !== binding.workspaceRoot) throw new Error('codex_session_workspace_mismatch');
+  const status = object(read.status).type;
+  if (status !== 'idle' && status !== 'notLoaded') throw new Error('codex_session_unavailable');
+  if (status === 'notLoaded') {
+    const resumed = scopedThread(await transport.request('thread/resume', { threadId: binding.threadId }), binding.threadId);
+    if (resumed.cwd !== binding.workspaceRoot || object(resumed.status).type !== 'idle') throw new Error('codex_session_unavailable');
+  }
+  if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
+  if (!await input.budget.reserve(input.workId, input.maximumProviderCostCents)) throw new Error('codex_session_budget_unavailable');
+  if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
+  const result = await runScopedTurn({ ...input, timeoutMs, permissions: 'dharma_work',
+    prompt: `Local coding work ${input.workId}: ${input.prompt}\nConsult the installed Agent Fabric manifest, knowledge catalog, lexicon and applicable skills before relevant work. Work only in this repository. Network and broader permissions are unavailable. Report changes and actual test outcomes.` });
+  return { workId: input.workId, bindingId: binding.bindingId, ...result };
+}
+
+async function runScopedTurn(input: {
+  transport: CodexAppServerTransport; binding: CodexBridgeBinding;
+  exclusiveLease: CodexSessionExclusiveLease; timeoutMs: number;
+  permissions: 'dharma_bridge' | 'dharma_work'; prompt: string;
+}) {
+  const { transport, binding, timeoutMs } = input;
+
+  const startedAt = Date.now();
+  const usageByTurn = new Map<string, CodexProviderUsage | null>();
   const arrivals: unknown[] = [];
   let resolveArrival: ((value: unknown) => void) | null = null;
   const unsubscribe = transport.onNotification(event => {
+    try {
+      const notification = object(event), params = object(notification.params);
+      if (params.threadId !== binding.threadId) return;
+      if (notification.method === 'thread/tokenUsage/updated') {
+        if (typeof params.turnId === 'string' && usageByTurn.size < 32) {
+          usageByTurn.set(params.turnId, providerUsage(params.tokenUsage));
+        }
+        return;
+      }
+      // Streaming deltas must not crowd out the exact completion notification.
+      if (notification.method !== 'turn/completed') return;
+    } catch { return; }
     if (resolveArrival) {
       const resolvePending = resolveArrival;
       resolveArrival = null;
@@ -160,10 +268,10 @@ export async function runCodexBridgeQuestion(input: {
   try {
     const started = object(await transport.request('turn/start', {
       threadId: binding.threadId,
-      input: [{ type: 'text', text: `Repository question (${question.category}; task ${question.taskId}): ${question.question}\nAnswer only from authorized repository material. Do not modify files, use network access, or request broader permissions.` }],
+      input: [{ type: 'text', text: input.prompt }],
       cwd: binding.workspaceRoot,
       approvalPolicy: 'never',
-      permissions: 'dharma_bridge',
+      permissions: input.permissions,
     }));
     const turnId = object(started.turn).id;
     if (typeof turnId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(turnId)) {
@@ -182,9 +290,10 @@ export async function runCodexBridgeQuestion(input: {
       if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
       const answer = finalAnswer(turn);
       return {
-        questionId: question.questionId, taskId: question.taskId,
-        bindingId: binding.bindingId, targetEndpointId: binding.endpointId,
         answer, answerHash: `sha256:${createHash('sha256').update(answer).digest('hex')}`,
+        providerThreadId: binding.threadId, providerTurnId: turnId, elapsedMs: Date.now() - startedAt,
+        // Total is cumulative thread usage; last is the last request, not a billed turn cost.
+        providerUsage: usageByTurn.get(turnId) ?? null,
       };
     }
     try {

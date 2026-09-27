@@ -78,6 +78,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     requireCompletedBootstrapEvidence: () => undefined,
     summarizeBootstrapOrganizationApi: () => ({ ok: true }),
     loadAgentFabricOnboardingContract: async () => ({ markdown: '# fixture', sha256: 'a'.repeat(64) }),
+    namedSessionCommand: async () => { await record('named_session'); return { ok: true, state: 'running' }; },
   };
   return { dependencies, calls };
 }
@@ -165,6 +166,26 @@ test('bootstrap completes after the relay installs the signed shared release', a
   assert.equal(actual.stage, 'complete');
   assert.equal(actual.sharedRepositoryReady, true);
   assert.equal((actual.repositoryReadiness as Record<string, unknown>).attempts, 3);
+  assert.equal((actual.namedSession as Record<string, unknown>).state, 'running');
+  assert.equal((actual.workflowReadiness as Record<string, unknown>).namedSession, 'ready');
+  assert.equal(f.calls.filter(value => value === 'named_session').length, 1);
+});
+
+test('a failed named session cannot produce a complete bootstrap receipt', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture' });
+  f.dependencies.namedSessionCommand = async () => { throw new Error('named_session_provider_authentication_required'); };
+  await assert.rejects((await caller('bootstrap', f.dependencies))(bootstrapFlags(true)), /provider_authentication_required/);
+});
+
+test('a stopped named session keeps an otherwise ready bootstrap incomplete', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture' });
+  f.dependencies.namedSessionCommand = async () => ({ ok: true, state: 'stopped' });
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.ok, false);
+  assert.equal(actual.stage, 'named_session_pending');
+  assert.equal((actual.workflowReadiness as Record<string, unknown>).namedSession, 'pending');
 });
 
 test('bootstrap reports a blocked repository candidate without replaying enrollment', async () => {

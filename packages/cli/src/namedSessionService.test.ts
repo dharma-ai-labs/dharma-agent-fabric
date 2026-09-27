@@ -1,0 +1,133 @@
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
+import { signCanonicalObject, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import { namedSessionPaths, namedSessionRequest, readNamedSession, runNamedSessionService, saveNamedSession,
+  type NamedSessionRegistration } from './namedSessionService.js';
+
+test('durable named registration excludes credentials, grants and foreign shape', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-named-registration-'));
+  const identity = { organizationId: 'org_test', repositoryBindingId: randomUUID(), workspaceId: randomUUID(),
+    endpointId: randomUUID(), membershipId: randomUUID(), deviceId: randomUUID(), provider: 'codex' as const };
+  const good: NamedSessionRegistration = { schema: 'dharma.named-session/v1', name: 'reviewer', bindingId: randomUUID(),
+    identity, maximumCostCents: 100, maximumTurnCostCents: 25, enabled: true };
+  await saveNamedSession(home, good);
+  for (const invalid of [{ ...good, grant: 'private-fixture' }, { ...good, maximumTurnCostCents: 101 },
+    { ...good, identity: { ...identity, credential: 'private-fixture' } },
+    { ...good, identity: { ...identity, membershipId: 'unbound-email' } }]) {
+    await assert.rejects(saveNamedSession(home, invalid as NamedSessionRegistration), /registration_invalid/);
+    assert.deepEqual(await readNamedSession(home, 'reviewer'), good);
+  }
+  await writeFile(namedSessionPaths(home, 'reviewer').registration, JSON.stringify({ ...good, grant: 'private-fixture' }));
+  await assert.rejects(readNamedSession(home, 'reviewer'), /registration_invalid/);
+});
+
+test('named session serializes local work and signed peer questions with per-turn permissions',
+  { skip: process.platform !== 'linux' }, async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dharma-named-'));
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const identity = { organizationId: 'org_test', repositoryBindingId: randomUUID(), workspaceId: randomUUID(),
+      endpointId: randomUUID(), membershipId: randomUUID(), deviceId: randomUUID(), provider: 'codex' as const };
+    const binding: LocalProviderSessionBinding = { schema: 'dharma.local-provider-session-binding/v1', ...identity,
+      bindingId: randomUUID(), owner: 'dharma_bridge', sessionId: randomUUID(), workspaceRoot: join(home, 'repo'),
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString(), maximumProviderCostCents: 25 };
+    const registration: NamedSessionRegistration = { schema: 'dharma.named-session/v1', name: 'implementer',
+      bindingId: binding.bindingId, identity, maximumCostCents: 100, maximumTurnCostCents: 25, enabled: true };
+    await mkdir(binding.workspaceRoot); await saveNamedSession(home, registration);
+    assert.deepEqual(await readNamedSession(home, registration.name), registration);
+    const vault = await LocalVault.open({ root: join(home, 'vault'), masterKey: randomBytes(32) });
+    vault.saveProviderSessionBinding(binding);
+    const controller = new AbortController(), turns: string[] = [], replies: string[] = [];
+    const listeners = new Set<(value: unknown) => void>();
+    let offered = false, accepted = false, active = 0, maximumActive = 0, closed = false, revision = 0;
+    const questionId = randomUUID(), taskId = randomUUID(), now = new Date();
+    const unsigned = { schema: 'dharma.session-question/v1', questionId, taskId,
+      organizationId: identity.organizationId, repositoryBindingId: identity.repositoryBindingId,
+      source: { workspaceId: randomUUID(), endpointId: randomUUID(), membershipId: randomUUID(), deviceId: randomUUID() },
+      target: { workspaceId: identity.workspaceId, endpointId: identity.endpointId, membershipId: identity.membershipId,
+        deviceId: identity.deviceId, bindingId: binding.bindingId, provider: 'codex' },
+      category: 'code-review', question: 'What is a logical job?',
+      authority: { mode: 'read_only', readPaths: ['.'], network: 'deny', maximumProviderCostCents: 25 },
+      createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 300000).toISOString(),
+      nonce: randomUUID(), signerKeyVersion: 'test-v1' };
+    const question = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
+    const transport = {
+      onNotification(listener: (value: unknown) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+      async close() { closed = true; },
+      async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+        if (method === 'permissionProfile/list') return { data: ['dharma_bridge', 'dharma_work'].map(id => ({ id, allowed: true })) };
+        if (method === 'config/read') return { config: { permissions: {
+          dharma_bridge: { filesystem: { ':minimal': 'read', ':workspace_roots': { '.': 'read' } }, network: { enabled: false } },
+          dharma_work: { filesystem: { ':minimal': 'read', ':workspace_roots': { '.': 'write' } }, network: { enabled: false } },
+        } } };
+        if (method === 'thread/read') return { thread: { id: binding.sessionId, cwd: binding.workspaceRoot, status: { type: 'idle' } } };
+        if (method === 'turn/start') {
+          assert.equal(params.threadId, binding.sessionId);
+          assert.equal(params.approvalPolicy, 'never');
+          turns.push(String(params.permissions)); active++; maximumActive = Math.max(maximumActive, active);
+          const turnId = randomUUID();
+          setTimeout(() => {
+            active--;
+            for (const listener of listeners) listener({ method: 'turn/completed', params: { threadId: binding.sessionId,
+              turn: { id: turnId, status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'One tenant-scoped operation.' }] } } });
+          }, 25);
+          return { turn: { id: turnId } };
+        }
+        throw new Error('unexpected');
+      },
+    };
+    const channelTransport = { async signedPost(route: string, body: unknown) {
+      const value = body as Record<string, unknown>;
+      const base = { ok: true, organizationId: identity.organizationId, correlationId: randomUUID() };
+      if (route.endsWith('provider-sessions')) {
+        if (value.action === 'inspect') return { ...base, registration: null };
+        return { ...base, registration: { bindingId: binding.bindingId, ...identity,
+          organizationId: undefined, mode: 'bridge_owned', revision: ++revision, state: 'attached',
+          leaseUntil: new Date(Date.now() + 60000).toISOString(), replay: false } };
+      }
+      if (value.action === 'inbox') return { ...base, result: { offers: offered && !accepted ? [question] : [] } };
+      if (value.action === 'accept') accepted = true;
+      if (value.action === 'reply') replies.push(String(value.answer));
+      return { ...base, result: { questionId, taskId, targetBindingId: binding.bindingId,
+        state: value.action === 'reply' ? 'answered' : 'accepted', replay: false } };
+    } };
+    // The wire registration deliberately has no organizationId inside the scoped result.
+    const rawPost = channelTransport.signedPost;
+    channelTransport.signedPost = async (route, body) => {
+      const result = await rawPost(route, body) as Record<string, unknown>;
+      if (result.registration) delete (result.registration as Record<string, unknown>).organizationId;
+      return result as Awaited<ReturnType<typeof rawPost>>;
+    };
+    const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
+      openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
+      authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => true,
+      withActivationBoundary: operation => operation() });
+    try {
+      for (let n = 0; n < 40; n++) {
+        try { await namedSessionRequest(home, 'implementer', { action: 'status' }); break; }
+        catch { await new Promise(resolveWait => setTimeout(resolveWait, 10)); }
+      }
+      const workId = randomUUID();
+      const first = namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Run the public tests.' });
+      const second = namedSessionRequest(home, 'implementer', { action: 'work', workId: randomUUID(), prompt: 'Check the correction.' });
+      await Promise.all([first, second]);
+      offered = true;
+      for (let n = 0; n < 150 && !replies.length; n++) await new Promise(resolveWait => setTimeout(resolveWait, 10));
+      assert.equal(replies.length, 1);
+      assert.equal(maximumActive, 1);
+      assert.deepEqual(turns, ['dharma_work', 'dharma_work', 'dharma_bridge']);
+      await assert.rejects(namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Replay' }), /work_already_recorded/);
+      assert.equal(turns.length, 3);
+      const health = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
+      assert.equal(health.budget.reservedCents, 75);
+      const completion = JSON.parse((await vault.getBlob(health.lastObservation.completionHash)).toString('utf8'));
+      assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+        'https://schemas.dharma-ai.io/provider-session-completion/v1', completion)).ok, true);
+      assert.equal((await namedSessionRequest(home, 'implementer', { action: 'status' })).sessionId, binding.sessionId);
+    } finally { controller.abort(); await service; vault.close(); }
+    assert.equal(closed, true);
+  });

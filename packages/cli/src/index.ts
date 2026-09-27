@@ -69,10 +69,13 @@ import { demoWatchRegistrationKey, listDemoWatchRegistrations, type DemoWatchReg
 import { createDemoWatchHealthRecorder } from './demoWatchHealth.js';
 import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSupervisor,
   type DemoWatchControlDependencies } from './demoWatchControl.js';
+import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
+  runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
+import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.109';
+const VERSION = '0.2.110';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1752,7 +1755,9 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       }),
     }) : Promise.resolve({ restarts: 0 });
     services.push(standard);
-    const [demoResult, standardResult] = await Promise.all([demo, standard]);
+    const sessions = policyPath ? superviseNamedSessions(controller.signal) : Promise.resolve();
+    services.push(sessions);
+    const [demoResult, standardResult] = await Promise.all([demo, standard, sessions]);
     return { ok: true, stopped: true, ...standardResult, demo: demoResult };
   } finally {
     controller.abort();
@@ -1764,6 +1769,34 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       .then(value => JSON.parse(value) as { pid: number }).catch(() => null);
     if (binding?.pid === process.pid) await rm(bindingPath, { force: true });
     await releaseLease();
+  }
+}
+
+async function superviseNamedSessions(signal: AbortSignal) {
+  if (process.platform !== 'linux') return;
+  while (!signal.aborted) {
+    const root = resolve(dharmaHome(), 'sessions');
+    const entries = await readdir(root, { withFileTypes: true }).catch(error => {
+      if (error.code === 'ENOENT') return []; throw error;
+    });
+    for (const entry of entries.slice(0, 50)) {
+      if (signal.aborted) break;
+      if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,47}$/.test(entry.name)) continue;
+      try {
+        const registration = await readNamedSession(dharmaHome(), entry.name);
+        if (!registration?.enabled) continue;
+        await namedSessionCommand('start', new Map<string, string | boolean>([
+          ['name', registration.name], ['workspace-id', registration.identity.workspaceId], ['apply', true],
+        ]));
+      } catch {
+        process.stderr.write(`${JSON.stringify({ event: 'named_session_reconnect_pending', name: entry.name })}\n`);
+      }
+    }
+    await new Promise<void>(resolveWait => {
+      const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolveWait(); };
+      const timer = setTimeout(finish, 10_000); signal.addEventListener('abort', finish, { once: true });
+      if (signal.aborted) finish();
+    });
   }
 }
 
@@ -2124,12 +2157,24 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     usage,
   });
   const operatingContract = await loadAgentFabricOnboardingContract();
+  const namedSession = provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
+    ? await withOnboardingStage('named_session', String(onboarded.workspaceId),
+      `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+      () => namedSessionCommand('start', new Map<string, string | boolean>([
+      ['name', String(flags.get('session-name') || `codex-${String(onboarded.workspaceId).slice(0, 8)}`)],
+      ['workspace-id', String(onboarded.workspaceId)], ['apply', true],
+      ...(typeof flags.get('session-budget-cents') === 'string'
+        ? [['session-budget-cents', String(flags.get('session-budget-cents'))] as [string, string]] : []),
+    ]))) as Record<string, unknown>
+    : null;
   const repositoryReceipt = onboarded as Record<string, unknown>;
+  const namedSessionReady = provider !== 'codex' || process.platform !== 'linux'
+    || Boolean(namedSession?.ok === true && ['running', 'executing'].includes(String(namedSession.state)));
   const firstLearning = repositoryReceipt.firstLearningEvidence as Record<string, unknown> | undefined;
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   return {
-    ok: repositoryReadiness?.outcome !== 'blocked',
-    stage: sharedRepositoryReady ? 'complete'
+    ok: repositoryReadiness?.outcome !== 'blocked' && namedSessionReady,
+    stage: sharedRepositoryReady ? namedSessionReady ? 'complete' : 'named_session_pending'
       : repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending',
     localStage: 'complete',
     sharedRepositoryReady,
@@ -2154,6 +2199,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     },
     relayProbe: relay.probe,
     relay,
+    namedSession,
     repositoryReadiness,
     organizationApi,
     operatingContract: {
@@ -2168,6 +2214,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         ? Number(firstLearning.discovered || 0) > 0 ? 'synchronized' : 'no_eligible_history'
         : String(firstLearning?.state || 'pending'),
       synchronization: relay.state === 'running' ? 'running' : 'pending',
+      namedSession: namedSession && namedSessionReady ? 'ready'
+        : provider === 'codex' && process.platform === 'linux' ? 'pending' : 'not_supported',
     },
   };
 }
@@ -3310,6 +3358,16 @@ async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | '
   const item = (await registry()).find(candidate => candidate.workspaceId === workspaceId);
   if (!item) throw new Error('Repository role workspace is not registered locally.');
   const scope = repositoryRoleScope(item), transport = await client();
+  if (['ask', 'reply'].includes(action) && flags.has('session-name')) {
+    const name = required(flags, 'session-name');
+    const registered = await readNamedSession(dharmaHome(), name);
+    if (!registered || registered.identity.workspaceId !== workspaceId) throw new Error('named_session_scope_mismatch');
+    return namedSessionRequest(dharmaHome(), name, action === 'ask' ? {
+      action: 'ask', targetBindingId: required(flags, 'target-session-binding-id'),
+      taskId: required(flags, 'task-id'), category: required(flags, 'category'), question: required(flags, 'question'),
+    } : { action: 'read', questionId: required(flags, 'question-id'),
+      taskId: required(flags, 'task-id'), targetBindingId: required(flags, 'target-session-binding-id') });
+  }
   if (action === 'register') {
     const categories = required(flags, 'question-categories').split(',').map(value => value.trim()).filter(Boolean);
     return registerRepositoryRoleMetadata(transport, scope, { expectedRevision: Number(flags.get('expected-revision') || 0),
@@ -3324,6 +3382,143 @@ async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | '
     category: required(flags, 'category'), question: required(flags, 'question'),
     targetEndpointId: typeof flags.get('target-endpoint-id') === 'string' ? String(flags.get('target-endpoint-id')) : undefined });
   return readRepositoryRoleReply({ transport, scope, questionId: required(flags, 'question-id') });
+}
+
+async function namedSessionCommand(action: string, flags: Map<string, string | boolean>): Promise<Output> {
+  const name = String(flags.get('name') || 'codex');
+  const paths = namedSessionPaths(dharmaHome(), name);
+  if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
+  const workspaceId = required(flags, 'workspace-id');
+  const item = (await registry()).find(row => row.workspaceId === workspaceId);
+  const config = await readDeviceConfig();
+  if (!item || !config || item.organizationId !== config.organizationId) throw new Error('named_session_scope_mismatch');
+  const scope = repositoryRoleScope(item);
+  const existing = await readNamedSession(dharmaHome(), name);
+  if (existing && (existing.identity.workspaceId !== item.workspaceId
+    || existing.identity.organizationId !== config.organizationId || existing.identity.deviceId !== config.deviceId
+    || existing.identity.endpointId !== scope.endpointId || existing.identity.repositoryBindingId !== scope.repositoryBindingId)) {
+    throw new Error('named_session_scope_mismatch');
+  }
+  if (action === 'status') {
+    try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); }
+    catch { return { ok: true, name, state: 'stopped', registered: Boolean(existing), enabled: existing?.enabled ?? false,
+      bindingId: existing?.bindingId ?? null }; }
+  }
+  if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
+    workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
+  if (action === 'stop') {
+    if (!flags.has('apply')) return { ok: true, planned: true, name, action: 'stop' };
+    if (existing) await saveNamedSession(dharmaHome(), { ...existing, enabled: false });
+    try { return await namedSessionRequest(dharmaHome(), name, { action: 'stop' }); }
+    catch { return { ok: true, name, state: 'stopped', enabled: false }; }
+  }
+  if (!['start', 'serve'].includes(action)) throw new Error('named_session_action_invalid');
+  if (!flags.has('apply')) return { ok: true, planned: true, name, workspaceId,
+    provider: 'codex', localWork: 'workspace_write', peerQuestions: 'read_only', network: 'deny' };
+  if (!await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
+  if (action === 'start') {
+    if (existing && !existing.enabled) await saveNamedSession(dharmaHome(), { ...existing, enabled: true });
+    try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Start an owned worker below. */ }
+    const args = [fileURLToPath(import.meta.url), 'sessions', 'serve', '--name', name,
+      '--workspace-id', workspaceId, '--apply'];
+    for (const key of ['session-budget-cents', 'turn-budget-cents']) {
+      if (flags.has(key)) args.push(`--${key}`, required(flags, key));
+    }
+    const child = spawn(process.execPath, args, { cwd: item.path, detached: true, stdio: 'ignore', env: process.env });
+    child.on('error', () => {}); child.unref();
+    for (let attempt = 0; attempt < 80; attempt++) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 250));
+      try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Await service initialization. */ }
+    }
+    throw new Error('named_session_startup_failed');
+  }
+  await mkdir(paths.root, { recursive: true, mode: 0o700 });
+  const releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
+  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
+  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
+  const controller = new AbortController(), stop = () => controller.abort();
+  process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
+  try {
+    const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json') });
+    await fabric.openSession(VERSION);
+    const policyPath = resolve(item.path, '.dharma', 'approved-policy.json');
+    const policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
+    const writeRoots = policy.tasks.writePaths.filter(path => /^[a-zA-Z0-9_-]+\/\*\*$/.test(path))
+      .map(path => path.slice(0, -3));
+    if (!writeRoots.length) throw new Error('named_session_workspace_write_not_authorized');
+    const workRoots = ['"."="read"', ...writeRoots.map(root => `${JSON.stringify(root)}="write"`)].join(',');
+    transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
+      environment: providerProcessEnvironment(process.env), experimentalApi: true,
+      argv: ['-c', 'default_permissions="dharma_bridge"',
+        '-c', 'permissions.dharma_bridge.filesystem={":minimal"="read",":workspace_roots"={"."="read"}}',
+        '-c', 'permissions.dharma_bridge.network={enabled=false}',
+        '-c', `permissions.dharma_work.filesystem={":minimal"="read",":workspace_roots"={${workRoots}}}`,
+        '-c', 'permissions.dharma_work.network={enabled=false}', 'app-server'] });
+    const account = await transport.request('account/read', { refreshToken: false }) as { account?: unknown };
+    if (!account.account) throw new Error('named_session_provider_authentication_required');
+    let registration = existing;
+    if (!registration) {
+      const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
+      const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
+      const created = await transport.request('thread/start', { cwd: item.path,
+        approvalPolicy: 'never', permissions: 'dharma_bridge', ephemeral: false }) as { thread?: { id?: string; cwd?: string } };
+      if (!created.thread?.id || created.thread.cwd !== item.path) throw new Error('named_session_thread_invalid');
+      const bindingId = randomUUID();
+      const response = await fabric.signedPost('/agent-fabric/provider-sessions', {
+        schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
+        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        bindingId, expectedRevision: 0, leaseSeconds: 60,
+      });
+      const remote = response.registration as Record<string, unknown> | undefined;
+      if (response.ok !== true || response.organizationId !== config.organizationId || !remote
+        || remote.bindingId !== bindingId || remote.workspaceId !== workspaceId || remote.endpointId !== scope.endpointId
+        || remote.repositoryBindingId !== scope.repositoryBindingId || remote.deviceId !== config.deviceId
+        || !UUID_PATTERN.test(String(remote.membershipId)) || remote.provider !== 'codex'
+        || remote.mode !== 'bridge_owned' || remote.state !== 'attached' || remote.revision !== 1) {
+        throw new Error('named_session_registration_invalid');
+      }
+      const identity = { organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
+        workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
+        provider: 'codex' as const };
+      const keyExpiry = config.serverSigningKeyset ? Date.parse(config.serverSigningKeyset.expiresAt) : Date.now() + 86400000;
+      vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
+        bindingId, owner: 'dharma_bridge', sessionId: created.thread.id, workspaceRoot: item.path,
+        createdAt: new Date().toISOString(), expiresAt: new Date(Math.min(keyExpiry, Date.now() + 30 * 86400000)).toISOString(),
+        maximumProviderCostCents: maximumTurnCostCents });
+      registration = { schema: 'dharma.named-session/v1', name, bindingId, identity,
+        maximumCostCents, maximumTurnCostCents, enabled: true };
+      await saveNamedSession(dharmaHome(), registration);
+    }
+    const resolver = config.serverSigningKeyset ? createActionDecisionPublicKeyResolver(config.serverSigningKeyset)
+      : (version: string) => version === 'legacy-v1'
+        ? createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }) : null;
+    // The durable reservation already suppresses duplicate provider execution.
+    const consumed = new Set<string>();
+    return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
+      localWriteRoots: writeRoots,
+      withActivationBoundary: operation => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+        const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
+        if (!skill.ready || !await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
+        return operation();
+      }),
+      authorizeLocalWork: async () => {
+        const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
+        return writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`));
+      },
+      openTransport: async () => transport!, channelTransport: fabric,
+      verifier: { resolvePublicKey: resolver, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
+      authorizeContent: async content => {
+        const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
+        return current.evidence.automaticDisclosure?.mode === 'customer_authorized_content'
+          && !containsDisallowedLocalPath(content)
+          && canonicalize(redactValue(content, { classes: new Set<string>(), redactedValues: 0,
+            excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) === canonicalize(content);
+      } });
+  } finally {
+    try { if (transport) await transport.close(); }
+    finally { vault.close(); await releaseLock(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+  }
 }
 
 async function workspaceSync(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
@@ -6318,6 +6513,7 @@ export async function run(argv: string[]): Promise<Output> {
     });
   }
   if (command === 'bootstrap') return bootstrap(flags);
+  if (command === 'sessions') return namedSessionCommand(String(subcommand), flags);
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return {

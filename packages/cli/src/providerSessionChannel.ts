@@ -181,6 +181,7 @@ export function createProviderSessionChannel(input: {
         const inspected = inspectSessionQuestionForBinding(candidate, scope, input.verifier, now());
         fact(inspected.ok, 'response'); const offer = candidate as SessionQuestion;
         text(offer.question, 'response');
+        await content(offer.question, 'question');
         fact(!seen.has(offer.questionId), 'response'); seen.add(offer.questionId); offers.push(offer);
       }
       return offers;

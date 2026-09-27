@@ -63,6 +63,15 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   return {
     close,
     retire: () => close({ retire: true }),
+    async runWork(request: Parameters<typeof owner.runWork>[0]) {
+      if (stopped) throw new Error('codex_inbox_session_unavailable');
+      if (running) throw new Error('codex_inbox_session_busy');
+      running = true;
+      try { return await owner.runWork(request); }
+      finally { running = false; }
+    },
+    ask: channel.ask,
+    read: channel.read,
     async runNext() {
       if (stopped) throw new Error('codex_inbox_session_unavailable');
       if (running) throw new Error('codex_inbox_session_busy');
@@ -86,18 +95,26 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
           }
           throw error;
         }
+        const providerTelemetryHash = await input.vault.putBlob(Buffer.from(canonicalize({
+          schema: 'dharma.provider-session-telemetry/v1', organizationId: scope.organizationId,
+          repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId,
+          deviceId: scope.deviceId, bindingId: scope.bindingId, questionId: offer.questionId, taskId: offer.taskId,
+          providerThreadId: result.providerThreadId, providerTurnId: result.providerTurnId,
+          elapsedMs: result.elapsedMs, providerUsage: result.providerUsage,
+        }), 'utf8'), 'provider-session-telemetry');
         const completionHash = await input.vault.stageProviderSessionReply(input.bindingId, input.identity,
           offer.questionId, Buffer.from(canonicalize({
           schema: 'dharma.provider-session-completion/v1', organizationId: scope.organizationId,
           repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId,
           deviceId: scope.deviceId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
-          ...result,
+          questionId: result.questionId, taskId: result.taskId, bindingId: result.bindingId,
+          targetEndpointId: result.targetEndpointId, answer: result.answer, answerHash: result.answerHash,
         }), 'utf8'));
         try {
           const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
             outcome: 'answered', answer: result.answer, failureCode: null });
           input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, offer.questionId, completionHash);
-          return { ...receipt, completionHash };
+          return { ...receipt, completionHash, providerTelemetryHash };
         } catch (error) {
           // Preserve the encrypted completed result. Never repeat the provider turn
           // because its upload was denied or the network acknowledgement was lost.

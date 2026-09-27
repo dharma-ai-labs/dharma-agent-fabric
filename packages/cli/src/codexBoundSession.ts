@@ -1,6 +1,6 @@
 import { inspectSessionQuestionForBinding, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { runCodexBridgeQuestion, type CodexSessionBudget } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 interface CodexBoundSessionInput {
@@ -11,6 +11,7 @@ interface CodexBoundSessionInput {
   openTransport(): Promise<CodexStdioTransport>;
   verifier: SessionQuestionVerifier;
   budget: CodexSessionBudget;
+  localWriteRoots?: string[];
 }
 
 export async function openCodexBoundSession(input: CodexBoundSessionInput) {
@@ -48,6 +49,22 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
   return {
     close,
     async assertActive() { return !closing && !closed && await heldLease.assertHeld(); },
+    async runWork(request: { workId: string; prompt: string; maximumProviderCostCents: number; timeoutMs?: number }) {
+      if (closing) throw new Error('codex_session_closed');
+      if (running) throw new Error('codex_session_busy');
+      running = true;
+      try {
+        const result = await runCodexLocalWork({ ...request, transport, binding: codexBinding,
+          exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [] });
+        if (closing) throw new Error('codex_session_closed');
+        return result;
+      } catch (error) {
+        if (!(error instanceof Error) || !['codex_session_budget_unavailable', 'codex_session_work_invalid'].includes(error.message)) {
+          try { await close(); } catch { /* Retain the fence until shutdown is confirmed. */ }
+        }
+        throw error;
+      } finally { running = false; }
+    },
     async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');
