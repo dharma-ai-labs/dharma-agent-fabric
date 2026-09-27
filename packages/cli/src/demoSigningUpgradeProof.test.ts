@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
 import { mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -9,6 +9,7 @@ import { canonicalize, signCanonicalObject, verifyCanonicalObject } from '@dharm
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { connectDemoDevice, scopePath } from './demoEnrollment.js';
 import { prepareDemoSigningUpgradeProof, readDemoSigningUpgradeContext } from './demoSigningUpgradeProof.js';
+import { submitDemoSigningUpgradeProof } from './demoSigningUpgradeSubmission.js';
 import { run } from './index.js';
 
 const now = new Date('2026-09-27T10:00:00Z');
@@ -299,4 +300,225 @@ test('both actual CLI commands expose a grant-free dry-run and enforce the curre
     assert.doesNotMatch(JSON.stringify(result), /signature|grant|privateKey|confirmed/);
     await assert.rejects(run(['demo', command, ...flags, '--normalized-repository', 'github.com/example/other']), /does not match/);
   }
+  assert.equal((await run(['demo', 'signing-client-proof', ...flags, '--submit']) as { stage: string }).stage, 'demo_signing_proof_plan');
+  await assert.rejects(run(['demo', 'signing-owner-proof', ...flags, '--submit']), /browser/i);
+});
+
+function submissionServer(f: Awaited<ReturnType<typeof fixture>>, options: {
+  loseResponse?: boolean; loseStatus?: boolean; receipt?: (value: Record<string, unknown>) => Response;
+  afterStatus?: () => void;
+} = {}) {
+  let sequence = f.config.nextSequence, posts = 0, lostStatus = false;
+  const proofs: unknown[] = [], stored = new Set<string>(), calls: string[] = [];
+  const fetcher: typeof fetch = async (resource, init) => {
+    const url = new URL(String(resource)), headers = new Headers(init?.headers);
+    calls.push(url.pathname);
+    assert.equal(url.origin, f.scope.hqUrl);
+    assert.equal(url.searchParams.get('orgId'), f.scope.organizationId);
+    assert.equal(init?.redirect, 'error');
+    assert.equal((init as { cache?: string })?.cache, 'no-store');
+    assert.ok(init?.signal);
+    assert.equal(headers.has('authorization'), false);
+    assert.equal(headers.has('cookie'), false);
+    const raw = String(init?.body || '');
+    const payload = { bodyHash: `sha256:${createHash('sha256').update(raw).digest('hex')}`,
+      deviceId, messageId: headers.get('x-dharma-message-id'), method: init?.method,
+      nonce: headers.get('x-dharma-nonce'), organizationId: f.scope.organizationId,
+      pathname: `${url.pathname}${url.search}`, sequence: Number(headers.get('x-dharma-sequence')),
+      sessionId: headers.get('x-dharma-session-id'), timestamp: headers.get('x-dharma-timestamp') };
+    assert.equal(verify(null, Buffer.from(JSON.stringify(payload)), createPublicKey({ key: {
+      kty: 'OKP', crv: 'Ed25519', x: f.config.publicKeyEd25519 }, format: 'jwk' }),
+      Buffer.from(headers.get('x-dharma-signature')!, 'base64url')), true);
+    if (payload.sequence !== sequence) return Response.json({ ok: false,
+      error: { code: 'demo_fabric_sequence_out_of_order', message: 'Sequence rejected.' } }, { status: 409 });
+    sequence++;
+    if (url.pathname.endsWith('/status')) {
+      if (options.loseStatus && posts === 1 && !lostStatus) {
+        lostStatus = true; throw new TypeError('Status response lost after proof recorded.');
+      }
+      options.afterStatus?.();
+      return Response.json({ ok: true, organizationId: f.scope.organizationId, repositoryId, deviceId,
+        normalizedRepository: f.scope.normalizedRepository, acceptedSequence: payload.sequence });
+    }
+    assert.equal(url.pathname, `/api/demo/fabric/repositories/${repositoryId}/signing-upgrade-sources`);
+    assert.equal(headers.get('content-type'), 'application/json');
+    posts++;
+    const { proof } = JSON.parse(raw);
+    proofs.push(proof);
+    const duplicate = stored.has(proof.sourceHash); stored.add(proof.sourceHash);
+    if (options.loseResponse && posts === 1) throw new TypeError('Response lost after write.');
+    const receipt = { ok: true, organizationId: f.scope.organizationId, repositoryId, deviceId,
+      sourceHash: proof.sourceHash, duplicate, correlationId: headers.get('x-dharma-correlation-id') };
+    return options.receipt?.(receipt) ?? Response.json(receipt, { headers: {
+      'x-dharma-correlation-id': String(receipt.correlationId) } });
+  };
+  return { fetcher, proofs, calls, stored };
+}
+
+test('submits only an existing client proof and validates signed transport and exact receipt', async t => {
+  const f = await fixture(t), server = submissionServer(f), before = JSON.stringify([...f.values]);
+  const result = await submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher });
+  assert.equal(result.stage, 'client_proof_recorded');
+  assert.equal(result.submitted, true);
+  assert.equal(result.activated, false);
+  assert.equal(result.duplicate, false);
+  assert.equal(result.deviceId, deviceId);
+  assert.equal(server.proofs.length, 1);
+  assert.equal(JSON.stringify([...f.values]), before);
+  assert.doesNotMatch(JSON.stringify(result), /privateKey|privateJwk|signature|grant|confirmed/);
+  await assert.rejects(readFile(`${f.configPath}.pending-signing-upgrade.json`), { code: 'ENOENT' });
+});
+
+test('lost response retries the same immutable proof with sequence reconciliation and duplicate receipt', async t => {
+  const f = await fixture(t), server = submissionServer(f, { loseResponse: true });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), /Response lost/);
+  const pending = await readFile(`${f.configPath}.pending-signing-upgrade.json`, 'utf8');
+  t.mock.timers.setTime(now.getTime() + 30_000);
+  const result = await submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher });
+  assert.equal(result.duplicate, true); assert.equal(result.resumed, true);
+  assert.deepEqual(server.proofs[0], server.proofs[1]); assert.equal(server.stored.size, 1);
+  assert.doesNotMatch(pending, /privateKey|privateJwk|grant|authorization/);
+});
+
+test('a lost final status keeps the recorded proof recoverable across the next invocation', async t => {
+  const f = await fixture(t), server = submissionServer(f, { loseStatus: true });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), /Status response lost/);
+  assert.ok(await readFile(`${f.configPath}.pending-signing-upgrade.json`, 'utf8'));
+  const result = await submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher });
+  assert.equal(result.duplicate, true); assert.equal(result.resumed, true);
+  assert.deepEqual(server.proofs[0], server.proofs[1]); assert.equal(server.stored.size, 1);
+});
+
+for (const status of [401, 403, 409, 500]) test(`HTTP ${status} cannot acknowledge a proof or expose provider text`, async t => {
+  let requestedCorrelation = '';
+  const f = await fixture(t), server = submissionServer(f, { receipt: value => {
+    requestedCorrelation = String(value.correlationId);
+    return Response.json({ ok: false,
+    error: { code: 'demo_signing_source_rejected', message: 'private-provider-error-content' } },
+    { status, headers: { 'x-dharma-correlation-id': requestedCorrelation } });
+  } });
+  const before = JSON.stringify([...f.values]);
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), error => {
+    assert.ok(error instanceof Error); assert.doesNotMatch(error.message, /private-provider-error-content/);
+    const details = error as Error & { stage: string; code: string; status: number; correlationId: string };
+    assert.equal(details.stage, 'client_proof_submission'); assert.equal(details.code, 'demo_signing_source_rejected');
+    assert.equal(details.status, status); assert.equal(details.correlationId, requestedCorrelation);
+    assert.ok(error.message.includes(requestedCorrelation)); return true;
+  });
+  assert.equal(JSON.stringify([...f.values]), before);
+  assert.ok(await readFile(`${f.configPath}.pending-signing-upgrade.json`, 'utf8'));
+});
+
+for (const header of [null, 'malformed-private-value', otherClient])
+  test('a missing or untrusted error correlation cannot attest a typed provider failure', async t => {
+    let requestedCorrelation = '';
+    const f = await fixture(t), server = submissionServer(f, { receipt: value => {
+      requestedCorrelation = String(value.correlationId);
+      return Response.json({ ok: false, error: { code: 'demo_signing_source_rejected',
+        message: 'private-provider-error-content', correlationId: requestedCorrelation } },
+      { status: 403, headers: header ? { 'x-dharma-correlation-id': header } : {} });
+    } });
+    await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), error => {
+      assert.ok(error instanceof Error);
+      const details = error as Error & { stage: string; code: string; status: number; correlationId: string };
+      assert.equal(details.code, 'receipt_invalid'); assert.equal(details.correlationId, requestedCorrelation);
+      assert.equal(details.stage, 'client_proof_submission'); assert.equal(details.status, 403);
+      assert.doesNotMatch(error.message, /malformed-private-value|private-provider-error-content/);
+      return true;
+    });
+    assert.ok(await readFile(`${f.configPath}.pending-signing-upgrade.json`, 'utf8'));
+  });
+
+for (const [label, mutate] of Object.entries({
+  organization: (v: Record<string, unknown>) => { v.organizationId = 'org_foreign'; },
+  repository: (v: Record<string, unknown>) => { v.repositoryId = otherClient; },
+  device: (v: Record<string, unknown>) => { v.deviceId = otherClient; },
+  source: (v: Record<string, unknown>) => { v.sourceHash = predecessorHash; },
+  duplicate: (v: Record<string, unknown>) => { v.duplicate = 'yes'; },
+  success: (v: Record<string, unknown>) => { v.ok = false; },
+  correlation: (v: Record<string, unknown>) => { v.correlationId = otherClient; },
+})) test(`does not acknowledge a mismatched ${label} receipt`, async t => {
+  const f = await fixture(t), server = submissionServer(f, { receipt: value => {
+    const correlation = String(value.correlationId); mutate(value);
+    return Response.json(value, { headers: { 'x-dharma-correlation-id': correlation } });
+  } });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), /receipt/i);
+  assert.ok(await readFile(`${f.configPath}.pending-signing-upgrade.json`, 'utf8'));
+});
+
+for (const [label, response] of [
+  ['HTML', () => new Response('<html>private-error-content</html>', { headers: { 'content-type': 'text/html' } })],
+  ['empty', () => Response.json({})],
+  ['malformed', () => new Response('{', { headers: { 'content-type': 'application/json' } })],
+  ['redirect', () => new Response('', { status: 302, headers: { location: 'https://foreign.example' } })],
+  ['generic 404', () => Response.json({ error: 'missing' }, { status: 404 })],
+  ['oversized', () => new Response(' '.repeat(8193), { headers: { 'content-type': 'application/json' } })],
+] as const) test(`rejects ${label} without claiming submission success or exposing content`, async t => {
+  const f = await fixture(t), server = submissionServer(f, { receipt: response });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), error => {
+    assert.ok(error instanceof Error); assert.doesNotMatch(error.message, /private-error-content/); return true;
+  });
+  assert.ok(await readFile(`${f.configPath}.pending-signing-upgrade.json`, 'utf8'));
+});
+
+test('tampered pending proof is preserved and cannot send a network request', async t => {
+  const f = await fixture(t), server = submissionServer(f, { loseResponse: true });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }));
+  const path = `${f.configPath}.pending-signing-upgrade.json`, pending = JSON.parse(await readFile(path, 'utf8'));
+  pending.signature = 'A'.repeat(86); await writeFile(path, JSON.stringify(pending));
+  const before = server.calls.length;
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }), /pending|proof/i);
+  assert.equal(server.calls.length, before); assert.equal((JSON.parse(await readFile(path, 'utf8'))).signature, pending.signature);
+});
+
+test('a changed context cannot silently replace an unresolved proof', async t => {
+  const f = await fixture(t), server = submissionServer(f, { loseResponse: true });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }));
+  const path = `${f.configPath}.pending-signing-upgrade.json`, before = await readFile(path, 'utf8'), calls = server.calls.length;
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, { ...f.context, candidateHash: predecessorHash.replace(/a/g, 'c') },
+    { store: f.store, fetcher: server.fetcher }), /pending|proof/i);
+  assert.equal(server.calls.length, calls); assert.equal(await readFile(path, 'utf8'), before);
+});
+
+test('expired or missing protected state blocks submission before networking', async t => {
+  const f = await fixture(t), server = submissionServer(f), before = JSON.stringify([...f.values]);
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, { ...f.context, expiresAt: now.toISOString() },
+    { store: f.store, fetcher: server.fetcher }));
+  assert.equal(server.calls.length, 0); assert.equal(JSON.stringify([...f.values]), before);
+  f.values.clear();
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }));
+  assert.equal(server.calls.length, 0); assert.equal(f.values.size, 0);
+});
+
+test('device removal during signed status cannot mint a replacement key or dispatch a proof', async t => {
+  const f = await fixture(t), key = [...f.values].find(([, value]) => { try { return !!JSON.parse(value).d; } catch { return false; } })?.[0];
+  assert.ok(key);
+  let writes = 0;
+  const store = { ...f.store, put: async () => { writes++; }, delete: async () => { writes++; } };
+  const server = submissionServer(f, { afterStatus: () => { f.values.delete(key); } });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store, fetcher: server.fetcher }));
+  assert.equal(server.proofs.length, 0); assert.equal(writes, 0); assert.equal(f.values.has(key), false);
+});
+
+test('the anchor removed during the final envelope identity read is checked again before dispatch', async t => {
+  const f = await fixture(t), anchor = [...f.values.keys()].find(key => /^demo-signing-[0-9a-f]{32}$/.test(key));
+  const key = [...f.values].find(([, value]) => { try { return !!JSON.parse(value).d; } catch { return false; } })?.[0];
+  assert.ok(anchor && key);
+  let reads = 0, writes = 0;
+  const store: SecureSecretStore = { ...f.store, getFresh: async account => {
+    if (account === key && ++reads === 8) f.values.delete(anchor);
+    return f.values.get(account) ?? null;
+  }, put: async () => { writes++; }, delete: async () => { writes++; } };
+  const server = submissionServer(f);
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store, fetcher: server.fetcher }));
+  assert.equal(f.values.has(anchor), false); assert.equal(writes, 0); assert.equal(server.proofs.length, 0);
+});
+
+test('expired proof pending after a lost response remains preserved and does not retry', async t => {
+  const f = await fixture(t), server = submissionServer(f, { loseResponse: true });
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }));
+  const path = `${f.configPath}.pending-signing-upgrade.json`, before = await readFile(path, 'utf8'), calls = server.calls.length;
+  t.mock.timers.setTime(now.getTime() + 11 * 60_000);
+  await assert.rejects(submitDemoSigningUpgradeProof(f.scope, f.context, { store: f.store, fetcher: server.fetcher }));
+  assert.equal(server.calls.length, calls); assert.equal(await readFile(path, 'utf8'), before);
 });

@@ -64,6 +64,7 @@ import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from '
 import { demoRepositoryPackage } from './demoPackage.js';
 import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { prepareDemoSigningUpgradeProof, readDemoSigningUpgradeContext } from './demoSigningUpgradeProof.js';
+import { submitDemoSigningUpgradeProof } from './demoSigningUpgradeSubmission.js';
 import { runDemoWatch } from './demoWatch.js';
 import { runDemoSupervisor } from './demoSupervisor.js';
 import { demoWatchRegistrationKey, listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
@@ -6213,6 +6214,9 @@ export async function run(argv: string[]): Promise<Output> {
     }
     const watchControl = ['watch-enable', 'watch-status', 'watch-disable'].includes(String(subcommand));
     const signingProof = ['signing-client-proof', 'signing-owner-proof'].includes(String(subcommand));
+    if (signingProof && subcommand === 'signing-owner-proof' && flags.has('submit')) {
+      throw new Error('Owner signing approval requires explicit browser confirmation.');
+    }
     if (watchControl && await realpath(root) !== workspace) {
       throw new Error('Demo watch setup must select the exact Git repository root.');
     }
@@ -6227,6 +6231,7 @@ export async function run(argv: string[]): Promise<Output> {
     };
     if (signingProof) {
       const context = await readDemoSigningUpgradeContext(resolve(required(flags, 'review-context')));
+      if (flags.has('submit')) return withDemoDeviceLock(scope, () => submitDemoSigningUpgradeProof(scope, context));
       return withDemoDeviceLock(scope, () => prepareDemoSigningUpgradeProof(scope, context,
         subcommand === 'signing-owner-proof' ? 'owner' : 'client'));
     }
