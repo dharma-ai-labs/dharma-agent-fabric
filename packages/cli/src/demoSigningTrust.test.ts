@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import { signCanonicalObject, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
-import { acceptDemoSigningKeysets, acceptDemoSigningUpdate, resolveDemoSigningTrust } from './demoSigningTrust.js';
+import { acceptDemoSigningKeysets, acceptDemoSigningUpdate, recoverDemoSigningEnrollment, resolveDemoSigningTrust } from './demoSigningTrust.js';
 
 const now = new Date('2026-09-27T03:00:00.000Z');
 const old = generateKeyPairSync('ed25519');
@@ -39,6 +39,201 @@ function fixture() {
     async delete(account) { values.delete(account); } };
   return { initial, preload, active, config, store, values };
 }
+
+const expiredNow = new Date('2026-09-28T03:00:00.000Z');
+function approval(f: ReturnType<typeof fixture>) {
+  return { schema: 'dharma.demo-enrollment-approval/v1', organizationId: f.config.organizationId,
+    repositoryId: f.config.repositoryId, participantId: '20000000-0000-4000-8000-000000000001',
+    deviceId: f.config.deviceId, enrollmentId: '50000000-0000-4000-8000-000000000001',
+    publicKeyEd25519: f.config.publicKeyEd25519, approvedAt: expiredNow.toISOString(),
+    expiresAt: new Date(expiredNow.getTime() + 60_000).toISOString() };
+}
+
+test('browser re-enrollment archives expired trust and repairs an older disk binding on restart', async () => {
+  const f = fixture();
+  await resolveDemoSigningTrust(f.config, { store: f.store, now });
+  const original = [...f.values.values()][0]!;
+  const renewed = await recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store: f.store, now: expiredNow });
+  assert.equal(renewed.enrolledAt, f.config.enrolledAt);
+  assert.equal(renewed.nextSequence, f.config.nextSequence);
+  assert.equal(renewed.serverPublicKeyEd25519, nextPublic);
+  assert.ok([...f.values.values()].includes(original));
+  assert.deepEqual(await resolveDemoSigningTrust(f.config, { store: f.store, now: expiredNow }), renewed);
+  assert.doesNotMatch([...f.values.values()].join(''), /grant|privateJwk|privateKey|authorization/i);
+});
+
+test('re-enrollment of an expired legacy file labels its snapshot without treating it as prior protected authority', async () => {
+  const f = fixture();
+  const renewed = await recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store: f.store, now: expiredNow });
+  assert.ok([...f.values.values()].some(value => value.includes('"previousWasProtected":false')));
+  assert.deepEqual(await resolveDemoSigningTrust(f.config, { store: f.store, now: expiredNow }), renewed);
+});
+
+test('re-enrollment requires a fresh scoped approval and rejects credentials, old receipts and malformed candidates', async () => {
+  for (const change of [null, { schema: 'legacy' }, { grant: 'never-persist' },
+    { organizationId: 'org_foreign' }, { repositoryId: '10000000-0000-4000-8000-000000000099' },
+    { deviceId: '30000000-0000-4000-8000-000000000099' }, { publicKeyEd25519: 'E'.repeat(43) },
+    { approvedAt: now.toISOString() }, { approvedAt: new Date(expiredNow.getTime() + 60_000).toISOString() },
+    { expiresAt: expiredNow.toISOString() }, { expiresAt: new Date(expiredNow.getTime() + 16 * 60_000).toISOString() }]) {
+    const f = fixture();
+    await resolveDemoSigningTrust(f.config, { store: f.store, now });
+    const before = [...f.values.entries()];
+    await assert.rejects(recoverDemoSigningEnrollment(f.config,
+      { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active },
+      change === null ? null : { ...approval(f), ...change }, { store: f.store, now: expiredNow }), /Demo signing/);
+    assert.deepEqual([...f.values.entries()], before);
+  }
+  for (const trust of [{ serverPublicKeyEd25519: oldPublic, serverSigningKeyset: fixture().active },
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: { ...fixture().active, signature: 'invalid' } },
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: { ...fixture().active, generation: 1 } }]) {
+    const f = fixture();
+    await assert.rejects(recoverDemoSigningEnrollment(f.config, trust, approval(f), { store: f.store, now: expiredNow }), /Demo signing/);
+    assert.equal(f.values.size, 0);
+  }
+});
+
+test('valid protected trust and modified disk bindings cannot be replaced through re-enrollment', async () => {
+  const f = fixture();
+  await resolveDemoSigningTrust(f.config, { store: f.store, now });
+  const before = [...f.values.entries()];
+  await assert.rejects(recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active },
+    { ...approval(f), approvedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() },
+    { store: f.store, now }), /approval_must_follow_trust_expiry/);
+  const altered = { ...f.config, enrolledAt: '2026-09-27T02:31:00Z' };
+  await assert.rejects(recoverDemoSigningEnrollment(altered,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store: f.store, now: expiredNow }), /binding_mismatch/);
+  assert.deepEqual([...f.values.entries()], before);
+});
+
+test('recipient approval cannot extend or rewrite a retained expired signing key', async () => {
+  const f = fixture();
+  const { signature: _signature, ...body } = f.active;
+  const altered = { ...body, keys: body.keys.map(key => key.keyVersion === 'original'
+    ? { ...key, notAfter: newExpiry } : key) };
+  await assert.rejects(recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic,
+      serverSigningKeyset: { ...altered, signature: signCanonicalObject(altered, next.privateKey) } },
+    approval(f), { store: f.store, now: expiredNow }), /retained_window_changed/);
+  assert.equal(f.values.size, 0);
+});
+
+test('interrupted protected replacement resumes from confirmed history without extending old validity', async () => {
+  for (const interruptedAt of ['before', 'after', 'removed']) {
+    const f = fixture();
+    await resolveDemoSigningTrust(f.config, { store: f.store, now });
+    const original = [...f.values.values()][0]!;
+    const store: SecureSecretStore = { ...f.store, async put(account, value) {
+      if (!account.includes('-history-') && !account.endsWith('-recovery') && !account.includes('-approval-')) {
+        if (interruptedAt === 'after') await f.store.put(account, value);
+        if (interruptedAt === 'removed') await f.store.delete(account);
+        throw new Error('interrupted anchor replacement');
+      }
+      await f.store.put(account, value);
+    } };
+    await assert.rejects(recoverDemoSigningEnrollment(f.config,
+      { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store, now: expiredNow }), /interrupted/);
+    assert.ok([...f.values.values()].includes(original));
+    if (interruptedAt === 'after') {
+      const restored = await resolveDemoSigningTrust(f.config, { store: f.store, now: expiredNow });
+      assert.equal(restored.serverPublicKeyEd25519, nextPublic);
+      assert.equal(restored.serverSigningKeyset?.keys[0]?.notAfter, oldExpiry);
+    } else {
+      const restored = await recoverDemoSigningEnrollment(f.config,
+        { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store: f.store, now: expiredNow });
+      assert.equal(restored.serverPublicKeyEd25519, nextPublic);
+    }
+  }
+});
+
+test('a missing active anchor cannot recover from changed approval, missing history or malformed journal', async () => {
+  for (const fault of ['recipient', 'enrollment', 'expired', 'binding', 'history', 'approval_record', 'null_journal', 'invalid_journal']) {
+    const f = fixture();
+    await resolveDemoSigningTrust(f.config, { store: f.store, now });
+    const [account] = [...f.values.keys()];
+    const store: SecureSecretStore = { ...f.store, async put(key, value) {
+      if (key === account) {
+        await f.store.delete(key);
+        throw new Error('interrupted anchor replacement');
+      }
+      await f.store.put(key, value);
+    } };
+    const trust = { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active };
+    await assert.rejects(recoverDemoSigningEnrollment(f.config, trust, approval(f), { store, now: expiredNow }), /interrupted/);
+    if (fault === 'history') f.values.delete([...f.values.keys()].find(key => key.includes('-history-'))!);
+    if (fault === 'approval_record') f.values.delete([...f.values.keys()].find(key => key.includes('-approval-'))!);
+    if (fault === 'null_journal') f.values.set(`${account}-recovery`, 'null');
+    if (fault === 'invalid_journal') f.values.set(`${account}-recovery`, '{');
+    const receipt = { ...approval(f), ...(fault === 'recipient'
+      ? { participantId: '20000000-0000-4000-8000-000000000099' }
+      : fault === 'enrollment' ? { enrollmentId: '50000000-0000-4000-8000-000000000099' } : {}) };
+    const before = [...f.values.entries()];
+    await assert.rejects(recoverDemoSigningEnrollment(
+      { ...f.config, ...(fault === 'binding' ? { enrolledAt: '2026-09-27T02:31:00Z' } : {}) }, trust, receipt,
+      { store: f.store, now: fault === 'expired' ? new Date(expiredNow.getTime() + 60_000) : expiredNow }), /Demo signing trust rejected/);
+    assert.deepEqual([...f.values.entries()], before);
+  }
+});
+
+test('every protected recovery write must be confirmed before returning replacement trust', async () => {
+  for (const phase of ['history', 'approval', 'journal', 'anchor']) {
+    const f = fixture();
+    await resolveDemoSigningTrust(f.config, { store: f.store, now });
+    const [account, original] = [...f.values.entries()][0]!;
+    const store: SecureSecretStore = { ...f.store, async put(key, value) {
+      if ((phase === 'history' && key.includes('-history-'))
+        || (phase === 'approval' && key.includes('-approval-'))
+        || (phase === 'journal' && key.endsWith('-recovery'))
+        || (phase === 'anchor' && key === account)) return;
+      await f.store.put(key, value);
+    } };
+    await assert.rejects(recoverDemoSigningEnrollment(f.config,
+      { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store, now: expiredNow }), /write_not_confirmed/);
+    assert.equal(f.values.get(account), original);
+    await assert.rejects(resolveDemoSigningTrust(f.config, { store: f.store, now: expiredNow }), /expired/);
+  }
+});
+
+test('a cached secure-store echo cannot substitute for confirmed OS storage', async () => {
+  const f = fixture();
+  const cache = new Map<string, string>();
+  const store: SecureSecretStore = { ...f.store,
+    async get(account) { return cache.get(account) ?? null; },
+    async getFresh() { return null; },
+    async put(account, value) { cache.set(account, value); } };
+  await assert.rejects(resolveDemoSigningTrust(f.config, { store, now }), /write_not_confirmed/);
+  await assert.rejects(recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store, now: expiredNow }), /write_not_confirmed/);
+  assert.equal(f.values.size, 0);
+});
+
+test('accepted approval identities cannot be replayed with edited timestamps or a different recipient', async () => {
+  const f = fixture();
+  await resolveDemoSigningTrust(f.config, { store: f.store, now });
+  const renewed = await recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, approval(f), { store: f.store, now: expiredNow });
+  const afterExpiry = new Date(Date.parse(newExpiry) + 60_000);
+  const fourth = generateKeyPairSync('ed25519');
+  const fourthPin = fourth.publicKey.export({ format: 'jwk' }).x!;
+  const body = { schema: 'dharma.server-signing-keyset/v1' as const, organizationId: f.config.organizationId,
+    generation: 4, signedByKeyVersion: 'fourth', issuedAt: afterExpiry.toISOString(),
+    expiresAt: new Date(afterExpiry.getTime() + 86_400_000).toISOString(), keys: [{ keyVersion: 'fourth',
+      publicKeyEd25519: fourthPin, status: 'active' as const, notBefore: afterExpiry.toISOString(),
+      notAfter: new Date(afterExpiry.getTime() + 86_400_000).toISOString() }] };
+  const trust = { serverPublicKeyEd25519: fourthPin,
+    serverSigningKeyset: { ...body, signature: signCanonicalObject(body, fourth.privateKey) } };
+  const before = [...f.values.entries()];
+  for (const change of [{}, { participantId: '20000000-0000-4000-8000-000000000099',
+    enrollmentId: '50000000-0000-4000-8000-000000000099' }]) {
+    await assert.rejects(recoverDemoSigningEnrollment(renewed, trust,
+      { ...approval(f), approvedAt: afterExpiry.toISOString(),
+        expiresAt: new Date(afterExpiry.getTime() + 60_000).toISOString(), ...change },
+      { store: f.store, now: afterExpiry }), /approval_replayed_or_conflicting/);
+    assert.deepEqual([...f.values.entries()], before);
+  }
+});
 
 test('Demo trust survives restart and original-key expiry only after a protected successor transition', async () => {
   const f = fixture();
