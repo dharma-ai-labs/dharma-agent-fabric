@@ -5,6 +5,10 @@ import { LifecycleAdapterError, previewLifecycleSource, SqliteLifecycleAdapter }
 
 try {
   const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === '--help') {
+    process.stdout.write('dharma-lifecycle-reference --config <absolute approved-config.mjs> [--dry-run | --apply]\nDefault: metadata-only preview; --apply dispatches under customer-owned policy.\nThis reference does not enroll a device or attach a desktop chat.\n');
+    process.exit(0);
+  }
   const index = args.indexOf('--config');
   const path = index >= 0 ? args[index + 1] : null;
   if (!path || !isAbsolute(path) || args.filter(a => a === '--config').length !== 1

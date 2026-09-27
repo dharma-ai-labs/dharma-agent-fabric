@@ -125,10 +125,10 @@ async function prepare(event: LifecycleEvent, input: LifecycleSourceOptions) {
     sourceTaskId: event.sourceTaskId, targetEndpointId: event.targetEndpointId,
     // Stable conversation and idempotency IDs make a lost response replayable.
     conversationId: event.eventId, requestedResponse: 'proposal',
-    stateEnvelope: { intent: safe.intent, evidence_used: [`approved source ${event.sourceHash}`],
+    stateEnvelope: { intent: safe.intent.trim(), evidence_used: [`approved source ${event.sourceHash}`],
       known_state: { lifecycle_event: { ...metadata, eventHash, policyRevision: permission.policyRevision },
         source_revision: { commit: event.sourceCommit, contentHash: event.sourceHash }, summary: safe.summary },
-      unknown_or_missing_state: safe.missing, allowed_next_actions: [ACTIONS[event.boundary]],
+      unknown_or_missing_state: [...new Set(safe.missing.map(value => value.trim()))], allowed_next_actions: [ACTIONS[event.boundary]],
       blocked_actions: ['publishing', 'spending', 'permission_expansion', 'scheduler_replacement'],
       decision_authority: 'Customer scheduler and existing human approvals retain execution, publishing and spending authority.',
       tool_results: [] }, evidenceReferences,
@@ -157,7 +157,27 @@ export interface LifecycleHandoffTransport {
   readonly organizationId: string;
   dispatchHandoff(input: AgentFabricHandoffInput, options?: AgentFabricRequestOptions): Promise<Record<string, unknown>>;
 }
-function receipt(response: Record<string, unknown>, event: LifecycleEvent, eventHash: string, requestHash: string) {
+function matchesApprovedState(state: AgentFabricHandoffInput['stateEnvelope'] | undefined,
+  expected: AgentFabricHandoffInput['stateEnvelope']) {
+  if (!state || !state.known_state || Array.isArray(state.known_state)) return false;
+  const same = (a: unknown, b: unknown) => a !== undefined && b !== undefined && canonicalize(a) === canonicalize(b);
+  for (const key of ['intent', 'allowed_next_actions', 'blocked_actions', 'decision_authority', 'tool_results'] as const) {
+    if (!same(state[key], expected[key])) return false;
+  }
+  for (const [key, value] of Object.entries(expected.known_state)) {
+    if (!same(state.known_state[key], value)) return false;
+  }
+  if (Object.keys(state.known_state).some(key => !(key in expected.known_state)
+    && !['source_task', 'source_task_result'].includes(key))) return false;
+  // The server appends verified source-task evidence, but cannot replace the customer's state or authority.
+  return Array.isArray(state.evidence_used) && Array.isArray(state.unknown_or_missing_state)
+    && expected.evidence_used.every(value => state.evidence_used.includes(value))
+    && state.evidence_used.every(value => expected.evidence_used.includes(value) || /^source_task_receipt:sha256:[a-f0-9]{64}$/.test(value))
+    && same(state.unknown_or_missing_state?.filter(value => value !== 'source_task_result'),
+      expected.unknown_or_missing_state.filter(value => value !== 'source_task_result'));
+}
+function receipt(response: Record<string, unknown>, event: LifecycleEvent, eventHash: string, requestHash: string,
+  handoff: AgentFabricHandoffInput) {
   if (!response || typeof response !== 'object' || Array.isArray(response)) fail('lifecycle_response_invalid');
   const task = response.task as Record<string, unknown> | undefined;
   const message = response.message as Record<string, unknown> | undefined;
@@ -173,9 +193,13 @@ function receipt(response: Record<string, unknown>, event: LifecycleEvent, event
     || task.workspace_id !== event.targetWorkspaceId || task.status !== 'offered'
     || message.org_id !== event.organizationId || message.task_id !== task.id
     || message.conversation_id !== event.eventId || message.source_endpoint_id !== event.sourceEndpointId
-    || message.target_endpoint_id !== event.targetEndpointId || echoed?.eventHash !== eventHash) fail('lifecycle_response_invalid');
+    || message.target_endpoint_id !== event.targetEndpointId || echoed?.eventHash !== eventHash
+    || message.requested_response !== handoff.requestedResponse
+    || canonicalize(message.evidence_references ?? null) !== canonicalize(handoff.evidenceReferences ?? [])
+    || !matchesApprovedState(state, handoff.stateEnvelope)) fail('lifecycle_response_invalid');
   const observation = { taskId: String(task.id), messageId: String(message.id),
-    correlationId: String(response.correlationId), eventHash, requestHash };
+    correlationId: String(response.correlationId), eventHash, requestHash,
+    returnedStateHash: sha256(canonicalize(state)) };
   return { ...observation, observationHash: sha256(canonicalize(observation)) };
 }
 function alive(pid: number) {
@@ -290,14 +314,14 @@ export class SqliteLifecycleAdapter {
           const controller = new AbortController();
           let timer: NodeJS.Timeout | undefined;
           try { response = await Promise.race([
-            transport.dispatchHandoff(planned.handoff, { idempotencyKey: planned.idempotencyKey, signal: controller.signal }),
+            transport.dispatchHandoff(structuredClone(planned.handoff), { idempotencyKey: planned.idempotencyKey, signal: controller.signal }),
             new Promise<never>((_, reject) => { timer = setTimeout(() => {
               controller.abort(); reject(new LifecycleAdapterError('lifecycle_transport_unavailable'));
             }, requestTimeout(this.options)); }),
           ]); }
           catch { fail('lifecycle_transport_unavailable'); }
           finally { if (timer) clearTimeout(timer); }
-          observed = receipt(response, event, planned.eventHash, planned.requestHash);
+          observed = receipt(response, event, planned.eventHash, planned.requestHash, planned.handoff);
         }
         this.#transaction(() => {
           this.state.prepare('UPDATE adapter_events SET state=?, observation=? WHERE event_id=? AND revision=?')

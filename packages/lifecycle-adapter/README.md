@@ -1,6 +1,7 @@
 # Lifecycle and SQLite reference adapter
 
-Private reference package `0.1.0`, using Agent Fabric SDK `0.1.10`.
+Private reference package `0.1.0`, using Agent Fabric SDK `0.1.10`, contracts
+`0.1.11`, and evidence reduction `0.2.20` from the CLI `0.2.109` release family.
 Requires Node `>=22.20.0 <25` and npm `>=10.9.3 <12`.
 This is fixture-qualified integration code, not a production-enabled CLI command.
 It does not enroll a device, attach a desktop chat, or replace a scheduler.
@@ -18,7 +19,7 @@ The projection must expose `dharma_lifecycle_export_v1` with:
 | Column | Contract |
 |---|---|
 | `sequence` | Positive, unique, increasing safe integer; never reused |
-| `event_json` | Immutable JSON conforming to `schemas/lifecycle-event.schema.json` |
+| `event_json` | Immutable JSON conforming to `schemas/lifecycle-event.schema.json` (checkout) or `dist/lifecycle-event.schema.json` (package) |
 
 Export only approved, bounded summaries and registered evidence references,
 not an entire SQLite transcript. Preserve a customer-side mapping from job ID
@@ -73,6 +74,16 @@ node packages/lifecycle-adapter/bin/run.mjs --config /absolute/path/approved-con
 node packages/lifecycle-adapter/bin/run.mjs --config /absolute/path/approved-config.mjs --apply
 ```
 
+For a standalone reference distribution, build the reviewed checkout, then run
+`npm pack --workspace packages/lifecycle-adapter --pack-destination /absolute/release`.
+Distribute that tarball with its SHA-256 and exact source commit. Recipients
+verify both through the trusted handoff, install the local tarball in a separate
+adapter directory, and use `npx --no-install dharma-lifecycle-reference --help`
+or the same `--config` / `--apply` flags above. No npm publication is required;
+the private flag prevents accidental registry publication. The supplied module
+exports and bundled runtime schema work without a monorepo checkout. This
+reference is not a signed skill bundle or a newly qualified CLI release.
+
 The first invocation defaults to metadata-only dry-run: no SDK client or state
 database is created, but your authorization callback still runs. A Windows config
 path must also be absolute. `--apply` is an explicit dispatch boundary; a lifecycle
@@ -109,6 +120,10 @@ subsequent batches using the existing scheduler; this runner is not a daemon.
 `drained` means one bounded batch was consumed; inspect its cursor and processed
 entries. It does not mean the entire stream is empty. `dispatched` means a
 strictly attributed upstream `offered` task/message response was received.
+The receipt verifies the returned approved content, source revision, response
+type, evidence references, and bounded authority, not only echoed IDs or a hash.
+Documented server source-task annotations are allowed; replacement content or
+permission expansion is rejected. Local receipts also hash the returned state.
 `duplicate` suppresses another dispatch of the same immutable revision.
 `expired` means the event was never dispatched. Every result includes
 `executionVerified: false`: inspect the actual task outcome, receiver's answer,

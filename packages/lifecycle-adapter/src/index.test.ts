@@ -53,9 +53,52 @@ function accepted(input: Parameters<AgentFabricClient['dispatchHandoff']>[0]) {
       workspace_id: scope.targets[0]!.workspaceId, status: 'offered' },
     message: { id: randomUUID(), org_id: scope.organizationId, task_id: taskId,
       conversation_id: input.conversationId, source_endpoint_id: scope.sourceEndpointId,
-      target_endpoint_id: input.targetEndpointId, state_envelope: input.stateEnvelope } };
+      target_endpoint_id: input.targetEndpointId, requested_response: input.requestedResponse,
+      evidence_references: input.evidenceReferences, state_envelope: input.stateEnvelope } };
 }
 const transport = { organizationId: scope.organizationId, dispatchHandoff: async (input: Parameters<AgentFabricClient['dispatchHandoff']>[0]) => accepted(input) };
+
+test('a matching event hash cannot hide changed handoff content or authority', async t => {
+  const changes = [
+    (r: ReturnType<typeof accepted>) => { r.message.state_envelope.allowed_next_actions = ['publishing']; },
+    (r: ReturnType<typeof accepted>) => { r.message.state_envelope.blocked_actions = []; },
+    (r: ReturnType<typeof accepted>) => { r.message.state_envelope.decision_authority = 'Agent may spend'; },
+    (r: ReturnType<typeof accepted>) => { r.message.state_envelope.known_state.summary = 'Changed summary'; },
+    (r: ReturnType<typeof accepted>) => { r.message.state_envelope.known_state.source_revision = { commit: 'c'.repeat(40) }; },
+    (r: ReturnType<typeof accepted>) => { r.message.requested_response = 'task_result'; },
+    (r: ReturnType<typeof accepted>) => { r.message.evidence_references = [{ trajectoryId: randomUUID(), revision: 1, capsuleHash: `sha256:${'c'.repeat(64)}` }]; },
+  ];
+  for (const [i, change] of changes.entries()) await t.test(`mutation ${i + 1}`, async () => {
+    const f = await fixture(); f.write(1, event());
+    try {
+      const adapter = await SqliteLifecycleAdapter.open(f.input);
+      try {
+        const result = await adapter.run({ ...transport, dispatchHandoff: async input => {
+          const r = structuredClone(accepted(input)); change(r); return r;
+        } });
+        assert.equal(result.state, 'blocked'); assert.equal(result.cursor, 0);
+        assert.equal(result.state === 'blocked' && result.code, 'lifecycle_response_invalid');
+      } finally { adapter.close(); }
+    } finally { await f.cleanup(); }
+  });
+});
+
+test('documented server source-task annotations do not invalidate approved content', async () => {
+  const f = await fixture(); f.write(1, event());
+  try {
+    const adapter = await SqliteLifecycleAdapter.open(f.input);
+    try {
+      const result = await adapter.run({ ...transport, dispatchHandoff: async input => {
+        const r = structuredClone(accepted(input));
+        r.message.state_envelope.known_state.source_task = { task_id: input.sourceTaskId, status: 'running' };
+        r.message.state_envelope.unknown_or_missing_state.push('source_task_result');
+        return r;
+      } });
+      assert.equal(result.state, 'drained'); assert.equal(result.cursor, 1);
+      assert.equal(result.executionVerified, false);
+    } finally { adapter.close(); }
+  } finally { await f.cleanup(); }
+});
 
 test('preview reads a bounded approved SQLite event without writing customer history', async () => {
   const root = await mkdtemp(join(tmpdir(), 'fabric-lifecycle-'));

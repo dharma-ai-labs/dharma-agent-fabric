@@ -100,4 +100,19 @@ for (const workspace of workspaceDirectories) {
   }
 }
 
-process.stdout.write(`${JSON.stringify({ ok: true, requiredFiles: required.length, publicPackages: workspaceDirectories.length })}\n`);
+const reference = JSON.parse(await readFile(resolve(root, 'packages/lifecycle-adapter/package.json'), 'utf8'));
+if (reference.private !== true || reference.dependencies['@dharma-ai-labs/agent-fabric-contracts'] !== workspaceManifests.get('@dharma-ai-labs/agent-fabric-contracts').version
+  || reference.dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] !== workspaceManifests.get('@dharma-ai-labs/agent-fabric-evidence-reduction').version
+  || reference.dependencies['@dharma-ai-labs/agent-fabric-sdk'] !== workspaceManifests.get('@dharma-ai-labs/agent-fabric-sdk').version) {
+  throw new Error('Lifecycle reference must remain private and pin qualified workspace dependencies.');
+}
+const { stdout: referencePack } = await execFileAsync(process.execPath,
+  [process.env.npm_execpath, 'pack', '--workspace', 'packages/lifecycle-adapter', '--dry-run', '--json'], { cwd: root });
+const referenceFiles = new Set(JSON.parse(referencePack)[0].files.map(file => file.path));
+if ([...referenceFiles].some(file => file.includes('.test.') || /(?:\.env|config\.mjs|\.sqlite|credential|grant)/i.test(file))) {
+  throw new Error('Lifecycle reference tarball contains tests or durable runtime data.');
+}
+for (const required of ['dist/index.js', 'dist/index.d.ts', 'dist/lifecycle-event.schema.json', 'bin/run.mjs', 'README.md']) {
+  if (!referenceFiles.has(required)) throw new Error(`Lifecycle reference tarball is missing ${required}.`);
+}
+process.stdout.write(`${JSON.stringify({ ok: true, requiredFiles: required.length, publicPackages: workspaceDirectories.length, privateReferences: 1 })}\n`);
