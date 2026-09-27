@@ -99,6 +99,8 @@ After the recipient has approved and the device is enrolled, an `agent_fabric_on
 
 An expired bootstrap grant requires a new private setup envelope. An expired device trust anchor requires normal browser-authorized re-enrollment. Revoked policy or membership must remain revoked. Cross-tenant, cross-repository, and stale-recipient requests must fail closed.
 
+Named Linux sessions refresh their verifier from protected current trust at signed operation boundaries. Their local execution deadline can renew under current enrollment, signed workspace policy and verified remote ownership without replacing the conversation. This never extends a signing key or revives expired trust; unsupported transitions stop dispatch and require supported recovery.
+
 ## 9. Report readiness
 
 Return one concise status object or table with:

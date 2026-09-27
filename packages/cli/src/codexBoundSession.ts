@@ -20,7 +20,15 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
     throw new Error('codex_session_binding_unavailable');
   }
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
-  const codexBinding = { ...binding, threadId: binding.sessionId };
+  const currentBinding = () => {
+    const current = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+    if (!current) throw new Error('codex_session_lease_unavailable');
+    if (current.sessionId !== binding.sessionId || current.workspaceRoot !== binding.workspaceRoot
+      || current.owner !== binding.owner || current.maximumProviderCostCents !== binding.maximumProviderCostCents) {
+      throw new Error('codex_session_binding_unavailable');
+    }
+    return { ...current, threadId: current.sessionId };
+  };
   const lease = input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
   if (!lease) throw new Error('codex_session_lease_unavailable');
   const heldLease = lease;
@@ -54,7 +62,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
       if (running) throw new Error('codex_session_busy');
       running = true;
       try {
-        const result = await runCodexLocalWork({ ...request, transport, binding: codexBinding,
+        const result = await runCodexLocalWork({ ...request, transport, binding: currentBinding(),
           exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [] });
         if (closing) throw new Error('codex_session_closed');
         return result;
@@ -68,6 +76,9 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
     async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');
+      let codexBinding: ReturnType<typeof currentBinding>;
+      try { codexBinding = currentBinding(); }
+      catch (error) { try { await close(); } catch { /* Retain an unconfirmed owner fence. */ } throw error; }
       const inspected = inspectSessionQuestionForBinding(request.question, codexBinding,
         input.verifier, request.now ?? new Date());
       if (!inspected.ok) throw new Error(inspected.reason);

@@ -72,6 +72,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
+import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
@@ -3441,6 +3442,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
   try {
     const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json') });
+    if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
+      || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
+    const trust = createNamedSessionTrust({ configPath: configPath(), identity: fabric.config });
+    await trust.refresh();
     await fabric.openSession(VERSION);
     const policyPath = resolve(item.path, '.dharma', 'approved-policy.json');
     const policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
@@ -3481,23 +3486,39 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       const identity = { organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
         workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
         provider: 'codex' as const };
-      const keyExpiry = config.serverSigningKeyset ? Date.parse(config.serverSigningKeyset.expiresAt) : Date.now() + 86400000;
       vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
         bindingId, owner: 'dharma_bridge', sessionId: created.thread.id, workspaceRoot: item.path,
-        createdAt: new Date().toISOString(), expiresAt: new Date(Math.min(keyExpiry, Date.now() + 30 * 86400000)).toISOString(),
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
         maximumProviderCostCents: maximumTurnCostCents });
       registration = { schema: 'dharma.named-session/v1', name, bindingId, identity,
         maximumCostCents, maximumTurnCostCents, enabled: true };
       await saveNamedSession(dharmaHome(), registration);
     }
-    const resolver = config.serverSigningKeyset ? createActionDecisionPublicKeyResolver(config.serverSigningKeyset)
-      : (version: string) => version === 'legacy-v1'
-        ? createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }) : null;
+    const authorizeLifetime = async () => {
+      const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
+      if (!writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`))) return false;
+      const response = await fabric.signedPost('/agent-fabric/provider-sessions', {
+        schema: 'dharma.provider-session-registration/v1', action: 'inspect', provider: 'codex', mode: 'bridge_owned',
+        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        bindingId: registration!.bindingId, expectedRevision: 0, leaseSeconds: 60,
+      });
+      return isNamedSessionOwnerReceipt(response, registration!.bindingId, registration!.identity);
+    };
+    const refreshLifetime = () => renewNamedSessionLifetime({ vault, bindingId: registration!.bindingId,
+      identity: registration!.identity, trust, authorize: authorizeLifetime });
+    await refreshLifetime();
+    const channelTransport = { async signedPost(route: string, body: unknown) {
+      await trust.refresh();
+      const response = await fabric.signedPost(route, body);
+      await trust.refresh();
+      return response;
+    } };
     // The durable reservation already suppresses duplicate provider execution.
     const consumed = new Set<string>();
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
       localWriteRoots: writeRoots,
       withActivationBoundary: operation => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+        await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
         if (!skill.ready || !await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
         return operation();
@@ -3506,8 +3527,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
         return writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`));
       },
-      openTransport: async () => transport!, channelTransport: fabric,
-      verifier: { resolvePublicKey: resolver, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
+      openTransport: async () => transport!, channelTransport,
+      verifier: { resolvePublicKey: trust.resolvePublicKey, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
       authorizeContent: async content => {
         const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
         return current.evidence.automaticDisclosure?.mode === 'customer_authorized_content'

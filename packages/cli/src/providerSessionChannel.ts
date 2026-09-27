@@ -58,6 +58,7 @@ export function createProviderSessionChannel(input: {
   transport: { signedPost(route: string, body: unknown): Promise<Record<string, unknown>> };
   scope: SessionBindingScope; mode: Mode; expectedRevision: number;
   assertOwner(): Promise<boolean>;
+  currentExpiresAt?: () => string | null;
   verifier: Pick<SessionQuestionVerifier, 'resolvePublicKey'>;
   authorizeContent(content: string, kind: 'question' | 'answer'): Promise<boolean>;
   now?: () => Date;
@@ -88,9 +89,12 @@ export function createProviderSessionChannel(input: {
     if (closed) throw new Error('provider_session_channel_closed');
     let held = false;
     try { held = await input.assertOwner(); } catch { /* Unconfirmed ownership cannot authorize another send. */ }
-    if (!held || !Number.isFinite(now().getTime()) || now().getTime() >= Date.parse(scope.expiresAt)) {
+    const expiresAt = input.currentExpiresAt ? input.currentExpiresAt() : scope.expiresAt;
+    if (!held || !expiresAt || !Number.isFinite(Date.parse(expiresAt))
+      || !Number.isFinite(now().getTime()) || now().getTime() >= Date.parse(expiresAt)) {
       closed = true; throw new Error('provider_session_channel_owner_lost');
     }
+    scope.expiresAt = expiresAt;
     if (live && (!registration || registration.state !== 'attached' || now().getTime() >= Date.parse(registration.leaseUntil))) {
       throw new Error('provider_session_channel_unavailable');
     }

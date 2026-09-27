@@ -32,6 +32,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   } });
   channel = createProviderSessionChannel({ transport: input.channelTransport, scope, mode: 'bridge_owned',
     expectedRevision: input.expectedRevision ?? 0, assertOwner: owner.assertActive,
+    currentExpiresAt: () => input.vault.getProviderSessionBinding(input.bindingId, input.identity)?.expiresAt ?? null,
     verifier: input.verifier, authorizeContent: input.authorizeContent });
   try { await (input.expectedRevision === undefined ? channel.reconnect() : channel.attach()); }
   catch (error) { try { await owner.close(); } catch { /* Keep the fence if shutdown is unconfirmed. */ } throw error; }
