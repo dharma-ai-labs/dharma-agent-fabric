@@ -112,7 +112,7 @@ const referenceFiles = new Set(JSON.parse(referencePack)[0].files.map(file => fi
 if ([...referenceFiles].some(file => file.includes('.test.') || /(?:\.env|config\.mjs|\.sqlite|credential|grant)/i.test(file))) {
   throw new Error('Lifecycle reference tarball contains tests or durable runtime data.');
 }
-for (const required of ['dist/index.js', 'dist/index.d.ts', 'dist/lifecycle-event.schema.json', 'bin/run.mjs', 'README.md']) {
+for (const required of ['dist/index.js', 'dist/index.d.ts', 'dist/lifecycle-event.schema.json', 'bin/run.mjs', 'README.md', 'LICENSE']) {
   if (!referenceFiles.has(required)) throw new Error(`Lifecycle reference tarball is missing ${required}.`);
 }
 process.stdout.write(`${JSON.stringify({ ok: true, requiredFiles: required.length, publicPackages: workspaceDirectories.length, privateReferences: 1 })}\n`);
