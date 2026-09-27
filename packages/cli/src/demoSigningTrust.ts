@@ -187,14 +187,28 @@ export async function recoverDemoSigningEnrollment<T extends DemoSigningConfig>(
   // Windows PasswordVault removes an existing credential before adding its
   // replacement. Resume that interrupted write only from the confirmed journal.
   if (existing === null && prior?.previousWasProtected) {
-    if (canonicalize(prior.approval) !== canonicalize(value)
-      || await readProtected(store, `${account}-approval-${value.enrollmentId}`) !== canonicalize(prior)) {
+    const sameApproval = canonicalize(prior.approval) === canonicalize(value);
+    const replacesExpiredApproval = prior.approval.enrollmentId !== value.enrollmentId
+      && Date.parse(prior.approval.expiresAt) <= now.getTime()
+      && approved > Date.parse(prior.approval.expiresAt)
+      && (['organizationId', 'repositoryId', 'participantId', 'deviceId', 'publicKeyEd25519'] as const)
+        .every(field => prior.approval[field] === value[field]);
+    if ((!sameApproval && !replacesExpiredApproval)
+      || await readProtected(store, `${account}-approval-${prior.approval.enrollmentId}`) !== canonicalize(prior)) {
       failure('approval_replayed_or_conflicting');
     }
     const previous = await readProtected(store, `${account}-history-${prior.previousAnchorHash}`);
     if (!previous || hashAnchor(previous) !== prior.previousAnchorHash
       || canonicalize(anchorBinding(parseAnchor(previous))) !== canonicalize(binding(config))) {
       failure('protected_anchor_binding_mismatch');
+    }
+    if (replacesExpiredApproval) {
+      const pending = parseAnchor(prior.replacementAnchor);
+      if (!trust.serverSigningKeyset || canonicalize({ ...anchorBinding(pending),
+        serverPublicKeyEd25519: config.serverPublicKeyEd25519 }) !== canonicalize(binding(config))) {
+        failure('protected_anchor_binding_mismatch');
+      }
+      checkDiskHead({ ...config, serverSigningKeyset: pending.serverSigningKeyset }, trust.serverSigningKeyset);
     }
     existing = previous;
   }

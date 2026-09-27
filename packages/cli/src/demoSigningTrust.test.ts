@@ -177,6 +177,112 @@ test('a missing active anchor cannot recover from changed approval, missing hist
   }
 });
 
+test('a fresh recipient approval resumes an abandoned missing-anchor write after its earlier approval expires', async () => {
+  const f = fixture();
+  await resolveDemoSigningTrust(f.config, { store: f.store, now });
+  const [account, original] = [...f.values.entries()][0]!;
+  const trust = { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active };
+  const interrupted: SecureSecretStore = { ...f.store, async put(key, value) {
+    if (key === account) {
+      await f.store.delete(key);
+      throw new Error('interrupted anchor replacement');
+    }
+    await f.store.put(key, value);
+  } };
+  const oldReceipt = approval(f);
+  await assert.rejects(recoverDemoSigningEnrollment(f.config, trust, oldReceipt,
+    { store: interrupted, now: expiredNow }), /interrupted/);
+  const oldJournal = f.values.get(`${account}-recovery`)!;
+  const afterApprovalExpiry = new Date(Date.parse(oldReceipt.expiresAt) + 1_000);
+  const freshReceipt = { ...oldReceipt, enrollmentId: '50000000-0000-4000-8000-000000000002',
+    approvedAt: afterApprovalExpiry.toISOString(),
+    expiresAt: new Date(afterApprovalExpiry.getTime() + 60_000).toISOString() };
+  const before = [...f.values.entries()];
+  await assert.rejects(recoverDemoSigningEnrollment(f.config, trust, oldReceipt,
+    { store: f.store, now: afterApprovalExpiry }), /approval_scope_or_expiry_invalid/);
+  assert.deepEqual([...f.values.entries()], before);
+  const renewed = await recoverDemoSigningEnrollment(f.config, trust, freshReceipt,
+    { store: f.store, now: afterApprovalExpiry });
+  assert.equal(renewed.deviceId, f.config.deviceId);
+  assert.equal(renewed.enrolledAt, f.config.enrolledAt);
+  assert.equal(renewed.nextSequence, f.config.nextSequence);
+  assert.ok([...f.values.values()].includes(original));
+  assert.equal(f.values.get(`${account}-approval-${oldReceipt.enrollmentId}`), oldJournal);
+  assert.equal(f.values.size, 5, 'fresh receipt adds one immutable record, not another device or duplicate history');
+  assert.deepEqual(await resolveDemoSigningTrust(f.config, { store: f.store, now: afterApprovalExpiry }), renewed);
+});
+
+test('renewing an interrupted approval preserves recipient scope, expiry, history and generation fencing', async () => {
+  for (const fault of ['still_valid', 'early_approval', 'same_enrollment', 'organization', 'repository',
+    'participant', 'device', 'key', 'missing_approval', 'corrupt_approval', 'missing_history',
+    'corrupt_history', 'lower_generation', 'conflicting_generation']) {
+    const f = fixture();
+    await resolveDemoSigningTrust(f.config, { store: f.store, now });
+    const [account] = [...f.values.keys()];
+    const trust = { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active };
+    const interrupted: SecureSecretStore = { ...f.store, async put(key, value) {
+      if (key === account) {
+        await f.store.delete(key);
+        throw new Error('interrupted anchor replacement');
+      }
+      await f.store.put(key, value);
+    } };
+    const oldReceipt = approval(f);
+    await assert.rejects(recoverDemoSigningEnrollment(f.config, trust, oldReceipt,
+      { store: interrupted, now: expiredNow }), /interrupted/);
+    const retryAt = fault === 'still_valid' ? new Date(expiredNow.getTime() + 1_000)
+      : new Date(Date.parse(oldReceipt.expiresAt) + 1_000);
+    const receipt = { ...oldReceipt, enrollmentId: '50000000-0000-4000-8000-000000000002',
+      approvedAt: retryAt.toISOString(), expiresAt: new Date(retryAt.getTime() + 60_000).toISOString() };
+    if (fault === 'early_approval') receipt.approvedAt = oldReceipt.expiresAt;
+    if (fault === 'same_enrollment') receipt.enrollmentId = oldReceipt.enrollmentId;
+    if (fault === 'organization') receipt.organizationId = 'org_foreign';
+    if (fault === 'repository') receipt.repositoryId = '10000000-0000-4000-8000-000000000099';
+    if (fault === 'participant') receipt.participantId = '20000000-0000-4000-8000-000000000099';
+    if (fault === 'device') receipt.deviceId = '30000000-0000-4000-8000-000000000099';
+    if (fault === 'key') receipt.publicKeyEd25519 = 'E'.repeat(43);
+    const oldApprovalAccount = `${account}-approval-${oldReceipt.enrollmentId}`;
+    const historyAccount = [...f.values.keys()].find(key => key.includes('-history-'))!;
+    if (fault === 'missing_approval') f.values.delete(oldApprovalAccount);
+    if (fault === 'corrupt_approval') f.values.set(oldApprovalAccount, '{}');
+    if (fault === 'missing_history') f.values.delete(historyAccount);
+    if (fault === 'corrupt_history') f.values.set(historyAccount, '{}');
+    const candidate = fault === 'lower_generation' ? signed(2, f.active.keys, true)
+      : fault === 'conflicting_generation' ? signed(3, [...f.active.keys].reverse(), true) : f.active;
+    const before = [...f.values.entries()];
+    await assert.rejects(recoverDemoSigningEnrollment(f.config,
+      { ...trust, serverSigningKeyset: candidate }, receipt, { store: f.store, now: retryAt }),
+    /Demo signing trust rejected/, fault);
+    assert.deepEqual([...f.values.entries()], before, `${fault}: rejection cannot write protected state`);
+  }
+});
+
+test('fresh approval may recover to a newer generation without reusing the abandoned pending generation', async () => {
+  const f = fixture();
+  await resolveDemoSigningTrust(f.config, { store: f.store, now });
+  const [account] = [...f.values.keys()];
+  const interrupted: SecureSecretStore = { ...f.store, async put(key, value) {
+    if (key === account) {
+      await f.store.delete(key);
+      throw new Error('interrupted anchor replacement');
+    }
+    await f.store.put(key, value);
+  } };
+  const oldReceipt = approval(f);
+  await assert.rejects(recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: f.active }, oldReceipt,
+    { store: interrupted, now: expiredNow }), /interrupted/);
+  const retryAt = new Date(Date.parse(oldReceipt.expiresAt) + 1_000);
+  const renewed = await recoverDemoSigningEnrollment(f.config,
+    { serverPublicKeyEd25519: nextPublic, serverSigningKeyset: signed(4, f.active.keys, true) },
+    { ...oldReceipt, enrollmentId: '50000000-0000-4000-8000-000000000002',
+      approvedAt: retryAt.toISOString(), expiresAt: new Date(retryAt.getTime() + 60_000).toISOString() },
+    { store: f.store, now: retryAt });
+  assert.equal(renewed.serverSigningKeyset?.generation, 4);
+  assert.equal(renewed.nextSequence, f.config.nextSequence);
+  assert.deepEqual(await resolveDemoSigningTrust(f.config, { store: f.store, now: retryAt }), renewed);
+});
+
 test('every protected recovery write must be confirmed before returning replacement trust', async () => {
   for (const phase of ['history', 'approval', 'journal', 'anchor']) {
     const f = fixture();
