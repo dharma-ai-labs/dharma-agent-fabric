@@ -10,7 +10,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, runNamedSessi
   type NamedSessionRegistration } from './namedSessionService.js';
 
 test('durable named registration excludes credentials, grants and foreign shape', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'dharma-named-registration-'));
+  const home = await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'dhr-'));
   const identity = { organizationId: 'org_test', repositoryBindingId: randomUUID(), workspaceId: randomUUID(),
     endpointId: randomUUID(), membershipId: randomUUID(), deviceId: randomUUID(), provider: 'codex' as const };
   const good: NamedSessionRegistration = { schema: 'dharma.named-session/v1', name: 'reviewer', bindingId: randomUUID(),
@@ -24,6 +24,12 @@ test('durable named registration excludes credentials, grants and foreign shape'
   }
   await writeFile(namedSessionPaths(home, 'reviewer').registration, JSON.stringify({ ...good, grant: 'private-fixture' }));
   await assert.rejects(readNamedSession(home, 'reviewer'), /registration_invalid/);
+});
+
+test('named session socket paths remain bounded without relaxing identity validation', () => {
+  assert.throws(() => namedSessionPaths('/tmp/' + 'x'.repeat(100), 'reviewer'), /socket_path_too_long/);
+  assert.throws(() => namedSessionPaths('/tmp/dhr', '../foreign'), /name_invalid/);
+  assert.ok(Buffer.byteLength(namedSessionPaths('/tmp/dhr', 'reviewer').socket) <= 103);
 });
 
 test('named session serializes local work and signed peer questions with per-turn permissions',
