@@ -300,6 +300,7 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
   let deviceId = '';
   let serverPublicKeyEd25519 = '';
   let serverSigningKeyset: TrustedServerSigningKeyset | undefined;
+  let signingTrustUpdate: unknown;
   let transientFailures = 0;
   while (Date.now() < deadline) {
     let polled: Record<string, unknown>;
@@ -333,6 +334,7 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
         createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: serverPublicKeyEd25519 }, format: 'jwk' }),
         input.organizationId);
       if (!verification.ok) throw new Error(`Demo enrollment signing trust was rejected: ${verification.reason}.`);
+      signingTrustUpdate = polled.signingTrustUpdate;
       break;
     }
     if (polled.status !== 'pending') throw new Error(`Demo device approval ended: ${String(polled.status || 'unknown')}.`);
@@ -348,16 +350,47 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
     if (existing.serverPublicKeyEd25519 && existing.serverPublicKeyEd25519 !== serverPublicKeyEd25519) {
       throw new Error('Existing Demo signing root differs. Use supported browser-authorized recovery.');
     }
-    await writePrivateJson(configPath, { ...existing, serverPublicKeyEd25519, serverSigningKeyset });
+    // Repeated approval polling must not replace a newer protected generation
+    // with the enrollment predecessor. Signed status reconciles from its head.
+    if (!existing.serverSigningKeyset) {
+      let restored = { ...existing, serverPublicKeyEd25519, serverSigningKeyset };
+      if (signingTrustUpdate !== undefined) restored = await acceptDemoSigningUpdate(restored, signingTrustUpdate, { store: deps.store });
+      await writePrivateJson(configPath, restored);
+    }
     return verifyDemoDevice(input, deps);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  await writePrivateJson(configPath, { schema: 'dharma.demo-device/v1',
+  let config: DemoDeviceConfig = { schema: 'dharma.demo-device/v1',
     hqUrl: origin, organizationId: input.organizationId, repositoryId: input.repositoryId,
     normalizedRepository: input.normalizedRepository, installationId: input.installationId,
     deviceId, publicKeyEd25519: identity.publicKeyEd25519,
     enrolledAt: new Date().toISOString(), signedReady: false, nextSequence: 1,
-    serverPublicKeyEd25519, serverSigningKeyset });
+    serverPublicKeyEd25519, serverSigningKeyset };
+  const pendingEnrollmentPath = `${configPath}.pending-enrollment.json`;
+  try {
+    const pending = JSON.parse(await readFile(pendingEnrollmentPath, 'utf8')) as DemoDeviceConfig;
+    if (Object.keys(pending).length !== Object.keys(config).length
+      || Object.keys(pending).some(key => !Object.hasOwn(config, key))
+      || pending.schema !== config.schema || pending.signedReady !== false || pending.nextSequence !== 1
+      || !Number.isFinite(Date.parse(pending.enrolledAt)) || !pending.serverSigningKeyset
+      || (['hqUrl', 'organizationId', 'repositoryId', 'normalizedRepository', 'installationId',
+        'deviceId', 'publicKeyEd25519', 'serverPublicKeyEd25519'] as const).some(key => pending[key] !== config[key])) {
+      throw new Error('Pending Demo enrollment does not match the approved identity. Preserve it for recovery.');
+    }
+    config = pending;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  // Persist the credential-free enrollment binding before the protected trust
+  // write. A restart can recover its exact timestamp from this intent record.
+  await writePrivateJson(pendingEnrollmentPath, config);
+  const predecessorGeneration = config.serverSigningKeyset!.generation;
+  config = await resolveDemoSigningTrust(config, { store: deps.store });
+  if (signingTrustUpdate !== undefined && config.serverSigningKeyset!.generation === predecessorGeneration) {
+    config = await acceptDemoSigningUpdate(config, signingTrustUpdate, { store: deps.store });
+  }
+  await writePrivateJson(configPath, config);
+  await unlink(pendingEnrollmentPath);
   return verifyDemoDevice(input, deps);
 }

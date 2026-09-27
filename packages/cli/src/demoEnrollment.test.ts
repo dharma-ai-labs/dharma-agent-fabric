@@ -132,6 +132,133 @@ test('Demo enrollment rejects missing and foreign signing anchors before saving 
   }
 });
 
+test('fresh enrollment during preload protects the successor before status and resumes activation after restart', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-preload-enrollment-'));
+  const scope = options(stateRoot);
+  const store = memoryStore();
+  const approved = approvedEnrollment();
+  const initial = approved.serverSigningKeyset;
+  const successor = generateKeyPairSync('ed25519');
+  const nextExpiry = new Date(Date.now() + 48 * 60 * 60_000).toISOString();
+  const { signature: _signature, ...initialUnsigned } = initial;
+  const preloadUnsigned = { ...initialUnsigned, generation: 2, keys: [...initial.keys, {
+    keyVersion: 'successor', publicKeyEd25519: successor.publicKey.export({ format: 'jwk' }).x!,
+    status: 'overlap' as const, notBefore: initial.issuedAt, notAfter: nextExpiry }] };
+  const preload = { ...preloadUnsigned, signature: signCanonicalObject(preloadUnsigned, signer.privateKey) };
+  const activeUnsigned = { ...preloadUnsigned, generation: 3, signedByKeyVersion: 'successor',
+    expiresAt: nextExpiry, keys: preload.keys.map(key => ({ ...key,
+      status: key.keyVersion === 'successor' ? 'active' as const : 'overlap' as const })) };
+  const active = { ...activeUnsigned, signature: signCanonicalObject(activeUnsigned, successor.privateKey) };
+  const envelope = (keysets: unknown[]) => ({ schema: 'dharma.demo-signing-update/v1',
+    organizationId: orgId, repositoryId, deviceId, issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), keysets });
+  let activate = false;
+  const fetcher: typeof fetch = async (resource) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) return new Response(JSON.stringify({ ok: true,
+      status: 'pending', organizationId: orgId, repositoryId, deviceCode,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }));
+    if (url.pathname.endsWith('/poll')) return new Response(JSON.stringify({ ...approved,
+      signingTrustUpdate: envelope([initial, preload]) }));
+    assert.equal(url.searchParams.get('signingGeneration'), '2');
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository, ...(activate ? { signingTrustUpdate: envelope([preload, active]) } : {}) }));
+  };
+  const connected = await connectDemoDevice(scope, { store, fetcher });
+  assert.equal((await loadDemoSigningTrust(scope, { store })).keyset.generation, 2);
+  // The same approved enrollment may be returned on retry; it must not downgrade protected trust.
+  await connectDemoDevice(scope, { store, fetcher });
+  activate = true;
+  await verifyDemoDevice(scope, { store, fetcher });
+  const trust = await loadDemoSigningTrust(scope, { store,
+    now: new Date(Date.parse(initial.expiresAt) + 1_000) });
+  assert.equal(trust.keyset.generation, 3);
+  const saved = await readFile(connected.configPath, 'utf8');
+  assert.doesNotMatch(saved, /grant|signingTrustUpdate|privateKey|privateJwk/i);
+  assert.equal(JSON.parse(saved).serverPublicKeyEd25519, serverPublicKeyEd25519);
+});
+
+test('fresh enrollment rejects a foreign or corrupt preload before writing a device or requesting signed status', async () => {
+  for (const fault of ['foreign', 'corrupt', 'expired', 'unexpected']) {
+    const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-preload-reject-'));
+    const scope = options(stateRoot);
+    const approved = approvedEnrollment();
+    const update = { schema: 'dharma.demo-signing-update/v1', organizationId: orgId,
+      repositoryId, deviceId, issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), keysets: [approved.serverSigningKeyset],
+      ...(fault === 'unexpected' ? { grant: 'must-not-persist' } : {}) };
+    if (fault === 'foreign') update.deviceId = '30000000-0000-4000-8000-000000000099';
+    if (fault === 'expired') update.expiresAt = new Date(Date.now() - 1_000).toISOString();
+    if (fault === 'corrupt') update.keysets = [{ ...approved.serverSigningKeyset, generation: 2, signature: 'invalid' }];
+    const fetcher: typeof fetch = async (resource) => {
+      const pathname = new URL(String(resource)).pathname;
+      if (pathname.endsWith('/enrollments')) return new Response(JSON.stringify({ ok: true,
+        status: 'pending', organizationId: orgId, repositoryId, deviceCode,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }));
+      assert.ok(pathname.endsWith('/poll'), 'a rejected preload must never dispatch signed status');
+      return new Response(JSON.stringify({ ...approved, signingTrustUpdate: update }));
+    };
+    await assert.rejects(connectDemoDevice(scope, { store: memoryStore(), fetcher }), /Demo signing/);
+    await assert.rejects(readFile(scopePath(scope, hqUrl)), { code: 'ENOENT' });
+  }
+});
+
+test('interrupted preload enrollment recovers its protected binding without a second approval or credential file', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-preload-interrupt-'));
+  const scope = options(stateRoot);
+  const store = memoryStore();
+  const approved = approvedEnrollment();
+  const initial = approved.serverSigningKeyset;
+  const successor = generateKeyPairSync('ed25519');
+  const { signature: _signature, ...body } = initial;
+  const unsigned = { ...body, generation: 2, keys: [...initial.keys, { keyVersion: 'successor',
+    publicKeyEd25519: successor.publicKey.export({ format: 'jwk' }).x!, status: 'overlap' as const,
+    notBefore: initial.issuedAt, notAfter: new Date(Date.now() + 48 * 60 * 60_000).toISOString() }] };
+  const preload = { ...unsigned, signature: signCanonicalObject(unsigned, signer.privateKey) };
+  const fetcher: typeof fetch = async (resource) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) return new Response(JSON.stringify({ ok: true,
+      status: 'approved', organizationId: orgId, repositoryId, deviceCode,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }));
+    if (url.pathname.endsWith('/poll')) return new Response(JSON.stringify({ ...approved, signingTrustUpdate: {
+      schema: 'dharma.demo-signing-update/v1', organizationId: orgId, repositoryId, deviceId,
+      issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), keysets: [initial, preload] } }));
+    assert.equal(url.searchParams.get('signingGeneration'), '2');
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId, deviceId, normalizedRepository }));
+  };
+  const interruptedStore: SecureSecretStore = { ...store, async put(account, value) {
+    await store.put(account, value);
+    if (account.startsWith('demo-signing-') && JSON.parse(value).serverSigningKeyset.generation === 2) {
+      throw new Error('simulated termination after protected write');
+    }
+  } };
+  await assert.rejects(connectDemoDevice(scope, { store: interruptedStore, fetcher }), /simulated termination/);
+  const path = scopePath(scope, hqUrl);
+  await assert.rejects(readFile(path), { code: 'ENOENT' });
+  const pending = JSON.parse(await readFile(`${path}.pending-enrollment.json`, 'utf8'));
+  assert.equal(pending.signedReady, false);
+  assert.doesNotMatch(JSON.stringify(pending), /grant|privateKey|privateJwk|signingTrustUpdate/i);
+  for (const change of [{ organizationId: 'org_foreign' }, { publicKeyEd25519: 'E'.repeat(43) },
+    { deviceId: '30000000-0000-4000-8000-000000000099' }, { signedReady: true }, { nextSequence: 2 },
+    { grant: 'must-not-persist' }]) {
+    const foreign = JSON.stringify({ ...pending, ...change });
+    await writeFile(`${path}.pending-enrollment.json`, foreign);
+    await assert.rejects(connectDemoDevice(scope, { store, fetcher }), /Pending Demo enrollment/);
+    assert.equal(await readFile(`${path}.pending-enrollment.json`, 'utf8'), foreign);
+  }
+  await writeFile(`${path}.pending-enrollment.json`, JSON.stringify(pending));
+  await new Promise(accept => setTimeout(accept, 10));
+  const result = await connectDemoDevice(scope, { store, fetcher,
+    onApprovalRequired: async () => { assert.fail('an approved interrupted enrollment must not ask for another approval'); } });
+  assert.equal(result.stage, 'device_signed_ready');
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).enrolledAt, pending.enrolledAt);
+  assert.equal((await loadDemoSigningTrust(scope, { store })).keyset.generation, 2);
+  await assert.rejects(readFile(`${path}.pending-enrollment.json`), { code: 'ENOENT' });
+});
+
 test('signed status autonomously accepts a successor and reloads it from protected trust after bootstrap expiry', async () => {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-rotation-'));
   const scope = options(stateRoot);

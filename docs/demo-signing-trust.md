@@ -24,9 +24,17 @@ or installing this response does not satisfy those server gates.
 
 The protected anchor also records the exact pending successor introduced by a
 preload. A second preload cannot replace it, and activation cannot promote a
-retained historical key. Clients freshly enrolled during a preload still require
-qualification of the enrollment's pending-successor metadata or authenticated
-predecessor history; this client patch must not be reported as that live proof.
+retained historical key. A compatible enrollment poll delivers its authenticated
+predecessor as the initial keyset and the published preload in `signingTrustUpdate`.
+The client validates and protects that transition before saving the new device or
+requesting signed status. A private, credential-free pending enrollment record
+preserves the exact approved binding before the secure-store write; interrupted
+setup reuses it and repairs the disk file from protected trust. A foreign or
+malformed pending record fails closed without being overwritten.
+Repeated enrollment polling cannot downgrade a newer
+protected generation. An expired predecessor cannot authorize a new preload;
+after activation, a fresh browser-approved enrollment pins the current signer.
+Fixture qualification of these paths is not live rotation proof.
 
 The caller holds the existing per-device operation lock. Protected storage is
 written and read back before the disk configuration changes. A restart repairs a
