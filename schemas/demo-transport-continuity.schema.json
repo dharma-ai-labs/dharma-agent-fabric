@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-transport-continuity/v1",
+  "title": "Signed same-authority API transport continuity, not enrollment or expanded access",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "purpose", "organizationId", "repositoryId", "deviceId", "installationId", "publicKeyEd25519", "enrollmentOrigin", "transportOrigin", "requestNonce", "policyRevision", "trustGeneration", "installedKeysetHash", "signingKeyVersion", "issuedAt", "expiresAt", "signature"],
+  "properties": {
+    "schema": { "const": "dharma.demo-transport-continuity/v1" },
+    "purpose": { "const": "same-authority-repository-transport" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9]+$", "maxLength": 200 },
+    "repositoryId": { "type": "string", "format": "uuid" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "installationId": { "type": "string", "format": "uuid" },
+    "publicKeyEd25519": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+    "enrollmentOrigin": { "type": "string", "format": "uri", "maxLength": 2048 },
+    "transportOrigin": { "type": "string", "format": "uri", "maxLength": 2048 },
+    "requestNonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{32}$" },
+    "policyRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "trustGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "installedKeysetHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "signingKeyVersion": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+  }
+}
