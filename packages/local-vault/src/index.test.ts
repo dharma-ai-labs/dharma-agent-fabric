@@ -23,7 +23,7 @@ test('provider session binding is encrypted, scoped, immutable, and revocable', 
     deviceId: '40000000-0000-4000-8000-000000000005',
     bindingId: '40000000-0000-4000-8000-000000000006',
     provider: 'codex', sessionId: 'private-thread-123', workspaceRoot: resolve(root, 'repo'),
-    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     maximumProviderCostCents: 25,
   };
   const expected = {
@@ -32,6 +32,9 @@ test('provider session binding is encrypted, scoped, immutable, and revocable', 
     membershipId: binding.membershipId, deviceId: binding.deviceId, provider: binding.provider,
   };
   const vault = await LocalVault.open({ root, masterKey: key });
+  assert.throws(() => vault.saveProviderSessionBinding({ ...binding,
+    createdAt: new Date(Date.now() - 2_000).toISOString(),
+    expiresAt: new Date(Date.now() - 1_000).toISOString() }), /binding_expired/);
   vault.saveProviderSessionBinding(binding);
   vault.saveProviderSessionBinding(binding);
   assert.deepEqual(vault.getProviderSessionBinding(binding.bindingId, expected), binding);
@@ -71,7 +74,7 @@ test('pending session replies survive reopening, retain evidence, and reject for
     deviceId: '40000000-0000-4000-8000-000000000005',
     bindingId: '40000000-0000-4000-8000-000000000006',
     provider: 'codex', sessionId: 'private-thread', workspaceRoot: resolve(root, 'repo'),
-    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     maximumProviderCostCents: 25,
   };
   const identity = { organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
@@ -120,7 +123,7 @@ test('provider session lease fences concurrent local owners and observes revocat
     deviceId: '40000000-0000-4000-8000-000000000015',
     bindingId: '40000000-0000-4000-8000-000000000016',
     provider: 'codex', sessionId: 'private-thread-lease', workspaceRoot: resolve(root, 'repo'),
-    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     maximumProviderCostCents: 25,
   };
   const expected = {
@@ -160,7 +163,7 @@ test('provider session lease recovers only after the recorded process has exited
     deviceId: '40000000-0000-4000-8000-000000000025',
     bindingId: '40000000-0000-4000-8000-000000000026',
     provider: 'codex', sessionId: 'private-thread-recovery', workspaceRoot: resolve(root, 'repo'),
-    createdAt: '2026-09-26T00:00:00.000Z', expiresAt: '2026-09-27T00:00:00.000Z',
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     maximumProviderCostCents: 25,
   };
   const expected = {
