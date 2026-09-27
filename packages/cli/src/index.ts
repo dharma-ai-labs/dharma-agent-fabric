@@ -63,6 +63,7 @@ import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
 import { demoDeviceAndPackageStatus } from './demoStatus.js';
+import { prepareDemoSigningUpgradeProof, readDemoSigningUpgradeContext } from './demoSigningUpgradeProof.js';
 import { runDemoWatch } from './demoWatch.js';
 import { runDemoSupervisor } from './demoSupervisor.js';
 import { demoWatchRegistrationKey, listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
@@ -6196,7 +6197,8 @@ export async function run(argv: string[]): Promise<Output> {
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
-    'package', 'package-status', 'watch', 'watch-enable', 'watch-status', 'watch-disable']
+    'package', 'package-status', 'watch', 'watch-enable', 'watch-status', 'watch-disable',
+    'signing-client-proof', 'signing-owner-proof']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -6210,10 +6212,12 @@ export async function run(argv: string[]): Promise<Output> {
       throw new Error('Local Git remote does not match the private Demo repository binding.');
     }
     const watchControl = ['watch-enable', 'watch-status', 'watch-disable'].includes(String(subcommand));
+    const signingProof = ['signing-client-proof', 'signing-owner-proof'].includes(String(subcommand));
     if (watchControl && await realpath(root) !== workspace) {
       throw new Error('Demo watch setup must select the exact Git repository root.');
     }
-    if (flags.has('dry-run')) return { ok: true, stage: watchControl ? 'demo_watch_plan' : 'demo_device_plan',
+    if (flags.has('dry-run')) return { ok: true, stage: signingProof ? 'demo_signing_proof_plan'
+      : watchControl ? 'demo_watch_plan' : 'demo_device_plan',
       organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
       repositoryPackageState: 'not_connected' };
     const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
@@ -6221,6 +6225,11 @@ export async function run(argv: string[]): Promise<Output> {
       hqUrl, organizationId, repositoryId, normalizedRepository,
       installationId: await loadOrCreateInstallationId(), stateRoot: dharmaHome(),
     };
+    if (signingProof) {
+      const context = await readDemoSigningUpgradeContext(resolve(required(flags, 'review-context')));
+      return withDemoDeviceLock(scope, () => prepareDemoSigningUpgradeProof(scope, context,
+        subcommand === 'signing-owner-proof' ? 'owner' : 'client'));
+    }
     if (watchControl) {
       const existing = (await listDemoWatchRegistrations(dharmaHome()))
         .find(row => row.hqUrl === hqUrl && row.organizationId === organizationId && row.repositoryId === repositoryId);
