@@ -12,6 +12,43 @@ function registration(index = 0): DemoWatchRegistration {
     normalizedRepository: `github.com/example/repo${index}`, provider: 'codex', workspace: resolve(tmpdir(), `repo${index}`) };
 }
 
+test('default deadline permits serialized signed source reconciliation beyond thirty seconds', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signal!: AbortSignal;
+  let finish!: (value: { stage: string }) => void;
+  const pending = runDemoSupervisor({ once: true, list: async () => [registration()],
+    cycle: async (_row, cycleSignal) => {
+      signal = cycleSignal;
+      return new Promise(resolve => { finish = resolve; });
+    } });
+  await Promise.resolve();
+  t.mock.timers.tick(45_000);
+  assert.equal(signal.aborted, false);
+  finish({ stage: 'installed' });
+  const result = await pending;
+  assert.equal(result.completed, 1);
+  assert.equal(result.failures, 0);
+});
+
+test('default deadline still aborts an unresponsive cycle at two minutes', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signal!: AbortSignal;
+  const observations: DemoWatchObservation[] = [];
+  const pending = runDemoSupervisor({ once: true, list: async () => [registration()],
+    cycle: async (_row, cycleSignal) => {
+      signal = cycleSignal;
+      return new Promise(() => {});
+    }, onObservation: value => observations.push(value) });
+  await Promise.resolve();
+  t.mock.timers.tick(119_999);
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(1);
+  const result = await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(result.failures, 1);
+  assert.deepEqual(observations.map(value => value.code), ['demo_watch_cycle_timeout']);
+});
+
 test('supervisor records bounded package observations without private payloads', async () => {
   const observations: DemoWatchObservation[] = [];
   const result = await runDemoSupervisor({ once: true, list: async () => [registration()],

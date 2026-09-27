@@ -33,7 +33,8 @@ export async function runDemoSupervisor(input: {
   onObservation?: (observation: DemoWatchObservation) => void;
 }) {
   const intervalMs = input.intervalMs ?? 60_000;
-  const timeoutMs = input.cycleTimeoutMs ?? 30_000;
+  // Signed inventory requests are serialized by the device's monotonic sequence.
+  const timeoutMs = input.cycleTimeoutMs ?? 120_000;
   const concurrency = input.concurrency ?? 4;
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 15_000 || intervalMs > 300_000) {
     throw new Error('Demo supervisor interval must be between 15 and 300 seconds.');
