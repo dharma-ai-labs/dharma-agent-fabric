@@ -48,6 +48,7 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
   const listeners = new Set<(event: unknown) => void>();
   let closed = false;
   const transport: CodexStdioTransport = {
+    onToolCall() { return () => {}; },
     onNotification(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     async close() {
       calls.push('close');
@@ -128,6 +129,19 @@ test('unqualified native host cannot open or advertise a bridge-owned provider',
   });
 
 describe('qualified Linux retained Codex consumer', { skip: process.platform !== 'linux' }, () => {
+test('retained provider and owner use the renewed deadline without replacing the conversation', async () => {
+  const f = await fixture(), remote = fakeTransport(f.binding);
+  const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId, openTransport: async () => remote.transport });
+  try {
+    const later = new Date(Date.parse(f.binding.expiresAt) + 1000);
+    f.vault.renewProviderSessionBinding(f.binding.bindingId, f.identity, f.binding.expiresAt,
+      new Date(later.getTime() + 86400000).toISOString(), later);
+    const result = await owner.runQuestion({ question: signedQuestion(f.binding, later), now: later });
+    assert.equal(result.bindingId, f.binding.bindingId);
+    assert.equal(result.providerThreadId, f.binding.sessionId);
+    assert.equal(remote.calls.filter(call => call === 'turn/start').length, 1);
+  } finally { await owner.close(); f.vault.close(); }
+});
 test('default inbox startup recovers the server revision with its retained local owner and no provider turn', async () => {
   const f = await fixture(), remote = fakeTransport(f.binding), actions: string[] = [];
   let reserves = 0;

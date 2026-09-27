@@ -28,7 +28,7 @@ function offer(change: Record<string, unknown> = {}) {
   return { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
 }
 function fixture() {
-  let held = true, time = now, responseOverride: unknown;
+  let held = true, time = now, responseOverride: unknown, permitted = true;
   const calls: Array<{ route: string; body: Record<string, unknown> }> = [];
   let afterSend: (() => void) | undefined;
   const transport = { async signedPost(route: string, input: unknown) {
@@ -50,11 +50,17 @@ function fixture() {
   } };
   const channel = createProviderSessionChannel({ transport, scope, mode: 'bridge_owned', expectedRevision: 0,
     assertOwner: async () => held, now: () => time,
-    verifier: { resolvePublicKey: () => publicKey }, authorizeContent: async () => true });
+    verifier: { resolvePublicKey: () => publicKey }, authorizeContent: async () => permitted });
   return { channel, calls, setHeld: (value: boolean) => { held = value; },
     setTime: (value: Date) => { time = value; }, setResponse: (value: unknown) => { responseOverride = value; },
-    onSend: (fn: () => void) => { afterSend = fn; } };
+    onSend: (fn: () => void) => { afterSend = fn; }, setPermitted: (value: boolean) => { permitted = value; } };
 }
+
+test('revoked disclosure denies incoming questions before acceptance or provider dispatch', async () => {
+  const f = fixture(); await f.channel.attach(); f.setPermitted(false);
+  await assert.rejects(f.channel.inbox(), /provider_session_channel_input/);
+  assert.equal(f.calls.filter(call => call.body.action === 'accept').length, 0);
+});
 
 test('registration, heartbeat and detach preserve scope and CAS without transmitting a chat locator', async () => {
   const f = fixture();

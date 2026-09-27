@@ -8,6 +8,7 @@ export type OnboardingStage =
   | 'native_skill_install'
   | 'relay_start'
   | 'autostart'
+  | 'named_session'
   | 'readiness';
 
 export async function withOnboardingStage<T>(

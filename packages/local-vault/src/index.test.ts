@@ -38,6 +38,13 @@ test('provider session binding is encrypted, scoped, immutable, and revocable', 
   vault.saveProviderSessionBinding(binding);
   vault.saveProviderSessionBinding(binding);
   assert.deepEqual(vault.getProviderSessionBinding(binding.bindingId, expected), binding);
+  const renewedExpiry = new Date(Date.now() + 2 * 86400000).toISOString();
+  const renewed = vault.renewProviderSessionBinding(binding.bindingId, expected, binding.expiresAt, renewedExpiry);
+  assert.deepEqual({ ...renewed, expiresAt: binding.expiresAt }, binding);
+  assert.throws(() => vault.renewProviderSessionBinding(binding.bindingId, expected, binding.expiresAt,
+    new Date(Date.now() + 3 * 86400000).toISOString()), /renewal_conflict/);
+  assert.throws(() => vault.renewProviderSessionBinding(binding.bindingId, expected, renewedExpiry,
+    new Date(Date.now() + 31 * 86400000).toISOString()), /renewal_invalid/);
   assert.throws(() => vault.getProviderSessionBinding(binding.bindingId,
     { ...expected, organizationId: 'org_foreign' }), /scope_mismatch/);
   assert.throws(() => vault.saveProviderSessionBinding({ ...binding, workspaceRoot: resolve(root, 'other') }),
@@ -51,13 +58,28 @@ test('provider session binding is encrypted, scoped, immutable, and revocable', 
     .get(binding.bindingId) as { nonce: Uint8Array; ciphertext: Uint8Array };
   assert.equal(row.nonce.length, 12);
   assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from(binding.sessionId)), false);
+  const history = db.prepare('select nonce, ciphertext from provider_session_binding_renewals where binding_id = ?')
+    .all(binding.bindingId) as Array<{ nonce: Uint8Array; ciphertext: Uint8Array }>;
+  assert.equal(history.length, 1);
+  assert.equal(Buffer.from(history[0]!.ciphertext).includes(Buffer.from(binding.sessionId)), false);
+  db.prepare(`insert into provider_session_leases (binding_id, holder_id, host_name, owner_pid, acquired_at)
+    values (?, ?, ?, ?, ?)`).run(binding.bindingId, 'foreign-holder', 'foreign-host', process.pid, new Date().toISOString());
+  assert.throws(() => vault.renewProviderSessionBinding(binding.bindingId, expected, renewedExpiry,
+    new Date(Date.now() + 3 * 86400000).toISOString()), /lease_unavailable/);
+  db.prepare('delete from provider_session_leases where binding_id = ?').run(binding.bindingId);
+  assert.throws(() => vault.renewProviderSessionBinding(binding.bindingId,
+    { ...expected, membershipId: '40000000-0000-4000-8000-000000000099' }, renewedExpiry,
+    new Date(Date.now() + 3 * 86400000).toISOString()), /scope_mismatch/);
+  assert.deepEqual(vault.getProviderSessionBinding(binding.bindingId, expected), renewed);
   db.close();
   vault.close();
 
   const reopened = await LocalVault.open({ root, masterKey: key });
-  assert.deepEqual(reopened.getProviderSessionBinding(binding.bindingId, expected), binding);
+  assert.deepEqual(reopened.getProviderSessionBinding(binding.bindingId, expected), renewed);
   reopened.revokeProviderSessionBinding(binding.bindingId, expected);
   assert.equal(reopened.getProviderSessionBinding(binding.bindingId, expected), null);
+  assert.throws(() => reopened.renewProviderSessionBinding(binding.bindingId, expected, renewedExpiry,
+    new Date(Date.now() + 3 * 86400000).toISOString()), /binding_unavailable/);
   assert.throws(() => reopened.saveProviderSessionBinding(binding), /binding_conflict/);
   reopened.close();
 });

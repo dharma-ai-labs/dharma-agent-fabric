@@ -27,6 +27,11 @@ lines.on('line', line => {
       process.stdout.write(JSON.stringify({ id: 100, method: 'item/commandExecution/requestApproval', params: {} }) + '\\n');
       return;
     }
+    if (mode === 'tool') {
+      process.stdout.write(JSON.stringify({ id: 'call-1', method: 'item/tool/call', params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'dharma_peer_ask', arguments: {} } }) + '\\n');
+      global.pendingPing = message.id;
+      return;
+    }
     if (mode === 'error') {
       process.stdout.write(JSON.stringify({ id: message.id, error: { code: 403, message: 'private data' } }) + '\\n');
       return;
@@ -35,6 +40,8 @@ lines.on('line', line => {
     process.stdout.write(notification.slice(0, 12));
     process.stdout.write(notification.slice(12));
     process.stdout.write(JSON.stringify({ id: message.id, result: { pong: message.params.value } }) + '\\n');
+  } else if (message.id === 'call-1' && message.result) {
+    process.stdout.write(JSON.stringify({ id: global.pendingPing, result: message.result }) + '\\n');
   }
 });
 `;
@@ -104,5 +111,58 @@ test('stdio transport rejects an oversized outbound request', async () => {
   try {
     await assert.rejects(transport.request('ping', { value: 'x'.repeat(132_000) }),
       /codex_app_server_request_too_large/);
+  } finally { await transport.close(); }
+});
+
+test('explicit dynamic-tool handler receives a string request ID without granting approvals', async () => {
+  const transport = await open('tool');
+  try {
+    const remove = transport.onToolCall(async params => ({ success: params.tool === 'dharma_peer_ask',
+      contentItems: [{ type: 'inputText', text: 'bounded receipt' }] }));
+    assert.deepEqual(await transport.request('ping', {}), { success: true,
+      contentItems: [{ type: 'inputText', text: 'bounded receipt' }] });
+    remove();
+    await assert.rejects(transport.request('ping', {}), /codex_app_server_unexpected_request/);
+  } finally { await transport.close(); }
+});
+
+test('dynamic-tool handler failure cannot disclose its exception', async () => {
+  const transport = await open('tool');
+  try {
+    transport.onToolCall(async () => { throw new Error('private exception'); });
+    assert.deepEqual(await transport.request('ping', {}), { success: false,
+      contentItems: [{ type: 'inputText', text: 'codex_session_tool_unavailable' }] });
+  } finally { await transport.close(); }
+});
+
+test('registering tools does not authorize a provider approval request', async () => {
+  const transport = await open('request');
+  let called = false;
+  try {
+    transport.onToolCall(async () => { called = true; return { success: true, contentItems: [] }; });
+    await assert.rejects(transport.request('ping', {}), /codex_app_server_unexpected_request/);
+    assert.equal(called, false);
+  } finally { await transport.close(); }
+});
+
+test('uncertain tool work terminates dispatch, rather than replaying a request', async () => {
+  const transport = await open('tool');
+  let called = 0;
+  try {
+    transport.onToolCall(async () => { called++; return new Promise(() => {}); });
+    await assert.rejects(transport.request('ping', {}), /codex_app_server_request_timeout:ping|codex_app_server_tool_unconfirmed/);
+    assert.equal(called, 1);
+  } finally { await transport.close(); }
+});
+
+test('duplicate provider request IDs cannot repeat a peer side effect', async () => {
+  const transport = await open('tool');
+  let called = 0;
+  try {
+    transport.onToolCall(async () => { called++; return { success: true,
+      contentItems: [{ type: 'inputText', text: 'queued' }] }; });
+    await transport.request('ping', {});
+    await assert.rejects(transport.request('ping', {}), /codex_app_server_unexpected_request/);
+    assert.equal(called, 1);
   } finally { await transport.close(); }
 });

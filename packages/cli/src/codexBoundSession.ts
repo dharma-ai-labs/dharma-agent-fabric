@@ -1,6 +1,6 @@
 import { inspectSessionQuestionForBinding, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { runCodexBridgeQuestion, type CodexSessionBudget } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 interface CodexBoundSessionInput {
@@ -11,6 +11,8 @@ interface CodexBoundSessionInput {
   openTransport(): Promise<CodexStdioTransport>;
   verifier: SessionQuestionVerifier;
   budget: CodexSessionBudget;
+  localWriteRoots?: string[];
+  localToolHandler?: CodexToolHandler;
 }
 
 export async function openCodexBoundSession(input: CodexBoundSessionInput) {
@@ -19,7 +21,15 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
     throw new Error('codex_session_binding_unavailable');
   }
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
-  const codexBinding = { ...binding, threadId: binding.sessionId };
+  const currentBinding = () => {
+    const current = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+    if (!current) throw new Error('codex_session_lease_unavailable');
+    if (current.sessionId !== binding.sessionId || current.workspaceRoot !== binding.workspaceRoot
+      || current.owner !== binding.owner || current.maximumProviderCostCents !== binding.maximumProviderCostCents) {
+      throw new Error('codex_session_binding_unavailable');
+    }
+    return { ...current, threadId: current.sessionId };
+  };
   const lease = input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
   if (!lease) throw new Error('codex_session_lease_unavailable');
   const heldLease = lease;
@@ -48,9 +58,29 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
   return {
     close,
     async assertActive() { return !closing && !closed && await heldLease.assertHeld(); },
+    async runWork(request: { workId: string; prompt: string; maximumProviderCostCents: number; timeoutMs?: number }) {
+      if (closing) throw new Error('codex_session_closed');
+      if (running) throw new Error('codex_session_busy');
+      running = true;
+      try {
+        const result = await runCodexLocalWork({ ...request, transport, binding: currentBinding(),
+          exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [],
+          toolHandler: input.localToolHandler });
+        if (closing) throw new Error('codex_session_closed');
+        return result;
+      } catch (error) {
+        if (!(error instanceof Error) || !['codex_session_budget_unavailable', 'codex_session_work_invalid'].includes(error.message)) {
+          try { await close(); } catch { /* Retain the fence until shutdown is confirmed. */ }
+        }
+        throw error;
+      } finally { running = false; }
+    },
     async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');
+      let codexBinding: ReturnType<typeof currentBinding>;
+      try { codexBinding = currentBinding(); }
+      catch (error) { try { await close(); } catch { /* Retain an unconfirmed owner fence. */ } throw error; }
       const inspected = inspectSessionQuestionForBinding(request.question, codexBinding,
         input.verifier, request.now ?? new Date());
       if (!inspected.ok) throw new Error(inspected.reason);

@@ -42,7 +42,7 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
   silentTurn?: boolean; profileDenied?: boolean; expandedProfile?: boolean; unknownProfileKey?: boolean;
   unknownNetworkKey?: boolean; activeAfterResume?: boolean; wrongWorkspace?: boolean;
   loadedEmpty?: boolean; unknownAfterResume?: boolean; wireDefaults?: boolean;
-  socketExpansion?: boolean } = {}) {
+  socketExpansion?: boolean; oversizedAnswer?: boolean } = {}) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const listeners = new Set<(event: unknown) => void>();
   const seen = new Set<string>();
@@ -81,7 +81,7 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
         if (!options.silentTurn) queueMicrotask(() => emit({ method: 'turn/completed', params: { threadId,
           turn: { id: 'turn-1', status: options.failTurn ? 'failed' : 'completed',
             items: options.emptyAnswer ? [] : [{ type: 'agentMessage', phase: 'final_answer',
-              text: 'Use signed catalog generation 13.' }] } } }));
+              text: options.oversizedAnswer ? 'x'.repeat(2001) : 'Use signed catalog generation 13.' }] } } }));
         return { turn: { id: 'turn-1', status: 'inProgress' } };
       }
       if (method === 'turn/interrupt') return {};
@@ -115,6 +115,16 @@ test('unqualified native host rejects before provider, reservation or replay cla
   });
 
 describe('qualified Linux sandbox bridge protocol', { skip: process.platform !== 'linux' }, () => {
+test('incoming read-only questions cannot register inherited local peer tools', async () => {
+  const f = fixture();
+  let registered = false, invoked = false;
+  f.transport.onToolCall = () => { registered = true; return () => {}; };
+  const request = { transport: f.transport, binding, question: question(), verifier: f.verifier,
+    exclusiveLease, budget, now, timeoutMs: 1000,
+    toolHandler: async () => { invoked = true; return { success: true, contentItems: [] }; } };
+  await runCodexBridgeQuestion(request);
+  assert.equal(registered, false); assert.equal(invoked, false);
+});
 test('bridge asks only its explicit thread under restricted read-only authority', async () => {
   const f = fixture();
   const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
@@ -126,7 +136,7 @@ test('bridge asks only its explicit thread under restricted read-only authority'
     'permissionProfile/list', 'config/read', 'thread/read', 'thread/resume', 'turn/start',
   ]);
   assert.deepEqual(f.calls[4]?.params, {
-    threadId, input: [{ type: 'text', text: 'Repository question (code-review; task 40000000-0000-4000-8000-000000000011): Which approved catalog applies?\nAnswer only from authorized repository material. Do not modify files, use network access, or request broader permissions.' }],
+    threadId, input: [{ type: 'text', text: 'Repository question (code-review; task 40000000-0000-4000-8000-000000000011): Which approved catalog applies?\nAnswer only from authorized repository material in at most 2000 characters. Do not modify files, use network access, or request broader permissions.' }],
     cwd: workspaceRoot, approvalPolicy: 'never', permissions: 'dharma_bridge',
   });
 });
@@ -159,6 +169,12 @@ test('bridge does not manufacture an answer for failed or empty turns', async ()
     await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
       verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1_000 }));
   }
+});
+
+test('bridge rejects an answer larger than the existing signed messaging contract', async () => {
+  const f = fixture({ oversizedAnswer: true });
+  await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1000 }), /codex_session_answer_too_large/);
 });
 
 test('bridge rejects a missing exclusive lease before touching the provider', async () => {

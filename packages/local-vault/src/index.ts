@@ -191,6 +191,15 @@ export class LocalVault {
         owner_pid integer not null,
         acquired_at text not null
       );
+      create table if not exists provider_session_binding_renewals (
+        binding_id text not null references provider_session_bindings(binding_id),
+        previous_expires_at text not null,
+        nonce blob not null,
+        tag blob not null,
+        ciphertext blob not null,
+        renewed_at text not null,
+        primary key (binding_id, previous_expires_at)
+      );
       create table if not exists provider_session_replies (
         binding_id text not null references provider_session_bindings(binding_id),
         question_id text not null,
@@ -416,6 +425,39 @@ export class LocalVault {
     this.#database.prepare(`
       update provider_session_bindings set revoked_at = ? where binding_id = ? and revoked_at is null
     `).run(new Date().toISOString(), bindingId);
+  }
+
+  // Call only after verifying current enrollment, standing policy and remote ownership.
+  // This renews a local execution deadline, never a signing key or enrollment anchor.
+  renewProviderSessionBinding(bindingId: string, expected: LocalProviderSessionIdentity,
+    expectedExpiresAt: string, expiresAt: string, now = new Date()): LocalProviderSessionBinding {
+    if (!Number.isFinite(now.getTime()) || !Number.isFinite(Date.parse(expiresAt))
+      || Date.parse(expiresAt) <= now.getTime() || Date.parse(expiresAt) > now.getTime() + 30 * 86400000) {
+      throw new Error('provider_session_binding_renewal_invalid');
+    }
+    this.#database.exec('begin immediate');
+    try {
+      const record = this.getProviderSessionBinding(bindingId, expected);
+      if (!record || record.owner !== 'dharma_bridge') throw new Error('provider_session_binding_unavailable');
+      if (record.expiresAt !== expectedExpiresAt || Date.parse(expiresAt) <= Date.parse(record.expiresAt)) {
+        throw new Error('provider_session_binding_renewal_conflict');
+      }
+      const lease = this.#database.prepare('select host_name, owner_pid from provider_session_leases where binding_id = ?')
+        .get(bindingId) as { host_name: string; owner_pid: number } | undefined;
+      if (lease && (lease.host_name !== hostname() || (lease.owner_pid !== process.pid && processIsAlive(lease.owner_pid)))) {
+        throw new Error('provider_session_lease_unavailable');
+      }
+      const next = { ...record, expiresAt }; assertLocalProviderSessionBinding(next);
+      const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+      const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(next))), cipher.final()]);
+      this.#database.prepare(`insert into provider_session_binding_renewals
+        (binding_id, previous_expires_at, nonce, tag, ciphertext, renewed_at)
+        select binding_id, ?, nonce, tag, ciphertext, ? from provider_session_bindings where binding_id = ?`)
+        .run(record.expiresAt, now.toISOString(), bindingId);
+      this.#database.prepare('update provider_session_bindings set nonce = ?, tag = ?, ciphertext = ? where binding_id = ? and revoked_at is null')
+        .run(nonce, cipher.getAuthTag(), ciphertext, bindingId);
+      this.#database.exec('commit'); return next;
+    } catch (error) { this.#database.exec('rollback'); throw error; }
   }
 
   tryAcquireProviderSessionLease(

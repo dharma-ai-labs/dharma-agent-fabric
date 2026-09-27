@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { isAbsolute } from 'node:path';
-import type { CodexAppServerTransport } from './codexAppServerSession.js';
+import type { CodexAppServerTransport, CodexToolHandler } from './codexAppServerSession.js';
 
 type PendingRequest = {
   method: string;
@@ -11,6 +11,7 @@ type PendingRequest = {
 
 export interface CodexStdioTransport extends CodexAppServerTransport {
   close(): Promise<void>;
+  onToolCall(handler: CodexToolHandler): () => void;
 }
 
 export async function openCodexAppServerTransport(input: {
@@ -38,6 +39,9 @@ export async function openCodexAppServerTransport(input: {
   child.stderr.resume();
   const pending = new Map<number, PendingRequest>();
   const listeners = new Set<(event: unknown) => void>();
+  let toolHandler: CodexToolHandler | undefined;
+  let handlingTool = false;
+  const serverIds = new Set<string>();
   let nextId = 1;
   let buffer = Buffer.alloc(0);
   let stopped = false;
@@ -78,6 +82,37 @@ export async function openCodexAppServerTransport(input: {
       return;
     }
     const value = message as Record<string, unknown>;
+    if (typeof value.method === 'string' && value.id != null) {
+      const id = value.id, key = `${typeof id}:${String(id)}`;
+      if (value.method !== 'item/tool/call' || !toolHandler
+        || !(typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id)
+          || typeof id === 'number' && Number.isSafeInteger(id) && id >= 0)
+        || !value.params || typeof value.params !== 'object' || Array.isArray(value.params)
+        || serverIds.has(key) || serverIds.size >= 4096 || handlingTool) {
+        fail('codex_app_server_unexpected_request'); return;
+      }
+      serverIds.add(key); handlingTool = true;
+      const handler = toolHandler;
+      let timer: NodeJS.Timeout | undefined;
+      const unavailable = { success: false, contentItems: [{ type: 'inputText' as const, text: 'codex_session_tool_unavailable' }] };
+      void Promise.race([
+        Promise.resolve().then(() => handler(value.params as Record<string, unknown>)).catch(() => unavailable),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), Math.min(timeoutMs, 30000)); }),
+      ]).then(result => {
+        if (stopped) return;
+        if (typeof result?.success !== 'boolean' || !Array.isArray(result.contentItems)
+          || Object.keys(result).sort().join(',') !== 'contentItems,success'
+          || result.contentItems.length !== 1 || result.contentItems[0]?.type !== 'inputText'
+          || Object.keys(result.contentItems[0]).sort().join(',') !== 'text,type'
+          || typeof result.contentItems[0].text !== 'string' || Buffer.byteLength(result.contentItems[0].text) > 16000) {
+          fail('codex_app_server_tool_response_invalid'); return;
+        }
+        send({ id, result });
+      }).catch(() => fail('codex_app_server_tool_unconfirmed')).finally(() => {
+        if (timer) clearTimeout(timer); handlingTool = false;
+      });
+      return;
+    }
     if (typeof value.id === 'number') {
       if (typeof value.method === 'string') {
         fail('codex_app_server_unexpected_request');
@@ -150,6 +185,11 @@ export async function openCodexAppServerTransport(input: {
       if (stopped) throw new Error('codex_app_server_unavailable');
       listeners.add(listener);
       return () => { listeners.delete(listener); };
+    },
+    onToolCall(handler) {
+      if (stopped || toolHandler || typeof handler !== 'function') throw new Error('codex_app_server_tool_handler_unavailable');
+      toolHandler = handler;
+      return () => { if (toolHandler === handler) toolHandler = undefined; };
     },
     async close() {
       if (!stopped) {
