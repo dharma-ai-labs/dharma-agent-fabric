@@ -2,6 +2,7 @@ import { canonicalize, type SessionBindingScope, type SessionQuestion } from '@d
 import { openCodexBoundSession } from './codexBoundSession.js';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
+import { createCodexPeerToolHandler } from './codexPeerTools.js';
 
 // Only a bridge-owned thread can be driven through app-server. Cooperative desktop
 // chats must consume in their own session; knowing a thread ID is not ownership.
@@ -9,6 +10,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   channelTransport: Parameters<typeof createProviderSessionChannel>[0]['transport'];
   expectedRevision?: number;
   authorizeContent: Parameters<typeof createProviderSessionChannel>[0]['authorizeContent'];
+  authorizeLocalTools?: () => Promise<boolean>;
 }) {
   const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
   if (!binding || binding.owner !== 'dharma_bridge' || binding.provider !== 'codex') {
@@ -22,7 +24,11 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   };
   let current: SessionQuestion | null = null;
   let channel: ReturnType<typeof createProviderSessionChannel>;
-  const owner = await openCodexBoundSession({ ...input, verifier: {
+  const owner = await openCodexBoundSession({ ...input,
+    localToolHandler: input.authorizeLocalTools ? createCodexPeerToolHandler({ channel: () => channel,
+      maximumProviderCostCents: binding.maximumProviderCostCents, authorize: input.authorizeLocalTools,
+      authorizeContent: content => input.authorizeContent(content, 'answer') }) : undefined,
+    verifier: {
     resolvePublicKey: keyVersion => input.verifier.resolvePublicKey(keyVersion),
     consume: async questionId => {
       if (!current || current.questionId !== questionId) return false;

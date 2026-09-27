@@ -62,6 +62,7 @@ test('named session serializes local work and signed peer questions with per-tur
       nonce: randomUUID(), signerKeyVersion: 'test-v1' };
     const question = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
     const transport = {
+      onToolCall() { return () => {}; },
       onNotification(listener: (value: unknown) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
       async close() { closed = true; },
       async request(method: string, params: Record<string, unknown>): Promise<unknown> {

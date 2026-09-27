@@ -115,6 +115,16 @@ test('unqualified native host rejects before provider, reservation or replay cla
   });
 
 describe('qualified Linux sandbox bridge protocol', { skip: process.platform !== 'linux' }, () => {
+test('incoming read-only questions cannot register inherited local peer tools', async () => {
+  const f = fixture();
+  let registered = false, invoked = false;
+  f.transport.onToolCall = () => { registered = true; return () => {}; };
+  const request = { transport: f.transport, binding, question: question(), verifier: f.verifier,
+    exclusiveLease, budget, now, timeoutMs: 1000,
+    toolHandler: async () => { invoked = true; return { success: true, contentItems: [] }; } };
+  await runCodexBridgeQuestion(request);
+  assert.equal(registered, false); assert.equal(invoked, false);
+});
 test('bridge asks only its explicit thread under restricted read-only authority', async () => {
   const f = fixture();
   const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),

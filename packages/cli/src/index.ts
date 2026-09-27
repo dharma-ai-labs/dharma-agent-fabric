@@ -73,6 +73,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
+import { CODEX_PEER_TOOLS } from './codexPeerTools.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
@@ -3467,7 +3468,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
       const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
       const created = await transport.request('thread/start', { cwd: item.path,
-        approvalPolicy: 'never', permissions: 'dharma_bridge', ephemeral: false }) as { thread?: { id?: string; cwd?: string } };
+        approvalPolicy: 'never', permissions: 'dharma_bridge', ephemeral: false,
+        dynamicTools: CODEX_PEER_TOOLS }) as { thread?: { id?: string; cwd?: string } };
       if (!created.thread?.id || created.thread.cwd !== item.path) throw new Error('named_session_thread_invalid');
       const bindingId = randomUUID();
       const response = await fabric.signedPost('/agent-fabric/provider-sessions', {

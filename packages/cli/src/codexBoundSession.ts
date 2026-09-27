@@ -1,6 +1,6 @@
 import { inspectSessionQuestionForBinding, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 interface CodexBoundSessionInput {
@@ -12,6 +12,7 @@ interface CodexBoundSessionInput {
   verifier: SessionQuestionVerifier;
   budget: CodexSessionBudget;
   localWriteRoots?: string[];
+  localToolHandler?: CodexToolHandler;
 }
 
 export async function openCodexBoundSession(input: CodexBoundSessionInput) {
@@ -63,7 +64,8 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
       running = true;
       try {
         const result = await runCodexLocalWork({ ...request, transport, binding: currentBinding(),
-          exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [] });
+          exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [],
+          toolHandler: input.localToolHandler });
         if (closing) throw new Error('codex_session_closed');
         return result;
       } catch (error) {

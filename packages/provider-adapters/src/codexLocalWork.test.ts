@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolve } from 'node:path';
-import { runCodexLocalWork, type CodexAppServerTransport } from './codexAppServerSession.js';
+import { runCodexLocalWork, type CodexAppServerTransport, type CodexToolHandler, type CodexToolResult } from './codexAppServerSession.js';
 
 function fixture(expanded = false, usage: unknown = null) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -93,4 +93,38 @@ test('missing or malformed provider usage remains unknown, not zero cost', { ski
     const result = await runCodexLocalWork(fixture(false, usage));
     assert.equal(result.providerUsage, null);
   }
+});
+
+test('peer tools are fenced to the active local turn and removed before another turn', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture(), original = f.transport.request;
+  let registered: CodexToolHandler | undefined, retained: CodexToolHandler | undefined;
+  let invoked = 0, removed = 0;
+  const observations: CodexToolResult[] = [];
+  f.transport.onToolCall = handler => {
+    registered = handler; retained = handler;
+    return () => { registered = undefined; removed++; };
+  };
+  f.transport.request = async (method, params) => {
+    if (method !== 'turn/start') return original(method, params);
+    setImmediate(() => void (async () => {
+      const call = { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1', tool: 'dharma_peer_ask', arguments: {} };
+      observations.push(await registered!({ ...call, threadId: 'foreign' }));
+      observations.push(await registered!({ ...call, turnId: 'prior-turn' }));
+      observations.push(await registered!(call));
+      observations.push(await registered!(call));
+      f.exclusiveLease.assertHeld = async () => false;
+      observations.push(await registered!({ ...call, callId: 'call-2' }));
+      f.exclusiveLease.assertHeld = async () => true;
+      // Complete through the original fixture only after the tool assertions.
+      await original(method, params);
+    })());
+    return { turn: { id: 'turn-1' } };
+  };
+  await runCodexLocalWork({ ...f, toolHandler: async () => {
+    invoked++; return { success: true, contentItems: [{ type: 'inputText', text: 'queued, not answered' }] };
+  } });
+  assert.deepEqual(observations.map(value => value.success), [false, false, true, false, false]);
+  assert.equal(invoked, 1); assert.equal(removed, 1); assert.equal(registered, undefined);
+  assert.equal((await retained!({ threadId: 'thread-1', turnId: 'turn-1', callId: 'late-call' })).success, false);
+  assert.equal(invoked, 1);
 });

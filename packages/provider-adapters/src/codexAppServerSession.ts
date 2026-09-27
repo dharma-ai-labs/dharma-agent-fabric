@@ -11,7 +11,11 @@ import {
 export interface CodexAppServerTransport {
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
   onNotification(listener: (event: unknown) => void): () => void;
+  onToolCall?(handler: CodexToolHandler): () => void;
 }
+
+export type CodexToolResult = { success: boolean; contentItems: Array<{ type: 'inputText'; text: string }> };
+export type CodexToolHandler = (params: Record<string, unknown>) => Promise<CodexToolResult>;
 
 export interface CodexBridgeBinding extends SessionBindingScope {
   owner: string;
@@ -198,6 +202,7 @@ export async function runCodexLocalWork(input: {
   prompt: string;
   maximumProviderCostCents: number;
   writeRoots: string[];
+  toolHandler?: CodexToolHandler;
   timeoutMs?: number;
 }) {
   const { binding, transport } = input;
@@ -215,6 +220,7 @@ export async function runCodexLocalWork(input: {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) throw new Error('codex_session_timeout_invalid');
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
   if (!Array.isArray(input.writeRoots) || !input.writeRoots.length) throw new Error('codex_session_work_invalid');
+  if (input.toolHandler && !transport.onToolCall) throw new Error('codex_session_tool_handler_unavailable');
   await assertRestrictedProfile(transport, binding.workspaceRoot, 'dharma_work', input.writeRoots);
   const read = scopedThread(await transport.request('thread/read', {
     threadId: binding.threadId, includeTurns: false,
@@ -237,11 +243,26 @@ export async function runCodexLocalWork(input: {
 async function runScopedTurn(input: {
   transport: CodexAppServerTransport; binding: CodexBridgeBinding;
   exclusiveLease: CodexSessionExclusiveLease; timeoutMs: number;
+  toolHandler?: CodexToolHandler;
   permissions: 'dharma_bridge' | 'dharma_work'; prompt: string;
 }) {
   const { transport, binding, timeoutMs } = input;
 
   const startedAt = Date.now();
+  let activeTurnId: string | null = null;
+  const calls = new Set<string>();
+  const removeTools = input.permissions === 'dharma_work' && input.toolHandler && transport.onToolCall
+    ? transport.onToolCall(async params => {
+      if (!activeTurnId || params.threadId !== binding.threadId || params.turnId !== activeTurnId
+        || typeof params.callId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(params.callId)
+        || calls.has(params.callId) || calls.size >= 8 || !await input.exclusiveLease.assertHeld()) {
+        return { success: false, contentItems: [{ type: 'inputText', text: 'codex_session_tool_not_authorized' }] };
+      }
+      calls.add(params.callId);
+      const result = await input.toolHandler!(params);
+      return activeTurnId === params.turnId && await input.exclusiveLease.assertHeld()
+        ? result : { success: false, contentItems: [{ type: 'inputText', text: 'codex_session_tool_not_authorized' }] };
+    }) : undefined;
   const usageByTurn = new Map<string, CodexProviderUsage | null>();
   const arrivals: unknown[] = [];
   let resolveArrival: ((value: unknown) => void) | null = null;
@@ -277,6 +298,7 @@ async function runScopedTurn(input: {
     if (typeof turnId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(turnId)) {
       throw new Error('codex_session_turn_invalid');
     }
+    activeTurnId = turnId;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const event = arrivals.shift() ?? await Promise.race([
@@ -304,6 +326,8 @@ async function runScopedTurn(input: {
     } catch { /* The timeout remains unconfirmed; never report a completed answer. */ }
     throw new Error('codex_session_turn_timeout');
   } finally {
+    activeTurnId = null;
+    removeTools?.();
     if (timer) clearTimeout(timer);
     resolveArrival = null;
     unsubscribe();

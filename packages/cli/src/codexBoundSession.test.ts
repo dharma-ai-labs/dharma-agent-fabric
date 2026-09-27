@@ -48,6 +48,7 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
   const listeners = new Set<(event: unknown) => void>();
   let closed = false;
   const transport: CodexStdioTransport = {
+    onToolCall() { return () => {}; },
     onNotification(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     async close() {
       calls.push('close');
