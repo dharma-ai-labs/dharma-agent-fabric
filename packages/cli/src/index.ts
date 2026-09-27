@@ -73,7 +73,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
-import { CODEX_PEER_TOOLS } from './codexPeerTools.js';
+import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
@@ -3467,10 +3467,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     if (!registration) {
       const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
       const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
-      const created = await transport.request('thread/start', { cwd: item.path,
-        approvalPolicy: 'never', permissions: 'dharma_bridge', ephemeral: false,
-        dynamicTools: CODEX_PEER_TOOLS }) as { thread?: { id?: string; cwd?: string } };
-      if (!created.thread?.id || created.thread.cwd !== item.path) throw new Error('named_session_thread_invalid');
+      const threadId = await startNamedCodexThread(transport, item.path, name);
       const bindingId = randomUUID();
       const response = await fabric.signedPost('/agent-fabric/provider-sessions', {
         schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
@@ -3489,7 +3486,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
         provider: 'codex' as const };
       vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
-        bindingId, owner: 'dharma_bridge', sessionId: created.thread.id, workspaceRoot: item.path,
+        bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
         maximumProviderCostCents: maximumTurnCostCents });
       registration = { schema: 'dharma.named-session/v1', name, bindingId, identity,
