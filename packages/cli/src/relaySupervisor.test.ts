@@ -52,7 +52,9 @@ test('Demo-only supervisor consumes registrations without a standard device or s
     const observation = JSON.parse(observations.trim());
     assert.equal(observation.event, 'demo_watch_cycle');
     assert.equal(observation.state, 'failed');
-    assert.equal(observation.code, 'demo_watch_cycle_failed');
+    // A native store may be unavailable, or available but empty for this new home.
+    assert.ok(['demo_watch_cycle_failed', 'demo_transport_existing_protected_state_required']
+      .includes(observation.code), `Unexpected unenrolled watch failure: ${observation.code}`);
     assert.equal(typeof observation.key, 'string');
     assert.equal(health?.pid, child.pid);
     assert.equal(health?.state, observation.state);

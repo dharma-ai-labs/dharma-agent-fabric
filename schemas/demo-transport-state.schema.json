@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-transport-state/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "certificate", "verifiedKeyset", "acceptedAt"],
+  "properties": {
+    "schema": { "const": "dharma.demo-transport-state/v1" },
+    "certificate": { "$ref": "https://schemas.dharma-ai.io/demo-transport-continuity/v1" },
+    "verifiedKeyset": { "$ref": "https://schemas.dharma-ai.io/server-signing-keyset/v1" },
+    "acceptedAt": { "type": "string", "format": "date-time" }
+  }
+}
