@@ -1,0 +1,21 @@
+{
+  "name": "@dharma-ai-labs/agent-fabric-lifecycle-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "bin": { "dharma-lifecycle-reference": "bin/run.mjs" },
+  "files": ["dist/index.js", "dist/index.js.map", "dist/index.d.ts", "dist/index.d.ts.map", "dist/lifecycle-event.schema.json", "bin/run.mjs", "README.md"],
+  "engines": { "node": ">=22.20.0 <25.0.0" },
+  "scripts": { "test": "node --test dist/*.test.js" },
+  "dependencies": {
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.11",
+    "@dharma-ai-labs/agent-fabric-evidence-reduction": "0.2.20",
+    "@dharma-ai-labs/agent-fabric-sdk": "0.1.10",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  }
+}
