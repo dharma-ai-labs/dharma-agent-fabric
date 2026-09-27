@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-transport-journal/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "previousState", "previousStateHash", "nextState"],
+  "properties": {
+    "schema": { "const": "dharma.demo-transport-journal/v1" },
+    "previousState": { "type": ["string", "null"], "maxLength": 65536 },
+    "previousStateHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "nextState": { "type": "string", "minLength": 2, "maxLength": 65536 }
+  }
+}

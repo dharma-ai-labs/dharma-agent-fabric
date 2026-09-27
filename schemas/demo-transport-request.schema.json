@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-transport-request/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "bindingHash", "request", "correlationId", "createdAt", "lastAttemptAt", "attempts"],
+  "properties": {
+    "schema": { "const": "dharma.demo-transport-request/v1" },
+    "bindingHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "correlationId": { "type": "string", "format": "uuid" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "lastAttemptAt": { "type": ["string", "null"], "format": "date-time" },
+    "attempts": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["installationId", "enrollmentOrigin", "transportOrigin", "requestNonce", "trustGeneration", "installedKeysetHash"],
+      "properties": {
+        "installationId": { "type": "string", "format": "uuid" },
+        "enrollmentOrigin": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "transportOrigin": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "requestNonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{32}$" },
+        "trustGeneration": { "type": "integer", "minimum": 1 },
+        "installedKeysetHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

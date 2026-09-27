@@ -65,6 +65,7 @@ import { demoRepositoryPackage } from './demoPackage.js';
 import { demoDeviceAndPackageStatus } from './demoStatus.js';
 import { prepareDemoSigningUpgradeProof, readDemoSigningUpgradeContext } from './demoSigningUpgradeProof.js';
 import { submitDemoSigningUpgradeProof } from './demoSigningUpgradeSubmission.js';
+import { createDemoDeviceTransport } from './demoDeviceTransport.js';
 import { runDemoWatch } from './demoWatch.js';
 import { runDemoSupervisor } from './demoSupervisor.js';
 import { demoWatchRegistrationKey, listDemoWatchRegistrations, type DemoWatchRegistration } from './demoWatchRegistry.js';
@@ -74,7 +75,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.110';
+const VERSION = '0.2.111';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1697,14 +1698,15 @@ async function supervisedDemoCycle(registration: DemoWatchRegistration, signal: 
   const nativeDirectory = registration.provider === 'codex' ? resolve(workspace, '.agents', 'skills')
     : registration.provider === 'claude' ? resolve(workspace, '.claude', 'skills')
       : nativeSkillDirectory(registration.provider);
-  return withDemoDeviceLock(scope, () => {
+  return withDemoDeviceLock(scope, async () => {
     signal.throwIfAborted();
+    const deps = await createDemoDeviceTransport(scope, { fetcher: (url, options) => {
+      signal.throwIfAborted();
+      return fetch(url, { ...options,
+        signal: options?.signal ? AbortSignal.any([options.signal, signal]) : signal });
+    } });
     return demoRepositoryPackage({ scope, workspace, provider: registration.provider,
-      nativeSkillDirectory: nativeDirectory }, { fetcher: (url, options) => {
-        signal.throwIfAborted();
-        return fetch(url, { ...options,
-          signal: options?.signal ? AbortSignal.any([options.signal, signal]) : signal });
-      } });
+      nativeSkillDirectory: nativeDirectory }, deps);
   });
 }
 
@@ -6199,7 +6201,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
     'package', 'package-status', 'watch', 'watch-enable', 'watch-status', 'watch-disable',
-    'signing-client-proof', 'signing-owner-proof']
+    'signing-client-proof', 'signing-owner-proof', 'transport-connect']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -6220,10 +6222,18 @@ export async function run(argv: string[]): Promise<Output> {
     if (watchControl && await realpath(root) !== workspace) {
       throw new Error('Demo watch setup must select the exact Git repository root.');
     }
-    if (flags.has('dry-run')) return { ok: true, stage: signingProof ? 'demo_signing_proof_plan'
+    let transportOrigin: string | null = null;
+    if (subcommand === 'transport-connect') {
+      transportOrigin = required(flags, 'transport-origin');
+      try {
+        const target = new URL(transportOrigin);
+        if (transportOrigin.length > 2048 || target.protocol !== 'https:' || target.origin !== transportOrigin || transportOrigin === hqUrl) throw new Error();
+      } catch { throw new Error('Demo transport recovery target_invalid. Use the exact reviewed HTTPS origin.'); }
+    }
+    if (flags.has('dry-run')) return { ok: true, stage: transportOrigin ? 'demo_transport_plan' : signingProof ? 'demo_signing_proof_plan'
       : watchControl ? 'demo_watch_plan' : 'demo_device_plan',
       organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
-      repositoryPackageState: 'not_connected' };
+      repositoryPackageState: 'not_connected', ...(transportOrigin ? { transportOrigin } : {}) };
     const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
     const scope = {
       hqUrl, organizationId, repositoryId, normalizedRepository,
@@ -6231,7 +6241,8 @@ export async function run(argv: string[]): Promise<Output> {
     };
     if (signingProof) {
       const context = await readDemoSigningUpgradeContext(resolve(required(flags, 'review-context')));
-      if (flags.has('submit')) return withDemoDeviceLock(scope, () => submitDemoSigningUpgradeProof(scope, context));
+      if (flags.has('submit')) return withDemoDeviceLock(scope, async () =>
+        submitDemoSigningUpgradeProof(scope, context, await createDemoDeviceTransport(scope)));
       return withDemoDeviceLock(scope, () => prepareDemoSigningUpgradeProof(scope, context,
         subcommand === 'signing-owner-proof' ? 'owner' : 'client'));
     }
@@ -6246,7 +6257,8 @@ export async function run(argv: string[]): Promise<Output> {
         hqUrl, organizationId, repositoryId, normalizedRepository, provider, workspace };
       const input = { home: dharmaHome(), registration, version: VERSION };
       const deps: DemoWatchControlDependencies = {
-        verify: async () => { await withDemoDeviceLock(scope, () => verifyDemoDevice(scope)); },
+        verify: async () => { await withDemoDeviceLock(scope, async () =>
+          verifyDemoDevice(scope, await createDemoDeviceTransport(scope))); },
         exclusive: operation => withRelayStartupMutation(operation),
         prepareStartup: async () => {
           const launcher = await installStableRepositoryLauncher(workspace);
@@ -6274,9 +6286,9 @@ export async function run(argv: string[]): Promise<Output> {
       const demoNativeSkillDirectory = provider === 'codex' ? resolve(workspace, '.agents', 'skills')
         : provider === 'claude' ? resolve(workspace, '.claude', 'skills')
           : nativeSkillDirectory(provider);
-      const cycle = () => withDemoDeviceLock(scope, () => demoRepositoryPackage({ scope, workspace,
+      const cycle = () => withDemoDeviceLock(scope, async () => demoRepositoryPackage({ scope, workspace,
         statusOnly: subcommand === 'package-status', provider,
-        nativeSkillDirectory: demoNativeSkillDirectory }));
+        nativeSkillDirectory: demoNativeSkillDirectory }, await createDemoDeviceTransport(scope)));
       if (subcommand !== 'watch') return cycle();
       const rawInterval = flags.get('interval-ms');
       const intervalMs = rawInterval === undefined ? 60_000 : Number(rawInterval);
@@ -6297,7 +6309,6 @@ export async function run(argv: string[]): Promise<Output> {
       }
     }
     return withDemoDeviceLock(scope, async () => {
-      if (subcommand === 'status') return demoDeviceAndPackageStatus(scope, workspace);
       if (subcommand === 'connect') {
         const connected = await connectDemoDevice({
             ...scope, grant: grant!,
@@ -6310,6 +6321,9 @@ export async function run(argv: string[]): Promise<Output> {
         const { configPath: _configPath, ...receipt } = connected;
         return receipt;
       }
+      const deps = await createDemoDeviceTransport(scope);
+      if (transportOrigin) return deps.connectTransport(transportOrigin);
+      if (subcommand === 'status') return demoDeviceAndPackageStatus(scope, workspace, deps);
       let action: DemoPeerAction | null = null;
       if (subcommand === 'role') {
         const categories = repeated.get('category') || [];
@@ -6328,7 +6342,7 @@ export async function run(argv: string[]): Promise<Output> {
         questionId: required(flags, 'question-id'), content: required(flags, 'content') };
       if (subcommand === 'inbox') action = { kind: 'inbox' };
       if (subcommand === 'ack') action = { kind: 'ack', messageId: required(flags, 'message-id') };
-      return performDemoPeerAction(scope, action);
+      return performDemoPeerAction(scope, action, deps);
     });
   }
   if (command === 'bootstrap') return bootstrap(flags);
