@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-signing-update/v1",
+  "title": "Repository-scoped Demo signing trust update",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryId", "deviceId", "issuedAt", "expiresAt", "keysets"],
+  "properties": {
+    "schema": { "const": "dharma.demo-signing-update/v1" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9]+$", "maxLength": 200 },
+    "repositoryId": { "type": "string", "format": "uuid" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "keysets": { "type": "array", "minItems": 1, "maxItems": 20,
+      "items": { "$ref": "https://schemas.dharma-ai.io/server-signing-keyset/v1" } }
+  }
+}

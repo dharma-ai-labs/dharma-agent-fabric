@@ -214,7 +214,7 @@ async function installActiveDemoPackage(input: {
     || descriptor.releaseId !== published.releaseId) {
     throw new Error('Active Demo release does not match the current repository authorization.');
   }
-  const trust = await loadDemoSigningTrust(scope);
+  const trust = await loadDemoSigningTrust(scope, { store: deps.store });
   const bundle = published.bundle as SkillBundle;
   const { signature, ...unsignedEnvelope } = envelope;
   const now = Date.now();

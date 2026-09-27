@@ -92,8 +92,9 @@ test('Demo enrollment verifies the browser origin, waits for approval and signs 
       deviceId, normalizedRepository }), { status: 200 });
   };
   const approvals: string[] = [];
+  const store = memoryStore();
   const connected = await connectDemoDevice(options(stateRoot), {
-    store: memoryStore(), fetcher, sleep: async () => {},
+    store, fetcher, sleep: async () => {},
     onApprovalRequired: async (url) => { approvals.push(url); },
   });
   assert.equal(connected.stage, 'device_signed_ready');
@@ -106,7 +107,7 @@ test('Demo enrollment verifies the browser origin, waits for approval and signs 
   assert.equal(config.deviceId, deviceId);
   assert.equal(config.grant, undefined);
   assert.equal(config.privateKey, undefined);
-  assert.equal((await loadDemoSigningTrust(options(stateRoot))).deviceId, deviceId);
+  assert.equal((await loadDemoSigningTrust(options(stateRoot), { store })).deviceId, deviceId);
   if (process.platform !== 'win32') assert.equal((await stat(connected.configPath)).mode & 0o777, 0o600);
 });
 
@@ -129,6 +130,81 @@ test('Demo enrollment rejects missing and foreign signing anchors before saving 
       /signing trust|untrusted_initial_signer/i);
     await assert.rejects(readFile(scopePath(options(stateRoot), hqUrl)), { code: 'ENOENT' });
   }
+});
+
+test('signed status autonomously accepts a successor and reloads it from protected trust after bootstrap expiry', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-rotation-'));
+  const scope = options(stateRoot);
+  const store = memoryStore();
+  const approved = approvedEnrollment();
+  const initial = approved.serverSigningKeyset;
+  const successor = generateKeyPairSync('ed25519');
+  const nextExpiry = new Date(Date.now() + 48 * 60 * 60_000).toISOString();
+  const preloadBody = { ...initial, generation: 2, keys: [...initial.keys, {
+    keyVersion: 'successor', publicKeyEd25519: successor.publicKey.export({ format: 'jwk' }).x!,
+    status: 'overlap' as const, notBefore: initial.issuedAt, notAfter: nextExpiry }] };
+  const { signature: _oldSignature, ...preloadUnsigned } = preloadBody;
+  const preload = { ...preloadUnsigned, signature: signCanonicalObject(preloadUnsigned, signer.privateKey) };
+  const activeUnsigned = { ...preloadUnsigned, generation: 3, signedByKeyVersion: 'successor',
+    expiresAt: nextExpiry, keys: preload.keys.map(key => ({ ...key,
+      status: key.keyVersion === 'successor' ? 'active' as const : 'overlap' as const })) };
+  const active = { ...activeUnsigned, signature: signCanonicalObject(activeUnsigned, successor.privateKey) };
+  let update: unknown;
+  const fetcher: typeof fetch = async (resource) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) return new Response(JSON.stringify({ ok: true,
+      status: 'pending', organizationId: orgId, repositoryId, deviceCode,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }));
+    if (url.pathname.endsWith('/poll')) return new Response(JSON.stringify(approved));
+    assert.equal(url.searchParams.get('signingGeneration'), '1');
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository, ...(update ? { signingTrustUpdate: update } : {}) }));
+  };
+  const connected = await connectDemoDevice(scope, { store, fetcher });
+  update = { schema: 'dharma.demo-signing-update/v1', organizationId: orgId, repositoryId, deviceId,
+    issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    keysets: [preload, active] };
+  await verifyDemoDevice(scope, { store, fetcher });
+  const trusted = await loadDemoSigningTrust(scope, { store,
+    now: new Date(Date.parse(initial.expiresAt) + 1_000) });
+  assert.equal(trusted.keyset.generation, 3);
+  const config = JSON.parse(await readFile(connected.configPath, 'utf8'));
+  assert.equal(config.serverPublicKeyEd25519, approved.serverPublicKeyEd25519);
+  assert.equal(config.serverSigningKeyset.keys[0].notAfter, initial.keys[0]!.notAfter);
+  assert.equal(config.nextSequence, 3);
+  assert.doesNotMatch(JSON.stringify(config), /grant|privateJwk|privateKey/i);
+});
+
+test('a rejected status trust update preserves the sequence and last verified keyset', async () => {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-rotation-reject-'));
+  const scope = options(stateRoot);
+  const store = memoryStore();
+  const approved = approvedEnrollment();
+  let tamper = false;
+  const fetcher: typeof fetch = async (resource) => {
+    const pathname = new URL(String(resource)).pathname;
+    if (pathname.endsWith('/enrollments')) return new Response(JSON.stringify({ ok: true,
+      status: 'pending', organizationId: orgId, repositoryId, deviceCode,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` }));
+    if (pathname.endsWith('/poll')) return new Response(JSON.stringify(approved));
+    return new Response(JSON.stringify({ ok: true, organizationId: orgId, repositoryId,
+      deviceId, normalizedRepository, ...(tamper ? { signingTrustUpdate: {
+        schema: 'dharma.demo-signing-update/v1', organizationId: orgId, repositoryId, deviceId,
+        issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        keysets: [{ ...approved.serverSigningKeyset, generation: 2, signature: 'invalid' }] } } : {}) }));
+  };
+  const connected = await connectDemoDevice(scope, { store, fetcher });
+  tamper = true;
+  await assert.rejects(verifyDemoDevice(scope, { store, fetcher }), /Demo signing/);
+  const config = JSON.parse(await readFile(connected.configPath, 'utf8'));
+  assert.equal(config.nextSequence, 3);
+  assert.equal(config.serverSigningKeyset.generation, 1);
+  assert.deepEqual((await loadDemoSigningTrust(scope, { store })).keyset, approved.serverSigningKeyset);
+  tamper = false;
+  await verifyDemoDevice(scope, { store, fetcher });
+  assert.equal(JSON.parse(await readFile(connected.configPath, 'utf8')).nextSequence, 4);
 });
 
 test('Demo enrollment recovers from one transient poll failure without restarting enrollment', async () => {
