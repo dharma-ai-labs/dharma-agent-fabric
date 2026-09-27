@@ -18,6 +18,11 @@ const deviceId = '30000000-0000-4000-8000-000000000001';
 const otherClient = '30000000-0000-4000-8000-000000000002';
 const predecessorHash = `sha256:${'a'.repeat(64)}`;
 const candidateHash = `sha256:${'b'.repeat(64)}`;
+const cliVersion: string = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+const contractVersion: string = JSON.parse(await readFile(new URL('../package.json',
+  import.meta.resolve('@dharma-ai-labs/agent-fabric-contracts')), 'utf8')).version;
+const [major, minor, patch] = cliVersion.split('.').map(Number);
+const uninstalledCliVersion = `${major}.${minor}.${patch! + 1}`;
 function historicalHash(value: unknown): string {
   const ordered = (item: unknown): unknown => Array.isArray(item) ? item.map(ordered)
     : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item)
@@ -63,7 +68,7 @@ async function fixture(t: test.TestContext, preloaded = true) {
   const context = { schema: 'dharma.signing-upgrade-context/v1', organizationId: scope.organizationId, repositoryId,
     globalEpoch: 'fixture-epoch', predecessorHash, candidateHash, installedKeysetHash: historicalHash(keyset),
     baselineConsumers: [{ name: 'cli', version: '0.2.107' }, { name: 'contracts', version: '0.1.10' }],
-    requiredConsumers: [{ name: 'cli', version: '0.2.109' }, { name: 'contracts', version: '0.1.11' }],
+    requiredConsumers: [{ name: 'cli', version: cliVersion }, { name: 'contracts', version: contractVersion }],
     requiredClientIds: [deviceId, otherClient], expiresAt: '2026-09-27T10:10:00Z' };
   const configPath = scopePath(scope, scope.hqUrl);
   const config = JSON.parse(await readFile(configPath, 'utf8'));
@@ -77,8 +82,8 @@ test('prepares an original-client proof using the actual device and installed pa
   assert.equal(result.submitted, false);
   assert.ok(result.proof.schema === 'dharma.signing-client-upgrade-proof/v1');
   assert.equal(result.proof.principalId, deviceId);
-  assert.equal(result.proof.cliVersion, '0.2.109');
-  assert.equal(result.proof.contractVersion, '0.1.11');
+  assert.equal(result.proof.cliVersion, cliVersion);
+  assert.equal(result.proof.contractVersion, contractVersion);
   const { sourceHash, ...signed } = result.proof, { signature, ...unsigned } = signed;
   assert.equal(sourceHash, `sha256:${createHash('sha256').update(canonicalize(signed)).digest('hex')}`);
   assert.equal(verifyCanonicalObject(unsigned, signature, createPublicKey({
@@ -108,10 +113,10 @@ const faults: Array<[string, (value: Record<string, unknown>) => void]> = [
   ['false installed versions', v => { v.cliVersion = '9.9.9'; }],
   ['missing original device', v => { v.requiredClientIds = [otherClient]; }],
   ['duplicate clients', v => { v.requiredClientIds = [deviceId, deviceId]; }],
-  ['duplicate consumers', v => { v.requiredConsumers = [{ name: 'cli', version: '0.2.109' }, { name: 'cli', version: '0.2.109' }]; }],
-  ['omitted consumer', v => { v.requiredConsumers = [{ name: 'cli', version: '0.2.109' }]; }],
-  ['downgrade', v => { v.requiredConsumers = [{ name: 'cli', version: '0.2.106' }, { name: 'contracts', version: '0.1.11' }]; }],
-  ['uninstalled required version', v => { v.requiredConsumers = [{ name: 'cli', version: '0.2.110' }, { name: 'contracts', version: '0.1.11' }]; }],
+  ['duplicate consumers', v => { v.requiredConsumers = [{ name: 'cli', version: cliVersion }, { name: 'cli', version: cliVersion }]; }],
+  ['omitted consumer', v => { v.requiredConsumers = [{ name: 'cli', version: cliVersion }]; }],
+  ['downgrade', v => { v.requiredConsumers = [{ name: 'cli', version: '0.2.106' }, { name: 'contracts', version: contractVersion }]; }],
+  ['uninstalled required version', v => { v.requiredConsumers = [{ name: 'cli', version: uninstalledCliVersion }, { name: 'contracts', version: contractVersion }]; }],
   ['wrong preload hash', v => { v.installedKeysetHash = candidateHash; }],
   ['same candidate', v => { v.candidateHash = predecessorHash; }],
   ['expired', v => { v.expiresAt = now.toISOString(); }],
