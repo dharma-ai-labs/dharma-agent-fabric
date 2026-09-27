@@ -8,6 +8,7 @@ interface Dependencies {
   loadBinding: (readOnlyStore: SecureSecretStore) => Promise<DemoTransportBinding>;
   fetcher?: typeof fetch;
   now?: () => Date;
+  refresh?: (binding: DemoTransportBinding, transportOrigin: string) => Promise<unknown>;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function fail(reason: string): never {
@@ -70,9 +71,21 @@ export function createDemoTransportFetcher(deps: Dependencies): typeof fetch {
     const init = { ...input, headers: new Headers(input.headers) };
     const selected = typeof resource === 'string' ? resource : resource instanceof URL ? new URL(resource) : resource;
     init.signal?.throwIfAborted();
-    const binding = structuredClone(await deps.loadBinding(readOnlyStore));
-    const resolution = await resolveDemoTransport(binding, { store: deps.store, now: deps.now });
-    const { url, headers } = requestScope(selected, init, binding);
+    let binding = structuredClone(await deps.loadBinding(readOnlyStore));
+    let resolution = await resolveDemoTransport(binding, { store: deps.store, now: deps.now });
+    let { url, headers } = requestScope(selected, init, binding);
+    signedRequest(url, init, headers, binding, deps.now?.() ?? new Date());
+    const needsRefresh = resolution.state === 'refresh_required' || resolution.state === 'ready'
+      && Date.parse(resolution.certificate.expiresAt) <= (deps.now?.() ?? new Date()).getTime() + 60_000;
+    if (needsRefresh && deps.refresh) {
+      const target = resolution.state === 'refresh_required' ? resolution.lastTransportOrigin
+        : resolution.state === 'ready' ? resolution.transportOrigin : binding.enrollmentOrigin;
+      await deps.refresh(binding, target);
+      binding = structuredClone(await deps.loadBinding(readOnlyStore));
+      resolution = await resolveDemoTransport(binding, { store: deps.store, now: deps.now });
+      ({ url, headers } = requestScope(selected, init, binding));
+      if (resolution.state !== 'ready' || resolution.transportOrigin !== target) fail('refresh_unconfirmed');
+    }
     if (resolution.state === 'refresh_required') fail('refresh_required');
     signedRequest(url, init, headers, binding, deps.now?.() ?? new Date());
     const target = new URL(`${url.pathname}${url.search}`, resolution.transportOrigin);

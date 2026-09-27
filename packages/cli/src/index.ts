@@ -6201,7 +6201,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
     'package', 'package-status', 'watch', 'watch-enable', 'watch-status', 'watch-disable',
-    'signing-client-proof', 'signing-owner-proof']
+    'signing-client-proof', 'signing-owner-proof', 'transport-connect']
     .includes(String(subcommand))) {
     const hqUrl = normalizeHqUrl(portalUrl(flags));
     const organizationId = required(flags, 'organization-id');
@@ -6222,10 +6222,18 @@ export async function run(argv: string[]): Promise<Output> {
     if (watchControl && await realpath(root) !== workspace) {
       throw new Error('Demo watch setup must select the exact Git repository root.');
     }
-    if (flags.has('dry-run')) return { ok: true, stage: signingProof ? 'demo_signing_proof_plan'
+    let transportOrigin: string | null = null;
+    if (subcommand === 'transport-connect') {
+      transportOrigin = required(flags, 'transport-origin');
+      try {
+        const target = new URL(transportOrigin);
+        if (transportOrigin.length > 2048 || target.protocol !== 'https:' || target.origin !== transportOrigin || transportOrigin === hqUrl) throw new Error();
+      } catch { throw new Error('Demo transport recovery target_invalid. Use the exact reviewed HTTPS origin.'); }
+    }
+    if (flags.has('dry-run')) return { ok: true, stage: transportOrigin ? 'demo_transport_plan' : signingProof ? 'demo_signing_proof_plan'
       : watchControl ? 'demo_watch_plan' : 'demo_device_plan',
       organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
-      repositoryPackageState: 'not_connected' };
+      repositoryPackageState: 'not_connected', ...(transportOrigin ? { transportOrigin } : {}) };
     const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
     const scope = {
       hqUrl, organizationId, repositoryId, normalizedRepository,
@@ -6314,6 +6322,7 @@ export async function run(argv: string[]): Promise<Output> {
         return receipt;
       }
       const deps = await createDemoDeviceTransport(scope);
+      if (transportOrigin) return deps.connectTransport(transportOrigin);
       if (subcommand === 'status') return demoDeviceAndPackageStatus(scope, workspace, deps);
       let action: DemoPeerAction | null = null;
       if (subcommand === 'role') {

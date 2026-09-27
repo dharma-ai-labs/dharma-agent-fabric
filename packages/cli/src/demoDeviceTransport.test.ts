@@ -55,6 +55,18 @@ async function fixture(t: TestContext) {
     trustGeneration: 1, installedKeysetHash: sha256(canonicalize(keyset)), signingKeyVersion: 'original',
     issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 600_000).toISOString() };
   return { scope, store, fetcher, calls, values, config, binding, target,
+    issue: async (resource: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      calls.push(String(resource));
+      const request = JSON.parse(String(init?.body)), now = new Date();
+      const issued = { ...body, ...request, issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 600_000).toISOString() };
+      const correlationId = new Headers(init?.headers).get('x-dharma-correlation-id')!;
+      return Response.json({ ok: true, certificate: { ...issued, signature: signCanonicalObject(issued, signer.privateKey) },
+        duplicate: false, correlationId }, { headers: { 'x-dharma-correlation-id': correlationId } });
+    },
+    shortCertificate: () => {
+      const issued = { ...body, expiresAt: new Date(Date.now() + 30_000).toISOString() };
+      return { ...issued, signature: signCanonicalObject(issued, signer.privateKey) };
+    },
     certificate: { ...body, signature: signCanonicalObject(body, signer.privateKey) } };
 }
 
@@ -123,4 +135,36 @@ test('lost status responses resume the same original pending request after trans
   assert.equal(after.nextSequence, f.config.nextSequence + 1);
   for (const [account, value] of before) assert.equal(f.values.get(account), value);
   await assert.rejects(readFile(pendingPath), { code: 'ENOENT' });
+});
+test('grant-free issuance cannot consume the business sequence, and pending status resumes unchanged', async t => {
+  const f = await fixture(t), before = new Map(f.values), sequences: string[] = [];
+  let lost = true;
+  const network: typeof fetch = async (resource, init) => {
+    if (String(resource).includes('/transport-continuity')) return f.issue(resource, init);
+    sequences.push(new Headers(init?.headers).get('x-dharma-sequence')!);
+    if (lost) { lost = false; throw new TypeError('Fixture status response lost'); }
+    return f.fetcher(resource, init);
+  };
+  await assert.rejects(verifyDemoDevice(f.scope, await createDemoDeviceTransport(f.scope, { store: f.store, fetcher: network })), /response lost/);
+  const pendingPath = `${scopePath(f.scope, f.scope.hqUrl)}.pending-status.json`;
+  const pendingBefore = await readFile(pendingPath, 'utf8');
+  const deps = await createDemoDeviceTransport(f.scope, { store: f.store, fetcher: network });
+  await deps.connectTransport(f.target);
+  assert.equal(await readFile(pendingPath, 'utf8'), pendingBefore);
+  assert.equal(JSON.parse(await readFile(scopePath(f.scope, f.scope.hqUrl), 'utf8')).nextSequence, f.config.nextSequence);
+  await verifyDemoDevice(f.scope, deps);
+  assert.deepEqual(sequences, [String(f.config.nextSequence), String(f.config.nextSequence)]);
+  assert.equal(JSON.parse(await readFile(scopePath(f.scope, f.scope.hqUrl), 'utf8')).nextSequence, f.config.nextSequence + 1);
+  for (const [account, value] of before) assert.equal(f.values.get(account), value);
+});
+test('routine status refreshes near-expiry transport autonomously before unchanged signed work', async t => {
+  const f = await fixture(t), before = new Map(f.values);
+  await acceptDemoTransport(f.shortCertificate(), f.binding,
+    { transportOrigin: f.target, requestNonce: f.certificate.requestNonce }, { store: f.store });
+  const network: typeof fetch = (resource, init) => String(resource).includes('/transport-continuity') ? f.issue(resource, init) : f.fetcher(resource, init);
+  await verifyDemoDevice(f.scope, await createDemoDeviceTransport(f.scope, { store: f.store, fetcher: network }));
+  assert.equal(f.calls.length, 2);
+  assert.ok(f.calls[0]!.includes('/transport-continuity')); assert.ok(f.calls[1]!.includes('/status'));
+  assert.equal(JSON.parse(await readFile(scopePath(f.scope, f.scope.hqUrl), 'utf8')).nextSequence, f.config.nextSequence + 1);
+  for (const [account, value] of before) assert.equal(f.values.get(account), value);
 });
