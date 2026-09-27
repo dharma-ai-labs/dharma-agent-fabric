@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promi
 import { dirname, resolve } from 'node:path';
 import { loadOrCreateDeviceIdentity, normalizeHqUrl, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { verifyInitialServerSigningKeyset, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
+import { acceptDemoSigningUpdate, recoverDemoSigningEnrollment, resolveDemoSigningTrust, type DemoSigningDependencies } from './demoSigningTrust.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE = /^[A-Za-z0-9_-]{43}$/;
@@ -97,9 +98,12 @@ export function scopePath(input: DemoDeviceScope, origin: string) {
   return resolve(input.stateRoot, 'demo', scope, 'device.json');
 }
 
-export async function loadDemoSigningTrust(input: DemoDeviceScope) {
-  const config = JSON.parse(await readFile(scopePath(input, normalizeHqUrl(input.hqUrl)), 'utf8')) as DemoDeviceConfig;
+export async function loadDemoSigningTrust(input: DemoDeviceScope, deps: DemoSigningDependencies = {}) {
+  const origin = normalizeHqUrl(input.hqUrl);
+  const configPath = scopePath(input, origin);
+  const config = JSON.parse(await readFile(configPath, 'utf8')) as DemoDeviceConfig;
   if (config.schema !== 'dharma.demo-device/v1' || !config.signedReady
+    || config.hqUrl !== origin || !UUID.test(config.deviceId)
     || config.organizationId !== input.organizationId || config.repositoryId !== input.repositoryId
     || config.normalizedRepository !== input.normalizedRepository
     || config.installationId !== input.installationId
@@ -107,12 +111,20 @@ export async function loadDemoSigningTrust(input: DemoDeviceScope) {
     || !config.serverSigningKeyset) {
     throw new Error('Demo signing trust is not pinned to this approved device. Re-enroll through browser approval.');
   }
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: origin,
+    organizationId: `${input.organizationId}:${input.repositoryId}`,
+    installationId: input.installationId, store: deps.store });
+  if (config.publicKeyEd25519 !== identity.publicKeyEd25519) {
+    throw new Error('Demo signing trust does not match its protected device identity.');
+  }
+  const trusted = await resolveDemoSigningTrust(config, deps);
+  if (trusted.serverPublicKeyEd25519 !== config.serverPublicKeyEd25519
+    || JSON.stringify(trusted.serverSigningKeyset) !== JSON.stringify(config.serverSigningKeyset)) {
+    await writePrivateJson(configPath, trusted);
+  }
   const publicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
-    x: config.serverPublicKeyEd25519 }, format: 'jwk' });
-  const verification = verifyInitialServerSigningKeyset(
-    config.serverSigningKeyset, publicKey, input.organizationId);
-  if (!verification.ok) throw new Error(`Demo signing trust is invalid: ${verification.reason}.`);
-  return { publicKey, keyset: config.serverSigningKeyset, deviceId: config.deviceId };
+    x: trusted.serverPublicKeyEd25519 }, format: 'jwk' });
+  return { publicKey, keyset: trusted.serverSigningKeyset!, deviceId: config.deviceId };
 }
 
 async function writePrivateJson(path: string, value: unknown) {
@@ -143,9 +155,10 @@ function approvalUri(value: unknown, origin: string, input: DemoDeviceConnectOpt
 }
 
 function signedStatusRequest(origin: string, input: DemoDeviceScope,
-  deviceId: string, privateJwk: JsonWebKey, sequence: number) {
+  deviceId: string, privateJwk: JsonWebKey, sequence: number, signingGeneration?: number) {
   const url = new URL(`/api/demo/fabric/repositories/${input.repositoryId}/status`, origin);
   url.searchParams.set('orgId', input.organizationId);
+  if (signingGeneration !== undefined) url.searchParams.set('signingGeneration', String(signingGeneration));
   const sessionId = randomUUID();
   const messageId = randomUUID();
   const timestamp = new Date().toISOString();
@@ -173,7 +186,7 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
   const origin = normalizeHqUrl(input.hqUrl);
   const configPath = scopePath(input, origin);
   const pendingPath = `${configPath}.pending-status.json`;
-  const config = JSON.parse(await readFile(configPath, 'utf8')) as DemoDeviceConfig;
+  let config = JSON.parse(await readFile(configPath, 'utf8')) as DemoDeviceConfig;
   if (config.schema !== 'dharma.demo-device/v1' || config.hqUrl !== origin
     || config.organizationId !== input.organizationId || config.repositoryId !== input.repositoryId
     || config.normalizedRepository !== input.normalizedRepository
@@ -187,21 +200,26 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
   if (config.publicKeyEd25519 !== identity.publicKeyEd25519) {
     throw new Error('Demo device key does not match its protected local identity.');
   }
+  if (config.serverSigningKeyset) config = await resolveDemoSigningTrust(config, { store: deps.store });
   let hasPending = false;
   let pending = signedStatusRequest(origin, input, config.deviceId,
-    identity.privateJwk, config.nextSequence);
+    identity.privateJwk, config.nextSequence, config.serverSigningKeyset?.generation);
   try {
     const existing = JSON.parse(await readFile(pendingPath, 'utf8')) as typeof pending;
-    if (existing.deviceId !== config.deviceId || existing.url !== pending.url
+    const existingUrl = new URL(existing.url);
+    existingUrl.searchParams.delete('signingGeneration');
+    const expectedUrl = new URL(pending.url);
+    expectedUrl.searchParams.delete('signingGeneration');
+    if (existing.deviceId !== config.deviceId || existingUrl.toString() !== expectedUrl.toString()
       || !Number.isSafeInteger(existing.sequence) || existing.sequence < config.nextSequence
       || !Number.isFinite(Date.parse(existing.createdAt))) {
       throw new Error('Pending Demo device status does not match this identity.');
     }
     hasPending = true;
-    pending = Date.now() - Date.parse(existing.createdAt) < 4 * 60_000
+    pending = Date.now() - Date.parse(existing.createdAt) < 4 * 60_000 && existing.url === pending.url
       ? existing
       : signedStatusRequest(origin, input, config.deviceId,
-        identity.privateJwk, existing.sequence);
+        identity.privateJwk, existing.sequence, config.serverSigningKeyset?.generation);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw new Error('Pending Demo device status is invalid; preserve it for recovery.', { cause: error });
@@ -224,7 +242,8 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
       .filter((sequence) => sequence >= config.nextSequence);
     let recovered = false;
     for (const sequence of candidates) {
-      pending = signedStatusRequest(origin, input, config.deviceId, identity.privateJwk, sequence);
+      pending = signedStatusRequest(origin, input, config.deviceId, identity.privateJwk, sequence,
+        config.serverSigningKeyset?.generation);
       try {
         status = await requestStatus();
         recovered = true;
@@ -244,6 +263,12 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
   config.nextSequence = pending.sequence + 1;
   await writePrivateJson(configPath, config);
   await unlink(pendingPath).catch(() => {});
+  // Sequence consumption is saved even when a delivered trust update is rejected.
+  // No acknowledgement or package activation occurs until protected storage confirms it.
+  if (status.signingTrustUpdate !== undefined) {
+    config = await acceptDemoSigningUpdate(config, status.signingTrustUpdate, { store: deps.store });
+    await writePrivateJson(configPath, config);
+  }
   return { ok: true as const, stage: 'device_signed_ready' as const,
     organizationId: input.organizationId, repositoryId: input.repositoryId,
     normalizedRepository: input.normalizedRepository, deviceId: config.deviceId,
@@ -276,6 +301,8 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
   let deviceId = '';
   let serverPublicKeyEd25519 = '';
   let serverSigningKeyset: TrustedServerSigningKeyset | undefined;
+  let signingTrustUpdate: unknown;
+  let enrollmentApproval: unknown;
   let transientFailures = 0;
   while (Date.now() < deadline) {
     let polled: Record<string, unknown>;
@@ -309,6 +336,8 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
         createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: serverPublicKeyEd25519 }, format: 'jwk' }),
         input.organizationId);
       if (!verification.ok) throw new Error(`Demo enrollment signing trust was rejected: ${verification.reason}.`);
+      signingTrustUpdate = polled.signingTrustUpdate;
+      enrollmentApproval = polled.enrollmentApproval;
       break;
     }
     if (polled.status !== 'pending') throw new Error(`Demo device approval ended: ${String(polled.status || 'unknown')}.`);
@@ -317,23 +346,66 @@ export async function connectDemoDevice(input: DemoDeviceConnectOptions,
   if (!deviceId) throw new Error('Demo device approval timed out. Resume from the same prompt while its grant is valid.');
   const configPath = scopePath(input, origin);
   try {
-    const existing = JSON.parse(await readFile(configPath, 'utf8')) as DemoDeviceConfig;
-    if (existing.deviceId !== deviceId || existing.publicKeyEd25519 !== identity.publicKeyEd25519) {
+    let existing = JSON.parse(await readFile(configPath, 'utf8')) as DemoDeviceConfig;
+    if (existing.schema !== 'dharma.demo-device/v1' || existing.hqUrl !== origin
+      || existing.organizationId !== input.organizationId || existing.repositoryId !== input.repositoryId
+      || existing.normalizedRepository !== input.normalizedRepository || existing.installationId !== input.installationId
+      || existing.deviceId !== deviceId || existing.publicKeyEd25519 !== identity.publicKeyEd25519) {
       throw new Error('Existing Demo device belongs to another approved identity.');
     }
-    if (existing.serverPublicKeyEd25519 && existing.serverPublicKeyEd25519 !== serverPublicKeyEd25519) {
-      throw new Error('Existing Demo signing root differs. Use supported browser-authorized recovery.');
+    if (existing.serverSigningKeyset) {
+      try { existing = await resolveDemoSigningTrust(existing, { store: deps.store }); }
+      catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith('Demo signing trust rejected: expired.')) throw error;
+        existing = await recoverDemoSigningEnrollment(existing, { serverPublicKeyEd25519, serverSigningKeyset },
+          enrollmentApproval, { store: deps.store });
+        if (signingTrustUpdate !== undefined) {
+          existing = await acceptDemoSigningUpdate(existing, signingTrustUpdate, { store: deps.store });
+        }
+      }
+      await writePrivateJson(configPath, existing);
     }
-    await writePrivateJson(configPath, { ...existing, serverPublicKeyEd25519, serverSigningKeyset });
+    // Repeated approval polling must not replace a newer protected generation
+    // with the enrollment predecessor. Signed status reconciles from its head.
+    if (!existing.serverSigningKeyset) {
+      let restored = { ...existing, serverPublicKeyEd25519, serverSigningKeyset };
+      if (signingTrustUpdate !== undefined) restored = await acceptDemoSigningUpdate(restored, signingTrustUpdate, { store: deps.store });
+      await writePrivateJson(configPath, restored);
+    }
     return verifyDemoDevice(input, deps);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  await writePrivateJson(configPath, { schema: 'dharma.demo-device/v1',
+  let config: DemoDeviceConfig = { schema: 'dharma.demo-device/v1',
     hqUrl: origin, organizationId: input.organizationId, repositoryId: input.repositoryId,
     normalizedRepository: input.normalizedRepository, installationId: input.installationId,
     deviceId, publicKeyEd25519: identity.publicKeyEd25519,
     enrolledAt: new Date().toISOString(), signedReady: false, nextSequence: 1,
-    serverPublicKeyEd25519, serverSigningKeyset });
+    serverPublicKeyEd25519, serverSigningKeyset };
+  const pendingEnrollmentPath = `${configPath}.pending-enrollment.json`;
+  try {
+    const pending = JSON.parse(await readFile(pendingEnrollmentPath, 'utf8')) as DemoDeviceConfig;
+    if (Object.keys(pending).length !== Object.keys(config).length
+      || Object.keys(pending).some(key => !Object.hasOwn(config, key))
+      || pending.schema !== config.schema || pending.signedReady !== false || pending.nextSequence !== 1
+      || !Number.isFinite(Date.parse(pending.enrolledAt)) || !pending.serverSigningKeyset
+      || (['hqUrl', 'organizationId', 'repositoryId', 'normalizedRepository', 'installationId',
+        'deviceId', 'publicKeyEd25519', 'serverPublicKeyEd25519'] as const).some(key => pending[key] !== config[key])) {
+      throw new Error('Pending Demo enrollment does not match the approved identity. Preserve it for recovery.');
+    }
+    config = pending;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  // Persist the credential-free enrollment binding before the protected trust
+  // write. A restart can recover its exact timestamp from this intent record.
+  await writePrivateJson(pendingEnrollmentPath, config);
+  const predecessorGeneration = config.serverSigningKeyset!.generation;
+  config = await resolveDemoSigningTrust(config, { store: deps.store });
+  if (signingTrustUpdate !== undefined && config.serverSigningKeyset!.generation === predecessorGeneration) {
+    config = await acceptDemoSigningUpdate(config, signingTrustUpdate, { store: deps.store });
+  }
+  await writePrivateJson(configPath, config);
+  await unlink(pendingEnrollmentPath);
   return verifyDemoDevice(input, deps);
 }

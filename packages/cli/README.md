@@ -31,6 +31,47 @@ is sent. An acknowledged message proves delivery, not that the recipient agent
 used or correctly applied the answer. The Demo peer transport is separate from
 the signed package, knowledge, Atlas, and autonomous-update readiness gates.
 
+## Signing Upgrade Proof Preparation
+
+For a reviewed Demo signing-consumer upgrade, an operator supplies the bounded
+`dharma.signing-upgrade-context/v1` review JSON for the exact organization and
+repository. It identifies the candidate, predecessor, installed preload hash,
+unchanged original-client inventory, current and requested consumer versions,
+and a proof expiry no more than 15 minutes away. This file is a review request,
+not authorization. Never put a grant, credential or private key in it.
+
+```bash
+dharma demo signing-client-proof --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --review-context <review.json>
+dharma demo signing-client-proof --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --review-context <review.json> --submit
+dharma demo signing-owner-proof --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote> --review-context <review.json>
+```
+
+`--submit` records only an original enrolled client's signing-upgrade proof. It
+uses the existing device key and still-valid protected preload, verifies the
+exact server receipt, and preserves the same pending proof for a grant-free
+retry after a lost response. Run the same command with the same review context
+to resume; do not delete the pending proof or change trust files. A recorded
+proof is not activation. Owner proofs still require explicit ordinary-session
+browser review; `signing-owner-proof --submit` is rejected. Expired trust requires
+browser-authorized re-enrollment, not a locally extended anchor.
+
+Both commands verify the current Git remote, use the existing enrolled device
+and protected, still-valid preload, and read versions from the actual installed
+CLI/contracts packages. `--dry-run` verifies the repository scope and reports
+only a plan; it does not attest installed trust or issue a signature.
+
+Without `--submit`, the JSON result has `stage: "proof_prepared"` and
+`submitted: false`. It contains
+the device signature and source hash, not enrollment credentials. Preparing an
+owner proof does not prove owner authority or approve rotation: the current
+owner must separately review and confirm it in the ordinary browser session.
+The server must independently check current access, preload and inventory for
+every submitted source and final registration. Only client `--submit` sends the
+proof. Neither command rotates or activates keys, extends trust, replaces an original client, alters
+financial records, or bypass browser approval. Missing OS credentials or a
+missing protected signing anchor fail without recreating them. Expired trust requires supported
+browser-authorized re-enrollment, never editing local trust files.
+
 ## Autonomous organization setup
 
 Requires Node.js 22.20.0 through 24.x.

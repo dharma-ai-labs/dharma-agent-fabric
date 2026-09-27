@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/demo-enrollment-approval/v1",
+  "title": "Browser-authorized Demo device enrollment approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryId", "participantId", "deviceId", "enrollmentId", "publicKeyEd25519", "approvedAt", "expiresAt"],
+  "properties": {
+    "schema": { "const": "dharma.demo-enrollment-approval/v1" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9]+$", "maxLength": 200 },
+    "repositoryId": { "type": "string", "format": "uuid" },
+    "participantId": { "type": "string", "format": "uuid" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "enrollmentId": { "type": "string", "format": "uuid" },
+    "publicKeyEd25519": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+    "approvedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" }
+  }
+}
