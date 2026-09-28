@@ -126,7 +126,7 @@ function memoryStore(): SecureSecretStore {
 async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boolean;
   loseFirstUpload?: boolean; packagePublished?: boolean; candidatePublished?: boolean;
   activePackage?: boolean | 'valid'; loseFirstAck?: boolean; automaticPublication?: boolean;
-  remoteSkill?: boolean; corruptSource?: boolean } = {}) {
+  remoteSkill?: boolean; corruptSource?: boolean; staleSigner?: boolean } = {}) {
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-package-'));
   const workspace = await mkdtemp(resolve(tmpdir(), 'dharma-demo-source-'));
   await writeFile(resolve(workspace, 'README.md'), 'Approved source evidence.\n');
@@ -238,7 +238,8 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
     }
     if (url.pathname.endsWith('/packages/active')) return Response.json({ ok: true,
       organizationId, repositoryId, repositoryPackageState: options.activePackage ? 'published' : 'pending',
-      package: release ? { releaseId: release.releaseId, envelope: release.envelope,
+      package: release ? { releaseId: release.releaseId, envelope: options.staleSigner
+        ? { ...release.envelope, signature: 'expired-signature' } : release.envelope,
         bundle: release.bundle, index: release.index } : options.activePackage ? {
         releaseId: '90000000-0000-4000-8000-000000000001',
         envelope: { descriptor: { policyHash: sourceAuthorization.policyHash,
@@ -246,6 +247,13 @@ async function fixture(options: { loseFirstScope?: boolean; sourcePolicy?: boole
           releaseId: '90000000-0000-4000-8000-000000000001' } },
         bundle: {}, index: {},
       } : null });
+    if (url.pathname.endsWith('/signing-epoch-republish')) {
+      assert.equal(options.staleSigner, true);
+      assert.deepEqual(JSON.parse(body), { expectedReleaseId: release?.releaseId });
+      return Response.json({ ok: true, organizationId, repositoryId,
+        candidateId: '80000000-0000-4000-8000-000000000003',
+        state: 'accepted', correlationId: 'epoch-republish-test' }, { status: 202 });
+    }
     if (release && url.pathname.includes('/packages/') && url.pathname.includes('/chunks/')) {
       const parts = url.pathname.split('/');
       const fileIndex = Number(parts.at(-2));
@@ -434,6 +442,18 @@ test('a published package cannot install without the browser-pinned signing anch
   await assert.rejects(demoRepositoryPackage({ scope: f.scope, workspace: f.workspace },
     { store: f.store, fetcher: f.fetcher }), /signing trust is not pinned/i);
   assert.equal(f.uploads.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
+});
+
+test('an enrolled client queues epoch republication without installing an old-key package', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true,
+    activePackage: 'valid', staleSigner: true });
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace },
+    { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.stage, 'demo_repository_package_republishing');
+  assert.equal(result.candidateId, '80000000-0000-4000-8000-000000000003');
+  assert.equal(result.ready, false);
+  assert.equal(f.acknowledgements.length, 0);
   await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')));
 });
 

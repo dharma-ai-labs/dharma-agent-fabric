@@ -586,10 +586,29 @@ export async function demoRepositoryPackage(input: {
       throw new Error('Published Demo package has no verified source parent.');
     }
     const nativeSkillDirectory = input.nativeSkillDirectory ?? resolve(input.workspace, '.agents/skills');
-    const installed = await installActiveDemoPackage({ scope,
-      workspaceId: view.workspaceId, provider: input.provider ?? 'codex',
-      nativeSkillDirectory,
-      authorization: sourceAuthorization }, deps);
+    let installed: Awaited<ReturnType<typeof installActiveDemoPackage>>;
+    try {
+      installed = await installActiveDemoPackage({ scope,
+        workspaceId: view.workspaceId, provider: input.provider ?? 'codex',
+        nativeSkillDirectory,
+        authorization: sourceAuthorization }, deps);
+    } catch (error) {
+      if (!(error instanceof Error)
+        || error.message !== 'Demo release is not signed by a currently trusted organization key.') throw error;
+      const recovery = await signedJson(scope, 'POST',
+        `${root}/signing-epoch-republish`, { expectedReleaseId: view.activeReleaseId }, deps);
+      if (recovery.organizationId !== scope.organizationId || recovery.repositoryId !== scope.repositoryId
+        || !UUID.test(String(recovery.candidateId || ''))
+        || !['accepted', 'processing', 'published', 'blocked'].includes(String(recovery.state))) {
+        throw new Error('Demo signing-epoch recovery receipt is incomplete.');
+      }
+      return { ok: true, stage: 'demo_repository_package_republishing',
+        repositoryId: scope.repositoryId, repositoryPackageState: 'published',
+        candidateId: recovery.candidateId, candidateState: recovery.state,
+        errorCode: recovery.errorCode ?? null,
+        correlationId: recovery.correlationId, ready: false,
+        activationState: 'signed_delivery_pending' };
+    }
     if (installed && 'policyTransition' in installed) {
       if (installed.releaseId !== view.activeReleaseId) {
         throw new Error('Demo active release changed during policy transition.');
