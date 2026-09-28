@@ -42,6 +42,24 @@ function memoryStore(): SecureSecretStore {
   };
 }
 
+test('ordinary and exact study task polls use distinct signed payloads', async () => {
+  const sent: Array<{ route: string; body: unknown }> = [];
+  const receiver = {
+    signedPost: async (route: string, body: unknown) => {
+      sent.push({ route, body });
+      return { ok: true, task: null };
+    },
+  };
+  await AgentFabricClient.prototype.pollTask.call(receiver as unknown as AgentFabricClient, 120);
+  await AgentFabricClient.prototype.pollTask.call(receiver as unknown as AgentFabricClient, 600,
+    '3b671bac-7ec8-4809-b8f3-1ddfb3e08b20');
+  assert.deepEqual(sent, [
+    { route: '/agent-fabric/tasks/poll', body: { leaseSeconds: 120 } },
+    { route: '/agent-fabric/tasks/poll', body: { leaseSeconds: 600,
+      studyExpectedTaskId: '3b671bac-7ec8-4809-b8f3-1ddfb3e08b20' } },
+  ]);
+});
+
 test('repository candidate uploads are content-bearing but status reads are not', () => {
   const root = '/api/v1/orgs/org_a/agent-fabric/repository-agents/57f61652-a5eb-46e4-930c-9478cd4a9c31/package-candidates';
   assert.equal(isContentBearingPath(root), true);

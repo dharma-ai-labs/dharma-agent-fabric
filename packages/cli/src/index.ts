@@ -40,6 +40,7 @@ import {
 import { CLI_USAGE } from './usage.js';
 import { superviseRelay } from './relaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, relayAutostartStatus, startRelayAutostart } from './relayAutostart.js';
+import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
@@ -4712,8 +4713,10 @@ async function finalizeRecoveredSignedTaskTrajectories(
 async function executeOneTask(
   fabric: AgentFabricClient,
   leaseSeconds: number,
+  exactStudyTask?: { taskId: string; workspaceId: string },
 ): Promise<Record<string, unknown>> {
-  const polled = await fabric.pollTask(leaseSeconds);
+  const polled = await fabric.pollTask(leaseSeconds, exactStudyTask?.taskId);
+  if (exactStudyTask) assertStudyExactPoll(polled, exactStudyTask.taskId, exactStudyTask.workspaceId);
   const taskRow = polled.task as { envelope?: TaskEnvelope } | null | undefined;
   if (!taskRow?.envelope) return { ok: true, task: null };
   const task = taskRow.envelope;
@@ -4853,13 +4856,14 @@ async function runOneTask(flags: Map<string, string | boolean>): Promise<Output>
     && (!requestedWorkspaceId || item.workspaceId === requestedWorkspaceId)
   ));
   if (!selectedWorkspace) throw new Error('Task policy must be the canonical policy of one registered workspace.');
+  const studyTaskId = studyTaskIdFromFlags(flags, selectedWorkspace.workspaceId);
   const policy = await loadVerifiedWorkspacePolicy(policyPath, selectedWorkspace.workspaceId);
   const fabric = await client();
-  const recoveredTaskTrajectories = await finalizeRecoveredSignedTaskTrajectories(
-    fabric,
-    policy,
+  const recoveredTaskTrajectories = studyTaskId ? [] : await finalizeRecoveredSignedTaskTrajectories(
+    fabric, policy,
   );
-  const result = await executeOneTask(fabric, Number(flags.get('lease-seconds') || 120));
+  const result = await executeOneTask(fabric, Number(flags.get('lease-seconds') || 120),
+    studyTaskId ? { taskId: studyTaskId, workspaceId: selectedWorkspace.workspaceId } : undefined);
   return recoveredTaskTrajectories.length ? { ...result, recoveredTaskTrajectories } : result;
 }
 
