@@ -195,6 +195,7 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
 
 export async function enableRelayAutostart(options: RelayAutostartOptions & {
   workspace: string; launcher: string; policy: string | null; version: string;
+  preserveStandardAnchor?: boolean;
 }): Promise<RelayAutostartState> {
   const platform = options.platform || process.platform;
   if (platform !== 'linux' && platform !== 'win32') {
@@ -208,13 +209,17 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     throw new Error('Existing relay autostart belongs to a different operating system.');
   }
   // Demo scopes share a standard service when one already owns this user's startup entry.
-  const policy = options.policy ?? previous?.policy ?? null;
-  const workspace = options.policy === null && previous?.policy ? previous.workspace : options.workspace;
+  const preserve = options.preserveStandardAnchor && previous?.policy !== null && Boolean(previous);
+  if (preserve && previous!.version !== options.version) {
+    throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
+  }
+  const policy = preserve ? previous!.policy : options.policy ?? previous?.policy ?? null;
+  const workspace = preserve || (options.policy === null && previous?.policy) ? previous!.workspace : options.workspace;
   const registration: Registration = {
     ...(policy === null ? { schema: 'dharma.relay-autostart/v2' as const, mode: 'demo-only' as const, policy: null }
       : { schema: 'dharma.relay-autostart/v1' as const, policy: safeLine(policy) }),
     backend: platform === 'linux' ? 'systemd-user' : 'windows-task',
-    launcher: safeLine(options.launcher),
+    launcher: safeLine(preserve ? previous!.launcher : options.launcher),
     workspace: safeLine(workspace), version: options.version,
     taskName: platform === 'win32' ? taskName(options.home) : null,
   };
@@ -243,6 +248,10 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   if (platform === 'win32' && previous) {
     await run('powershell.exe', encodedPowerShell(windowsTaskLookup(previous)
       + `if ($null -ne $task) { ${windowsTaskGuard(previous, options.home)} }`));
+  }
+  if (preserve) {
+    const status = await relayAutostartStatus(options);
+    if (status.state === 'enabled') return status;
   }
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   await mkdir(dirname(registrationPath(options.home)), { recursive: true, mode: 0o700 });
