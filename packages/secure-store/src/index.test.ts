@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +14,42 @@ test('platform backends identify their security boundary', () => {
   assert.equal(secureStoreInternals.windowsStore().backend, 'windows-credential-manager');
   assert.equal(secureStoreInternals.linuxStore().backend, 'linux-secret-service');
   assert.equal(secureStoreInternals.macosStore().backend, 'macos-keychain');
+});
+
+test('Windows fresh reads reuse the helper but never cache a credential', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-fresh-read-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const counter = join(root, 'starts');
+  const valuePath = join(root, 'value');
+  await writeFile(valuePath, 'original');
+  const bridge = `
+    const fs = require('node:fs');
+    fs.appendFileSync(${JSON.stringify(counter)}, 'x');
+    const valuePath = ${JSON.stringify(valuePath)};
+    const value = () => fs.existsSync(valuePath) ? fs.readFileSync(valuePath, 'utf8') : null;
+    let received = false;
+    const lines = require('node:readline').createInterface({input: process.stdin});
+    lines.on('line', raw => {
+      received = true;
+      const request = JSON.parse(raw);
+      const current = value();
+      process.stdout.write(JSON.stringify({id: request.id, status: current === null ? 3 : 0, value: current}) + '\\n');
+    });
+    lines.on('close', () => {
+      if (!received) { const current = value(); if (current === null) process.exitCode = 3;
+        else process.stdout.write(current); }
+    });
+  `;
+  const spec = { command: process.execPath, prefixArgs: ['-e', bridge, '--'],
+    timeoutMs: 2_500, retryAttempts: 1, freshReadBroker: true };
+  const store = secureStoreInternals.processCachedStore(secureStoreInternals.windowsStore(undefined, spec));
+  assert.equal(await store.getFresh!('fresh-fixture'), 'original');
+  await writeFile(valuePath, 'rotated\n"quoted"');
+  assert.equal(await store.getFresh!('fresh-fixture'), 'rotated\n"quoted"');
+  await rm(valuePath);
+  assert.equal(await store.getFresh!('fresh-fixture'), null);
+  assert.equal(await store.get('fresh-fixture'), null);
+  assert.equal(await readFile(counter, 'utf8'), 'x');
 });
 
 test('WSL launches Windows Credential Manager through the interop bridge', () => {

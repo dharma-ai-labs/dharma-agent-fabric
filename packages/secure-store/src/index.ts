@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createWindowsFreshReader } from './windowsFreshRead.js';
 
 export interface SecureSecretStore {
   backend: 'windows-credential-manager' | 'macos-keychain' | 'linux-secret-service';
@@ -119,6 +120,7 @@ interface WindowsCommandSpec {
   prefixArgs: string[];
   timeoutMs: number;
   retryAttempts: number;
+  freshReadBroker?: boolean;
 }
 
 function windowsCommandSpec(platform = process.platform): WindowsCommandSpec {
@@ -144,6 +146,9 @@ function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec
   const commandSpec = commandSpecOverride ?? (command
     ? { command, prefixArgs: [], timeoutMs: 5_000, retryAttempts: 3 }
     : windowsCommandSpec());
+  const reader = commandSpecOverride?.freshReadBroker === true
+    || !commandSpecOverride && !command && process.platform === 'win32'
+    ? createWindowsFreshReader(commandSpec) : null;
   const invoke = (script: string, account: string, secret?: string) => withTransientWindowsRetry(
     () => run(commandSpec.command, [
       ...commandSpec.prefixArgs,
@@ -159,6 +164,7 @@ function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec
     backend: 'windows-credential-manager',
     async get(account) {
       assertAccount(account);
+      if (reader) return reader.read(account);
       const result = await invoke(windowsRead, account);
       if (result.code === 3) return null;
       if (result.code !== 0) throw new Error(`Windows Credential Manager failed: ${result.stderr.trim()}`);
