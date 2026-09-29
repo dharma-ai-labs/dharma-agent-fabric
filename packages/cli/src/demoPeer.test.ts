@@ -210,14 +210,16 @@ test('the CLI lock rejects overlapping Demo operations on one local device', asy
   const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-peer-lock-'));
   const input = scope(stateRoot);
   let release: (() => void) | undefined;
-  const first = withDemoDeviceLock(input, () => new Promise<void>((done) => { release = done; }));
+  let entered!: () => void;
+  const started = new Promise<void>((done) => { entered = done; });
+  const first = withDemoDeviceLock(input, () => new Promise<void>((done) => { release = done; entered(); }));
   const lockPath = `${scopePath(input, hqUrl)}.lock`;
-  for (let attempts = 0; attempts < 20; attempts += 1) {
-    try { await stat(lockPath); break; }
-    catch { await new Promise((done) => setTimeout(done, 10)); }
-  }
+  // A newly opened file does not mean its owner callback has entered yet.
+  await Promise.race([started, first]);
+  await stat(lockPath);
   await assert.rejects(withDemoDeviceLock(input, async () => 'overlap'), /busy/);
-  release?.();
+  assert.ok(release);
+  release();
   await first;
   assert.equal(await withDemoDeviceLock(input, async () => 'available'), 'available');
 });
