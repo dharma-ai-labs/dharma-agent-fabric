@@ -47,12 +47,14 @@ test('repository connect endpoint role state is exact and revisioned', () => {
   assert.throws(() => canonicalEndpointRole({ revision: 0, profileHash: `sha256:${'d'.repeat(64)}` }), /invalid/);
 });
 
-test('one prompt submits initial knowledge only for an absent package and derives a role without flags', async () => {
+test('one prompt submits absent or blocked initial knowledge and derives a role without flags', async () => {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const onboard = source.slice(source.indexOf('async function onboard('), source.indexOf('async function evidenceSync('));
   assert.match(onboard, /canonicalPackage\.state === 'absent'/);
-  assert.match(onboard, /canonicalPackage\.state === 'absent' \|\| refreshPolicy/);
-  assert.match(onboard, /snapshot: initialSnapshot, initialRepository: canonicalPackage\.state === 'absent'/);
+  assert.match(onboard, /canonicalPackage\.state === 'blocked' && canonicalPackage\.generation === 0/);
+  assert.match(onboard, /canonicalPackage\.state === 'absent' \|\| refreshPolicy \|\| retryBlockedInitial/);
+  assert.match(onboard, /snapshot: initialSnapshot, initialRepository: canonicalPackage\.generation === 0/);
+  assert.match(onboard, /blockedCandidate:/);
   assert.match(onboard, /: await adoptRepositoryCandidate\(/);
   assert.match(onboard, /const derivedRole = deriveRepositoryRole\(/);
   assert.match(onboard, /const roleInput = roleRequested \?/);

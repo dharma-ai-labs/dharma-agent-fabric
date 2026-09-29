@@ -93,6 +93,48 @@ test('repository candidate rejects non-canonical upload timestamps before transp
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('one blocked initial candidate can be retried without another grant or unbounded resubmission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-recovery-'));
+  const calls: string[] = [];
+  const idsByAttempt = [
+    '77f61652-a5eb-46e4-930c-9478cd4a9c31',
+    '87f61652-a5eb-46e4-930c-9478cd4a9c31',
+  ];
+  try {
+    const transport = {
+      signedPost: async (_route: string, value: unknown) => {
+        const body = value as Record<string, unknown>;
+        calls.push('POST');
+        return { ok: true, organizationId: 'org_fixture', candidate: {
+          candidateId: idsByAttempt[calls.length - 1], operationId: body.operationId,
+          snapshotHash: body.sourceSnapshotHash, state: 'accepted', releaseId: null,
+        } };
+      },
+      signedGet: async () => {
+        calls.push('GET');
+        const stored = JSON.parse(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'));
+        return { ok: true, organizationId: 'org_fixture', candidate: {
+          candidateId: stored.candidateId, operationId: stored.operationId,
+          snapshotHash: stored.snapshotHash, state: 'blocked', releaseId: null,
+        } };
+      },
+    };
+    const input = { transport, outboxRoot: join(root, 'outbox'), scope: { organizationId: 'org_fixture', ...ids },
+      snapshot: await snapshot(root), initialRepository: true };
+    const initial = await synchronizeRepositoryCandidate(input);
+    const recovery = { ...input, blockedCandidate: { ...initial, state: 'blocked' as const } };
+    const retried = await synchronizeRepositoryCandidate(recovery);
+    assert.notEqual(retried.operationId, initial.operationId);
+    assert.notEqual(retried.candidateId, initial.candidateId);
+    const replay = await synchronizeRepositoryCandidate(recovery);
+    assert.equal(replay.operationId, retried.operationId);
+    assert.equal(replay.candidateId, retried.candidateId);
+    assert.deepEqual(calls, ['POST', 'POST', 'GET']);
+    await assert.rejects(() => synchronizeRepositoryCandidate({ ...input, blockedCandidate: initial }),
+      /blocked initial publication/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('reconciled updates pin the latest source in the signed upload and durable outbox', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-parent-'));
   const parent = `sha256:${'a'.repeat(64)}`;
