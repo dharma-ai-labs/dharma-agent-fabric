@@ -2919,8 +2919,17 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
         captureProvenance: captureProvenance(session.endedAt),
       });
     });
+    const disclosureFailures = capsules.map((capsule) => {
+      try {
+        return containsDisallowedLocalPath(capsule) ? 'local_path_disclosure_forbidden' : null;
+      } catch {
+        return 'local_path_inspection_depth_exceeded';
+      }
+    }).filter((reason) => reason !== null);
     automaticDisclosure = {
-      ready: true,
+      ready: disclosureFailures.length === 0,
+      blockedCapsuleCount: disclosureFailures.length,
+      reasonCodes: [...new Set(disclosureFailures)].sort(),
       disclosureClass: 'automatic_capsule',
       disclosureMode: capsules[0]?.automaticDisclosureMode ?? policy.evidence.automaticDisclosure?.mode ?? 'local_analysis',
       consentReceiptId: policy.evidence.automaticDisclosure?.consentReceiptId ?? null,

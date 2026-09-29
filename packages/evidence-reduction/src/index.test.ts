@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { buildTrajectoryCapsule, containsDisallowedLocalPath, trajectoryCapsuleHash } from './index.js';
+import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash } from './index.js';
 
 const policy: OrganizationPolicy = {
   schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: 'rev_1',
@@ -532,6 +532,87 @@ test('serialized payload, body, message, and content fields cannot hide excluded
     assert.equal(encoded.includes('/repo/.env'), false, field);
     assert.equal(capsule.redactionReceipt.excludedPaths, 1, field);
   }
+});
+
+test('serialized JSON text cannot hide newline-prefixed local paths from the capsule guard', () => {
+  for (const field of ['text', 'output', 'customResult']) {
+    for (const path of ['/tmp/fabric-redaction-repro', 'C:\\Users\\customer\\result', '\\\\server\\share\\result', 'file:///tmp/result']) {
+      const raw = { [field]: JSON.stringify({ output: `Synthetic result\n${path}`, ok: true }) };
+      const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+      assert.equal(containsDisallowedLocalPath(raw), true);
+      const reduced = redactValue(raw, stats) as Record<string, string>;
+      assert.equal(containsDisallowedLocalPath(reduced), false, `${field}:${path}`);
+      assert.equal(JSON.parse(reduced[field]!).ok, true);
+      assert.ok(stats.classes.has('local_path'));
+      assert.ok(stats.redactedValues > 0);
+      assert.equal(raw[field], JSON.stringify({ output: `Synthetic result\n${path}`, ok: true }));
+    }
+  }
+});
+
+test('nested serialized JSON arrays redact sensitive fields and escaped paths', () => {
+  const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const raw = { text: JSON.stringify([{ nested: JSON.stringify({ password: 'synthetic-secret-value',
+    output: 'Results\n/tmp/hidden', url: 'https://dharma-ai.io/docs' }) }]) };
+  const reduced = redactValue(raw, stats) as { text: string };
+  const nested = JSON.parse(JSON.parse(reduced.text)[0].nested);
+  assert.equal(nested.password, '[REDACTED:sensitive_field]');
+  assert.equal(nested.url, 'https://dharma-ai.io/docs');
+  assert.equal(containsDisallowedLocalPath(reduced), false);
+  assert.equal(JSON.stringify(reduced).includes('synthetic-secret-value'), false);
+});
+
+test('serialized text preserves configured excluded-path omission', () => {
+  const native = { text: JSON.stringify({ path: '/repo/.env', output: 'not permitted' }) };
+  assert.equal(referencesExcludedPath(native, ['**/.env']), true);
+  assert.equal(referencesExcludedPath({ text: JSON.stringify(['private/.env']) }, ['**/.env']), true);
+  const capsule = buildTrajectoryCapsule({
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test',
+    policy: customerAuthorizedPolicy(['**/.env']), rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 200,
+    session: { provider: 'codex', sessionId: 'excluded_text', sourcePath: '/private/session.jsonl', workspace: '/repo',
+      coverage: 'observed', startedAt: '2026-09-29T00:00:00.000Z', endedAt: '2026-09-29T00:00:01.000Z',
+      records: [{ native, sourcePath: '/private/session.jsonl', line: 1, workspace: '/repo',
+        timestamp: '2026-09-29T00:00:01.000Z', kind: 'tool_result' }] },
+  });
+  assert.equal(capsule.redactionReceipt.excludedPaths, 1);
+  assert.equal(JSON.stringify(capsule).includes('not permitted'), false);
+});
+
+test('serialized JSON depth remains bounded without disclosing its terminal secret', () => {
+  let raw: unknown = { password: 'terminal-secret-value', output: '/tmp/terminal' };
+  for (let index = 0; index < 66; index += 1) raw = { text: raw };
+  const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const reduced = redactValue({ text: JSON.stringify(raw) }, stats);
+  assert.ok(stats.classes.has('maximum_redaction_depth'));
+  assert.equal(JSON.stringify(reduced).includes('terminal-secret-value'), false);
+  assert.equal(JSON.stringify(reduced).includes('/tmp/terminal'), false);
+  assert.throws(() => containsDisallowedLocalPath(reduced), /depth limit/);
+});
+
+test('malformed serialized JSON falls back to string redaction', () => {
+  const stats = { classes: new Set<string>(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+  const reduced = redactValue({ text: '{broken\n/tmp/result\napi_key=synthetic-key-value' }, stats);
+  assert.equal(containsDisallowedLocalPath(reduced), false);
+  assert.equal(JSON.stringify(reduced).includes('synthetic-key-value'), false);
+  assert.ok(JSON.stringify(reduced).includes('broken'));
+});
+
+test('customer-authorized serialized output is redacted before hashing and remains deterministic', () => {
+  const native = { payload: { output: [{ text: JSON.stringify({ output: 'Synthetic result\n/tmp/fabric-redaction-repro' }) }] } };
+  const session = { provider: 'codex' as const, sessionId: 'serialized_output', sourcePath: '/private/source.jsonl',
+    workspace: '/repo', coverage: 'observed' as const,
+    startedAt: '2026-09-29T00:00:00.000Z', endedAt: '2026-09-29T00:00:01.000Z',
+    records: [{ native, sourcePath: '/private/source.jsonl', line: 1, workspace: '/repo',
+      timestamp: '2026-09-29T00:00:01.000Z', kind: 'tool_result' }] };
+  const input = { organizationId: 'org_test', deviceId: 'device_test', workspaceId: 'workspace_test', session,
+    policy: customerAuthorizedPolicy(), rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 300,
+    createdAt: '2026-09-29T00:00:02.000Z' };
+  const capsule = buildTrajectoryCapsule(input);
+  assert.equal(containsDisallowedLocalPath(capsule), false);
+  assert.ok(capsule.redactionReceipt.classes.includes('local_path'));
+  assert.equal(capsule.capsuleHash, trajectoryCapsuleHash(capsule));
+  assert.equal(capsule.capsuleHash, buildTrajectoryCapsule(input).capsuleHash);
+  assert.ok(native.payload.output[0]!.text.includes('fabric-redaction-repro'));
 });
 
 test('bounded expansion redacts file URIs and local paths while preserving web URLs and semantic text', async () => {
