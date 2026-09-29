@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,7 +11,7 @@ const contents = (version: string) => ({ shell: `#!/bin/sh\nexec npm exec --yes 
   windows: `@echo off\r\nnpm exec --yes -- @dharma-ai-labs/agent-fabric@${version} %*\r\n` });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-runtime-upgrade-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-runtime-upgrade-')));
   const home = join(root, 'profile'), workspace = join(root, 'repo');
   await mkdir(join(workspace, '.dharma', 'bin'), { recursive: true });
   await mkdir(join(home, 'relay'), { recursive: true });
@@ -103,6 +103,18 @@ test('another workspace startup cannot be redirected by upgrade', async () => {
   const f = await fixture();
   f.deps.inspectStartup = async () => ({ version: '0.2.116', workspace: join(f.input.workspace, 'other') });
   await assert.rejects(upgradeRelayRuntime(f.input, f.deps), /workspace_conflict/);
+  assert.deepEqual(f.calls, ['stopped']);
+});
+
+test('noncanonical workspace paths remain rejected without launcher or startup mutation', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture();
+  const alias = join(f.input.home, 'repo-alias');
+  await symlink(f.input.workspace, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  f.deps.inspectStartup = async () => ({ version: '0.2.116', workspace: alias });
+  await assert.rejects(upgradeRelayRuntime({ ...f.input, workspace: alias }, f.deps), /launcher_conflict/);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), f.old.shell);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma.cmd'), 'utf8'), f.old.windows);
   assert.deepEqual(f.calls, ['stopped']);
 });
 
