@@ -26,8 +26,9 @@ interface RegistrationFields {
   taskName: string | null;
 }
 
-type Registration = RegistrationFields & ({ schema: 'dharma.relay-autostart/v1'; policy: string }
+export type RelayAutostartRegistration = RegistrationFields & ({ schema: 'dharma.relay-autostart/v1'; policy: string }
   | { schema: 'dharma.relay-autostart/v2'; mode: 'demo-only'; policy: null });
+type Registration = RelayAutostartRegistration;
 
 export type RelayAutostartState = {
   state: 'enabled' | 'disabled' | 'unavailable' | 'unsupported';
@@ -313,4 +314,33 @@ export async function startRelayAutostart(options: RelayAutostartOptions) {
       + `Start-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')}`));
   }
   return { state: 'start_requested' as const, backend: registration.backend, version: registration.version };
+}
+
+export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions) {
+  const registration = await readRegistration(options.home);
+  if (!registration || !await ownsStartupFile(options, registration)) {
+    throw new Error('autostart_conflict: a verified owned startup entry is required.');
+  }
+  const platform = options.platform || process.platform;
+  if (platform !== (registration.backend === 'systemd-user' ? 'linux' : 'win32')) {
+    throw new Error('autostart_conflict: startup registration belongs to another operating system.');
+  }
+  if (registration.backend === 'windows-task') {
+    await (options.run || defaultRunner)('powershell.exe', encodedPowerShell(
+      windowsTaskLookup(registration) + windowsTaskGuard(registration, options.home)));
+  }
+  return registration;
+}
+
+export async function stopRelayAutostart(options: RelayAutostartOptions) {
+  const registration = await inspectOwnedRelayAutostart(options);
+  const run = options.run || defaultRunner;
+  if (registration.backend === 'systemd-user') {
+    await run('systemctl', ['--user', 'stop', UNIT_NAME]);
+  } else {
+    await run('powershell.exe', encodedPowerShell(windowsTaskLookup(registration)
+      + windowsTaskGuard(registration, options.home)
+      + `Stop-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')}`));
+  }
+  return { state: 'stop_requested' as const, backend: registration.backend, version: registration.version };
 }

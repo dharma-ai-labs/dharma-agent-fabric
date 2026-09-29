@@ -39,7 +39,8 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { superviseRelay } from './relaySupervisor.js';
-import { disableRelayAutostart, enableRelayAutostart, relayAutostartStatus, startRelayAutostart } from './relayAutostart.js';
+import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
@@ -1611,6 +1612,92 @@ async function installStableRepositoryLauncher(workspace: string) {
   await chmod(shellPath, 0o700);
   await writeFile(cmdPath, contents.windows, { mode: 0o600 });
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
+}
+
+async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Output> {
+  const config = await readDeviceConfig();
+  if (!config) throw new Error('relay_upgrade_enrollment_required');
+  if (flags.has('dry-run') && flags.has('apply')) throw new Error('relay_upgrade_flags_conflict');
+  const workspace = await realpath(String(flags.get('workspace') || '.'));
+  const selected = selectDeviceWorkspace(await registry(), {
+    organizationId: config.organizationId, deviceId: config.deviceId, path: workspace,
+  });
+  if (!selected) throw new Error('relay_upgrade_workspace_unregistered');
+  const home = dharmaHome();
+  const startup = await inspectOwnedRelayAutostart({ home });
+  const expectedLauncher = resolve(workspace, '.dharma', 'bin', process.platform === 'win32' ? 'dharma.cmd' : 'dharma');
+  if (startup.workspace !== workspace || startup.launcher !== expectedLauncher
+    || startup.policy !== resolve(workspace, '.dharma', 'approved-policy.json')) {
+    throw new Error('relay_upgrade_workspace_conflict');
+  }
+  const assertStopped = async () => {
+    if (await relaySupervisorProcessState(home) !== 'stopped' || await relayProcessState(home) !== 'stopped') {
+      throw new Error('relay_upgrade_runtime_busy: finish current work, then stop the owned relay before upgrading.');
+    }
+    const entries = await readdir(resolve(home, 'sessions'), { withFileTypes: true }).catch(error => {
+      if (error.code === 'ENOENT') return []; throw error;
+    });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,47}$/.test(entry.name)) continue;
+      if (await pidProcessState(resolve(home, 'sessions', entry.name, 'service.lock')) !== 'stopped') {
+        throw new Error('relay_upgrade_session_busy: finish and stop the named session before upgrading.');
+      }
+    }
+  };
+  return withRelayStartupMutation(async () => {
+    const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
+      organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
+      dryRun: !flags.has('apply'), rollback: flags.has('rollback') }, {
+      assertStopped, inspectStartup: async () => {
+        const current = await inspectOwnedRelayAutostart({ home });
+        if (current.launcher !== expectedLauncher || current.policy !== startup.policy
+          || current.workspace !== workspace) throw new Error('relay_upgrade_workspace_conflict');
+        return current;
+      },
+      launcherContents: version => stableRepositoryLauncherContents(version,
+        { platform: process.platform, nodeDirectory: dirname(process.execPath) }),
+      legacyLauncherContents: version => stableRepositoryLauncherContents(version),
+      configureStartup: version => enableRelayAutostart({ home, workspace,
+        launcher: startup.launcher, policy: startup.policy, version }),
+      start: () => startRelayAutostart({ home }),
+      stop: async () => {
+        const activationLocks = resolve(home, 'registry', 'skill-activation-locks');
+        const locks = await readdir(activationLocks).catch(error => {
+          if (error.code === 'ENOENT') return []; throw error;
+        });
+        for (const lock of locks) {
+          if (lock.endsWith('.lock') && await pidProcessState(resolve(activationLocks, lock)) !== 'stopped') {
+            throw new Error('relay_upgrade_work_in_progress: recovery must wait for a safe task boundary.');
+          }
+        }
+        const binding = await readFile(resolve(home, 'relay', 'supervisor-workspace.json'), 'utf8')
+          .then(value => JSON.parse(value)).catch(() => null);
+        if (await relaySupervisorProcessState(home) !== 'stopped'
+          && binding?.workspaceId !== selected.workspaceId) throw new Error('relay_upgrade_process_unverified');
+        await stopRelayAutostart({ home });
+        const stopped = await relayStop() as Record<string, unknown>;
+        if (stopped.ok !== true) throw new Error('relay_upgrade_stop_unconfirmed');
+      },
+      verify: async (version, since) => {
+        for (let attempt = 0; attempt < 90; attempt++) {
+          const read = (name: string) => readFile(resolve(home, 'relay', name), 'utf8').catch(() => 'null');
+          const supervisorPid = Number((await read('supervisor.pid')).trim());
+          const relayPid = Number((await read('relay.pid')).trim());
+          const supervisor = JSON.parse(await read('supervisor-workspace.json'));
+          const lastPoll = JSON.parse(await read('last-successful-poll.json'));
+          if (await relaySupervisorProcessState(home) === 'running' && await relayProcessState(home) === 'running'
+            && relayRuntimeObservationReady({ version, workspaceId: selected.workspaceId, since,
+              supervisorPid, relayPid, supervisor, lastPoll, allowLegacyPoll: version !== VERSION })) return;
+          if (attempt < 89) await new Promise(resolveWait => setTimeout(resolveWait, 1000));
+        }
+        throw new Error('relay_upgrade_receiver_unconfirmed');
+      },
+    });
+    const validation = await validateContract(resolve(fileURLToPath(new URL('.', import.meta.url)), 'schemas'),
+      'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
+    if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
+    return receipt;
+  });
 }
 
 export async function waitForRelayReadiness(options: {
@@ -6404,7 +6491,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       const result = await executeOneTask(fabric, leaseSeconds);
       if (Date.now() - lastPollReceiptAt >= 30_000) {
         await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'last-successful-poll.json'), {
-          at: new Date().toISOString(), workspaceId: canonicalWorkspace.workspaceId, version: VERSION,
+          at: new Date().toISOString(), workspaceId: canonicalWorkspace.workspaceId, version: VERSION, pid: process.pid,
         });
         lastPollReceiptAt = Date.now();
       }
@@ -6745,6 +6832,7 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'probe') return probeRelayConnection();
   if (command === 'relay' && subcommand === 'stop') return relayStop();
+  if (command === 'relay' && subcommand === 'upgrade') return relayUpgrade(flags);
   if (command === 'relay' && subcommand === 'autostart') {
     if (positional[2] === 'status') return relayAutostartStatus({ home: dharmaHome() });
     if (positional[2] === 'disable') return withRelayStartupMutation(() => disableRelayAutostart({ home: dharmaHome() }));
