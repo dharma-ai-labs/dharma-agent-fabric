@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
-import { applyServerEvidencePolicy, loadSkillSynchronizationPolicy, materializeWorkspacePolicy, run } from './index.js';
+import { applyServerEvidencePolicy, loadSkillSynchronizationPolicy, materializeWorkspacePolicy, run, skillSync } from './index.js';
 import { saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 
 async function fixture() {
@@ -71,7 +71,7 @@ const cases = [
     mutate: async (f: Awaited<ReturnType<typeof fixture>>) => { await writeFile(f.statePath, JSON.stringify(value)); } })),
 ];
 
-for (const scenario of cases) test(`actual skill sync rejects ${scenario.name} before transport or installation`, async () => {
+for (const dryRun of [false, true]) for (const scenario of cases) test(`actual skill sync${dryRun ? ' dry run' : ''} rejects ${scenario.name} before transport or installation`, async () => {
   const f = await fixture();
   const path = await scenario.mutate(f) || f.policyPath;
   const previousHome = process.env.DHARMA_HOME, previousFetch = globalThis.fetch;
@@ -80,7 +80,8 @@ for (const scenario of cases) test(`actual skill sync rejects ${scenario.name} b
   process.env.DHARMA_HOME = f.home;
   globalThis.fetch = async () => { networkCalls += 1; throw new Error('unexpected_skill_network'); };
   try {
-    await assert.rejects(() => run(['skills', 'sync', '--workspace-id', 'workspace-test', '--provider', 'codex', '--policy', path]), scenario.expected);
+    await assert.rejects(() => run(['skills', 'sync', '--workspace-id', 'workspace-test', '--provider', 'codex', '--policy', path,
+      ...(dryRun ? ['--dry-run'] : [])]), scenario.expected);
     assert.equal(networkCalls, 0);
     assert.deepEqual(await readFile(f.policyPath), before);
     assert.deepEqual(await readFile(f.statePath), stateBefore);
@@ -143,4 +144,42 @@ test('skill policy loader accepts anchored signed scope without discarding local
   } finally {
     if (previousHome === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previousHome;
   }
+});
+
+test('skill sync dry run verifies current scope without transport, activation locks, or installation', async () => {
+  const f = await fixture(), previousHome = process.env.DHARMA_HOME, previousFetch = globalThis.fetch;
+  const values = new Map<string, string>();
+  let networkCalls = 0, credentialWrites = 0;
+  const store: SecureSecretStore = { backend: 'linux-secret-service',
+    get: async account => values.get(account) ?? null,
+    put: async (account, value) => { credentialWrites += 1; values.set(account, value); },
+    delete: async account => { credentialWrites += 1; values.delete(account); } };
+  process.env.DHARMA_HOME = f.home;
+  try {
+    const config = JSON.parse(await readFile(join(f.home, 'device.json'), 'utf8')) as DeviceConfig;
+    await saveDeviceEnrollmentAnchor({ config, store });
+    credentialWrites = 0;
+    const policyBefore = await readFile(f.policyPath), stateBefore = await readFile(f.statePath);
+    globalThis.fetch = async () => { networkCalls += 1; throw new Error('unexpected_skill_network'); };
+    const result = await skillSync(new Map<string, string | boolean>([
+      ['workspace-id', 'workspace-test'], ['provider', 'codex'], ['policy', f.policyPath], ['dry-run', true],
+    ]), store);
+    assert.deepEqual(result, { ok: true, dryRun: true, changed: false,
+      workspaceId: 'workspace-test', provider: 'codex', networkPerformed: false,
+      installedBundleChanged: false, rolloutReadiness: 'not_checked' });
+    assert.equal(networkCalls, 0);
+    assert.equal(credentialWrites, 0);
+    assert.deepEqual(await readFile(f.policyPath), policyBefore);
+    assert.deepEqual(await readFile(f.statePath), stateBefore);
+    await assert.rejects(() => readFile(join(f.home, 'registry', 'skill-activation-locks')), { code: 'ENOENT' });
+    await assert.rejects(() => readFile(join(f.home, 'relay', 'skill-sources')), { code: 'ENOENT' });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousHome === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previousHome;
+  }
+});
+
+test('skill sync rejects contradictory dry-run and apply flags before scope or transport', async () => {
+  await assert.rejects(() => run(['skills', 'sync', '--workspace-id', 'workspace-test', '--provider', 'codex',
+    '--policy', '/absent-policy.json', '--dry-run', '--apply']), /cannot combine --dry-run and --apply/);
 });
