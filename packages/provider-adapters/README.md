@@ -28,15 +28,21 @@ dispatch with `codex_session_sandbox_unqualified`. Do not widen filesystem acces
 or disable the sandbox to work around this gate. This restriction does not change
 ordinary enrollment, relay startup, or the separate provider task interfaces.
 
-Named local Codex work retains bounded, exact-thread/turn notifications in the
-encrypted local vault. Its success or failure receipt references the capture
-hash and explicit coverage; raw notifications are never added to CLI output.
+Named local Codex work retains the exact `turn/start` request and bounded,
+exact-thread/turn notifications in the encrypted local vault. Version 2 captures
+bind that request's text, workspace and restricted permission profile by hash;
+version 1 notification-only captures remain readable. Work prompts containing
+recognizable credentials are rejected before intent persistence or dispatch.
+Its success or failure receipt references hashes and explicit coverage; raw
+requests and notifications are never added to CLI output.
 Early events are attributed only after the provider identifies the turn.
 Missing scope, excluded credentials, interrupted turns and capture limits remain
 visible limitations. Existing raw-evidence retention applies to these captures.
 
-This is turn-notification evidence, not full-session history or an attestation of
-the execution model. `acceptedLearningObservation` remains `false`: local
+The approved evidence outbox includes the request under the existing disclosure
+policy. This is request-and-notification evidence, not retained session context,
+verified skill adoption or an attestation of the execution model.
+`acceptedLearningObservation` remains `false`: local
 completion and capture do not establish server intake, an automatic policy
 counter, a replay evaluation, canary approval or a signed learning release.
 

@@ -8,6 +8,7 @@ import { assertPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import type { ProviderSession, SourceRecord } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import { stripProtectedNativeContent } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 
 export interface NamedSessionEvidenceReceipt {
   schema: 'dharma.named-session-evidence/v1';
@@ -32,6 +33,11 @@ function object(value: unknown): Record<string, unknown> {
 
 function sourceRecords(capture: CodexLocalWorkCapture, workspace: string): SourceRecord[] {
   const records: SourceRecord[] = [], completed = new Set<string>();
+  if (capture.schema === 'dharma.codex-local-work-capture/v2') {
+    records.push({ native: { type: 'user_message', content: capture.request.params.input,
+      providerRequestHash: capture.requestHash }, sourcePath: 'dharma-codex-turn', line: 1,
+      workspace, timestamp: capture.startedAt, kind: 'user_message', coverage: 'partial' });
+  }
   function addItem(item: Record<string, unknown>, receivedAt: string, started: boolean) {
     const type = String(item.type || '');
     const tools = ['commandExecution', 'mcpToolCall', 'dynamicToolCall'];
@@ -75,7 +81,7 @@ export async function queueNamedSessionEvidence(input: {
 }): Promise<NamedSessionEvidenceReceipt> {
   const { capture, binding, vault, policy } = input;
   const valid = await validateContract(join(import.meta.dirname, 'schemas'),
-    'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture);
+    codexWorkCaptureSchemaId(capture), capture);
   if (!valid.ok) throw new Error('named_session_evidence_invalid');
   for (const key of ['organizationId', 'repositoryBindingId', 'workspaceId', 'deviceId', 'endpointId',
     'membershipId', 'provider', 'bindingId'] as const) {
@@ -88,6 +94,16 @@ export async function queueNamedSessionEvidence(input: {
   const eventsHash = `sha256:${createHash('sha256').update(JSON.stringify(capture.events)).digest('hex')}`;
   if (eventsHash !== capture.eventsHash || Date.parse(capture.startedAt) > Date.parse(capture.closedAt)) {
     throw new Error('named_session_evidence_integrity_failed');
+  }
+  if (capture.schema === 'dharma.codex-local-work-capture/v2') {
+    const request = capture.request;
+    if (request.params.threadId !== binding.sessionId || request.params.cwd !== binding.workspaceRoot) {
+      throw new Error('named_session_evidence_scope_mismatch');
+    }
+    if (`sha256:${createHash('sha256').update(JSON.stringify(request)).digest('hex')}` !== capture.requestHash) {
+      throw new Error('named_session_evidence_integrity_failed');
+    }
+    assertCodexWorkPrompt(request.params.input[0].text, true);
   }
   assertPolicy(policy);
   const raw = Buffer.from(JSON.stringify(capture));
@@ -108,7 +124,8 @@ export async function queueNamedSessionEvidence(input: {
     workspaceId: binding.workspaceId, session, policy, rawContentId: captureHash, rawBytes: raw.length,
     rawKind: 'raw-provider-turn' });
   capsule.coverage.missingFields = [...new Set([...capsule.coverage.missingFields.filter(field => field !== 'workspace_on_some_events'),
-    'turn_notifications_only', 'executed_model_unreported', 'applied_skill_unverified', ...capture.limitations])];
+    capture.schema === 'dharma.codex-local-work-capture/v2' ? 'retained_context_unavailable' : 'turn_notifications_only',
+    'executed_model_unreported', 'applied_skill_unverified', ...capture.limitations])];
   capsule.capsuleHash = trajectoryCapsuleHash(capsule);
   const checked = await validateContract(join(import.meta.dirname, 'schemas'),
     'https://schemas.dharma-ai.io/trajectory-capsule/v2', capsule);

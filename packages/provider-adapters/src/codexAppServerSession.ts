@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
-import { createCodexTurnCapture, type CodexTurnEvidenceSink } from './codexTurnCapture.js';
+import { assertCodexWorkPrompt, createCodexTurnCapture, type CodexTurnEvidenceSink, type CodexWorkRequest } from './codexTurnCapture.js';
 export type { CodexLocalWorkCapture, CodexTurnEvidenceSink } from './codexTurnCapture.js';
+export { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from './codexTurnCapture.js';
 import {
   inspectSessionQuestionForBinding,
   verifySessionQuestionForBinding,
@@ -208,6 +209,7 @@ export async function runCodexLocalWork(input: {
   timeoutMs?: number;
   onTurnEvidence?: CodexTurnEvidenceSink;
 }) {
+  assertCodexWorkPrompt(input.prompt);
   const { binding, transport } = input;
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
   if (binding.owner !== 'dharma_bridge' || binding.provider !== 'codex'
@@ -302,13 +304,15 @@ async function runScopedTurn(input: {
   });
   let timer: NodeJS.Timeout | undefined;
   try {
-    const started = object(await transport.request('turn/start', {
+    const params = {
       threadId: binding.threadId,
-      input: [{ type: 'text', text: input.prompt }],
+      input: [{ type: 'text', text: input.prompt }] as [{ type: 'text'; text: string }],
       cwd: binding.workspaceRoot,
-      approvalPolicy: 'never',
+      approvalPolicy: 'never' as const,
       permissions: input.permissions,
-    }));
+    };
+    if (input.capture) input.capture.retainRequest(params as CodexWorkRequest['params']);
+    const started = object(await transport.request('turn/start', params));
     const turnId = object(started.turn).id;
     if (typeof turnId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(turnId)) {
       throw new Error('codex_session_turn_invalid');

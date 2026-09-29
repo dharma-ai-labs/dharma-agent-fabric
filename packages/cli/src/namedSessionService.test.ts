@@ -140,6 +140,17 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         catch { await new Promise(resolveWait => setTimeout(resolveWait, 10)); }
       }
       const workId = randomUUID();
+      const putBlob = vault.putBlob.bind(vault);
+      let secretPersisted = false;
+      vault.putBlob = async (plaintext, kind) => {
+        if (Buffer.from(plaintext).includes(Buffer.from('dhab_PRIVATE_TEST_GRANT'))) secretPersisted = true;
+        return putBlob(plaintext, kind);
+      };
+      await assert.rejects(namedSessionRequest(home, 'implementer', { action: 'work', workId: randomUUID(),
+        prompt: 'Use dhab_PRIVATE_TEST_GRANT for this task.' }), /codex_session_work_credentials_forbidden/);
+      assert.equal(secretPersisted, false);
+      assert.equal(turns.length, 0);
+      vault.putBlob = putBlob;
       if (failWork) {
         await namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Run the public tests.' });
         const failedId = randomUUID();
@@ -163,7 +174,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         assert.equal(capture.workOutcome, 'failed');
         assert.equal(capture.workId, failedId);
         assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
-          'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture)).ok, true);
+          'https://schemas.dharma-ai.io/codex-local-work-capture/v2', capture)).ok, true);
         assert.deepEqual(turns, ['dharma_work', 'dharma_work']);
         return;
       }
@@ -190,7 +201,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         assert.equal(capture.deviceId, identity.deviceId);
         assert.equal(capture.repositoryBindingId, identity.repositoryBindingId);
         assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
-          'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture)).ok, true);
+          'https://schemas.dharma-ai.io/codex-local-work-capture/v2', capture)).ok, true);
         assert.ok(JSON.stringify(capture).includes('RAW_CAPTURE_ONLY_TEST_CANARY'));
         const digest = String(evidence.contentHash).slice(7);
         const stored = await readFile(join(home, 'vault', 'blobs', digest.slice(0, 2), `${digest}.blob`));
