@@ -318,6 +318,87 @@ test('signed Demo package status reports no candidate and does not invent a rele
     f.sequence + 1);
 });
 
+test('Demo package consumes its response before status reconciliation expires an unread body', async () => {
+  const f = await fixture();
+  let pending: Response | null = null;
+  let cancelled = 0;
+  const fetcher: typeof fetch = async (resource, init) => {
+    const status = new URL(String(resource)).pathname.endsWith('/status');
+    if (status && pending && !pending.bodyUsed) {
+      await pending.body!.cancel();
+      cancelled += 1;
+    }
+    const response = await f.fetcher(resource, init);
+    if (!status) pending = response;
+    return response;
+  };
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    statusOnly: true }, { store: f.store, fetcher });
+  assert.equal(result.repositoryPackageState, 'not_connected');
+  assert.equal(cancelled, 0);
+  assert.equal((JSON.parse(await readFile(f.configPath, 'utf8')) as { nextSequence: number }).nextSequence,
+    f.sequence + 1);
+});
+
+test('Demo signed installation consumes scope, bundle, chunks and acknowledgement before reconciliation', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  let pending: Response | null = null;
+  const consumedRoutes: string[] = [];
+  const fetcher: typeof fetch = async (resource, init) => {
+    const route = new URL(String(resource)).pathname;
+    const status = route.endsWith('/status');
+    if (status && pending && !pending.bodyUsed) await pending.body!.cancel();
+    if (status && pending?.bodyUsed) pending = null;
+    const response = await f.fetcher(resource, init);
+    if (!status) { pending = response; consumedRoutes.push(route); }
+    return response;
+  };
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    provider: 'codex', nativeSkillDirectory: resolve(f.workspace, '.agents/skills') },
+  { store: f.store, fetcher });
+  assert.equal(result.installed?.releaseId, f.release?.releaseId);
+  assert.equal(f.acknowledgements.length, 1);
+  assert.ok(consumedRoutes.some(route => route.includes('/chunks/')));
+  assert.ok(consumedRoutes.some(route => route.endsWith('/install-receipts')));
+});
+
+for (const invalid of ['malformed JSON', 'false ok'] as const) {
+  test(`Demo rejects ${invalid} after reconciling the consumed request sequence`, async () => {
+    const f = await fixture();
+    const fetcher: typeof fetch = async (resource, init) => {
+      const response = await f.fetcher(resource, init);
+      if (!new URL(String(resource)).pathname.endsWith('/package-scope')) return response;
+      await response.body!.cancel();
+      return invalid === 'malformed JSON' ? new Response('{', { status: 200 })
+        : Response.json({ ok: false });
+    };
+    await assert.rejects(demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+      statusOnly: true }, { store: f.store, fetcher }), /not a verified JSON receipt/);
+    assert.equal((JSON.parse(await readFile(f.configPath, 'utf8')) as { nextSequence: number }).nextSequence,
+      f.sequence + 1);
+  });
+}
+
+test('Demo refuses an already parsed package response when post-request device authorization fails', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  let scopeReceived = false;
+  const fetcher: typeof fetch = async (resource, init) => {
+    const route = new URL(String(resource)).pathname;
+    if (scopeReceived && route.endsWith('/status')) {
+      return Response.json({ ok: false, error: { code: 'demo_device_revoked',
+        message: 'Device was revoked.' } }, { status: 403 });
+    }
+    const response = await f.fetcher(resource, init);
+    if (route.endsWith('/package-scope')) scopeReceived = true;
+    return response;
+  };
+  await assert.rejects(demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    provider: 'codex', nativeSkillDirectory: resolve(f.workspace, '.agents/skills') },
+  { store: f.store, fetcher }), /demo_device_revoked/);
+  assert.equal(f.acknowledgements.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace, '.agents/skills/dharma-agent-fabric/SKILL.md')), { code: 'ENOENT' });
+});
+
 test('signed Demo package status distinguishes a published release from local installation', async () => {
   const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
   const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,

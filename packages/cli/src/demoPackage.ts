@@ -99,10 +99,11 @@ async function signedJson(input: DemoDeviceScope, method: 'GET' | 'POST', route:
   const response = await (deps.fetcher || fetch)(url, {
     method, headers, body: method === 'POST' ? rawBody : undefined,
   });
+  // Consume the body within its transport deadline; use it only after status verification.
+  const result: unknown = await response.json().catch(() => null);
   // Authentication can reject before consuming a sequence. The signed status
   // reconciles both outcomes without persisting source bytes or guessing.
   await verifyDemoDevice(input, { ...deps, expectedAcceptedSequence: sequence });
-  const result: unknown = await response.json().catch(() => null);
   if (!response.ok) throw apiError(result, response.status);
   if (!result || typeof result !== 'object' || Array.isArray(result)
     || (result as Record<string, unknown>).ok !== true) {
