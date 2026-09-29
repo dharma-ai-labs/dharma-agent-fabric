@@ -38,6 +38,23 @@ test('relay permits the repository-agent control operation', () => {
   assert.equal(parsed.pathname.endsWith('/repository-agents'), true);
 });
 
+test('relay permits only signed POSTs to the exact provider-session operations', () => {
+  for (const name of ['provider-sessions', 'provider-session-questions']) {
+    const pathname = `/api/v1/orgs/org_customer/agent-fabric/${name}`;
+    const parsed = parseRelayRequest({ ...request, pathname });
+    assert.equal(parsed.pathname, pathname);
+    assert.equal(parsed.headers.authorization, undefined);
+    assert.equal(parsed.headers.cookie, undefined);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, method: 'GET', body: '' }), /route_not_allowed/);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, method: 'DELETE' }), /route_not_allowed/);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, headers: {} }), /signed_headers_required/);
+    for (const suffix of ['/all', '/attach', '?admin=true']) {
+      assert.throws(() => parseRelayRequest({ ...request, pathname: `${pathname}${suffix}` }), /route_not_allowed/);
+    }
+    assert.throws(() => parseRelayRequest({ ...request, pathname, body: 'x'.repeat(MAX_RELAY_BODY_BYTES + 1) }), /body_too_large/);
+  }
+});
+
 test('relay permits only bounded repository collaboration and package routes', () => {
   const id = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
   const other = '77f61652-a5eb-46e4-930c-9478cd4a9c31';
