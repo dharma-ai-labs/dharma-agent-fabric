@@ -43,6 +43,8 @@ import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectR
   serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
+import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
+  resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
@@ -3175,6 +3177,60 @@ async function workspaceAdd(flags: Map<string, string | boolean>, positional: st
   };
 }
 
+async function workspaceRecoverRegistry(flags: Map<string, string | boolean>): Promise<Output> {
+  if (flags.has('apply') && flags.has('dry-run')) throw new Error('registry_recovery_flags_conflict');
+  const config = await readDeviceConfig();
+  if (!config) throw new Error('registry_recovery_enrollment_required');
+  const enrollment = await loadDeviceEnrollmentAnchor({ config });
+  const workspace = await realpath(String(flags.get('workspace') || '.'));
+  const home = dharmaHome();
+  const startup = await inspectOwnedRelayAutostart({ home });
+  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
+  const launcher = resolve(workspace, '.dharma', 'bin', process.platform === 'win32' ? 'dharma.cmd' : 'dharma');
+  if (startup.workspace !== workspace || startup.policy !== policyPath || startup.launcher !== launcher) {
+    throw new Error('registry_recovery_startup_anchor_mismatch');
+  }
+  const policy = await loadOrganizationPolicy(policyPath);
+  const workspaceId = policy.serverAuthorization?.workspaceId;
+  if (!workspaceId || policy.organizationId !== config.organizationId) {
+    throw new Error('registry_recovery_policy_scope_mismatch');
+  }
+  verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: config.organizationId, workspaceId });
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+  const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+  if (!remote) throw new Error('registry_recovery_repository_identity_missing');
+  const repositoryFingerprint = sourceRepositoryFingerprint(remote).fingerprint;
+  const api = await organizationApi(new Map());
+  const projection = resolveRegistryRecoveryProjection({ organizationId: config.organizationId,
+    deviceId: config.deviceId, workspaceId, policyRevision: policy.revision, repositoryFingerprint,
+    workspaces: await api.listWorkspaces(), repositoryAgents: await api.listRepositoryAgents() });
+  const entry: WorkspaceRecord = {
+    workspaceId, organizationId: config.organizationId,
+    name: projection.name || basename(workspace), path: workspace,
+    routeHash: `sha256:${createHash('sha256').update(workspace).digest('hex')}`,
+    repositoryRemoteHash: repositoryFingerprint, repositoryIdentityVersion: 'normalized-v1',
+    repositoryAgentId: projection.repositoryAgentId, repositoryBindingId: projection.repositoryBindingId,
+    endpointId: projection.endpointId, repositoryAgentKey: projection.repositoryAgentKey,
+    controlBranch: projection.controlBranch, defaultBranch: projection.defaultBranch, status: 'active',
+  };
+  const path = workspaceRegistryPath();
+  const original = await inspectRegistryRecoveryFile<WorkspaceRecord>(path);
+  const planned = appendRecoveredWorkspace(original.records, entry);
+  if (!flags.has('apply')) return { ok: true, dryRun: true, workspaceId, organizationId: config.organizationId,
+    deviceId: config.deviceId, registryState: original.kind, registryHash: original.hash,
+    backupRequired: original.bytes !== null && !planned.alreadyPresent, alreadyPresent: planned.alreadyPresent,
+    serverMutation: false, newEnrollment: false, startupMutation: false, signedPackageMutation: false };
+  const release = await acquirePidLock(`${path}.mutation.lock`, 10_000,
+    'Workspace registry is busy; preserve it for recovery.');
+  try {
+    const recovered = await applyRegistryRecoveryFile({ home, path,
+      expectedKind: original.kind, expectedHash: original.hash, entry });
+    return { ok: true, ...recovered, workspaceId, registryStateBefore: original.kind,
+      serverMutation: false, newEnrollment: false, startupMutation: false, signedPackageMutation: false };
+  } finally { await release(); }
+}
+
 async function discoverRepositoryAt(path: string) {
   const canonical = await realpath(path);
   const topLevel = await gitValue(canonical, ['rev-parse', '--show-toplevel']);
@@ -4162,6 +4218,14 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
   const repositoryKey = typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null;
   const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(workspace, repositoryKey);
+  const registryState = await inspectRegistryRecoveryFile<WorkspaceRecord>(workspaceRegistryPath());
+  if (registryState.kind === 'corrupt_zero') {
+    const anchor = await inspectOwnedRelayAutostart({ home: dharmaHome() });
+    if (anchor.policy === null) throw new Error('registry_recovery_startup_anchor_mismatch');
+    await workspaceRecoverRegistry(new Map<string, string | boolean>([
+      ['workspace', anchor.workspace], ['apply', true],
+    ]));
+  }
   let registered = selectDeviceWorkspace(await registry(), {
     organizationId,
     deviceId: config.deviceId,
@@ -6948,6 +7012,7 @@ export async function run(argv: string[]): Promise<Output> {
     };
   }
   if (command === 'workspace' && subcommand === 'add') return workspaceAdd(flags, positional.slice(2));
+  if (command === 'workspace' && subcommand === 'recover-registry') return workspaceRecoverRegistry(flags);
   if (command === 'workspace' && subcommand === 'sync') return workspaceSync(flags, positional.slice(2));
   if (command === 'capture' || (command === 'evidence' && subcommand === 'capture')) return capture(flags);
   if (command === 'evidence' && subcommand === 'capture-batch') return capture(flags, true);

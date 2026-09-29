@@ -29,6 +29,29 @@ trust, install a signed bundle, publish content or establish activation. Resume
 the exact released onboarding command afterward and require its completion
 receipt. Keep backups private and retain them until recovery is qualified.
 
+## Recover a damaged local workspace registry
+
+An enrolled device with an owned startup anchor may report
+`workspace_registry_invalid` if `registry/workspaces.json` is zero bytes. The
+grant-free onboarding resume attempts bounded recovery of that anchor. It
+verifies the protected device enrollment, owned startup entry, signed policy,
+repository fingerprint and active current-device server binding before writing
+one local registry row. It preserves the original file in a private backup and
+does not change server state, enrollment, startup or signed packages.
+
+For an explicit preflight from the **actual startup-anchor checkout**:
+
+```powershell
+dharma workspace recover-registry --workspace . --dry-run
+```
+
+Use `--apply` only if the plan names the expected organization, device and
+workspace. A nonempty malformed registry, foreign binding, mismatched source,
+unowned startup entry or stale signed policy stops without repair. Do not edit
+or replace registry/trust files by hand. Restoring local registration is not a
+complete onboarding or a relay upgrade; verify the signed package and full
+readiness receipt after the supported grant-free resume.
+
 ## Demo peer collaboration
 
 After a recipient approves a Demo device, run these commands from the exact

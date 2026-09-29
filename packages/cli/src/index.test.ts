@@ -528,6 +528,22 @@ test('login fails closed before replacing an enrollment from another organizatio
   }
 });
 
+test('registry recovery command refuses an unenrolled device before any file change', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'registry-recovery-unenrolled-'));
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    await assert.rejects(run(['workspace', 'recover-registry', '--workspace', home, '--dry-run']),
+      /registry_recovery_enrollment_required/);
+    await assert.rejects(run(['workspace', 'recover-registry', '--workspace', home, '--apply']),
+      /registry_recovery_enrollment_required/);
+    await assert.rejects(readFile(join(home, 'registry', 'workspaces.json')), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
 test('posts action enforcement before a consequential task completion event', async () => {
   const events: string[] = [];
   const acknowledgement = {

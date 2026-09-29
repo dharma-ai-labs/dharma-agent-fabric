@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import { appendRecoveredWorkspace, resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -84,6 +86,67 @@ function bootstrapDependencies(onboarding: Onboarding) {
   };
   return { dependencies, calls };
 }
+
+test('registry recovery command plans before applying one current-device anchor row', async () => {
+  const workspace = resolve('/fixture', 'anchor');
+  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
+  const launcher = resolve(workspace, '.dharma', 'bin', process.platform === 'win32' ? 'dharma.cmd' : 'dharma');
+  const path = resolve('/fixture', 'home', 'registry', 'workspaces.json');
+  const calls: string[] = [];
+  const scope = { organizationId: 'org_fixture', deviceId: 'device_fixture', workspaceId: 'workspace_fixture',
+    policyRevision: 'revision_fixture', repositoryFingerprint: 'sha256:remote_fixture' };
+  const dependencies = {
+    readDeviceConfig: async () => ({ organizationId: scope.organizationId, deviceId: scope.deviceId }),
+    loadDeviceEnrollmentAnchor: async () => ({ serverPublicKeyEd25519: 'server_key' }),
+    realpath: async () => workspace,
+    dharmaHome: () => resolve('/fixture', 'home'),
+    inspectOwnedRelayAutostart: async () => ({ workspace, policy: policyPath, launcher }),
+    resolve, basename, createHash, process,
+    loadOrganizationPolicy: async () => ({ organizationId: scope.organizationId, revision: scope.policyRevision,
+      serverAuthorization: { workspaceId: scope.workspaceId } }),
+    verifyServerAuthorizedPolicy: () => { calls.push('signed_policy'); },
+    assertWorkspaceAuthorizationCurrent: async () => { calls.push('replay_state'); },
+    gitValue: async () => 'git@github.com:fixture/anchor.git',
+    sourceRepositoryFingerprint: () => ({ fingerprint: scope.repositoryFingerprint }),
+    organizationApi: async () => ({
+      listWorkspaces: async () => ({ ok: true, organizationId: scope.organizationId, workspaces: [{
+        id: scope.workspaceId, device_id: scope.deviceId, status: 'active', policy_revision: scope.policyRevision,
+        repository_binding_id: 'binding_fixture',
+      }] }),
+      listRepositoryAgents: async () => ({ ok: true, organizationId: scope.organizationId, repositoryAgents: [{
+        id: 'binding_fixture', status: 'active', source_repository_fingerprint: scope.repositoryFingerprint,
+        organization_agent_id: 'agent_fixture', control_branch: 'agent-fabric/control',
+        agent: { id: 'agent_fixture', agent_key: 'agent_key' },
+        workspaces: [{ id: scope.workspaceId, device_id: scope.deviceId,
+          repository_binding_id: 'binding_fixture', status: 'active' }],
+        endpoints: [],
+      }] }),
+    }),
+    resolveRegistryRecoveryProjection,
+    workspaceRegistryPath: () => path,
+    inspectRegistryRecoveryFile: async () => ({ kind: 'corrupt_zero', hash: 'sha256:empty',
+      bytes: Buffer.alloc(0), records: [] }),
+    appendRecoveredWorkspace,
+    acquirePidLock: async () => { calls.push('lock'); return async () => { calls.push('unlock'); }; },
+    applyRegistryRecoveryFile: async (input: { entry: { workspaceId: string }; expectedHash: string }) => {
+      assert.equal(input.entry.workspaceId, scope.workspaceId);
+      assert.equal(input.expectedHash, 'sha256:empty');
+      calls.push('apply');
+      return { state: 'recovered', backup: 'private-backup', restoredCount: 1 };
+    },
+  };
+  const command = await caller('workspaceRecoverRegistry', dependencies);
+  const dryRun = await command(new Map<string, string | boolean>([['workspace', workspace], ['dry-run', true]]));
+  assert.equal(dryRun.dryRun, true);
+  assert.equal(dryRun.backupRequired, true);
+  assert.equal(dryRun.serverMutation, false);
+  assert.deepEqual(calls, ['signed_policy', 'replay_state']);
+  const applied = await command(new Map<string, string | boolean>([['workspace', workspace], ['apply', true]]));
+  assert.equal(applied.state, 'recovered');
+  assert.equal(applied.serverMutation, false);
+  assert.deepEqual(calls, ['signed_policy', 'replay_state', 'signed_policy', 'replay_state',
+    'lock', 'apply', 'unlock']);
+});
 
 test('bootstrap preserves only a verified current-device startup anchor before enabling another repository', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
