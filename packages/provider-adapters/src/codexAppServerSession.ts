@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
+import { createCodexTurnCapture, type CodexTurnEvidenceSink } from './codexTurnCapture.js';
+export type { CodexLocalWorkCapture, CodexTurnEvidenceSink } from './codexTurnCapture.js';
 import {
   inspectSessionQuestionForBinding,
   verifySessionQuestionForBinding,
@@ -204,6 +206,7 @@ export async function runCodexLocalWork(input: {
   writeRoots: string[];
   toolHandler?: CodexToolHandler;
   timeoutMs?: number;
+  onTurnEvidence?: CodexTurnEvidenceSink;
 }) {
   const { binding, transport } = input;
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
@@ -235,9 +238,19 @@ export async function runCodexLocalWork(input: {
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
   if (!await input.budget.reserve(input.workId, input.maximumProviderCostCents)) throw new Error('codex_session_budget_unavailable');
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
-  const result = await runScopedTurn({ ...input, timeoutMs, permissions: 'dharma_work',
-    prompt: `Local coding work ${input.workId}: ${input.prompt}\nConsult the installed Agent Fabric manifest, knowledge catalog, lexicon and applicable skills before relevant work. Work only in this repository. Network and broader permissions are unavailable. Report changes and actual test outcomes.` });
-  return { workId: input.workId, bindingId: binding.bindingId, ...result };
+  const capture = input.onTurnEvidence ? createCodexTurnCapture(binding, input.workId) : undefined;
+  let workOutcome: 'completed' | 'failed' = 'failed';
+  try {
+    const result = await runScopedTurn({ ...input, capture, timeoutMs, permissions: 'dharma_work',
+      prompt: `Local coding work ${input.workId}: ${input.prompt}\nConsult the installed Agent Fabric manifest, knowledge catalog, lexicon and applicable skills before relevant work. Work only in this repository. Network and broader permissions are unavailable. Report changes and actual test outcomes.` });
+    workOutcome = 'completed';
+    return { workId: input.workId, bindingId: binding.bindingId, ...result };
+  } finally {
+    if (capture) {
+      try { await input.onTurnEvidence!(capture.finish(workOutcome)); }
+      catch { throw new Error('codex_session_evidence_persistence_failed'); }
+    }
+  }
 }
 
 async function runScopedTurn(input: {
@@ -245,6 +258,7 @@ async function runScopedTurn(input: {
   exclusiveLease: CodexSessionExclusiveLease; timeoutMs: number;
   toolHandler?: CodexToolHandler;
   permissions: 'dharma_bridge' | 'dharma_work'; prompt: string;
+  capture?: ReturnType<typeof createCodexTurnCapture>;
 }) {
   const { transport, binding, timeoutMs } = input;
 
@@ -267,6 +281,7 @@ async function runScopedTurn(input: {
   const arrivals: unknown[] = [];
   let resolveArrival: ((value: unknown) => void) | null = null;
   const unsubscribe = transport.onNotification(event => {
+    input.capture?.observe(event);
     try {
       const notification = object(event), params = object(notification.params);
       if (params.threadId !== binding.threadId) return;
@@ -299,6 +314,7 @@ async function runScopedTurn(input: {
       throw new Error('codex_session_turn_invalid');
     }
     activeTurnId = turnId;
+    input.capture?.bind(turnId);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const event = arrivals.shift() ?? await Promise.race([

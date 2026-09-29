@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createConnection, createServer, type Socket } from 'node:net';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import type { SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
+import { validateContract, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexInboxSession } from './codexInboxSession.js';
 
 export interface NamedSessionRegistration {
@@ -165,15 +165,26 @@ export async function runNamedSessionService(input: {
               const intent = await input.vault.putBlob(Buffer.from(JSON.stringify({ workId: request.workId,
                 prompt: request.prompt, bindingId: binding.bindingId })), 'named-session-work-intent');
               budget.beginWork(request.workId, intent);
+              let nativeEvidence: Record<string, unknown> | null = null;
               try {
                 const result = await input.withActivationBoundary(() => owner!.runWork({ workId: request.workId as string,
-                  prompt: request.prompt as string, maximumProviderCostCents: registration.maximumTurnCostCents }));
-                const blob = await input.vault.putBlob(Buffer.from(JSON.stringify(result)), 'named-session-work');
+                  prompt: request.prompt as string, maximumProviderCostCents: registration.maximumTurnCostCents,
+                  onTurnEvidence: async capture => {
+                    const valid = await validateContract(join(import.meta.dirname, 'schemas'),
+                      'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture);
+                    if (!valid.ok) throw new Error('codex_session_evidence_invalid');
+                    const contentHash = await input.vault.putBlob(Buffer.from(JSON.stringify(capture)), 'raw-provider-turn');
+                    nativeEvidence = { schema: capture.schema, captureId: capture.captureId, contentHash,
+                      coverage: capture.coverage, limitations: capture.limitations, providerTurnState: capture.providerTurnState,
+                      acceptedLearningObservation: false };
+                  } }));
+                const receipt = { ...result, intentHash: intent, nativeEvidence };
+                const blob = await input.vault.putBlob(Buffer.from(JSON.stringify(receipt)), 'named-session-work');
                 budget.finishWork(request.workId, 'completed', blob);
-                await health(); return { ok: true, ...result, completionHash: blob };
+                await health(); return { ok: true, ...receipt, completionHash: blob };
               } catch (error) {
-                const blob = await input.vault.putBlob(Buffer.from(JSON.stringify({ workId: request.workId,
-                  code: error instanceof Error ? error.message : 'named_session_work_failed' })), 'named-session-work-failure');
+                const blob = await input.vault.putBlob(Buffer.from(JSON.stringify({ workId: request.workId, intentHash: intent,
+                  code: error instanceof Error ? error.message : 'named_session_work_failed', nativeEvidence })), 'named-session-work-failure');
                 budget.finishWork(request.workId, 'failed', blob);
                 await health(); throw error;
               }

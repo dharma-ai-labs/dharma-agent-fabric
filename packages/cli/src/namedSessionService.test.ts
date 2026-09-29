@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -32,7 +32,9 @@ test('named session socket paths remain bounded without relaxing identity valida
   assert.ok(Buffer.byteLength(namedSessionPaths('/tmp/dhr', 'reviewer').socket) <= 103);
 });
 
-test('named session serializes local work and signed peer questions with per-turn permissions',
+for (const failWork of [false, true]) test(failWork
+  ? 'named session retains failed native work evidence and its reservation without replay'
+  : 'named session serializes local work and signed peer questions with per-turn permissions',
   { skip: process.platform !== 'linux' }, async () => {
     const home = await mkdtemp(join(tmpdir(), 'dharma-named-'));
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -77,10 +79,16 @@ test('named session serializes local work and signed peer questions with per-tur
           assert.equal(params.approvalPolicy, 'never');
           turns.push(String(params.permissions)); active++; maximumActive = Math.max(maximumActive, active);
           const turnId = randomUUID();
+          const fail = failWork && turns.length === 2;
           setTimeout(() => {
             active--;
+            if (params.permissions === 'dharma_work') for (const listener of listeners) listener({
+              method: 'item/completed', params: { threadId: binding.sessionId, turnId,
+                item: { type: 'commandExecution', output: 'RAW_CAPTURE_ONLY_TEST_CANARY' } },
+            });
             for (const listener of listeners) listener({ method: 'turn/completed', params: { threadId: binding.sessionId,
-              turn: { id: turnId, status: 'completed', items: [{ type: 'agentMessage', phase: 'final_answer', text: 'One tenant-scoped operation.' }] } } });
+              turn: { id: turnId, status: fail ? 'failed' : 'completed',
+                items: fail ? [] : [{ type: 'agentMessage', phase: 'final_answer', text: 'One tenant-scoped operation.' }] } } });
           }, 25);
           return { turn: { id: turnId } };
         }
@@ -119,9 +127,58 @@ test('named session serializes local work and signed peer questions with per-tur
         catch { await new Promise(resolveWait => setTimeout(resolveWait, 10)); }
       }
       const workId = randomUUID();
+      if (failWork) {
+        await namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Run the public tests.' });
+        const failedId = randomUUID();
+        await assert.rejects(namedSessionRequest(home, 'implementer', { action: 'work', workId: failedId,
+          prompt: 'A failing native task.' }), /turn_failed/);
+        controller.abort();
+        await service;
+        const health = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
+        assert.equal(health.lastWork.state, 'failed');
+        assert.equal(health.lastWork.workId, failedId);
+        assert.equal(health.budget.reservedCents, 50);
+        const failure = JSON.parse((await vault.getBlob(health.lastWork.receiptHash)).toString('utf8'));
+        const failedIntent = JSON.parse((await vault.getBlob(failure.intentHash)).toString('utf8'));
+        assert.equal(failedIntent.workId, failedId);
+        assert.equal(failedIntent.prompt, 'A failing native task.');
+        assert.equal(failure.nativeEvidence.acceptedLearningObservation, false);
+        assert.equal(failure.nativeEvidence.providerTurnState, 'failed');
+        const capture = JSON.parse((await vault.getBlob(failure.nativeEvidence.contentHash)).toString('utf8'));
+        assert.equal(capture.workOutcome, 'failed');
+        assert.equal(capture.workId, failedId);
+        assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+          'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture)).ok, true);
+        assert.deepEqual(turns, ['dharma_work', 'dharma_work']);
+        return;
+      }
       const first = namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Run the public tests.' });
       const second = namedSessionRequest(home, 'implementer', { action: 'work', workId: randomUUID(), prompt: 'Check the correction.' });
-      await Promise.all([first, second]);
+      const workReceipts = await Promise.all([first, second]);
+      for (const receipt of workReceipts) {
+        const intent = JSON.parse((await vault.getBlob(String(receipt.intentHash))).toString('utf8'));
+        assert.equal(intent.workId, receipt.workId);
+        assert.equal(intent.bindingId, binding.bindingId);
+        assert.equal('prompt' in receipt, false);
+        const evidence = receipt.nativeEvidence as Record<string, unknown>;
+        assert.equal(evidence.acceptedLearningObservation, false);
+        assert.equal(evidence.coverage, 'observed');
+        assert.equal(JSON.stringify(receipt).includes('RAW_CAPTURE_ONLY_TEST_CANARY'), false);
+        const capture = JSON.parse((await vault.getBlob(String(evidence.contentHash))).toString('utf8'));
+        assert.equal(capture.workId, receipt.workId);
+        assert.equal(capture.providerTurnId, receipt.providerTurnId);
+        assert.equal(capture.deviceId, identity.deviceId);
+        assert.equal(capture.repositoryBindingId, identity.repositoryBindingId);
+        assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+          'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture)).ok, true);
+        assert.ok(JSON.stringify(capture).includes('RAW_CAPTURE_ONLY_TEST_CANARY'));
+        const digest = String(evidence.contentHash).slice(7);
+        const stored = await readFile(join(home, 'vault', 'blobs', digest.slice(0, 2), `${digest}.blob`));
+        assert.equal(stored.includes(Buffer.from('RAW_CAPTURE_ONLY_TEST_CANARY')), false);
+      }
+      for (const entry of await readdir(join(home, 'vault'), { withFileTypes: true })) {
+        if (entry.isFile()) assert.equal((await readFile(join(home, 'vault', entry.name))).includes(Buffer.from('RAW_CAPTURE_ONLY_TEST_CANARY')), false);
+      }
       offered = true;
       for (let n = 0; n < 150 && !replies.length; n++) await new Promise(resolveWait => setTimeout(resolveWait, 10));
       assert.equal(replies.length, 1);
@@ -131,10 +188,18 @@ test('named session serializes local work and signed peer questions with per-tur
       assert.equal(turns.length, 3);
       const health = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
       assert.equal(health.budget.reservedCents, 75);
+      assert.equal(JSON.stringify(health).includes('RAW_CAPTURE_ONLY_TEST_CANARY'), false);
       const completion = JSON.parse((await vault.getBlob(health.lastObservation.completionHash)).toString('utf8'));
       assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
         'https://schemas.dharma-ai.io/provider-session-completion/v1', completion)).ok, true);
       assert.equal((await namedSessionRequest(home, 'implementer', { action: 'status' })).sessionId, binding.sessionId);
+      const retention = await vault.enforceRawEvidenceRetention({ retentionDays: 30,
+        now: new Date(Date.now() + 31 * 86400000) });
+      assert.equal(retention.deleted, 2);
+      for (const receipt of workReceipts) {
+        await assert.rejects(vault.getBlob(String((receipt.nativeEvidence as Record<string, unknown>).contentHash)));
+        assert.ok(await vault.getBlob(String(receipt.completionHash)));
+      }
     } finally { controller.abort(); await service; vault.close(); }
     assert.equal(closed, true);
   });
