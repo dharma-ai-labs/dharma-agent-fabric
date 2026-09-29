@@ -63,8 +63,21 @@ export function resolveRegistryRecoveryProjection(input: {
   const endpoints = Array.isArray(binding.endpoints) ? binding.endpoints : [];
   const matchingEndpoints = endpoints.map(object).filter((row): row is Row => Boolean(row
     && row.workspace_id === input.workspaceId && row.device_id === input.deviceId
-    && row.organization_agent_id === binding.organization_agent_id && row.status === 'active'));
-  if (matchingEndpoints.length > 1) throw new Error('registry_recovery_endpoint_ambiguous');
+    && row.organization_agent_id === binding.organization_agent_id && row.status === 'active'
+    && row.endpoint_kind === 'local_provider' && row.credential_boundary === 'local_device'));
+  if (matchingEndpoints.length === 0) throw new Error('registry_recovery_endpoint_missing');
+  const providerOrder = ['codex', 'claude', 'agy', 'hermes'];
+  if (matchingEndpoints.some(row => typeof row.id !== 'string' || typeof row.provider !== 'string')
+    || new Set(matchingEndpoints.map(row => row.provider)).size !== matchingEndpoints.length) {
+    throw new Error('registry_recovery_endpoint_ambiguous');
+  }
+  matchingEndpoints.sort((left, right) => {
+    const rank = (provider: unknown) => {
+      const index = providerOrder.indexOf(String(provider));
+      return index < 0 ? providerOrder.length : index;
+    };
+    return rank(left.provider) - rank(right.provider) || String(left.id).localeCompare(String(right.id));
+  });
   return {
     repositoryBindingId: binding.id as string,
     repositoryAgentId: binding.organization_agent_id as string,
