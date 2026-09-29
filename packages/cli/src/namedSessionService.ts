@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { validateContract, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexInboxSession } from './codexInboxSession.js';
+import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import type { NamedSessionEvidenceReceipt } from './namedSessionEvidence.js';
 
 export interface NamedSessionRegistration {
   schema: 'dharma.named-session/v1';
@@ -102,6 +104,7 @@ export async function runNamedSessionService(input: {
   authorizeContent: Parameters<typeof openCodexInboxSession>[0]['authorizeContent'];
   localWriteRoots: string[];
   authorizeLocalWork(): Promise<boolean>;
+  queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   withActivationBoundary<T>(operation: () => Promise<T>): Promise<T>;
   signal: AbortSignal;
 }) {
@@ -177,6 +180,26 @@ export async function runNamedSessionService(input: {
                     nativeEvidence = { schema: capture.schema, captureId: capture.captureId, contentHash,
                       coverage: capture.coverage, limitations: capture.limitations, providerTurnState: capture.providerTurnState,
                       acceptedLearningObservation: false };
+                    if (input.queueEvidence) {
+                      let synchronization: NamedSessionEvidenceReceipt;
+                      try {
+                        synchronization = await input.queueEvidence(capture);
+                        const checked = await validateContract(join(import.meta.dirname, 'schemas'),
+                          'https://schemas.dharma-ai.io/named-session-evidence/v1', synchronization);
+                        if (!checked.ok || synchronization.captureHash !== contentHash || synchronization.captureId !== capture.captureId
+                          || synchronization.organizationId !== capture.organizationId || synchronization.deviceId !== capture.deviceId
+                          || synchronization.workspaceId !== capture.workspaceId || synchronization.bindingId !== capture.bindingId
+                          || synchronization.workId !== capture.workId) throw new Error('named_session_evidence_receipt_invalid');
+                      } catch {
+                        // Evidence failure cannot rewrite the actual coding result or authorize another provider turn.
+                        synchronization = { schema: 'dharma.named-session-evidence/v1', organizationId: capture.organizationId,
+                          deviceId: capture.deviceId, workspaceId: capture.workspaceId, bindingId: capture.bindingId,
+                          workId: capture.workId, captureId: capture.captureId, captureHash: contentHash, createdAt: capture.closedAt,
+                          state: 'blocked', trajectoryId: null, capsuleHash: null, code: 'evidence_queue_failed',
+                          acceptedLearningObservation: false };
+                      }
+                      nativeEvidence.synchronization = synchronization;
+                    }
                   } }));
                 const receipt = { ...result, intentHash: intent, nativeEvidence };
                 const blob = await input.vault.putBlob(Buffer.from(JSON.stringify(receipt)), 'named-session-work');
@@ -186,6 +209,7 @@ export async function runNamedSessionService(input: {
                 const blob = await input.vault.putBlob(Buffer.from(JSON.stringify({ workId: request.workId, intentHash: intent,
                   code: error instanceof Error ? error.message : 'named_session_work_failed', nativeEvidence })), 'named-session-work-failure');
                 budget.finishWork(request.workId, 'failed', blob);
+                if (!await owner!.assertActive()) closing = true;
                 await health(); throw error;
               }
             }
@@ -207,7 +231,9 @@ export async function runNamedSessionService(input: {
     });
     await chmod(paths.socket, 0o600); await health();
     while (!closing && !input.signal.aborted) {
-      const result = await enqueue(() => input.withActivationBoundary(() => owner!.runNext()));
+      let result: Awaited<ReturnType<NonNullable<typeof owner>['runNext']>>;
+      try { result = await enqueue(() => input.withActivationBoundary(() => owner!.runNext())); }
+      catch (error) { if (closing || input.signal.aborted) break; throw error; }
       lastObservation = result; await health();
       if (result.state === 'reply_pending') throw new Error('named_session_reply_pending');
       await new Promise<void>(resolveWait => {

@@ -69,6 +69,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   }
   return {
     close,
+    assertActive: owner.assertActive,
     retire: () => close({ retire: true }),
     async runWork(request: Parameters<typeof owner.runWork>[0]) {
       if (stopped) throw new Error('codex_inbox_session_unavailable');

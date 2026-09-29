@@ -76,6 +76,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
   type DemoWatchControlDependencies } from './demoWatchControl.js';
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
+import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
@@ -507,6 +508,9 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
     const digest = /^sha256:[a-f0-9]{64}$/;
     const allowedMissingFields = new Set([
       'workspace_on_some_events', 'events_collapsed_for_size', 'native_payload_collapsed_for_size',
+      'turn_notifications_only', 'executed_model_unreported', 'applied_skill_unverified',
+      'unscoped_notification', 'invalid_notification', 'capture_limit', 'credential_excluded',
+      'turn_unconfirmed', 'terminal_unconfirmed', 'conflicting_turn_identity',
     ]);
     const allowedDisclosedClasses = new Set([
       'tenant_identifier', 'device_identifier', 'workspace_identifier', 'pseudonymous_session_identifier',
@@ -3534,6 +3538,13 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       authorizeLocalWork: async () => {
         const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
         return writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`));
+      },
+      queueEvidence: async capture => {
+        const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        if (!binding) throw new Error('named_session_binding_unavailable');
+        // The existing relay rechecks current authority, disclosure limits and device binding before upload.
+        return queueNamedSessionEvidence({ vault, capture, binding, policy: current });
       },
       openTransport: async () => transport!, channelTransport,
       verifier: { resolvePublicKey: trust.resolvePublicKey, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },

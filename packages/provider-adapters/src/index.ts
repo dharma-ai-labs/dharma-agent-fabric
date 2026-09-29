@@ -1171,4 +1171,4 @@ export const agyAdapter: ProviderAdapter = {
 export const codexAdapter = adapter('codex', 'codex');
 export const claudeAdapter = adapter('claude', 'claude');
 export const providerAdapters: ProviderAdapter[] = [codexAdapter, claudeAdapter, agyAdapter, hermesAdapter];
-export { insideWorkspace, parseAgyHistoryFile, parseAgyTranscriptFile, parseSessionFile };
+export { insideWorkspace, parseAgyHistoryFile, parseAgyTranscriptFile, parseSessionFile, stripProtectedNativeContent };
