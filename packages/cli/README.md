@@ -6,6 +6,29 @@ discovers provider capabilities, keeps full trajectories in an encrypted local
 vault, syncs policy-qualified evidence, executes bounded signed tasks, and
 installs signed Skill releases with receipts and rollback ancestry.
 
+## Recover a committed legacy bootstrap
+
+Older repositories may contain an unsigned installer marker committed for a
+different workspace. Normal onboarding rejects it. An enrolled member can plan
+an explicit migration using the old workspace ID from that marker:
+
+```powershell
+dharma repositories recover-installer --workspace . --organization-id <organization-id> --workspace-id <current-workspace-id> --from-workspace-id <old-workspace-id> --dry-run
+```
+
+After inspecting the plan, replace `--dry-run` with `--apply`. Both modes require
+current enrollment, the canonical device/repository binding, current signed
+workspace policy and live repository-source consent. Recovery accepts only the
+five unchanged, committed bootstrap files for the same repository key. Signed
+bundles, custom files, staged changes, untracked files, symlinks and hardlinks
+are rejected. Windows text checkout conversion is supported.
+
+Apply preserves original bytes under `.dharma/installer-recovery/<id>` and
+replaces only the unsigned installer workspace marker. It does not replace
+trust, install a signed bundle, publish content or establish activation. Resume
+the exact released onboarding command afterward and require its completion
+receipt. Keep backups private and retain them until recovery is qualified.
+
 ## Demo peer collaboration
 
 After a recipient approves a Demo device, run these commands from the exact

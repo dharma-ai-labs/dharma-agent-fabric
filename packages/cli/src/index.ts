@@ -50,6 +50,7 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
+import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -4061,6 +4062,37 @@ The CLI enrolls this device through browser-confirmed Clerk organization consent
   };
 }
 
+async function repositoryInstallerRecoveryCommand(flags: Map<string, string | boolean>) {
+  if (flags.has('apply') === flags.has('dry-run')) throw new Error('Choose exactly one of --apply or --dry-run.');
+  const fromWorkspaceId = required(flags, 'from-workspace-id');
+  const workspaceId = required(flags, 'workspace-id');
+  const workspace = await realpath(String(flags.get('workspace') || '.'));
+  const organizationId = required(flags, 'organization-id');
+  const config = await readDeviceConfig();
+  if (!config || config.organizationId !== organizationId) throw new Error('Recovery requires current organization enrollment.');
+  await loadDeviceEnrollmentAnchor({ config });
+  const identity = await preflightBootstrapWorkspaceIdentity(workspace);
+  const registered = selectLegacyInstallerRecoveryWorkspace(await registry(), { organizationId, deviceId: config.deviceId,
+    path: workspace, repositoryRemoteHash: identity.fingerprint, workspaceId });
+  const repositoryAgentKey = `repo:${identity.fingerprint.slice('sha256:'.length, 'sha256:'.length + 24)}`;
+  if (!registered?.repositoryBindingId || !registered.repositoryAgentId
+    || registered.repositoryAgentKey !== repositoryAgentKey) {
+    throw new Error('Recovery requires the enrolled device canonical repository binding.');
+  }
+  const policy = await loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId);
+  if (policy.organizationId !== organizationId || policy.serverAuthorization?.workspaceId !== registered.workspaceId) {
+    throw new Error('Recovery requires a current signed workspace policy.');
+  }
+  await assertWorkspaceAuthorizationCurrent(registered.workspaceId, policy.serverAuthorization);
+  const scope = { organizationId, workspaceId: registered.workspaceId,
+    repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId };
+  validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(await client(), scope), scope, new Date());
+  const recovery = await recoverLegacyRepositoryInstaller({ workspace, fromWorkspaceId,
+    workspaceId: registered.workspaceId, repositoryAgentKey, apply: flags.has('apply') });
+  return { ok: true, dryRun: !recovery.applied, serverMutation: false, recovery,
+    nextAction: 'Resume pinned onboarding; recovery is not signed skill installation or activation.' };
+}
+
 async function repositorySnapshotCommand(flags: Map<string, string | boolean>, outputs: Array<string | boolean>) {
   if (flags.has('apply') && flags.has('dry-run')) throw new Error('Choose --apply or --dry-run, not both.');
   if (outputs.some(value => typeof value !== 'string')) throw new Error('--approved-output requires a workspace-relative file path.');
@@ -6899,6 +6931,7 @@ export async function run(argv: string[]): Promise<Output> {
     );
   }
   if (command === 'repositories' && subcommand === 'list') return repositoriesList(flags);
+  if (command === 'repositories' && subcommand === 'recover-installer') return repositoryInstallerRecoveryCommand(flags);
   if (command === 'repositories' && subcommand === 'snapshot') {
     return repositorySnapshotCommand(flags, repeated.get('approved-output') || []);
   }
