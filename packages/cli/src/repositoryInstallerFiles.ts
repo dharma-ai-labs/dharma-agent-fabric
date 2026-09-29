@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, rename, unlink } from 'node:fs/promises';
+import { lstat, open, readFile, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
@@ -9,7 +9,7 @@ const FILES = [MARKER, `${ROOT}/SKILL.md`, `${ROOT}/references/organization.md`,
   '.dharma/agent-fabric.json', '.dharma/repository-agent.json'] as const;
 type InstallerFile = typeof FILES[number];
 
-async function checkedPath(workspace: string, path: string, leaf: 'file' | 'directory') {
+export async function checkedPath(workspace: string, path: string, leaf: 'file' | 'directory') {
   const boundary = resolve(workspace), within = relative(boundary, path);
   if (isAbsolute(within) || within === '..' || within.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
     throw new Error('Repository installer path escapes the workspace.');
@@ -73,7 +73,7 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
 }
 
 // Replace owned generated leaves atomically; never truncate an existing inode.
-export async function writeRepositoryInstallerFile(workspace: string, path: InstallerFile, content: string) {
+export async function writeRepositoryInstallerFile(workspace: string, path: InstallerFile, content: string, expectedContent?: Buffer) {
   if (!(FILES as readonly string[]).includes(path)) throw new Error('Unsupported repository installer file.');
   const target = resolve(workspace, path);
   await checkedPath(workspace, dirname(target), 'directory');
@@ -89,6 +89,9 @@ export async function writeRepositoryInstallerFile(workspace: string, path: Inst
     } finally { await handle.close(); }
     await checkedPath(workspace, dirname(target), 'directory');
     await checkedPath(workspace, target, 'file');
+    if (expectedContent && !(await readFile(target)).equals(expectedContent)) {
+      throw new Error('Repository installer destination changed before replacement.');
+    }
     await rename(temporary, target);
     published = true;
   } finally {
