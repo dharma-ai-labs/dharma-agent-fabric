@@ -139,6 +139,16 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         try { await namedSessionRequest(home, 'implementer', { action: 'status' }); break; }
         catch { await new Promise(resolveWait => setTimeout(resolveWait, 10)); }
       }
+      let idleHealth: Record<string, unknown> | undefined;
+      for (let n = 0; n < 100; n++) {
+        const candidate = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
+        if (candidate.lastObservation?.state === 'idle' && candidate.state === 'running' && candidate.queued === 0) {
+          idleHealth = candidate;
+          break;
+        }
+        await new Promise(resolveWait => setTimeout(resolveWait, 10));
+      }
+      assert.ok(idleHealth, 'an idle inbox poll must persist a running, empty-queue health snapshot');
       const workId = randomUUID();
       const putBlob = vault.putBlob.bind(vault);
       let secretPersisted = false;

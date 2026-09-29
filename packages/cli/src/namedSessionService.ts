@@ -127,15 +127,30 @@ export async function runNamedSessionService(input: {
     bindingId: binding.bindingId, sessionId: binding.sessionId, ...registration.identity,
     state: closing ? 'stopping' : pending ? 'executing' : 'running', budget: budget.status(),
     queued: pending, lastObservation, lastWork: budget.lastWork() });
-  const health = () => writeFile(paths.health, JSON.stringify({ ...status(), pid: process.pid, observedAt: new Date().toISOString() }), { mode: 0o600 });
+  let healthWrites = Promise.resolve();
+  const health = () => {
+    const snapshot = JSON.stringify({ ...status(), pid: process.pid, observedAt: new Date().toISOString() });
+    const write = healthWrites.then(async () => {
+      const temporary = `${paths.health}.${randomUUID()}.tmp`;
+      await writeFile(temporary, snapshot, { mode: 0o600, flag: 'wx' });
+      await rename(temporary, paths.health);
+    });
+    healthWrites = write.catch(() => {});
+    return write;
+  };
   function enqueue<T>(operation: () => Promise<T>) {
     if (closing || pending >= 8) return Promise.reject(new Error('named_session_busy'));
     pending++;
     const result = serial.then(async () => {
-      if (closing) throw new Error('named_session_stopped');
-      return operation();
+      try {
+        if (closing) throw new Error('named_session_stopped');
+        return await operation();
+      } finally {
+        pending--;
+        await health();
+      }
     });
-    serial = result.then(() => undefined, () => undefined).finally(() => { pending--; });
+    serial = result.then(() => undefined, () => undefined);
     return result;
   }
   try {
