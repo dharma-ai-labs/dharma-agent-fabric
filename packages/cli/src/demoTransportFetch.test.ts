@@ -80,6 +80,70 @@ test('unmapped transport uses the original origin without creating keys or a tra
   assert.deepEqual([...f.values], before);
 });
 
+for (const mapped of [false, true]) {
+  test(`canonical source blob GET preserves signed scope on ${mapped ? 'mapped' : 'original'} transport`, async () => {
+    const f = await fixture(mapped), before = [...f.values];
+    const candidate = '50000000-0000-4000-8000-000000000001';
+    const hash = `sha256:${'a'.repeat(64)}`;
+    const path = `${f.root}/source-inventory/${candidate}/blobs/${encodeURIComponent(hash)}`
+      + '?workspaceId=60000000-0000-4000-8000-000000000001&path=reports%2Freview.md&orgId=org_fixture';
+    for (const implicitMethod of [false, true]) {
+      const request = f.request(path);
+      const init: RequestInit = { ...request.init };
+      if (implicitMethod) delete init.method;
+      assert.equal((await f.fetcher(request.url, init)).status, 200);
+      const sent = f.calls.at(-1)!;
+      assert.equal(sent.url, request.url.replace(f.binding.enrollmentOrigin, mapped ? f.target : f.binding.enrollmentOrigin));
+      assert.equal(new Headers(sent.init?.headers).get('x-dharma-signature'), request.init.headers['x-dharma-signature']);
+      assert.equal(sent.init?.credentials, 'omit');
+      assert.equal(sent.init?.redirect, 'error');
+    }
+    assert.equal(f.calls.length, 2);
+    assert.deepEqual([...f.values], before);
+  });
+}
+
+test('source blob exception rejects malformed and noncanonical paths and non-GET methods', async () => {
+  const f = await fixture(), candidate = '50000000-0000-4000-8000-000000000001';
+  const hash = `sha256%3A${'a'.repeat(64)}`;
+  const suffix = `source-inventory/${candidate}/blobs/${hash}`;
+  const invalid = [suffix.replace(candidate, 'not-a-uuid'), suffix.replace('-4000-', '-0000-'),
+    suffix.replace('-8000-', '-7000-'), suffix.replace(candidate, '50000000-0000-4000-8000-00000000000A'),
+    suffix.replace('%3A', ':'), suffix.replace('%3A', '%3a'), suffix.replace('%3A', '%253A'),
+    suffix.replace('sha256', 'sha512'), suffix.slice(0, -1), `${suffix}a`, suffix.replace(/a$/, 'A'),
+    suffix.replace(/a$/, 'g'), suffix.replace('source-inventory', '%73ource-inventory'),
+    suffix.replace('/blobs/', '%2Fblobs/'), suffix.replace(candidate, `%35${candidate.slice(1)}`),
+    `${suffix}/extra`, `${suffix}/`, suffix.replace('blobs', 'blob'), suffix.replace('%3A', '%3A%2F')];
+  for (const path of invalid) {
+    const request = f.request(`${f.root}/${path}?orgId=org_fixture`);
+    await assert.rejects(f.fetcher(request.url, request.init), /request_scope_invalid/, path);
+  }
+  for (const method of ['POST', 'PUT', 'DELETE', 'HEAD', 'get']) {
+    const request = f.request(`${f.root}/${suffix}?orgId=org_fixture`, method);
+    await assert.rejects(f.fetcher(request.url, request.init), /request_scope_invalid/, method);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('canonical source blob GET cannot bypass tenant, identity, signature or origin checks', async () => {
+  const f = await fixture();
+  const path = `${f.root}/source-inventory/50000000-0000-4000-8000-000000000001/blobs/sha256%3A${'a'.repeat(64)}?orgId=org_fixture`;
+  for (const target of [path.replace(f.binding.repositoryId, '10000000-0000-4000-8000-000000000099'),
+    path.replace('org_fixture', 'org_foreign'), `${path}&orgId=org_fixture`,
+    `https://foreign.example${path}`]) {
+    const request = f.request(target);
+    await assert.rejects(f.fetcher(request.url, request.init), /request_scope_invalid/);
+  }
+  const request = f.request(path);
+  for (const headers of [{ ...request.init.headers, 'x-dharma-device-id': randomUUID() },
+    { ...request.init.headers, 'x-dharma-signature': 'A'.repeat(86) },
+    { ...request.init.headers, authorization: 'Bearer do-not-forward' }]) {
+    await assert.rejects(f.fetcher(request.url, { ...request.init, headers }), /request_(scope|signature)_invalid/);
+  }
+  await assert.rejects(f.fetcher(request.url, { ...request.init, body: 'unexpected' }), /request_scope_invalid/);
+  assert.equal(f.calls.length, 0);
+});
+
 test('every request resolves fresh protected state; expired transport or signing trust sends nothing', async () => {
   const f = await fixture();
   f.setNow(new Date('2026-09-27T14:10:00.000Z'));
