@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-relay-upgrade/v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["ok", "schema", "upgradeId", "organizationId", "deviceId", "workspaceId", "previousVersion", "version", "state", "createdAt", "previousLauncherHash", "enrollmentChanged", "skillsChanged", "runtimeObservation", "serverSignatureVerified"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "schema": { "const": "dharma.local-relay-upgrade/v1" },
+    "upgradeId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "previousVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$", "maxLength": 64 },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$", "maxLength": 64 },
+    "state": { "enum": ["planned", "completed", "rolled_back", "rollback_failed"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "previousLauncherHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "enrollmentChanged": { "const": false },
+    "skillsChanged": { "const": false },
+    "runtimeObservation": { "enum": ["not_performed", "unconfirmed", "local_process_and_poll"] },
+    "serverSignatureVerified": { "const": false }
+  },
+  "allOf": [{ "if": { "properties": { "state": { "enum": ["planned", "completed"] } } },
+    "then": { "properties": { "ok": { "const": true } } },
+    "else": { "properties": { "ok": { "const": false } } } },
+    { "if": { "properties": { "state": { "const": "planned" } } },
+      "then": { "properties": { "runtimeObservation": { "const": "not_performed" } } } },
+    { "if": { "properties": { "state": { "const": "rollback_failed" } } },
+      "then": { "properties": { "runtimeObservation": { "const": "unconfirmed" } } } },
+    { "if": { "properties": { "state": { "enum": ["completed", "rolled_back"] } } },
+      "then": { "properties": { "runtimeObservation": { "const": "local_process_and_poll" } } } }]
+}

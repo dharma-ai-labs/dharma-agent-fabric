@@ -93,6 +93,8 @@ The Linux supervisor also attempts to reconnect enabled named sessions after nor
 
 After publication, compare release ID and manifest/catalog hashes on every connected endpoint with `dharma skills status` and `dharma skills verify`. Have a second agent in a separate session answer a source-grounded question or use the new skill in a bounded task. Matching files prove delivery, not correct use. If a relay is not running, restart it under the enrolled identity and verify `dharma relay probe`; do not claim continuous synchronization from an earlier bootstrap receipt. An offline client must reconcile the signed release on reconnect before its next relevant task.
 
+CLI executable updates are separate from signed repository releases. Merely invoking a newer CLI does not upgrade the managed launcher or background receiver. Use the exact approved published release, the same secure device home and bound checkout. At a safe task boundary, stop named sessions and the relay, then inspect `dharma relay upgrade --workspace . --dry-run` using that release. Apply the verified plan with `--apply`; it updates the owned launchers and user-logon registration together, starts the receiver and checks its actual process versions and fresh local poll. It does not redeem another grant or change device identity, source policy or signed skills. Re-enable previously enabled named sessions on their existing bindings and verify messaging. A failed restart attempts to restore the previous executable and startup; report `rollback_failed` without claiming recovery. An interrupted transaction requires `dharma relay upgrade --workspace . --rollback --apply` from the same approved release after work stops. Local poll observations are unsigned. Fleet-wide automatic selection and live Windows/Linux upgrade qualification remain separate; do not claim them from this command alone.
+
 ## 8. Recover without weakening trust
 
 On failure, classify the stage: provider readiness, enrollment, authority, repository identity, source policy, package convergence, relay connectivity, signing, delivery, or activation. Retain the last verified release. Use supported retry, reconciliation, rollback, or browser-authorized re-enrollment; never edit trust files, extend an expired key, create a replacement organization, or manufacture a success receipt.
@@ -139,6 +141,7 @@ Report `complete` only when identity, shared package, native skill, role, first 
 - Read a peer answer: `dharma repositories reply --workspace-id <workspace-id> --question-id <question-id>`.
 - Check relay connectivity: `dharma relay probe`.
 - Check user-logon startup: `dharma relay autostart status`.
+- Plan an approved executable/startup update on a stopped runtime: `dharma relay upgrade --workspace . --dry-run`; apply with `--apply` instead of `--dry-run`.
 - Disable future user-logon startup without deleting enrollment: `dharma relay autostart disable`.
 - Resume a stopped supervised receiver from an enrolled checkout: `dharma onboard --resume --organization-id <organization-id> --workspace . --policy-revision <policy-revision> --providers <provider>`.
 - Stop the receiver intentionally, preserving enrollment and vault: `dharma relay stop`.
