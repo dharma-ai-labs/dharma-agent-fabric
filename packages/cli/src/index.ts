@@ -82,7 +82,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.114';
+const VERSION = '0.2.115';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5983,11 +5983,19 @@ async function activatePreparedSkillUpdate(input: {
   }
 }
 
-async function skillSync(flags: Map<string, string | boolean>): Promise<Output> {
+export async function skillSync(flags: Map<string, string | boolean>, dryRunStore?: SecureSecretStore): Promise<Output> {
+  if (flags.has('dry-run') && flags.has('apply')) {
+    throw new Error('Skill sync cannot combine --dry-run and --apply.');
+  }
   const workspaceId = required(flags, 'workspace-id');
   const providerValue = required(flags, 'provider');
   if (!isLocalProviderId(providerValue)) throw new Error('Skill provider must be codex, claude, agy, or hermes.');
   const provider = providerValue as ProviderId;
+  if (flags.has('dry-run')) {
+    await loadSkillSynchronizationPolicy(required(flags, 'policy'), workspaceId, dryRunStore);
+    return { ok: true, dryRun: true, changed: false, workspaceId, provider,
+      networkPerformed: false, installedBundleChanged: false, rolloutReadiness: 'not_checked' };
+  }
   return withWorkspaceSkillActivationLock(workspaceId, provider, async () => {
     const policyPath = required(flags, 'policy');
     const prepared = await prepareSkillUpdate({ workspaceId, provider, policyPath });
