@@ -47,6 +47,7 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
+import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { prepareProvidersIndependently, startSkillPreparationPump } from './skillPreparationPump.js';
@@ -81,7 +82,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.113';
+const VERSION = '0.2.114';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1221,14 +1222,6 @@ function providerAdapter(provider: string) {
   return null;
 }
 
-function deterministicUuid(value: string) {
-  const bytes = createHash('sha256').update(value).digest().subarray(0, 16);
-  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
-  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-  const hex = bytes.toString('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
 export function normalizeGitRemoteIdentity(value: string): string {
   const raw = value.trim();
   if (!raw || /[\u0000-\u001f\u007f]/.test(raw)) throw new Error('Git remote is empty or invalid.');
@@ -1720,11 +1713,18 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
   const demoOnly = flags.has('demo-only');
   if (demoOnly && flags.has('policy')) throw new Error('Demo-only supervision cannot select a standard policy.');
   const policyPath = demoOnly ? null : resolve(required(flags, 'policy'));
-  const selectedWorkspace = policyPath
-    ? (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath) : null;
+  const config = policyPath ? await readDeviceConfig() : null;
+  const policyWorkspace = policyPath ? dirname(dirname(policyPath)) : null;
+  const selectedWorkspace = policyPath && config && policyWorkspace
+    ? selectDeviceWorkspace(await registry(), {
+      organizationId: config.organizationId, deviceId: config.deviceId, path: policyWorkspace,
+    }) : null;
   if (policyPath) {
-    if (!await readDeviceConfig()) throw new Error('Relay supervision requires an enrolled device.');
+    if (!config) throw new Error('Relay supervision requires an enrolled device.');
     if (!selectedWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+    if (resolve(selectedWorkspace.path, '.dharma', 'approved-policy.json') !== policyPath) {
+      throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+    }
   } else if (!(await listDemoWatchRegistrations(dharmaHome())).length) {
     throw new Error('Relay supervision requires at least one registered Demo repository.');
   }
@@ -2734,7 +2734,9 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   }
   const session = sessions.at(-1)!;
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-  const registered = (await registry()).find((item) => item.path === workspace);
+  const registered = selectDeviceWorkspace(await registry(), {
+    organizationId: device.organizationId, deviceId: device.deviceId, path: workspace,
+  });
   if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
   const captureProvenance = (collectedAt: string) => ({
     sourceClass: (typeof root === 'string' ? 'explicit_import' : 'provider_discovery') as
@@ -2888,7 +2890,9 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
   const policyPath = flags.get('policy');
   if (typeof policyPath === 'string') {
     const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-    const registered = (await registry()).find((item) => item.path === workspace);
+    const registered = selectDeviceWorkspace(await registry(), {
+      organizationId: device.organizationId, deviceId: device.deviceId, path: workspace,
+    });
     if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
     const policy = await loadVerifiedWorkspacePolicy(policyPath, registered?.workspaceId);
     const captureProvenance = (collectedAt: string) => ({
@@ -2967,7 +2971,7 @@ async function workspaceAdd(flags: Map<string, string | boolean>, positional: st
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const organizationId = String(flags.get('organization-id') || device.organizationId);
   if (organizationId !== device.organizationId) throw new Error('Workspace organization must match the enrolled device.');
-  const workspaceId = deterministicUuid(`${organizationId}:${device.deviceId}:${path}`);
+  const workspaceId = workspaceIdForDevice({ organizationId, deviceId: device.deviceId, path });
   const remote = await gitValue(path, ['config', '--get', 'remote.origin.url']);
   const identity = sourceRepositoryFingerprint(remote, typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null);
   const entry: WorkspaceRecord = {
@@ -3905,16 +3909,28 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const providerIds = parseSelectedProviderIds(typeof flags.get('providers') === 'string'
     ? [String(flags.get('providers'))]
     : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
-  let registered = (await registry()).find((item) => item.path === workspace);
-  if (!registered || (!registered.repositoryRemoteHash && typeof flags.get('repository-key') === 'string')) {
+  const repositoryKey = typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null;
+  const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(workspace, repositoryKey);
+  let registered = selectDeviceWorkspace(await registry(), {
+    organizationId,
+    deviceId: config.deviceId,
+    path: workspace,
+    repositoryRemoteHash: repositoryIdentity.fingerprint,
+  });
+  if (!registered) {
     const addFlags = new Map<string, string | boolean>([
       ['organization-id', organizationId],
       ['path', workspace],
       ['name', String(flags.get('name') || basename(workspace))],
     ]);
-    if (typeof flags.get('repository-key') === 'string') addFlags.set('repository-key', String(flags.get('repository-key')));
+    if (repositoryKey) addFlags.set('repository-key', repositoryKey);
     await workspaceAdd(addFlags, [workspace]);
-    registered = (await registry()).find((item) => item.path === workspace);
+    registered = selectDeviceWorkspace(await registry(), {
+      organizationId,
+      deviceId: config.deviceId,
+      path: workspace,
+      repositoryRemoteHash: repositoryIdentity.fingerprint,
+    });
   }
   if (!registered) throw new Error('Workspace registration failed.');
   const fabric = await client();
@@ -3940,8 +3956,12 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   }
   const boundRepository = registered;
   const onboardWorkspaceId = registered.workspaceId;
-  const providerOption = providerIds?.length ? ` --providers ${providerIds.join(',')}` : '';
-  const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${authoritativeRevision}${providerOption}`;
+  const resumeCommand = onboardingResumeCommand({
+    organizationId,
+    policyRevision: authoritativeRevision,
+    repositoryKey,
+    providerIds,
+  });
   const staged = <T>(stage: OnboardingStage, operation: () => Promise<T>) =>
     withOnboardingStage(stage, onboardWorkspaceId, resumeCommand, operation);
   const installed = await staged('local_skill_inventory', async () => installRepositoryAgentFabricSkill({
@@ -4851,10 +4871,16 @@ async function executeOneTask(
 async function runOneTask(flags: Map<string, string | boolean>): Promise<Output> {
   const policyPath = resolve(required(flags, 'policy'));
   const requestedWorkspaceId = typeof flags.get('workspace-id') === 'string' ? String(flags.get('workspace-id')) : undefined;
-  const selectedWorkspace = (await registry()).find((item) => (
-    resolve(item.path, '.dharma', 'approved-policy.json') === policyPath
-    && (!requestedWorkspaceId || item.workspaceId === requestedWorkspaceId)
-  ));
+  const records = await registry();
+  const config = await readDeviceConfig();
+  const selectedWorkspace = requestedWorkspaceId
+    ? records.find(item => item.workspaceId === requestedWorkspaceId
+      && resolve(item.path, '.dharma', 'approved-policy.json') === policyPath)
+    : config
+      ? selectDeviceWorkspace(records, {
+        organizationId: config.organizationId, deviceId: config.deviceId, path: dirname(dirname(policyPath)),
+      })
+      : null;
   if (!selectedWorkspace) throw new Error('Task policy must be the canonical policy of one registered workspace.');
   const studyTaskId = studyTaskIdFromFlags(flags, selectedWorkspace.workspaceId);
   const policy = await loadVerifiedWorkspacePolicy(policyPath, selectedWorkspace.workspaceId);
@@ -6049,8 +6075,16 @@ async function takeCachedSkillUpdate(input: {
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
   const policyPath = resolve(required(flags, 'policy'));
-  const selectedWorkspace = (await registry()).find((item) => resolve(item.path, '.dharma', 'approved-policy.json') === policyPath);
+  const declaredPolicy = await loadOrganizationPolicy(policyPath);
+  const declaredWorkspaceId = declaredPolicy.serverAuthorization?.workspaceId;
+  const selectedWorkspace = declaredWorkspaceId
+    ? (await registry()).find(item => item.workspaceId === declaredWorkspaceId
+      && item.organizationId === declaredPolicy.organizationId)
+    : null;
   if (!selectedWorkspace) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  if (resolve(selectedWorkspace.path, '.dharma', 'approved-policy.json') !== policyPath) {
+    throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  }
   let canonicalWorkspace: WorkspaceRecord = selectedWorkspace;
   let policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
   const fabric = await client();

@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { relayRestartDelayMs, superviseRelay } from './relaySupervisor.js';
 import { listDemoWatchRegistrations, registerDemoWatch } from './demoWatchRegistry.js';
 import { readDemoWatchHealth } from './demoWatchHealth.js';
+import { workspaceIdForDevice } from './onboardingWorkspace.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -139,11 +140,15 @@ test('a detached supervisor records its workspace and relay stop shuts it down',
   const home = join(root, 'home');
   const workspace = join(root, 'repo');
   const policyPath = join(workspace, '.dharma', 'approved-policy.json');
+  const workspaceId = workspaceIdForDevice({ organizationId: 'org_test', deviceId: 'device_test', path: workspace });
   await mkdir(join(workspace, '.dharma'), { recursive: true });
   await mkdir(join(home, 'registry'), { recursive: true });
   await writeFile(policyPath, '{}\n');
   await writeFile(join(home, 'device.json'), JSON.stringify({ organizationId: 'org_test', deviceId: 'device_test' }));
-  await writeFile(join(home, 'registry', 'workspaces.json'), JSON.stringify([{ path: workspace, workspaceId: 'workspace_test' }]));
+  await writeFile(join(home, 'registry', 'workspaces.json'), JSON.stringify([
+    { path: workspace, workspaceId: 'historical_workspace', organizationId: 'org_test', repositoryRemoteHash: null },
+    { path: workspace, workspaceId, organizationId: 'org_test', repositoryRemoteHash: null },
+  ]));
   const env = { ...process.env, DHARMA_HOME: home };
   const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
   const child = spawn(process.execPath, [bin, 'relay', 'supervise', '--policy', policyPath], {
@@ -158,7 +163,7 @@ test('a detached supervisor records its workspace and relay stop shuts it down',
       await new Promise(resolveWait => setTimeout(resolveWait, 100));
     }
     assert.deepEqual(binding && { workspaceId: binding.workspaceId, policyPath: binding.policyPath }, {
-      workspaceId: 'workspace_test', policyPath,
+      workspaceId, policyPath,
     });
     const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], { env, timeout: 10_000 });
     assert.deepEqual(JSON.parse(stdout), { ok: true, stopped: true, vaultPreserved: true });

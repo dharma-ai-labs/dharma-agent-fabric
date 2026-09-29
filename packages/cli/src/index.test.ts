@@ -81,6 +81,7 @@ import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-
 import { buildTrajectoryCapsule, trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { CLI_USAGE } from './usage.js';
+import { workspaceIdForDevice } from './onboardingWorkspace.js';
 import {
   isSupportedNodeVersion,
   launchWithRuntime,
@@ -1144,6 +1145,9 @@ test('single capture selects an older session exactly and advances a changing se
   await mkdir(workspace);
   await mkdir(sessions);
   const canonicalWorkspace = await realpath(workspace);
+  const fixtureWorkspaceId = workspaceIdForDevice({
+    organizationId: 'org_test', deviceId: 'device_test', path: canonicalWorkspace,
+  });
   const source = join(sessions, 'desktop.jsonl');
   const firstTurn = '019fcaab-6c8e-7432-bfb7-fc63efa3d728';
   const secondTurn = '019fcaac-6c8e-7432-bfb7-fc63efa3d729';
@@ -1165,7 +1169,7 @@ test('single capture selects an older session exactly and advances a changing se
     relayUrl: 'wss://relay.invalid', enrolledAt: '2026-08-12T00:00:00.000Z',
   }));
   await writeFile(join(home, 'registry', 'workspaces.json'), JSON.stringify([{
-    workspaceId: 'workspace_test', organizationId: 'org_test', name: 'repo', path: canonicalWorkspace,
+    workspaceId: fixtureWorkspaceId, organizationId: 'org_test', name: 'repo', path: canonicalWorkspace,
     routeHash: 'route', repositoryRemoteHash: null, defaultBranch: null, status: 'active',
   }]));
   const generated = await materializeWorkspacePolicy({ workspace, organizationId: 'org_test', revision: 'policy_test' });
