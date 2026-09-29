@@ -153,6 +153,7 @@ export async function synchronizeRepositoryCandidate(input: {
   snapshot: RepositoryPackageSnapshot;
   initialRepository: boolean;
   expectedLatestSourceFingerprint?: string;
+  blockedCandidate?: RepositoryCandidateReceipt;
 }): Promise<RepositoryCandidateReceipt> {
   const scope = checkedScope(input.scope);
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
@@ -177,6 +178,11 @@ export async function synchronizeRepositoryCandidate(input: {
   requireFact(input.expectedLatestSourceFingerprint === undefined
     || !input.initialRepository && HASH.test(input.expectedLatestSourceFingerprint),
   'Repository candidate expected source parent is invalid.');
+  requireFact(input.blockedCandidate === undefined || input.initialRepository
+    && input.blockedCandidate.state === 'blocked' && UUID.test(input.blockedCandidate.candidateId)
+    && HASH.test(input.blockedCandidate.operationId) && HASH.test(input.blockedCandidate.snapshotHash)
+    && input.blockedCandidate.releaseId === null,
+  'Repository candidate recovery requires a blocked initial publication.');
   const consolidation: CandidateOutbox['consolidation'] = {
     mode: input.initialRepository ? 'initial_repository' : 'repository_update',
     includeApprovedOutputs: true, requireAtlasAssociation: true,
@@ -185,11 +191,14 @@ export async function synchronizeRepositoryCandidate(input: {
     } : {}),
   };
   const operationId = sha256(canonicalize({ schema: 'dharma.repository-candidate-operation/v1', ...scope,
-    snapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash, consolidation }));
+    snapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash, consolidation,
+    ...(input.blockedCandidate ? { recoveryAttempt: 1 } : {}) }));
   const path = outboxPath(input.outboxRoot, scope);
   const prior = await readOutbox(path, scope);
   if (prior && (prior.operationId !== operationId || canonicalize(prior.scope) !== canonicalize(scope))) {
-    requireFact(['published', 'blocked'].includes(prior.state), 'A different repository candidate is still pending.');
+    requireFact(['published', 'blocked'].includes(prior.state)
+      || input.blockedCandidate?.candidateId === prior.candidateId,
+    'A different repository candidate is still pending.');
   }
   const pending: CandidateOutbox = prior?.operationId === operationId ? prior : {
     schema: 'dharma.repository-candidate-outbox/v1', scope, operationId,

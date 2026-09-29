@@ -90,7 +90,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.122';
+const VERSION = '0.2.123';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4322,34 +4322,41 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const outboxRoot = resolve(dharmaHome(), 'relay', 'repository-candidates');
   const canonicalPackage = registered.repositoryPackage!;
   const refreshPolicy = repositoryPackageNeedsPolicyRefresh(canonicalPackage, sourceAuthorization.generationId);
-  const candidate = await staged('package_publication', async () => canonicalPackage.state === 'absent' || refreshPolicy
+  const retryBlockedInitial = canonicalPackage.state === 'blocked' && canonicalPackage.generation === 0
+    && canonicalPackage.consolidationMode === 'initial_repository';
+  const submitPackage = canonicalPackage.state === 'absent' || refreshPolicy || retryBlockedInitial;
+  const candidate = await staged('package_publication', async () => submitPackage
     ? await synchronizeRepositoryCandidate({ transport: fabric, outboxRoot, scope: candidateScope,
-      snapshot: initialSnapshot, initialRepository: canonicalPackage.state === 'absent' })
+      snapshot: initialSnapshot, initialRepository: canonicalPackage.generation === 0,
+      ...(retryBlockedInitial ? { blockedCandidate: {
+        candidateId: canonicalPackage.candidateId!, operationId: canonicalPackage.operationId!,
+        snapshotHash: canonicalPackage.snapshotHash!, state: 'blocked' as const, releaseId: null,
+      } } : {}) })
     : await adoptRepositoryCandidate({ outboxRoot, scope: candidateScope,
       sourceManifestHash: canonicalPackage.sourceManifestHash!,
       consolidationMode: canonicalPackage.consolidationMode!, candidate: {
         candidateId: canonicalPackage.candidateId!, operationId: canonicalPackage.operationId!,
-        snapshotHash: canonicalPackage.snapshotHash!, state: canonicalPackage.state,
+        snapshotHash: canonicalPackage.snapshotHash!, state: canonicalPackage.state as RepositoryCandidateReceipt['state'],
         releaseId: canonicalPackage.releaseId,
       } }));
   registered = { ...registered, repositoryPackage: {
     state: candidate.state, candidateId: candidate.candidateId, operationId: candidate.operationId,
     snapshotHash: candidate.snapshotHash,
-    sourceManifestHash: canonicalPackage.state === 'absent' || refreshPolicy
+    sourceManifestHash: submitPackage
       ? sha256(canonicalize(initialSnapshot.manifest)) : canonicalPackage.sourceManifestHash,
     releaseId: candidate.releaseId,
     generation: candidate.state === 'published' ? Math.max(1, canonicalPackage.generation) : canonicalPackage.generation,
-    consolidationMode: canonicalPackage.state === 'absent' ? 'initial_repository'
+    consolidationMode: canonicalPackage.generation === 0 ? 'initial_repository'
       : refreshPolicy ? 'repository_update' : canonicalPackage.consolidationMode,
-    sourcePolicyGenerationId: refreshPolicy ? sourceAuthorization.generationId : canonicalPackage.sourcePolicyGenerationId,
+    sourcePolicyGenerationId: submitPackage ? sourceAuthorization.generationId : canonicalPackage.sourcePolicyGenerationId,
     localBaselineSnapshotHash: initialSnapshot.manifest.snapshotHash,
     publishedLocalSnapshotHash: candidate.state === 'published'
       && candidate.snapshotHash === initialSnapshot.manifest.snapshotHash
       ? initialSnapshot.manifest.snapshotHash : canonicalPackage.publishedLocalSnapshotHash ?? null,
-    pendingLocalSnapshotHash: canonicalPackage.state === 'absent' || refreshPolicy
+    pendingLocalSnapshotHash: submitPackage
       ? candidate.state === 'accepted' || candidate.state === 'processing'
         ? initialSnapshot.manifest.snapshotHash : null : null,
-    pendingLocalOperationId: canonicalPackage.state === 'absent' || refreshPolicy
+    pendingLocalOperationId: submitPackage
       ? candidate.state === 'accepted' || candidate.state === 'processing'
         ? candidate.operationId : null : null,
   } };
