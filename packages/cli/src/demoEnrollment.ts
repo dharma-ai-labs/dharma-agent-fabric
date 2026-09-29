@@ -1,5 +1,5 @@
-import { createHash, createPublicKey, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { createHash, createPublicKey, randomBytes, randomUUID, sign, verify, type JsonWebKey } from 'node:crypto';
+import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { loadOrCreateDeviceIdentity, normalizeHqUrl, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { verifyInitialServerSigningKeyset, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -181,6 +181,57 @@ function signedStatusRequest(origin: string, input: DemoDeviceScope,
   } };
 }
 
+function authenticCompletedStatus(request: ReturnType<typeof signedStatusRequest>, publicKeyEd25519: string) {
+  try {
+    const fields = ['url', 'deviceId', 'sequence', 'createdAt', 'headers'];
+    const headerFields = ['x-dharma-device-id', 'x-dharma-session-id', 'x-dharma-message-id',
+      'x-dharma-timestamp', 'x-dharma-nonce', 'x-dharma-sequence', 'x-dharma-signature'];
+    const headers = request.headers;
+    if (Object.keys(request).length !== fields.length || Object.keys(request).some(key => !fields.includes(key))
+      || Object.keys(headers).length !== headerFields.length || Object.keys(headers).some(key => !headerFields.includes(key))
+      || headers['x-dharma-device-id'] !== request.deviceId
+      || headers['x-dharma-sequence'] !== String(request.sequence)
+      || headers['x-dharma-timestamp'] !== request.createdAt
+      || !UUID.test(headers['x-dharma-session-id']) || !UUID.test(headers['x-dharma-message-id'])
+      || !/^[A-Za-z0-9_-]{32}$/.test(headers['x-dharma-nonce'])
+      || !/^[A-Za-z0-9_-]{86}$/.test(headers['x-dharma-signature'])) return false;
+    const url = new URL(request.url);
+    if (url.toString() !== request.url) return false;
+    const payload = Buffer.from(JSON.stringify({
+      bodyHash: `sha256:${createHash('sha256').update('').digest('hex')}`,
+      deviceId: request.deviceId, messageId: headers['x-dharma-message-id'], method: 'GET',
+      nonce: headers['x-dharma-nonce'], organizationId: url.searchParams.get('orgId'),
+      pathname: `${url.pathname}${url.search}`, sequence: request.sequence,
+      sessionId: headers['x-dharma-session-id'], timestamp: request.createdAt,
+    }));
+    return verify(null, payload, createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: publicKeyEd25519 }, format: 'jwk',
+    }), Buffer.from(headers['x-dharma-signature'], 'base64url'));
+  } catch { return false; }
+}
+
+async function preserveCompletedStatus(configPath: string, bytes: string) {
+  const directory = `${configPath}.status-history`;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = await lstat(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    throw new Error('Completed Demo status history directory is invalid.');
+  }
+  if (process.platform !== 'win32') await chmod(directory, 0o700);
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const path = resolve(directory, `${hash}.json`);
+  try { await writeFile(path, bytes, { mode: 0o600, flag: 'wx' }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const existing = await lstat(path);
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.size !== Buffer.byteLength(bytes)
+      || await readFile(path, 'utf8') !== bytes) {
+      throw new Error('Completed Demo status history conflicts with the original receipt.');
+    }
+  }
+  if (process.platform !== 'win32') await chmod(path, 0o600);
+}
+
 export async function verifyDemoDevice(input: DemoDeviceScope,
   deps: Pick<DemoDeviceConnectDependencies, 'store' | 'fetcher' | 'expectedAcceptedSequence'> = {}) {
   const origin = normalizeHqUrl(input.hqUrl);
@@ -202,26 +253,38 @@ export async function verifyDemoDevice(input: DemoDeviceScope,
   }
   if (config.serverSigningKeyset) config = await resolveDemoSigningTrust(config, { store: deps.store });
   let hasPending = false;
+  let existingReceiptRead = false;
   let pending = signedStatusRequest(origin, input, config.deviceId,
     identity.privateJwk, config.nextSequence, config.serverSigningKeyset?.generation);
   try {
-    const existing = JSON.parse(await readFile(pendingPath, 'utf8')) as typeof pending;
+    const existingBytes = await readFile(pendingPath, 'utf8');
+    existingReceiptRead = true;
+    const existing = JSON.parse(existingBytes) as typeof pending;
     const existingUrl = new URL(existing.url);
     existingUrl.searchParams.delete('signingGeneration');
     const expectedUrl = new URL(pending.url);
     expectedUrl.searchParams.delete('signingGeneration');
     if (existing.deviceId !== config.deviceId || existingUrl.toString() !== expectedUrl.toString()
-      || !Number.isSafeInteger(existing.sequence) || existing.sequence < config.nextSequence
+      || !Number.isSafeInteger(existing.sequence) || existing.sequence < 1
       || !Number.isFinite(Date.parse(existing.createdAt))) {
       throw new Error('Pending Demo device status does not match this identity.');
     }
-    hasPending = true;
-    pending = Date.now() - Date.parse(existing.createdAt) < 4 * 60_000 && existing.url === pending.url
-      ? existing
-      : signedStatusRequest(origin, input, config.deviceId,
-        identity.privateJwk, existing.sequence, config.serverSigningKeyset?.generation);
+    if (existing.sequence < config.nextSequence) {
+      // A committed status can survive a crash before cleanup; never replay it or discard its receipt.
+      if (!config.signedReady || existing.sequence + 1 !== config.nextSequence
+        || !authenticCompletedStatus(existing, config.publicKeyEd25519)) {
+        throw new Error('Pending Demo device status does not match this identity.');
+      }
+      await preserveCompletedStatus(configPath, existingBytes);
+    } else {
+      hasPending = true;
+      pending = Date.now() - Date.parse(existing.createdAt) < 4 * 60_000 && existing.url === pending.url
+        ? existing
+        : signedStatusRequest(origin, input, config.deviceId,
+          identity.privateJwk, existing.sequence, config.serverSigningKeyset?.generation);
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+    if (existingReceiptRead || (error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw new Error('Pending Demo device status is invalid; preserve it for recovery.', { cause: error });
     }
   }
