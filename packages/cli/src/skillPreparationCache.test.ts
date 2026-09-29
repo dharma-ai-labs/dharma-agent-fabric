@@ -170,7 +170,12 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     rm: (path: string, options: Parameters<typeof rm>[1]) => rm(checkedPath(path), options),
     setTimeout, canonicalize, sha256,
     required: (options: Map<string, string | boolean>, name: string) => options.get(name),
-    registry: async () => [workspace], loadVerifiedWorkspacePolicy: async () => policy,
+    registry: async () => [workspace],
+    loadOrganizationPolicy: async () => ({
+      organizationId: workspace.organizationId,
+      serverAuthorization: { workspaceId: workspace.workspaceId },
+    }),
+    loadVerifiedWorkspacePolicy: async () => policy,
     client: async () => Object.freeze({ fixture: true }), dharmaHome: () => f.home,
     acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
