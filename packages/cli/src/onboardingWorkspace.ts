@@ -25,8 +25,16 @@ export function selectDeviceWorkspace<T extends OnboardingWorkspaceRecord>(
   const workspaceId = workspaceIdForDevice(input);
   const candidates = records.filter(record => record.organizationId === input.organizationId
     && record.path === input.path
-    && (input.repositoryRemoteHash === undefined || record.repositoryRemoteHash === input.repositoryRemoteHash));
-  return candidates.find(record => record.workspaceId === workspaceId) || null;
+    && record.workspaceId === workspaceId);
+  if (candidates.length > 1) {
+    throw new Error('Ambiguous registry records for the current device workspace.');
+  }
+  const candidate = candidates[0];
+  if (!candidate || (input.repositoryRemoteHash !== undefined
+    && candidate.repositoryRemoteHash !== input.repositoryRemoteHash)) {
+    return null;
+  }
+  return candidate;
 }
 
 export function onboardingResumeCommand(input: {

@@ -82,7 +82,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.113';
+const VERSION = '0.2.114';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3911,7 +3911,6 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
   const repositoryKey = typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null;
   const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(workspace, repositoryKey);
-  const expectedWorkspaceId = workspaceIdForDevice({ organizationId, deviceId: config.deviceId, path: workspace });
   let registered = selectDeviceWorkspace(await registry(), {
     organizationId,
     deviceId: config.deviceId,

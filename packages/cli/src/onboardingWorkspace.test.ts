@@ -44,3 +44,13 @@ test('onboarding resume preserves the repository identity and selected providers
   }), 'dharma onboard --resume --organization-id org-a --workspace . --policy-revision policy-a'
     + ' --repository-key github.com/dharma-ai-labs/example --providers codex,claude');
 });
+
+test('onboarding refuses conflicting duplicate records for the deterministic device workspace', () => {
+  const scope = { organizationId: 'org-a', deviceId: 'device-current', path };
+  const record = { workspaceId: workspaceIdForDevice(scope), organizationId: 'org-a', path, repositoryRemoteHash: null };
+  assert.throws(() => selectDeviceWorkspace([record, { ...record }], scope), /ambiguous/i);
+  assert.throws(() => selectDeviceWorkspace([
+    { ...record, repositoryRemoteHash: 'sha256:repo' },
+    { ...record, repositoryRemoteHash: 'sha256:other' },
+  ], { ...scope, repositoryRemoteHash: 'sha256:repo' }), /ambiguous/i);
+});
