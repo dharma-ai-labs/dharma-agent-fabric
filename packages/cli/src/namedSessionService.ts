@@ -121,6 +121,7 @@ export async function runNamedSessionService(input: {
   let owner: Awaited<ReturnType<typeof openCodexInboxSession>> | undefined;
   let server: ReturnType<typeof createServer> | undefined;
   const connections = new Set<Socket>();
+  const responses = new Set<Promise<void>>();
   let closing = false, pending = 0, serial = Promise.resolve();
   let lastObservation: unknown = { state: 'starting' };
   const status = () => ({ ok: true, schema: 'dharma.named-session-status/v1', name: registration.name,
@@ -165,6 +166,16 @@ export async function runNamedSessionService(input: {
     server = createServer(socket => {
       connections.add(socket); socket.once('close', () => connections.delete(socket));
       let bytes = Buffer.alloc(0), handled = false;
+      const respond = (value: unknown) => new Promise<void>(resolveReply => {
+        if (socket.destroyed) { resolveReply(); return; }
+        const done = () => { socket.off('close', done); resolveReply(); };
+        socket.once('close', done);
+        try {
+          socket.setTimeout(30_000, () => socket.destroy());
+          socket.end(`${JSON.stringify(value)}\n`);
+        }
+        catch { socket.destroy(); done(); }
+      });
       socket.setTimeout(310_000, () => socket.destroy());
       socket.on('error', () => {});
       socket.on('data', chunk => {
@@ -173,7 +184,7 @@ export async function runNamedSessionService(input: {
         if (bytes.length > 20000) { handled = true; socket.destroy(); return; }
         const end = bytes.indexOf(10); if (end < 0) return;
         handled = true;
-        void (async () => {
+        const response = (async () => {
           const request = JSON.parse(bytes.subarray(0, end).toString('utf8')) as Record<string, unknown>;
           if (request.action === 'status') return status();
           if (request.action === 'stop') { closing = true; return { ok: true, state: 'stop_requested' }; }
@@ -239,9 +250,11 @@ export async function runNamedSessionService(input: {
               String(request.taskId || ''), String(request.targetBindingId || '')) };
             throw new Error('named_session_action_invalid');
           });
-        })().then(result => socket.end(`${JSON.stringify(result)}\n`), error => {
-          socket.end(`${JSON.stringify({ ok: false, code: error instanceof Error ? error.message : 'named_session_failed' })}\n`);
-        });
+        })().then(result => respond(result), error => respond({ ok: false,
+          code: error instanceof Error ? error.message : 'named_session_failed' }))
+          .catch(() => { socket.destroy(); });
+        responses.add(response);
+        void response.then(() => responses.delete(response));
       });
     });
     await new Promise<void>((resolveListen, reject) => {
@@ -267,10 +280,14 @@ export async function runNamedSessionService(input: {
     try { if (owner) await owner.close(); }
     finally {
       try {
+        const serverClosed = server?.listening
+          ? new Promise<void>(resolveClose => server!.close(() => resolveClose())) : null;
         await serial;
+        // An accepted work failure must reach its caller before shutdown tears down the socket.
+        await Promise.allSettled([...responses]);
         if (server) {
           for (const connection of connections) connection.destroy();
-          await new Promise<void>(resolveClose => server!.close(() => resolveClose()));
+          if (serverClosed) await serverClosed;
           await unlink(paths.socket).catch(error => { if (error.code !== 'ENOENT') throw error; });
         }
         await health();
