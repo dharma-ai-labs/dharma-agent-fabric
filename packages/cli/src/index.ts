@@ -2046,6 +2046,32 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     });
     scopes = redeemed.organizationApiTokenScopes;
   }
+  let organizationApiTokenStored = false;
+  let credentialFailure: 'organization_api_credentials_required' | 'organization_api_credential_store_unavailable' | null = null;
+  try {
+    organizationApiTokenStored = Boolean(await loadOrganizationApiToken({
+      hqUrl, organizationId, installationId: config.installationId,
+    }));
+    if (!organizationApiTokenStored && !String(process.env.DHARMA_ORG_API_TOKEN || '').trim()) {
+      credentialFailure = 'organization_api_credentials_required';
+    }
+  } catch {
+    // Secure-store diagnostics can contain secrets. Emit only the failed stage.
+    credentialFailure = 'organization_api_credential_store_unavailable';
+  }
+  if (credentialFailure) {
+    return {
+      ok: false,
+      stage: 'organization_api_credentials',
+      code: credentialFailure,
+      message: 'The enrolled device is preserved, but its organization API credential is unavailable. Contact Dharma support for device-bound credential recovery; do not repeat enrollment or use another member\'s token.',
+      sharedRepositoryReady: false,
+      enrollment: {
+        organizationId, deviceId: config.deviceId, status: 'approved', organizationApiTokenStored,
+        scopes, recipientApproval, rebind,
+      },
+    };
+  }
   const onboardFlags = new Map(flags);
   onboardFlags.delete('grant');
   onboardFlags.set('portal-url', hqUrl);
@@ -2066,7 +2092,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         organizationId,
         deviceId: config.deviceId,
         status: 'approved',
-        organizationApiTokenStored: true,
+        organizationApiTokenStored,
         scopes,
         recipientApproval,
         rebind,
@@ -2096,7 +2122,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         organizationId,
         deviceId: config.deviceId,
         status: 'approved',
-        organizationApiTokenStored: true,
+        organizationApiTokenStored,
         scopes,
         recipientApproval,
         rebind,
@@ -2193,7 +2219,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       organizationId,
       deviceId: config.deviceId,
       status: 'approved',
-      organizationApiTokenStored: true,
+      organizationApiTokenStored,
       scopes,
       recipientApproval,
       rebind,

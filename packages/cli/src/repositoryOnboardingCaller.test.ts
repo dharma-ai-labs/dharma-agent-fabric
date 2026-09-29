@@ -54,8 +54,9 @@ function bootstrapDependencies(onboarding: Onboarding) {
     saveDeviceConfig: async () => record('save_device'),
     saveDeviceEnrollmentAnchor: async () => record('save_anchor'),
     saveOrganizationApiToken: async () => record('save_token'),
+    loadOrganizationApiToken: async () => { await record('read_token'); return 'fixture_token'; },
     retryBootstrapOnboarding: async (operation: () => Promise<unknown>) => operation(),
-    onboard: async () => onboarding,
+    onboard: async () => { await record('onboard'); return onboarding; },
     installStableRepositoryLauncher: async () => { await record('launcher');
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
     dharmaHome: () => '/fixture-home',
@@ -113,6 +114,78 @@ function bootstrapFlags(complete = false) {
   if (complete) flags.set('complete', true);
   return flags;
 }
+
+async function resumeFixture() {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture' });
+  f.dependencies.readDeviceConfig = async () => ({
+    organizationId: 'org_fixture', hqUrl: 'https://fixture.invalid', deviceId: 'fixture_device',
+    installationId: '11111111-1111-4111-8111-111111111111',
+  });
+  f.dependencies.assertBootstrapResumeAuthority = await caller('assertBootstrapResumeAuthority', {
+    ...f.dependencies, exports: {},
+  });
+  const flags = bootstrapFlags(true);
+  flags.delete('grant');
+  flags.set('resume', true);
+  return { ...f, flags };
+}
+
+test('resume with an absent organization credential stops before repository or runtime mutation', async () => {
+  const f = await resumeFixture();
+  f.dependencies.loadOrganizationApiToken = async () => null;
+  const actual = await (await caller('bootstrap', f.dependencies))(f.flags);
+  assert.equal(actual.ok, false);
+  assert.equal(actual.stage, 'organization_api_credentials');
+  assert.equal(actual.code, 'organization_api_credentials_required');
+  assert.equal(actual.sharedRepositoryReady, false);
+  assert.equal((actual.enrollment as Record<string, unknown>).organizationApiTokenStored, false);
+  assert.equal((actual.enrollment as Record<string, unknown>).deviceId, 'fixture_device');
+  assert.deepEqual(f.calls, ['preflight']);
+  assert.doesNotMatch(JSON.stringify(actual), /fixture_grant|fixture_token/);
+});
+
+test('resume verifies its exact installation-scoped credential without repeating enrollment', async () => {
+  const f = await resumeFixture();
+  let requestedScope: unknown;
+  f.dependencies.loadOrganizationApiToken = async (scope: unknown) => {
+    requestedScope = scope; return 'fixture_token';
+  };
+  const actual = await (await caller('bootstrap', f.dependencies))(f.flags);
+  assert.equal(actual.stage, 'complete');
+  assert.equal((actual.enrollment as Record<string, unknown>).organizationApiTokenStored, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(requestedScope)), {
+    hqUrl: 'https://fixture.invalid', organizationId: 'org_fixture',
+    installationId: '11111111-1111-4111-8111-111111111111',
+  });
+  assert.equal(f.calls.includes('save_device'), false);
+  assert.equal(f.calls.includes('save_token'), false);
+  assert.doesNotMatch(JSON.stringify(actual), /fixture_token/);
+});
+
+test('an environment-only credential is usable but never reported as durably stored', async () => {
+  const f = await resumeFixture();
+  f.dependencies.loadOrganizationApiToken = async () => null;
+  f.dependencies.process = { platform: 'linux', env: { DHARMA_ORG_API_TOKEN: 'fixture_environment_token' },
+    stderr: { write: () => true } };
+  const actual = await (await caller('bootstrap', f.dependencies))(f.flags);
+  assert.equal(actual.stage, 'complete');
+  assert.equal((actual.enrollment as Record<string, unknown>).organizationApiTokenStored, false);
+  assert.equal(f.calls.includes('save_token'), false);
+  assert.doesNotMatch(JSON.stringify(actual), /fixture_environment_token/);
+});
+
+test('a secure-store failure produces a safe credential-stage receipt before mutation', async () => {
+  const f = await resumeFixture();
+  f.dependencies.loadOrganizationApiToken = async () => { throw new Error('backend leaked fixture_sensitive_value'); };
+  const actual = await (await caller('bootstrap', f.dependencies))(f.flags);
+  assert.equal(actual.ok, false);
+  assert.equal(actual.stage, 'organization_api_credentials');
+  assert.equal(actual.code, 'organization_api_credential_store_unavailable');
+  assert.equal((actual.enrollment as Record<string, unknown>).organizationApiTokenStored, false);
+  assert.deepEqual(f.calls, ['preflight']);
+  assert.doesNotMatch(JSON.stringify(actual), /fixture_sensitive_value/);
+});
 
 test('standard account rebind cannot archive Demo watch state or signal its processes', async () => {
   const calls: string[] = [];
