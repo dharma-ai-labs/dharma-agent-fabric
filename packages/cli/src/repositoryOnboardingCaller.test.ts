@@ -292,6 +292,8 @@ test('repository onboarding registers the signed workspace before repository bin
   const calls: string[] = [];
   const workspace = { workspaceId: 'workspace_fixture' };
   const actual = await (await caller('registerWorkspaceBeforeRepositoryBind', {
+    registry: async () => [workspace],
+    reconcileWorkspaceRegistration: () => workspace,
     syncWorkspacePolicy: async (_fabric: unknown, item: unknown, revision: string, apply: boolean, providers: string[]) => {
       calls.push('register_workspace');
       assert.equal(item, workspace);
@@ -339,4 +341,113 @@ test('repository connect deduplicates canonical paths before counting attempts a
   assert.equal(actual.connected, 1);
   assert.equal(actual.sharedRepositoryReady, true);
   assert.equal(calls, 1);
+});
+
+test('workspace synchronization validates policy against the server-returned canonical workspace', async () => {
+  const { requested, canonical } = registrationFixture();
+  const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
+  const calls: string[] = [];
+  const response = { ok: true, organizationId: 'org_fixture', workspace: {
+    id: canonical.workspaceId, status: 'active', policyRevision: 'policy_fixture',
+  }, organizationPolicyAuthorization: { workspaceId: canonical.workspaceId } };
+  const fabric = { registerWorkspace: async () => { calls.push('register'); return response; } };
+  const actual = await (await caller('syncWorkspacePolicy', {
+    receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
+    registry: async () => [requested, canonical],
+    reconcileWorkspaceRegistration: reconcile,
+    readDeviceConfig: async () => ({ serverPublicKeyEd25519: 'fixture_key' }),
+    materializeWorkspacePolicy: async (input: { workspaceId: string; dryRun: boolean }) => {
+      calls.push('verify');
+      assert.equal(input.workspaceId, canonical.workspaceId);
+      assert.equal(input.dryRun, false);
+      return { relativePath: '.dharma/approved-policy.json', applied: true,
+        policy: { revision: 'policy_fixture', evidence: { automaticDisclosure: { mode: 'local_analysis' } } } };
+    },
+  }))(fabric, requested, 'policy_fixture', true, ['codex']);
+  assert.deepEqual(calls, ['register', 'verify']);
+  assert.equal((actual.workspace as Record<string, unknown>).id, canonical.workspaceId);
+});
+
+test('repository binding uses the canonical workspace after authenticated registration', async () => {
+  const { requested, canonical, response } = registrationFixture();
+  const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
+  const actual = await (await caller('registerWorkspaceBeforeRepositoryBind', {
+    registry: async () => [requested, canonical],
+    reconcileWorkspaceRegistration: reconcile,
+    syncWorkspacePolicy: async () => response,
+    bindRepositoryAgent: async (_fabric: unknown, item: unknown) => {
+      assert.equal(item, canonical);
+      return { ...canonical, repositoryAgentId: 'agent_original' };
+    },
+  }))({}, requested, 'policy_fixture', ['codex']);
+  assert.equal((actual.registered as Record<string, unknown>).workspaceId, canonical.workspaceId);
+});
+
+function registrationFixture() {
+  const requested = { workspaceId: '11111111-1111-4111-8111-111111111111', organizationId: 'org_fixture',
+    path: '/repo', routeHash: `sha256:${'a'.repeat(64)}`, repositoryRemoteHash: `sha256:${'b'.repeat(64)}`,
+    status: 'active', repositoryBindingId: null };
+  const canonical = { ...requested, workspaceId: '22222222-2222-4222-8222-222222222222',
+    repositoryBindingId: 'binding_original', endpointId: 'endpoint_original',
+    repositoryPackage: { state: 'published', localBaselineSnapshotHash: 'retained_snapshot' },
+    repositoryRole: { revision: 3, profileHash: 'retained_role' } };
+  const response = { ok: true, organizationId: requested.organizationId,
+    workspace: { id: canonical.workspaceId, status: 'active' } };
+  return { requested, canonical, response };
+}
+
+test('canonical registration preserves matching original repository, endpoint, package and role records', async () => {
+  const f = registrationFixture();
+  const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
+  const actual = await reconcile([f.requested, f.canonical], f.requested, f.response);
+  assert.equal(actual, f.canonical);
+  assert.equal(f.requested.workspaceId, '11111111-1111-4111-8111-111111111111');
+  assert.equal((actual.repositoryPackage as Record<string, unknown>).localBaselineSnapshotHash, 'retained_snapshot');
+});
+
+test('canonical registration restores a missing local row without inheriting workspace-specific state', async () => {
+  const f = registrationFixture();
+  const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
+  const actual = await reconcile([], f.canonical, { ...f.response, workspace: { id: f.requested.workspaceId, status: 'active' } });
+  assert.equal(actual.workspaceId, f.requested.workspaceId);
+  assert.equal(actual.path, f.canonical.path);
+  assert.equal(actual.repositoryRemoteHash, f.canonical.repositoryRemoteHash);
+  assert.equal(actual.repositoryBindingId, null);
+  assert.equal(actual.endpointId, null);
+  assert.equal(actual.repositoryPackage, undefined);
+  assert.equal(actual.repositoryRole, null);
+  assert.equal(f.canonical.endpointId, 'endpoint_original');
+});
+
+test('canonical registration rejects foreign, inactive, malformed, conflicting and ambiguous responses', async () => {
+  const f = registrationFixture();
+  const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
+  for (const response of [{ ...f.response, organizationId: 'org_foreign' }, { ...f.response, ok: false },
+    { ...f.response, workspace: { id: 'invalid', status: 'active' } },
+    { ...f.response, workspace: { id: f.canonical.workspaceId, status: 'revoked' } }]) {
+    assert.throws(() => reconcile([f.canonical], f.requested, response), /scope_mismatch/);
+  }
+  for (const patch of [{ organizationId: 'org_foreign' }, { path: '/foreign' },
+    { routeHash: 'foreign' }, { repositoryRemoteHash: 'foreign' }, { status: 'revoked' }]) {
+    assert.throws(() => reconcile([{ ...f.canonical, ...patch }], f.requested, f.response), /scope_mismatch/);
+  }
+  assert.throws(() => reconcile([f.canonical, { ...f.canonical }], f.requested, f.response), /ambiguous/);
+});
+
+test('canonical registration cannot bypass signed-policy verification or bind after rejection', async () => {
+  const f = registrationFixture();
+  const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
+  let bound = false;
+  const synchronize = await caller('syncWorkspacePolicy', {
+    receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
+    registry: async () => [f.canonical], reconcileWorkspaceRegistration: reconcile,
+    readDeviceConfig: async () => ({ serverPublicKeyEd25519: 'fixture_key' }),
+    materializeWorkspacePolicy: async () => { throw new Error('signature invalid'); },
+  });
+  const fabric = { registerWorkspace: async () => ({ ...f.response, organizationPolicyAuthorization: {} }) };
+  await assert.rejects(async () => (await caller('registerWorkspaceBeforeRepositoryBind', {
+    syncWorkspacePolicy: synchronize,
+    bindRepositoryAgent: async () => { bound = true; return {}; },
+  }))(fabric, f.requested, 'policy_fixture', ['codex']), /signature invalid/);
+  assert.equal(bound, false);
 });

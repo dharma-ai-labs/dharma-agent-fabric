@@ -83,7 +83,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.117';
+const VERSION = '0.2.118';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3594,13 +3594,14 @@ async function syncWorkspacePolicy(
     repositoryAgentId: item.repositoryAgentId,
     policyRevision, providers,
   });
+  const canonical = reconcileWorkspaceRegistration(await registry(), item, response);
   const generated = await materializeWorkspacePolicy({
-    workspace: item.path,
-    organizationId: item.organizationId,
+    workspace: canonical.path,
+    organizationId: canonical.organizationId,
     revision: String((response.workspace as Record<string, unknown> | undefined)?.policyRevision || policyRevision),
     serverPolicyAuthorization: response.organizationPolicyAuthorization,
     serverPublicKeyEd25519: (await readDeviceConfig())?.serverPublicKeyEd25519,
-    workspaceId: item.workspaceId,
+    workspaceId: canonical.workspaceId,
     dryRun: !apply,
   });
   return {
@@ -3614,6 +3615,39 @@ async function syncWorkspacePolicy(
   };
 }
 
+function reconcileWorkspaceRegistration(
+  records: readonly WorkspaceRecord[],
+  requested: WorkspaceRecord,
+  response: Record<string, unknown>,
+): WorkspaceRecord {
+  const workspace = response.workspace && typeof response.workspace === 'object' && !Array.isArray(response.workspace)
+    ? response.workspace as Record<string, unknown> : null;
+  if (response.ok !== true || response.organizationId !== requested.organizationId
+    || !workspace || typeof workspace.id !== 'string' || !UUID_PATTERN.test(workspace.id)
+    || workspace.status !== 'active') {
+    throw new Error('fabric_workspace_registration_scope_mismatch');
+  }
+  if (workspace.id === requested.workspaceId) return requested;
+  // The authenticated server upsert preserves the original ID for this device's
+  // route. Local records are hints only; signed policy verification still follows.
+  const candidates = records.filter(record => record.workspaceId === workspace.id);
+  if (candidates.length > 1) throw new Error('fabric_workspace_registration_ambiguous');
+  const canonical = candidates[0];
+  if (canonical) {
+    if (canonical.organizationId !== requested.organizationId || canonical.path !== requested.path
+      || canonical.routeHash !== requested.routeHash || canonical.status !== 'active'
+      || canonical.repositoryRemoteHash !== requested.repositoryRemoteHash) {
+      throw new Error('fabric_workspace_registration_scope_mismatch');
+    }
+    return canonical;
+  }
+  // A restored credential store may lack the old registry row. Do not carry
+  // workspace-specific endpoint/package state into the server-returned identity.
+  return { ...requested, workspaceId: workspace.id, repositoryAgentId: null,
+    repositoryBindingId: null, endpointId: null, repositoryPackage: undefined,
+    repositoryRole: null, repositoryAgentKey: null, controlBranch: null };
+}
+
 async function registerWorkspaceBeforeRepositoryBind(
   fabric: AgentFabricClient,
   item: WorkspaceRecord,
@@ -3624,7 +3658,8 @@ async function registerWorkspaceBeforeRepositoryBind(
   // and signed device-session record. Register those facts before requesting the
   // permanent repository binding and control branch.
   const synchronized = await syncWorkspacePolicy(fabric, item, policyRevision, true, providerIds);
-  const registered = await bindRepositoryAgent(fabric, item);
+  const canonical = reconcileWorkspaceRegistration(await registry(), item, synchronized);
+  const registered = await bindRepositoryAgent(fabric, canonical);
   return { registered, synchronized };
 }
 
