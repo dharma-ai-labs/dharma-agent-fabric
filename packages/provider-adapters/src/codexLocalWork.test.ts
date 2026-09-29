@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolve } from 'node:path';
-import { runCodexLocalWork, type CodexAppServerTransport, type CodexToolHandler, type CodexToolResult } from './codexAppServerSession.js';
+import { runCodexLocalWork, type CodexAppServerTransport, type CodexToolHandler, type CodexToolResult, type CodexLocalWorkCapture } from './codexAppServerSession.js';
 
 function fixture(expanded = false, usage: unknown = null) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -51,6 +51,43 @@ test('local coding work selects its bounded profile on the retained thread', { s
   assert.equal(turn.params.approvalPolicy, 'never');
 });
 
+test('local work delivers turn-scoped native evidence only to the private sink', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture();
+  let capture: CodexLocalWorkCapture | undefined;
+  const input = { ...f, onTurnEvidence: async (value: CodexLocalWorkCapture) => { capture = value; } };
+  const result = await runCodexLocalWork(input);
+  assert.equal(capture?.schema, 'dharma.codex-local-work-capture/v1');
+  assert.equal(capture?.workId, 'work-1');
+  assert.equal(capture?.providerThreadId, 'thread-1');
+  assert.equal(capture?.providerTurnId, 'turn-1');
+  assert.equal(capture?.workOutcome, 'completed');
+  assert.equal(capture?.providerTurnState, 'completed');
+  assert.equal(capture?.acceptedLearningObservation, false);
+  assert.ok(Array.isArray(capture?.events));
+  assert.equal('events' in result, false);
+  assert.equal('nativeCapture' in result, false);
+});
+
+test('failed native work retains evidence without claiming a completed observation', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture(), original = f.transport.request;
+  const listeners = new Set<(event: unknown) => void>();
+  f.transport.onNotification = listener => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+  f.transport.request = async (method, params) => {
+    if (method !== 'turn/start') return original(method, params);
+    queueMicrotask(() => listeners.forEach(listener => listener({ method: 'turn/completed', params: {
+      threadId: 'thread-1', turn: { id: 'turn-1', status: 'failed', items: [] },
+    } })));
+    return { turn: { id: 'turn-1' } };
+  };
+  let capture: CodexLocalWorkCapture | undefined;
+  const input = { ...f, onTurnEvidence: async (value: CodexLocalWorkCapture) => { capture = value; } };
+  await assert.rejects(runCodexLocalWork(input), /turn_failed/);
+  assert.equal(capture?.workOutcome, 'failed');
+  assert.equal(capture?.providerTurnState, 'failed');
+  assert.equal(capture?.acceptedLearningObservation, false);
+  assert.equal(listeners.size, 0);
+});
+
 test('expanded local write profile fails before reservation or a turn', { skip: process.platform !== 'linux' }, async () => {
   const f = fixture(true);
   let reserved = false;
@@ -58,6 +95,36 @@ test('expanded local write profile fails before reservation or a turn', { skip: 
   await assert.rejects(runCodexLocalWork(f), /profile_unavailable/);
   assert.equal(reserved, false);
   assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('capture persistence failure is typed, private and never replays the native turn', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture();
+  await assert.rejects(runCodexLocalWork({ ...f, onTurnEvidence: async () => {
+    throw new Error('private-storage-path-fixture');
+  } }), /^Error: codex_session_evidence_persistence_failed$/);
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+});
+
+test('timed-out work retains only its actual partial capture and interrupts without replay', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture(), original = f.transport.request;
+  const listeners = new Set<(event: unknown) => void>();
+  f.transport.onNotification = listener => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+  f.transport.request = async (method, params) => {
+    if (method === 'turn/interrupt') return {};
+    if (method !== 'turn/start') return original(method, params);
+    listeners.forEach(listener => listener({ method: 'item/completed', params: {
+      threadId: 'thread-1', turnId: 'turn-1', item: { type: 'commandExecution', output: 'partial work' },
+    } }));
+    return { turn: { id: 'turn-1' } };
+  };
+  let capture: CodexLocalWorkCapture | undefined;
+  await assert.rejects(runCodexLocalWork({ ...f, timeoutMs: 5,
+    onTurnEvidence: async value => { capture = value; } }), /turn_timeout/);
+  assert.equal(capture?.providerTurnState, 'unconfirmed');
+  assert.equal(capture?.workOutcome, 'failed');
+  assert.equal(capture?.coverage, 'partial');
+  assert.equal(capture?.acceptedLearningObservation, false);
+  assert.equal(listeners.size, 0);
 });
 
 test('lost lease and expired binding cannot authorize local work', { skip: process.platform !== 'linux' }, async () => {

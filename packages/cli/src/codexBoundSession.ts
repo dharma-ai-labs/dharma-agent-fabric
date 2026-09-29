@@ -1,6 +1,6 @@
 import { inspectSessionQuestionForBinding, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler, type CodexTurnEvidenceSink } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 interface CodexBoundSessionInput {
@@ -58,7 +58,8 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
   return {
     close,
     async assertActive() { return !closing && !closed && await heldLease.assertHeld(); },
-    async runWork(request: { workId: string; prompt: string; maximumProviderCostCents: number; timeoutMs?: number }) {
+    async runWork(request: { workId: string; prompt: string; maximumProviderCostCents: number; timeoutMs?: number;
+      onTurnEvidence?: CodexTurnEvidenceSink }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');
       running = true;
