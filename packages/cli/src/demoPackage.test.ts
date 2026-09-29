@@ -564,6 +564,51 @@ test('a published signed package installs once under the scoped provider and reu
   assert.equal(f.acknowledgements.length, 2);
 });
 
+test('missing checkout snapshot reseeds source history without publishing deletions', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid', remoteSkill: true });
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  const deps = { store: f.store, fetcher: f.fetcher };
+  const first = await demoRepositoryPackage(input, deps);
+  assert.equal(first.sourceSync?.state, 'seeded');
+  const historyPath = resolve(f.scope.stateRoot, 'demo-source-history', organizationId,
+    repositoryId, `${workspaceId}.json`);
+  const history = JSON.parse(await readFile(historyPath, 'utf8')) as { localSnapshotHash: string };
+  const snapshotPath = resolve(f.workspace, '.dharma/repository-source/snapshots',
+    `${history.localSnapshotHash.slice(7)}.json`);
+  await unlink(snapshotPath);
+
+  const recovered = await demoRepositoryPackage(input, deps);
+  assert.equal(recovered.stage, 'demo_repository_package_installed');
+  assert.equal(recovered.installed?.alreadyInstalled, true);
+  assert.equal(recovered.sourceSync?.state, 'seeded');
+  assert.equal(f.uploads.length, 0);
+  assert.ok((await readFile(snapshotPath, 'utf8')).includes(history.localSnapshotHash));
+  assert.equal((await demoRepositoryPackage(input, deps)).sourceSync?.state, 'unchanged');
+});
+
+test('missing snapshot with pending publication remains a hard failure', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') };
+  const deps = { store: f.store, fetcher: f.fetcher };
+  await demoRepositoryPackage(input, deps);
+  const historyPath = resolve(f.scope.stateRoot, 'demo-source-history', organizationId,
+    repositoryId, `${workspaceId}.json`);
+  const history = JSON.parse(await readFile(historyPath, 'utf8')) as { localSnapshotHash: string;
+    pending: unknown };
+  history.pending = { localSnapshotHash: history.localSnapshotHash,
+    snapshotHash: history.localSnapshotHash, sourceFingerprint: f.publishedSourceFingerprint,
+    capturedAt: new Date().toISOString() };
+  await writeFile(historyPath, `${canonicalize(history)}\n`);
+  await unlink(resolve(f.workspace, '.dharma/repository-source/snapshots',
+    `${history.localSnapshotHash.slice(7)}.json`));
+
+  await assert.rejects(demoRepositoryPackage(input, deps), { code: 'ENOENT' });
+  assert.equal(f.uploads.length, 0);
+  assert.deepEqual(JSON.parse(await readFile(historyPath, 'utf8')), history);
+});
+
 test('a stable approved source edit submits one scoped repository update candidate', async () => {
   const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
   const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,

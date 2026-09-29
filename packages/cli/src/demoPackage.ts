@@ -413,7 +413,23 @@ async function syncPublishedDemoSource(input: {
     // Legacy fingerprints do not prove this client ever observed another client's files.
     if (!input.priorPolicyHash) baseline = null;
   }
-  let previousLocal = await readRepositoryPackageSnapshot(input.workspace, history.localSnapshotHash);
+  let previousLocal;
+  try {
+    previousLocal = await readRepositoryPackageSnapshot(input.workspace, history.localSnapshotHash);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || history.pending) throw error;
+    // History is device-scoped, but snapshots live in a checkout. A new checkout
+    // must start a local baseline without treating absent files as deletions.
+    await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
+    const reseeded = observeDemoSource({ baseline: null, scope: baselineScope,
+      localFingerprint: fingerprint, publishedFingerprint: input.publishedSourceFingerprint,
+      now: (deps.now || Date.now)() });
+    await writeDemoSourceBaseline(scope.stateRoot, reseeded.baseline);
+    history = { ...history, localSnapshotHash: snapshot.manifest.snapshotHash };
+    await writeDemoSourceHistory(scope.stateRoot, history);
+    previousLocal = snapshot;
+    baseline = null;
+  }
   if (previousLocal.manifest.organizationId !== scope.organizationId
     || previousLocal.manifest.workspaceId !== input.workspaceId
     || previousLocal.manifest.sourceAuthorization?.repositoryBindingId !== scope.repositoryId
