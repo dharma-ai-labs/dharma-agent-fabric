@@ -18,7 +18,8 @@ const repositoryAgents = { ok: true, organizationId: scope.organizationId, repos
   agent: { id: 'agent_test', agent_key: 'repo-key' },
   workspaces: [{ id: scope.workspaceId, device_id: scope.deviceId, repository_binding_id: 'binding_test', status: 'active' }],
   endpoints: [{ id: 'endpoint_test', workspace_id: scope.workspaceId, device_id: scope.deviceId,
-    organization_agent_id: 'agent_test', status: 'active' }],
+    organization_agent_id: 'agent_test', status: 'active', endpoint_kind: 'local_provider',
+    credential_boundary: 'local_device', provider: 'codex' }],
 }] };
 
 test('registry recovery accepts only one current-device canonical binding', () => {
@@ -26,6 +27,18 @@ test('registry recovery accepts only one current-device canonical binding', () =
     repositoryBindingId: 'binding_test', repositoryAgentId: 'agent_test', repositoryAgentKey: 'repo-key',
     controlBranch: 'agent-fabric/control', endpointId: 'endpoint_test', name: 'repo', defaultBranch: 'main',
   });
+});
+
+test('registry recovery selects the same local endpoint as repository connect', () => {
+  const binding = repositoryAgents.repositoryAgents[0]!;
+  const codex = binding.endpoints[0]!;
+  const claude = { ...codex, id: 'endpoint_claude', provider: 'claude' };
+  const managed = { ...codex, id: 'endpoint_managed', endpoint_kind: 'managed_runtime' };
+  const foreignCredential = { ...codex, id: 'endpoint_foreign_credential', credential_boundary: 'cloud' };
+  const projection = resolveRegistryRecoveryProjection({ ...scope, workspaces,
+    repositoryAgents: { ...repositoryAgents, repositoryAgents: [{ ...binding,
+      endpoints: [claude, managed, foreignCredential, codex] }] } });
+  assert.equal(projection.endpointId, 'endpoint_test');
 });
 
 test('registry recovery rejects foreign, revoked, duplicate and mismatched projections', () => {
@@ -46,7 +59,11 @@ test('registry recovery rejects foreign, revoked, duplicate and mismatched proje
   assert.throws(() => resolve(workspaces, { ...repositoryAgents, repositoryAgents: [{ ...binding,
     workspaces: [] }] }), /binding_workspace_mismatch/);
   assert.throws(() => resolve(workspaces, { ...repositoryAgents, repositoryAgents: [{ ...binding,
+    endpoints: [{ ...binding.endpoints[0], status: 'revoked' }] }] }), /endpoint_missing/);
+  assert.throws(() => resolve(workspaces, { ...repositoryAgents, repositoryAgents: [{ ...binding,
     endpoints: [binding.endpoints[0], binding.endpoints[0]] }] }), /endpoint_ambiguous/);
+  assert.throws(() => resolve(workspaces, { ...repositoryAgents, repositoryAgents: [{ ...binding,
+    endpoints: [binding.endpoints[0], { ...binding.endpoints[0], id: 'second_codex' }] }] }), /endpoint_ambiguous/);
 });
 
 test('registry recovery appends without overwriting another workspace or foreign state', () => {
