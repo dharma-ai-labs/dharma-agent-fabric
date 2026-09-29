@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 import test from 'node:test';
 import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
   serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
@@ -161,10 +162,11 @@ test('only current-device aliases with matching canonical routes and organizatio
     make('/other-device', 'canonical_other'), alias('/wrong-route'), make('/wrong-route', 'canonical_wrong', { routeHash: 'different' }),
     alias('/wrong-policy'), make('/wrong-policy', 'canonical_policy'), alias('/missing'), make('/missing', 'canonical_missing')];
   const selected = await selectRepositoryRelayRegistrations(rows, enrollment, async path => {
-    if (path.startsWith('/missing/')) throw new Error('private missing path');
-    return { organizationId: path.startsWith('/wrong-policy/') ? 'org_foreign' : enrollment.organizationId,
-      serverAuthorization: { workspaceId: path.startsWith('/a/') ? 'canonical_a' : path.startsWith('/b/')
-        ? 'canonical_b' : path.startsWith('/wrong-route/') ? 'canonical_wrong' : 'canonical_policy' } };
+    if (path === resolve('/missing', '.dharma', 'approved-policy.json')) throw new Error('private missing path');
+    return { organizationId: path === resolve('/wrong-policy', '.dharma', 'approved-policy.json') ? 'org_foreign' : enrollment.organizationId,
+      serverAuthorization: { workspaceId: path === resolve('/a', '.dharma', 'approved-policy.json') ? 'canonical_a'
+        : path === resolve('/b', '.dharma', 'approved-policy.json') ? 'canonical_b'
+          : path === resolve('/wrong-route', '.dharma', 'approved-policy.json') ? 'canonical_wrong' : 'canonical_policy' } };
   });
   assert.deepEqual(selected.map(row => row.workspaceId), ['canonical_a', 'canonical_b']);
   assert.deepEqual(rows[0], alias('/a'));

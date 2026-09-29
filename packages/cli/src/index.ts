@@ -42,6 +42,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
   serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
@@ -1373,8 +1374,7 @@ async function platform(): Promise<DeviceConfig['platform']> {
 }
 
 async function registry(): Promise<WorkspaceRecord[]> {
-  try { return JSON.parse(await readFile(workspaceRegistryPath(), 'utf8')) as WorkspaceRecord[]; }
-  catch { return []; }
+  return (await readWorkspaceRegistry<WorkspaceRecord>(workspaceRegistryPath())).records;
 }
 
 async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
@@ -6982,18 +6982,30 @@ export async function run(argv: string[]): Promise<Output> {
         const relayPid = await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')
           .then(value => Number(value.trim())).catch(() => 0);
         try {
-          const registered = await selectRepositoryRelayRegistrations(await registry(), config, loadOrganizationPolicy);
-          const observations = [];
-          for (const row of registered) {
-            const observation = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
-              'last-successful-poll.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
-            observations.push({ workspaceId: row.workspaceId,
-              state: relay === 'running' && repositoryRelayObservationReady({ observation,
-                workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
-              lastSuccessfulPollAt: typeof observation?.at === 'string' ? observation.at : null });
+          const registryRead = await readWorkspaceRegistry<WorkspaceRecord>(workspaceRegistryPath());
+          status.workspaceRegistry = { state: registryRead.state, count: registryRead.records.length };
+          if (registryRead.state === 'absent') {
+            status.repositoryRelays = { state: 'unavailable', repositories: [], reason: 'workspace_registry_missing' };
+          } else {
+            const registered = await selectRepositoryRelayRegistrations(registryRead.records, config, loadOrganizationPolicy);
+            const observations = [];
+            for (const row of registered) {
+              const observation = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
+                'last-successful-poll.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              observations.push({ workspaceId: row.workspaceId,
+                state: relay === 'running' && repositoryRelayObservationReady({ observation,
+                  workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
+                lastSuccessfulPollAt: typeof observation?.at === 'string' ? observation.at : null });
+            }
+            status.repositoryRelays = { state: 'observed', repositories: observations };
           }
-          status.repositoryRelays = { state: 'observed', repositories: observations };
-        } catch { status.repositoryRelays = { state: 'unavailable', repositories: [] }; }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '';
+          const reason = ['workspace_registry_read_failed', 'workspace_registry_invalid'].includes(message)
+            ? message : 'repository_relay_state_unavailable';
+          if (!status.workspaceRegistry) status.workspaceRegistry = { state: 'unavailable', reason };
+          status.repositoryRelays = { state: 'unavailable', repositories: [], reason };
+        }
       }
       if (flags.has('verbose') || flags.has('diagnostic')) {
         Object.assign(status, { home: dharmaHome(), organizationId: config.organizationId, deviceId: config.deviceId });
