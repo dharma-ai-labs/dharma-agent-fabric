@@ -1056,8 +1056,8 @@ test('workspace registration reuses a normalized repository identity across loca
   const previous = process.env.DHARMA_HOME;
   process.env.DHARMA_HOME = home;
   try {
-    const left = await run(['workspace', 'add', first]) as Record<string, unknown>;
-    const right = await run(['workspace', 'add', second]) as Record<string, unknown>;
+    const [left, right] = await Promise.all([run(['workspace', 'add', first]),
+      run(['workspace', 'add', second])]) as [Record<string, unknown>, Record<string, unknown>];
     assert.notEqual(left.workspaceId, right.workspaceId);
     assert.equal(left.sourceFingerprint, right.sourceFingerprint);
     await assert.rejects(() => run(['workspace', 'add', unhosted]), /--repository-key/);

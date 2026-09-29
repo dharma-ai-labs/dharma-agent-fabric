@@ -61,6 +61,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
     dharmaHome: () => '/fixture-home',
     VERSION: '0.2.102',
+    relayAutostartStatus: async () => ({ state: 'disabled', backend: null }),
     enableRelayAutostart: async () => { await record('autostart'); return { state: 'enabled', backend: 'systemd-user' }; },
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => {
       await record('startup_lock'); return operation();
@@ -83,6 +84,28 @@ function bootstrapDependencies(onboarding: Onboarding) {
   };
   return { dependencies, calls };
 }
+
+test('bootstrap preserves only a verified current-device startup anchor before enabling another repository', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.relayAutostartStatus = async () => ({ state: 'enabled', backend: 'systemd-user' });
+  f.dependencies.inspectOwnedRelayAutostart = async () => ({ workspace: '/first', policy: '/first/.dharma/approved-policy.json' });
+  let reads = 0;
+  f.dependencies.readDeviceConfig = async () => ++reads === 1 ? null
+    : { organizationId: 'org_fixture', deviceId: 'fixture_device' };
+  f.dependencies.registry = async () => [{ workspaceId: 'fixture_first', organizationId: 'org_fixture',
+    path: '/first', routeHash: 'route', repositoryRemoteHash: 'remote' }];
+  f.dependencies.selectDeviceWorkspace = () => ({ workspaceId: 'fixture_first', routeHash: 'route', repositoryRemoteHash: 'remote' });
+  f.dependencies.loadOrganizationPolicy = async () => ({ serverAuthorization: { workspaceId: 'fixture_first' } });
+  f.dependencies.loadVerifiedWorkspacePolicy = async (_path: string, workspaceId: string) => {
+    assert.equal(workspaceId, 'fixture_first'); f.calls.push('verify_existing_anchor');
+  };
+  f.dependencies.enableRelayAutostart = async (options: { preserveStandardAnchor: boolean }) => {
+    assert.equal(options.preserveStandardAnchor, true); f.calls.push('autostart');
+    return { state: 'enabled', backend: 'systemd-user' };
+  };
+  await (await caller('bootstrap', f.dependencies))(bootstrapFlags());
+  assert.ok(f.calls.indexOf('verify_existing_anchor') < f.calls.indexOf('autostart'));
+});
 
 test('bootstrap passes recipient approval to the verified browser opener before storing credentials', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });

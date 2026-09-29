@@ -99,6 +99,44 @@ test('startup status never calls a missing OS registration healthy', async () =>
   assert.equal(result.state, 'disabled');
 });
 
+test('a second standard repository preserves the verified user startup anchor on Linux and Windows', async () => {
+  for (const platform of ['linux', 'win32'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-startup-anchor-'));
+    const calls: string[] = [];
+    const run = async (file: string, args: string[]) => {
+      const text = file === 'powershell.exe' ? Buffer.from(args.at(-1)!, 'base64').toString('utf16le') : args.join(' ');
+      calls.push(text);
+      return { stdout: text.includes("'exists'") ? 'absent\n' : 'enabled\n' };
+    };
+    const options = { platform, home: join(root, 'dharma'), userHome: root,
+      workspace: platform === 'linux' ? '/fixtures/first' : 'C:\\first',
+      launcher: platform === 'linux' ? '/fixtures/first/.dharma/bin/dharma' : 'C:\\first\\.dharma\\bin\\dharma.cmd',
+      policy: platform === 'linux' ? '/fixtures/first/.dharma/approved-policy.json' : 'C:\\first\\.dharma\\approved-policy.json',
+      version: '0.2.119', run };
+    await enableRelayAutostart(options);
+    const receipt = join(options.home, 'relay', 'autostart.json');
+    const file = platform === 'linux' ? join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service')
+      : join(options.home, 'relay', 'autostart.ps1');
+    const before = await readFile(receipt, 'utf8'), startup = await readFile(file, 'utf8');
+    calls.length = 0;
+    const second = { ...options, workspace: platform === 'linux' ? '/fixtures/second' : 'C:\\second',
+      launcher: platform === 'linux' ? '/fixtures/second/.dharma/bin/dharma' : 'C:\\second\\.dharma\\bin\\dharma.cmd',
+      policy: platform === 'linux' ? '/fixtures/second/.dharma/approved-policy.json' : 'C:\\second\\.dharma\\approved-policy.json',
+      preserveStandardAnchor: true };
+    assert.equal((await enableRelayAutostart(second)).state, 'enabled');
+    assert.equal(await readFile(receipt, 'utf8'), before);
+    assert.equal(await readFile(file, 'utf8'), startup);
+    assert.ok(!calls.some(call => call.includes('daemon-reload') || call.includes('Register-ScheduledTask')));
+    await assert.rejects(enableRelayAutostart({ ...second, version: '0.2.120' }), /relay_runtime_upgrade_required/);
+    assert.equal(await readFile(receipt, 'utf8'), before);
+    assert.equal(await readFile(file, 'utf8'), startup);
+    await writeFile(file, `${startup}# foreign\n`);
+    await assert.rejects(enableRelayAutostart(second), /autostart_conflict/);
+    assert.equal(await readFile(file, 'utf8'), `${startup}# foreign\n`);
+    assert.ok(!calls.join('\n').includes(second.launcher));
+  }
+});
+
 test('Windows task registration uses the enrolled user without an embedded password', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-windows-autostart-'));
   const calls: string[] = [];

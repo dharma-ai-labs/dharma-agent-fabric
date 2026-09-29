@@ -64,9 +64,10 @@ test('one prompt submits initial knowledge only for an absent package and derive
 
 test('relay polls candidate state independently and activates only after an idle task boundary', async () => {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
-  const relay = source.slice(source.indexOf('async function relayStart('), source.indexOf('export async function run('));
+  const relay = source.slice(source.indexOf('async function relayWorkspaceLoop('), source.indexOf('export async function run('));
   assert.match(relay, /await pollRepositoryCandidate\(/);
   assert.ok(relay.indexOf('await pollRepositoryCandidate(') < relay.indexOf('scanRepositorySourceChanges('));
-  assert.ok(relay.indexOf('const result = await executeOneTask(') < relay.indexOf('await takeCachedSkillUpdate('));
-  assert.match(relay, /if \(!result\.taskId && performance\.now\(\) >= nextSkillActivationAt\)/);
+  assert.ok(relay.indexOf('const result = await serialized(') >= 0);
+  assert.ok(relay.indexOf('const result = await serialized(') < relay.indexOf('await takeCachedSkillUpdate('));
+  assert.match(relay, /if \(!stopping && !result\.taskId && performance\.now\(\) >= nextSkillActivationAt\)/);
 });

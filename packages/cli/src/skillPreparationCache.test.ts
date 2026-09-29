@@ -140,8 +140,8 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
   diagnostic(`synthetic production-caller source=${sha256(await readFile(new URL('../src/index.ts', import.meta.url)))} emitted=${sha256(source)}`);
   const ast = ts.createSourceFile('index.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-  const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'relayStart');
-  assert.equal(declarations.length, 1, 'exact production relayStart declaration is required');
+  const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'relayWorkspaceLoop');
+  assert.equal(declarations.length, 1, 'exact production repository worker declaration is required');
   const declaration = declarations[0]!.getText(ast);
   const roots = [f.sourceRoot];
   for (let index = 1; index < cycles; index++) roots.push(await mkdtemp(join(f.scopeRoot, 'attempt-')));
@@ -156,14 +156,18 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     repositoryAgentId: f.record.repositoryAgentId, repositoryBindingId: '77777777-7777-4777-8777-777777777777' };
   const policy = { revision: 1, fixture: 'synthetic-staging-policy' };
   const processFixture = Object.assign(new EventEmitter(), { pid: 123 });
+  const controller = new AbortController();
   const checkedPath = (path: string) => {
     const resolved = resolve(path); const local = relative(f.home, resolved);
     assert.ok(local !== '..' && !local.startsWith(`..${sep}`) && !resolve(local).startsWith(`${sep}${sep}`), 'foreign fixture filesystem path');
     assert.ok(resolved === f.home || resolved.startsWith(f.home + sep), 'fixture filesystem containment');
     return resolved;
   };
-  const result = await new Script(`${declaration}\nrelayStart(flags);`, { filename: 'synthetic-relay-staging-fixture.js' }).runInNewContext({
+  const result = await new Script(`${declaration}\nrelayWorkspaceLoop(flags, signal, serialized);`, { filename: 'synthetic-relay-staging-fixture.js' }).runInNewContext({
     flags, process: processFixture, performance: { now: () => elapsedMs }, Date, Map, Promise, Number, Error,
+    signal: controller.signal, serialized: (operation: () => Promise<unknown>) => operation(),
+    readFile: (path: string, encoding: 'utf8') => readFile(checkedPath(path), encoding),
+    waitForRelayRefresh: async () => {},
     VERSION: '0.2.102',
     resolve, mkdir: (path: string, options: Parameters<typeof mkdir>[1]) => mkdir(checkedPath(path), options),
     writeFile: (path: string, bytes: string, options: Parameters<typeof writeFile>[2]) => writeFile(checkedPath(path), bytes, options),
@@ -211,7 +215,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     withWorkspaceSkillActivationLock: async () => {
       activations++; events.push(`activate-${activations}`);
       if (holdSourceScan && activations === 2) {
-        processFixture.emit('SIGINT');
+        controller.abort();
         releaseSourceScan?.();
       }
     },

@@ -39,6 +39,8 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { superviseRelay } from './relaySupervisor.js';
+import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
+  serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
@@ -1376,13 +1378,20 @@ async function registry(): Promise<WorkspaceRecord[]> {
 
 async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
   await mkdir(resolve(dharmaHome(), 'registry'), { recursive: true, mode: 0o700 });
-  await writeFile(workspaceRegistryPath(), `${JSON.stringify(items, null, 2)}\n`, { mode: 0o600 });
+  await writeJsonAtomic(workspaceRegistryPath(), items);
 }
 
 async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
-  const items = (await registry()).filter((item) => item.workspaceId !== entry.workspaceId);
-  items.push(entry);
-  await saveRegistry(items);
+  const release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
+    'Workspace registry is busy; preserve it for recovery.');
+  try {
+    const value = await readFile(workspaceRegistryPath(), 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return '[]'; throw error;
+    });
+    const items = JSON.parse(value) as WorkspaceRecord[];
+    if (!Array.isArray(items)) throw new Error('Workspace registry is invalid; preserve it for recovery.');
+    await saveRegistry([...items.filter(item => item.workspaceId !== entry.workspaceId), entry]);
+  } finally { await release(); }
 }
 
 async function gitValue(workspace: string, argv: string[]) {
@@ -1739,6 +1748,13 @@ export async function waitForRelayReadiness(options: {
 }
 
 async function startRelayDaemon(policyPath: string) {
+  const config = await readDeviceConfig();
+  if (!config) throw new Error('Relay startup requires current device enrollment.');
+  const policy = await loadOrganizationPolicy(policyPath);
+  const workspaceId = policy.serverAuthorization?.workspaceId;
+  const selected = (await registry()).find(row => row.workspaceId === workspaceId
+    && row.organizationId === config.organizationId && resolve(row.path, '.dharma', 'approved-policy.json') === policyPath);
+  if (!selected) throw new Error('Relay policy must belong to this enrolled repository.');
   const alreadyRunning = await relayProcessState() === 'running';
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
@@ -1757,10 +1773,14 @@ async function startRelayDaemon(policyPath: string) {
       const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
         .catch(() => '0')).trim());
       const binding = await readFile(resolve(dharmaHome(), 'relay', 'supervisor-workspace.json'), 'utf8')
-        .then(value => JSON.parse(value) as { pid: number; policyPath: string }).catch(() => null);
+        .then(value => JSON.parse(value) as { pid: number; policyPath: string; version?: string;
+          organizationId?: string; deviceId?: string; standardRepositories?: boolean }).catch(() => null);
       if (binding?.pid === pid) {
-        if (binding.policyPath !== policyPath) {
-          throw new Error('relay_workspace_conflict: the active relay supervisor belongs to another workspace.');
+        if (binding.version !== VERSION || !binding.standardRepositories) {
+          throw new Error('relay_runtime_upgrade_required: safely stop and upgrade the existing startup-anchor relay; do not retarget a working receiver.');
+        }
+        if (binding.organizationId !== config.organizationId || binding.deviceId !== config.deviceId) {
+          throw new Error('relay_workspace_conflict: the active supervisor belongs to another enrollment.');
         }
         supervisorReady = true;
         break;
@@ -1769,7 +1789,14 @@ async function startRelayDaemon(policyPath: string) {
     if (attempt < 79) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
   if (!supervisorReady) throw new Error('The relay supervisor did not become ready after bootstrap.');
-  const readiness = await waitForRelayReadiness({ expectedVersion: VERSION });
+  const readiness = await waitForRelayReadiness({ expectedVersion: VERSION, attempts: 120, delayMs: 1000, processState: async () => {
+    if (await relayProcessState() !== 'running') return 'stopped';
+    const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')).trim());
+    const poll = await readFile(resolve(dharmaHome(), 'relay', 'repositories', selected.workspaceId,
+      'last-successful-poll.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+    return repositoryRelayObservationReady({ observation: poll, workspaceId: selected.workspaceId,
+      version: VERSION, pid }) ? 'running' : 'stopped';
+  } });
   return { started: !alreadyRunning, supervisor: 'running' as const, ...readiness };
 }
 
@@ -1829,7 +1856,8 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
   const health = createDemoWatchHealthRecorder({ home: dharmaHome(), pid: process.pid, version: VERSION });
   try {
     await writeJsonAtomic(bindingPath, { pid: process.pid, workspaceId: selectedWorkspace?.workspaceId ?? null,
-      policyPath, demoWatches: true, version: VERSION });
+      policyPath, demoWatches: true, version: VERSION, standardRepositories: Boolean(policyPath),
+      organizationId: config?.organizationId ?? null, deviceId: config?.deviceId ?? null });
     const demo = runDemoSupervisor({ signal: controller.signal,
       list: () => listDemoWatchRegistrations(dharmaHome()), cycle: (registration, signal) => {
         if (!health.available(demoWatchRegistrationKey(registration))) {
@@ -2192,11 +2220,34 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     ? { state: 'disabled' as const, backend: null }
     : await withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
-      () => withRelayStartupMutation(() => enableRelayAutostart({
-        home: dharmaHome(), workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
-        launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
-        version: VERSION,
-      })));
+      () => withRelayStartupMutation(async () => {
+        const home = dharmaHome();
+        const existing = await relayAutostartStatus({ home });
+        if (existing.backend !== null || existing.state !== 'disabled') {
+          const anchor = await inspectOwnedRelayAutostart({ home });
+          if (anchor.policy !== null) {
+            const current = await readDeviceConfig();
+            if (!current || current.organizationId !== organizationId || current.deviceId !== config.deviceId) {
+              throw new Error('relay_workspace_conflict: startup enrollment changed.');
+            }
+            const selected = selectDeviceWorkspace(await registry(), { organizationId,
+              deviceId: config.deviceId, path: anchor.workspace });
+            if (!selected) throw new Error('relay_workspace_conflict: startup anchor is not registered to this device.');
+            if (anchor.policy !== resolve(anchor.workspace, '.dharma', 'approved-policy.json')) {
+              throw new Error('relay_workspace_conflict: startup policy is not canonical.');
+            }
+            const authorized = await loadOrganizationPolicy(anchor.policy);
+            const canonical = (await registry()).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
+              && row.organizationId === organizationId && row.path === anchor.workspace
+              && row.routeHash === selected.routeHash && row.repositoryRemoteHash === selected.repositoryRemoteHash);
+            if (canonical.length !== 1) throw new Error('relay_workspace_conflict: startup policy route changed.');
+            await loadVerifiedWorkspacePolicy(anchor.policy, authorized.serverAuthorization?.workspaceId ?? '');
+          }
+        }
+        return enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
+          launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
+          version: VERSION, preserveStandardAnchor: true });
+      }));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
@@ -6250,6 +6301,49 @@ async function takeCachedSkillUpdate(input: {
 }
 
 async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
+  const anchor = resolve(required(flags, 'policy'));
+  const config = await readDeviceConfig();
+  if (!config) throw new Error('Relay requires current enrollment.');
+  const declared = await loadOrganizationPolicy(anchor);
+  const rows = await registry();
+  const selected = rows.find(row => row.workspaceId === declared.serverAuthorization?.workspaceId
+    && row.organizationId === config.organizationId && resolve(row.path, '.dharma', 'approved-policy.json') === anchor);
+  if (!selected) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  const authorized = await selectRepositoryRelayRegistrations(rows, config, loadOrganizationPolicy);
+  if (!authorized.some(row => row.workspaceId === selected.workspaceId && row.policyPath === anchor)) {
+    throw new Error('Relay policy is not registered to this enrolled device.');
+  }
+  await loadVerifiedWorkspacePolicy(anchor, selected.workspaceId);
+  const release = await acquireRelayProcessLease();
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  const serialized = serializeRelayWork();
+  try {
+    if (flags.has('once')) return await relayWorkspaceLoop(flags, controller.signal, serialized);
+    await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => {
+      const currentConfig = await readDeviceConfig();
+      if (currentConfig?.organizationId !== config.organizationId || currentConfig.deviceId !== config.deviceId) {
+        throw new Error('Relay enrollment changed.');
+      }
+      const records = JSON.parse(await readFile(workspaceRegistryPath(), 'utf8')) as WorkspaceRecord[];
+      if (!Array.isArray(records)) throw new Error('Invalid workspace registry.');
+      return selectRepositoryRelayRegistrations(records, config, loadOrganizationPolicy);
+    }, run: (row, signal) => relayWorkspaceLoop(new Map([...flags, ['policy', row.policyPath]]), signal, serialized),
+    observe: event => process.stderr.write(`${JSON.stringify({ event: 'repository_relay', ...event })}\n`) });
+    return { ok: true, stopped: true };
+  } finally {
+    controller.abort();
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    await release();
+  }
+}
+
+async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: AbortSignal,
+  serialized: ReturnType<typeof serializeRelayWork>): Promise<Output> {
+  signal.throwIfAborted();
   const policyPath = resolve(required(flags, 'policy'));
   const declaredPolicy = await loadOrganizationPolicy(policyPath);
   const declaredWorkspaceId = declaredPolicy.serverAuthorization?.workspaceId;
@@ -6263,16 +6357,13 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   }
   let canonicalWorkspace: WorkspaceRecord = selectedWorkspace;
   let policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
+  signal.throwIfAborted();
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
-  const releaseRelayLease = await acquireRelayProcessLease();
-  try {
-  let stopping = false;
+  let stopping = signal.aborted;
   let stopPreparation: (() => void) | undefined;
   const stop = () => { stopping = true; stopPreparation?.(); };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
   let tasksCompleted = 0;
   let lastProviderFailureCategory: string | null = null;
   let taskTrajectoriesRecovered = 0;
@@ -6334,6 +6425,10 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
+  if (signal.aborted) vault.close();
+  signal.throwIfAborted();
+  signal.addEventListener('abort', stop, { once: true });
+  if (signal.aborted) stop();
   let skillPreparationsCompleted = 0;
   let skillPreparationFailures = 0;
   let skillActivationsCompleted = 0;
@@ -6457,6 +6552,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     }
   };
   try {
+    signal.throwIfAborted();
     const recoveredTaskTrajectories = await deferUnavailableRelayRetention(async () => finalizeRecoveredSignedTaskTrajectories(
       fabric,
       policy,
@@ -6465,6 +6561,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       taskTrajectoriesRecovered += recoveredTaskTrajectories.value.length;
     }
     do {
+      if (stopping) break;
       await consumeSourceScan();
       if (Date.now() >= nextPolicyRefreshAt) {
         try {
@@ -6501,7 +6598,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         } catch { repositorySourceFailures += 1; }
       }
       let evidenceRequestId: string | undefined;
-      if (evidencePolicyFresh) {
+      if (evidencePolicyFresh && !stopping) {
         const evidenceCycle = await deferUnavailableRelayRetention(async () => {
           const synced = await syncPendingRetentionCapsules(
             vault,
@@ -6523,16 +6620,26 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
           if (evidenceRequestId) evidenceResponsesCompleted += 1;
         }
       }
-      const result = await executeOneTask(fabric, leaseSeconds);
-      if (Date.now() - lastPollReceiptAt >= 30_000) {
-        await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'last-successful-poll.json'), {
+      const result = await serialized(async () => {
+        if (stopping) return { taskId: null };
+        return executeOneTask(fabric, leaseSeconds);
+      });
+      if (!stopping && Date.now() - lastPollReceiptAt >= 30_000) {
+        const observation = {
           at: new Date().toISOString(), workspaceId: canonicalWorkspace.workspaceId, version: VERSION, pid: process.pid,
-        });
+        };
+        await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', canonicalWorkspace.workspaceId,
+          'last-successful-poll.json'), observation);
+        const binding = await readFile(resolve(dharmaHome(), 'relay', 'supervisor-workspace.json'), 'utf8')
+          .then(value => JSON.parse(value)).catch(() => null);
+        if (!binding || binding.workspaceId === canonicalWorkspace.workspaceId) {
+          await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'last-successful-poll.json'), observation);
+        }
         lastPollReceiptAt = Date.now();
       }
       if (result.taskId) tasksCompleted += 1;
       if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
-      if (!result.taskId && performance.now() >= nextSkillActivationAt) {
+      if (!stopping && !result.taskId && performance.now() >= nextSkillActivationAt) {
         for (const adapter of providerAdapters) {
           try {
             const capability = await adapter.capability();
@@ -6559,7 +6666,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         }
         nextSkillActivationAt = performance.now() + 60_000;
       }
-      if (!sourceScanFlight && performance.now() >= nextRepositorySourceScanAt) {
+      if (!stopping && !sourceScanFlight && performance.now() >= nextRepositorySourceScanAt) {
         const sourceWorkspace = canonicalWorkspace;
         const sourceBaselineHash = publishedLocalSnapshotHash;
         sourceScanFlight = (async () => {
@@ -6601,15 +6708,14 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
         })();
       }
       if (flags.has('once')) break;
-      if (!result.taskId && !evidenceRequestId) await new Promise((accept) => setTimeout(accept, pollMs));
+      if (!result.taskId && !evidenceRequestId) await waitForRelayRefresh(pollMs, signal);
     } while (!stopping);
   } finally {
     if (sourceScanFlight) await sourceScanFlight;
     await consumeSourceScan();
     await skillPreparationPump.stop();
     vault.close();
-    process.removeListener('SIGINT', stop);
-    process.removeListener('SIGTERM', stop);
+    signal.removeEventListener('abort', stop);
   }
   return {
     ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
@@ -6620,7 +6726,6 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     skillActivationFailuresByProvider,
     sharedRepositoryReady: await repositorySharedReady(canonicalWorkspace),
   };
-  } finally { await releaseRelayLease(); }
 }
 
 export async function run(argv: string[]): Promise<Output> {
@@ -6840,6 +6945,23 @@ export async function run(argv: string[]): Promise<Output> {
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
       const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor, autostart, reconnect };
+      if (flags.has('verbose') || flags.has('diagnostic')) {
+        const relayPid = await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')
+          .then(value => Number(value.trim())).catch(() => 0);
+        try {
+          const registered = await selectRepositoryRelayRegistrations(await registry(), config, loadOrganizationPolicy);
+          const observations = [];
+          for (const row of registered) {
+            const observation = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
+              'last-successful-poll.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+            observations.push({ workspaceId: row.workspaceId,
+              state: relay === 'running' && repositoryRelayObservationReady({ observation,
+                workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
+              lastSuccessfulPollAt: typeof observation?.at === 'string' ? observation.at : null });
+          }
+          status.repositoryRelays = { state: 'observed', repositories: observations };
+        } catch { status.repositoryRelays = { state: 'unavailable', repositories: [] }; }
+      }
       if (flags.has('verbose') || flags.has('diagnostic')) {
         Object.assign(status, { home: dharmaHome(), organizationId: config.organizationId, deviceId: config.deviceId });
       }
