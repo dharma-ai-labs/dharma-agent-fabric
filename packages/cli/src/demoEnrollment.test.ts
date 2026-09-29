@@ -665,3 +665,194 @@ test('expired status does not advance on an unrelated conflict', async () => {
   assert.deepEqual(sequences, [1, 2]);
   assert.equal((JSON.parse(await readFile(connected.configPath, 'utf8')) as { nextSequence: number }).nextSequence, 2);
 });
+
+async function committedStatusFixture() {
+  const stateRoot = await mkdtemp(resolve(tmpdir(), 'dharma-demo-committed-status-'));
+  const scope = options(stateRoot);
+  const store = memoryStore();
+  const configPath = scopePath(scope, hqUrl);
+  const pendingPath = `${configPath}.pending-status.json`;
+  const sequences: number[] = [];
+  let committedPending = '';
+  let failNext = false;
+  const fetcher: typeof fetch = async (resource, init) => {
+    const url = new URL(String(resource));
+    if (url.pathname.endsWith('/enrollments')) return Response.json({ ok: true, status: 'pending',
+      organizationId: orgId, repositoryId, deviceCode,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      verificationUri: `${hqUrl}/demo/fabric/approve?orgId=${orgId}&repositoryId=${repositoryId}&code=${browserCode}` });
+    if (url.pathname.endsWith('/poll')) return Response.json(approvedEnrollment());
+    sequences.push(Number(new Headers(init?.headers).get('x-dharma-sequence')));
+    if (!committedPending) committedPending = await readFile(pendingPath, 'utf8');
+    if (failNext) {
+      failNext = false;
+      return Response.json({ ok: false, error: { code: 'fixture_unavailable', message: 'Unavailable.' } }, { status: 503 });
+    }
+    return Response.json({ ok: true, organizationId: orgId, repositoryId, deviceId, normalizedRepository });
+  };
+  await connectDemoDevice(scope, { store, fetcher });
+  const committedConfig = await readFile(configPath, 'utf8');
+  await writeFile(pendingPath, committedPending);
+  return { scope, store, configPath, pendingPath, sequences, fetcher, committedPending, committedConfig,
+    failNextStatus: () => { failNext = true; } };
+}
+
+test('status resumes after committed config but interrupted pending cleanup, preserving the authentic receipt', async () => {
+  const fixture = await committedStatusFixture();
+  const result = await verifyDemoDevice(fixture.scope, fixture);
+  assert.equal(result.stage, 'device_signed_ready');
+  assert.deepEqual(fixture.sequences, [1, 2]);
+  const before = JSON.parse(fixture.committedConfig);
+  const after = JSON.parse(await readFile(fixture.configPath, 'utf8'));
+  assert.deepEqual({ ...after, nextSequence: before.nextSequence }, before);
+  assert.equal(after.nextSequence, 3);
+  const hash = createHash('sha256').update(fixture.committedPending).digest('hex');
+  const historyPath = resolve(`${fixture.configPath}.status-history`, `${hash}.json`);
+  assert.equal(await readFile(historyPath, 'utf8'), fixture.committedPending);
+  if (process.platform !== 'win32') assert.equal((await stat(historyPath)).mode & 0o777, 0o600);
+  await assert.rejects(readFile(fixture.pendingPath), { code: 'ENOENT' });
+  await verifyDemoDevice(fixture.scope, fixture);
+  assert.deepEqual(fixture.sequences, [1, 2, 3]);
+  assert.deepEqual(await readdir(`${fixture.configPath}.status-history`), [`${hash}.json`]);
+});
+
+test('interrupted stale-status recovery keeps the fresh exact replay without advancing or losing history', async () => {
+  const fixture = await committedStatusFixture();
+  fixture.failNextStatus();
+  await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /fixture_unavailable/);
+  assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+  const pending = JSON.parse(await readFile(fixture.pendingPath, 'utf8'));
+  assert.equal(pending.sequence, 2);
+  const result = await verifyDemoDevice(fixture.scope, fixture);
+  assert.equal(result.stage, 'device_signed_ready');
+  assert.deepEqual(fixture.sequences, [1, 2, 2]);
+  const hash = createHash('sha256').update(fixture.committedPending).digest('hex');
+  assert.equal(await readFile(resolve(`${fixture.configPath}.status-history`, `${hash}.json`), 'utf8'), fixture.committedPending);
+  assert.equal(JSON.parse(await readFile(fixture.configPath, 'utf8')).nextSequence, 3);
+});
+
+test('stale-status recovery refuses foreign, malformed and unauthenticated receipts before dispatch', async () => {
+  const fixture = await committedStatusFixture();
+  const authentic = JSON.parse(fixture.committedPending);
+  const mutations = [
+    (p: typeof authentic) => { p.deviceId = repositoryId; },
+    (p: typeof authentic) => { p.url = p.url.replace(hqUrl, 'https://foreign.example'); },
+    (p: typeof authentic) => { p.url = p.url.replace(orgId, 'org_foreign'); },
+    (p: typeof authentic) => { p.url = p.url.replace(repositoryId, deviceId); },
+    (p: typeof authentic) => { p.sequence = 0; },
+    (p: typeof authentic) => { p.createdAt = 'invalid'; },
+    (p: typeof authentic) => { p.headers['x-dharma-device-id'] = repositoryId; },
+    (p: typeof authentic) => { p.headers['x-dharma-sequence'] = '2'; },
+    (p: typeof authentic) => { p.headers['x-dharma-message-id'] = repositoryId; },
+    (p: typeof authentic) => { p.headers['x-dharma-session-id'] = repositoryId; },
+    (p: typeof authentic) => { p.headers['x-dharma-nonce'] = 'A'.repeat(32); },
+    (p: typeof authentic) => { p.headers['x-dharma-signature'] = 'A'.repeat(86); },
+    (p: typeof authentic) => { p.headers.authorization = 'Bearer fixture-not-a-credential'; },
+    (p: typeof authentic) => { p.headers = {}; },
+  ];
+  for (const mutate of mutations) {
+    const pending = structuredClone(authentic);
+    mutate(pending);
+    const bytes = JSON.stringify(pending);
+    await writeFile(fixture.pendingPath, bytes);
+    await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /Pending Demo device status is invalid/);
+    assert.equal(await readFile(fixture.pendingPath, 'utf8'), bytes);
+    assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+    assert.deepEqual(fixture.sequences, [1]);
+    await assert.rejects(readdir(`${fixture.configPath}.status-history`), { code: 'ENOENT' });
+  }
+  await writeFile(fixture.pendingPath, fixture.committedPending);
+  for (const config of [
+    { ...JSON.parse(fixture.committedConfig), signedReady: false },
+    { ...JSON.parse(fixture.committedConfig), nextSequence: 3 },
+  ]) {
+    const bytes = JSON.stringify(config);
+    await writeFile(fixture.configPath, bytes);
+    await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /Pending Demo device status is invalid/);
+    assert.equal(await readFile(fixture.configPath, 'utf8'), bytes);
+    assert.equal(await readFile(fixture.pendingPath, 'utf8'), fixture.committedPending);
+    assert.deepEqual(fixture.sequences, [1]);
+  }
+});
+
+test('stale-status history conflicts preserve the source receipt and block dispatch', async () => {
+  const fixture = await committedStatusFixture();
+  const hash = createHash('sha256').update(fixture.committedPending).digest('hex');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(`${fixture.configPath}.status-history`);
+  const history = resolve(`${fixture.configPath}.status-history`, `${hash}.json`);
+  await writeFile(history, 'conflicting receipt');
+  await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /Pending Demo device status is invalid/);
+  assert.equal(await readFile(fixture.pendingPath, 'utf8'), fixture.committedPending);
+  assert.equal(await readFile(history, 'utf8'), 'conflicting receipt');
+  assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+  assert.deepEqual(fixture.sequences, [1]);
+});
+
+test('stale-status recovery reuses an identical private history receipt after interruption', async () => {
+  const fixture = await committedStatusFixture();
+  const hash = createHash('sha256').update(fixture.committedPending).digest('hex');
+  const { mkdir } = await import('node:fs/promises');
+  const directory = `${fixture.configPath}.status-history`;
+  await mkdir(directory);
+  const history = resolve(directory, `${hash}.json`);
+  await writeFile(history, fixture.committedPending);
+  await verifyDemoDevice(fixture.scope, fixture);
+  assert.equal(await readFile(history, 'utf8'), fixture.committedPending);
+  assert.deepEqual(await readdir(directory), [`${hash}.json`]);
+  assert.deepEqual(fixture.sequences, [1, 2]);
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(history)).mode & 0o777, 0o600);
+  }
+});
+
+test('stale-status archival failure cannot overwrite the source receipt or dispatch', async () => {
+  const fixture = await committedStatusFixture();
+  const directory = `${fixture.configPath}.status-history`;
+  await writeFile(directory, 'not a directory');
+  await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /Pending Demo device status is invalid/);
+  assert.equal(await readFile(fixture.pendingPath, 'utf8'), fixture.committedPending);
+  assert.equal(await readFile(directory, 'utf8'), 'not a directory');
+  assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+  assert.deepEqual(fixture.sequences, [1]);
+});
+
+test('stale-status history refuses directory symlinks without following or writing them', async () => {
+  const fixture = await committedStatusFixture();
+  const { symlink } = await import('node:fs/promises');
+  const target = await mkdtemp(resolve(tmpdir(), 'dharma-demo-history-target-'));
+  await symlink(target, `${fixture.configPath}.status-history`, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /Pending Demo device status is invalid/);
+  assert.deepEqual(await readdir(target), []);
+  assert.equal(await readFile(fixture.pendingPath, 'utf8'), fixture.committedPending);
+  assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+  assert.deepEqual(fixture.sequences, [1]);
+});
+
+test('stale-status recovery requires the fresh response to confirm the same repository and device', async () => {
+  for (const mutation of [
+    { organizationId: 'org_foreign' }, { repositoryId: deviceId },
+    { deviceId: repositoryId }, { normalizedRepository: 'github.com/foreign/private' },
+  ]) {
+    const fixture = await committedStatusFixture();
+    const fetcher: typeof fetch = async () => Response.json({ ok: true, organizationId: orgId,
+      repositoryId, deviceId, normalizedRepository, ...mutation });
+    await assert.rejects(verifyDemoDevice(fixture.scope, { store: fixture.store, fetcher }), /exact repository and device/);
+    assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+    assert.equal(JSON.parse(await readFile(fixture.pendingPath, 'utf8')).sequence, 2);
+    const hash = createHash('sha256').update(fixture.committedPending).digest('hex');
+    assert.equal(await readFile(resolve(`${fixture.configPath}.status-history`, `${hash}.json`), 'utf8'), fixture.committedPending);
+  }
+});
+
+test('stale-status recovery cannot extend expired signing trust or replace the enrolled identity', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-09-29T15:00:00Z') });
+  const fixture = await committedStatusFixture();
+  t.mock.timers.tick(48 * 60 * 60_000);
+  await assert.rejects(verifyDemoDevice(fixture.scope, fixture), /expired/i);
+  assert.equal(await readFile(fixture.configPath, 'utf8'), fixture.committedConfig);
+  assert.equal(await readFile(fixture.pendingPath, 'utf8'), fixture.committedPending);
+  assert.deepEqual(fixture.sequences, [1]);
+  await assert.rejects(readdir(`${fixture.configPath}.status-history`), { code: 'ENOENT' });
+});
