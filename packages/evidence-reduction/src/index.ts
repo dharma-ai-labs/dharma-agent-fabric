@@ -138,6 +138,11 @@ function normalizedFieldName(key: string) {
 export function referencesExcludedPath(value: unknown, excludePaths: string[], key = '', depth = 0): boolean {
   if (depth > 64) return true;
   if (typeof value === 'string') {
+    if (/^[\[{]/.test(value.trim())) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(value); } catch {}
+      if (parsed !== undefined && referencesExcludedPath(parsed, excludePaths, 'arguments', depth + 1)) return true;
+    }
     const normalizedKey = normalizedFieldName(key);
     const pathBearingKey = /(?:^|_)(?:path|file|filename|source|cwd)(?:$|_)/i.test(normalizedKey);
     const serializedPayloadKey = /(?:^|_)(?:arguments?|args|command|cmd|input|payload|body|data|message|content)(?:$|_)/i.test(normalizedKey);
@@ -151,11 +156,6 @@ export function referencesExcludedPath(value: unknown, excludePaths: string[], k
       ];
       if (candidates.some((candidate) => excludePaths.some((pattern) => globPattern(pattern).test(candidate.replace(/^\.\//, ''))))) {
         return true;
-      }
-      if (serializedPayloadKey && /^[\[{]/.test(value.trim())) {
-        try {
-          if (referencesExcludedPath(JSON.parse(value), excludePaths, 'arguments', depth + 1)) return true;
-        } catch {}
       }
     }
   }
@@ -250,11 +250,12 @@ function redactValue(value: unknown, stats: RedactionStats, key = '', options: R
     return '[REDACTED:local_path]';
   }
   if (typeof value === 'string') {
-    if (/^(?:arguments?|args|input|payload|body|data|message|content)$/i.test(normalizedKey)
-      && /^[\[{]/.test(value.trim())) {
-      try {
-        return JSON.stringify(redactValue(JSON.parse(value), stats, normalizedKey, options, depth + 1));
-      } catch {}
+    // The upload guard inspects JSON objects/arrays in every string field.
+    // Decode before redaction so escaped newlines cannot conceal local paths.
+    if (/^[\[{]/.test(value.trim())) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(value); } catch {}
+      if (parsed !== undefined) return JSON.stringify(redactValue(parsed, stats, normalizedKey, options, depth + 1));
     }
     return redactString(value, stats, options);
   }
