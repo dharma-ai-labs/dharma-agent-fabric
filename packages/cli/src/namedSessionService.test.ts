@@ -8,6 +8,7 @@ import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/ag
 import { signCanonicalObject, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { namedSessionPaths, namedSessionRequest, readNamedSession, runNamedSessionService, saveNamedSession,
   type NamedSessionRegistration } from './namedSessionService.js';
+import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 
 test('durable named registration excludes credentials, grants and foreign shape', async () => {
   const home = await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'dhr-'));
@@ -32,9 +33,10 @@ test('named session socket paths remain bounded without relaxing identity valida
   assert.ok(Buffer.byteLength(namedSessionPaths('/tmp/dhr', 'reviewer').socket) <= 103);
 });
 
-for (const failWork of [false, true]) test(failWork
+for (const queueFailure of [false, true]) for (const failWork of [false, true]) test((failWork
   ? 'named session retains failed native work evidence and its reservation without replay'
-  : 'named session serializes local work and signed peer questions with per-turn permissions',
+  : 'named session serializes local work and signed peer questions with per-turn permissions')
+    + (queueFailure ? ' with blocked evidence synchronization' : ' with encrypted outbox synchronization'),
   { skip: process.platform !== 'linux' }, async () => {
     const home = await mkdtemp(join(tmpdir(), 'dharma-named-'));
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -120,6 +122,17 @@ for (const failWork of [false, true]) test(failWork
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
       authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => true,
+      queueEvidence: async capture => {
+        if (queueFailure) throw new Error('RAW_QUEUE_FAILURE_DIAGNOSTIC_MUST_NOT_LEAK');
+        return queueNamedSessionEvidence({ vault, capture, binding, policy: {
+          schema: 'dharma.organization-policy/v1', organizationId: identity.organizationId, revision: 'test_rev',
+          evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: ['.env'],
+            maximumCapsuleBytes: 1_000_000, maximumDailyUploadBytes: 5_000_000, maximumExpansionBytes: 1_000_000 },
+          tasks: { defaultNetwork: 'deny', defaultGit: 'task_branch', writePaths: ['src/**'],
+            requireLocalConfirmationFor: [], allowedCommands: {} },
+          skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
+        } });
+      },
       withActivationBoundary: operation => operation() });
     try {
       for (let n = 0; n < 40; n++) {
@@ -144,6 +157,8 @@ for (const failWork of [false, true]) test(failWork
         assert.equal(failedIntent.prompt, 'A failing native task.');
         assert.equal(failure.nativeEvidence.acceptedLearningObservation, false);
         assert.equal(failure.nativeEvidence.providerTurnState, 'failed');
+        assert.equal(failure.nativeEvidence.synchronization.state, queueFailure ? 'blocked' : 'queued');
+        assert.equal((await vault.listPendingCapsuleSyncs()).length, queueFailure ? 0 : 2);
         const capture = JSON.parse((await vault.getBlob(failure.nativeEvidence.contentHash)).toString('utf8'));
         assert.equal(capture.workOutcome, 'failed');
         assert.equal(capture.workId, failedId);
@@ -162,6 +177,11 @@ for (const failWork of [false, true]) test(failWork
         assert.equal('prompt' in receipt, false);
         const evidence = receipt.nativeEvidence as Record<string, unknown>;
         assert.equal(evidence.acceptedLearningObservation, false);
+        const synchronization = evidence.synchronization as Record<string, unknown>;
+        assert.equal(synchronization.state, queueFailure ? 'blocked' : 'queued');
+        assert.equal(synchronization.acceptedLearningObservation, false);
+        assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+          'https://schemas.dharma-ai.io/named-session-evidence/v1', synchronization)).ok, true);
         assert.equal(evidence.coverage, 'observed');
         assert.equal(JSON.stringify(receipt).includes('RAW_CAPTURE_ONLY_TEST_CANARY'), false);
         const capture = JSON.parse((await vault.getBlob(String(evidence.contentHash))).toString('utf8'));
@@ -186,9 +206,11 @@ for (const failWork of [false, true]) test(failWork
       assert.deepEqual(turns, ['dharma_work', 'dharma_work', 'dharma_bridge']);
       await assert.rejects(namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Replay' }), /work_already_recorded/);
       assert.equal(turns.length, 3);
+      assert.equal((await vault.listPendingCapsuleSyncs()).length, queueFailure ? 0 : 2);
       const health = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
       assert.equal(health.budget.reservedCents, 75);
       assert.equal(JSON.stringify(health).includes('RAW_CAPTURE_ONLY_TEST_CANARY'), false);
+      assert.equal(JSON.stringify(health).includes('RAW_QUEUE_FAILURE_DIAGNOSTIC_MUST_NOT_LEAK'), false);
       const completion = JSON.parse((await vault.getBlob(health.lastObservation.completionHash)).toString('utf8'));
       assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
         'https://schemas.dharma-ai.io/provider-session-completion/v1', completion)).ok, true);

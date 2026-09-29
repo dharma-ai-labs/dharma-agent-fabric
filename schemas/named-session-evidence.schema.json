@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-evidence/v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "organizationId", "deviceId", "workspaceId", "bindingId", "workId", "captureId", "captureHash", "createdAt", "state", "trajectoryId", "capsuleHash", "code", "acceptedLearningObservation"],
+  "properties": {
+    "schema": { "const": "dharma.named-session-evidence/v1" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "bindingId": { "type": "string", "format": "uuid" },
+    "workId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "captureId": { "type": "string", "format": "uuid" },
+    "captureHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["queued", "unavailable", "blocked"] },
+    "trajectoryId": { "type": ["string", "null"], "format": "uuid" },
+    "capsuleHash": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+    "code": { "enum": ["relay_outbox_queued", "native_turn_unavailable", "evidence_queue_failed"] },
+    "acceptedLearningObservation": { "const": false }
+  },
+  "allOf": [
+    { "if": { "properties": { "state": { "const": "queued" } } },
+      "then": { "properties": { "code": { "const": "relay_outbox_queued" }, "trajectoryId": { "type": "string" }, "capsuleHash": { "type": "string" } } },
+      "else": { "properties": { "trajectoryId": { "type": "null" }, "capsuleHash": { "type": "null" } } } },
+    { "if": { "properties": { "state": { "const": "unavailable" } } }, "then": { "properties": { "code": { "const": "native_turn_unavailable" } } } },
+    { "if": { "properties": { "state": { "const": "blocked" } } }, "then": { "properties": { "code": { "const": "evidence_queue_failed" } } } }
+  ]
+}

@@ -114,6 +114,22 @@ Use the separate teammate action in the Instructions tab to send a Clerk
 organization invitation and copy a distinct one-time setup for that teammate.
 The agent connection can complete before the teammate accepts portal access.
 
+## Named Codex work evidence
+
+Named Codex coding turns retain their scoped native notifications in the encrypted
+local vault. The service automatically normalizes and queues a trajectory capsule
+under the verified workspace evidence policy. The existing relay rechecks current
+authorization, device binding and upload limits before sending it. Metadata-only
+or local-analysis policies do not disclose native prompt or output content.
+
+Work receipts include `nativeEvidence.synchronization` with `queued`, `unavailable`
+or `blocked` state. `queued` means local outbox persistence, not server acceptance,
+analysis, or successful learning. These notifications are partial turn evidence:
+they do not establish full context, the executed model, or actual skill use, and
+`acceptedLearningObservation` remains false. Peer questions are not counted as
+local coding work. Queue failures preserve the actual coding result; a failed or
+interrupted provider turn retains its reservation and is not replayed on restart.
+
 ## Manual enrollment
 
 Manual browser-confirmed enrollment remains available when no one-time grant is
