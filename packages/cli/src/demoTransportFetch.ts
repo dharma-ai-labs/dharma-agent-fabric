@@ -21,8 +21,10 @@ function requestScope(resource: Parameters<typeof fetch>[0], init: RequestInit, 
   try { url = new URL(String(resource)); } catch { fail('request_scope_invalid'); }
   const prefix = `/api/demo/fabric/repositories/${binding.repositoryId}/`;
   const suffix = url.pathname.slice(prefix.length);
+  const canonicalSourceBlobGet = (init.method || 'GET') === 'GET'
+    && /^source-inventory\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/blobs\/sha256%3A[0-9a-f]{64}$/.test(suffix);
   if (url.origin !== binding.enrollmentOrigin || url.username || url.password || url.hash
-    || !url.pathname.startsWith(prefix) || !/^[a-zA-Z0-9-]+(?:\/[a-zA-Z0-9-]+)*$/.test(suffix)
+    || !url.pathname.startsWith(prefix) || !/^[a-zA-Z0-9-]+(?:\/[a-zA-Z0-9-]+)*$/.test(suffix) && !canonicalSourceBlobGet
     || url.searchParams.getAll('orgId').length !== 1
     || url.searchParams.get('orgId') !== binding.organizationId
     || !['GET', 'POST'].includes(init.method || 'GET')
