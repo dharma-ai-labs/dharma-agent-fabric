@@ -6,6 +6,7 @@ import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/a
 import { validateContract, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexInboxSession } from './codexInboxSession.js';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { NamedSessionEvidenceReceipt } from './namedSessionEvidence.js';
 
 export interface NamedSessionRegistration {
@@ -164,6 +165,7 @@ export async function runNamedSessionService(input: {
           return enqueue(async () => {
             if (request.action === 'work') {
               if (typeof request.prompt !== 'string' || typeof request.workId !== 'string') throw new Error('named_session_work_invalid');
+              assertCodexWorkPrompt(request.prompt);
               if (!await input.authorizeLocalWork()) throw new Error('named_session_workspace_write_not_authorized');
               const intent = await input.vault.putBlob(Buffer.from(JSON.stringify({ workId: request.workId,
                 prompt: request.prompt, bindingId: binding.bindingId })), 'named-session-work-intent');
@@ -174,10 +176,11 @@ export async function runNamedSessionService(input: {
                   prompt: request.prompt as string, maximumProviderCostCents: registration.maximumTurnCostCents,
                   onTurnEvidence: async capture => {
                     const valid = await validateContract(join(import.meta.dirname, 'schemas'),
-                      'https://schemas.dharma-ai.io/codex-local-work-capture/v1', capture);
+                      codexWorkCaptureSchemaId(capture), capture);
                     if (!valid.ok) throw new Error('codex_session_evidence_invalid');
                     const contentHash = await input.vault.putBlob(Buffer.from(JSON.stringify(capture)), 'raw-provider-turn');
                     nativeEvidence = { schema: capture.schema, captureId: capture.captureId, contentHash,
+                      ...(capture.schema === 'dharma.codex-local-work-capture/v2' ? { requestHash: capture.requestHash } : {}),
                       coverage: capture.coverage, limitations: capture.limitations, providerTurnState: capture.providerTurnState,
                       acceptedLearningObservation: false };
                     if (input.queueEvidence) {

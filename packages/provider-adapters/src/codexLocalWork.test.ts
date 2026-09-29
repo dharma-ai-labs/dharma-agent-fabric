@@ -56,7 +56,7 @@ test('local work delivers turn-scoped native evidence only to the private sink',
   let capture: CodexLocalWorkCapture | undefined;
   const input = { ...f, onTurnEvidence: async (value: CodexLocalWorkCapture) => { capture = value; } };
   const result = await runCodexLocalWork(input);
-  assert.equal(capture?.schema, 'dharma.codex-local-work-capture/v1');
+  assert.equal(capture?.schema, 'dharma.codex-local-work-capture/v2');
   assert.equal(capture?.workId, 'work-1');
   assert.equal(capture?.providerThreadId, 'thread-1');
   assert.equal(capture?.providerTurnId, 'turn-1');
@@ -86,6 +86,48 @@ test('failed native work retains evidence without claiming a completed observati
   assert.equal(capture?.providerTurnState, 'failed');
   assert.equal(capture?.acceptedLearningObservation, false);
   assert.equal(listeners.size, 0);
+});
+
+test('native work captures the exact dispatched request without exposing it in its receipt', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture();
+  let capture: CodexLocalWorkCapture | undefined;
+  const result = await runCodexLocalWork({ ...f, onTurnEvidence: async value => { capture = value; } });
+  const request = f.calls.find(call => call.method === 'turn/start')!;
+  const retained = capture as unknown as Record<string, unknown>;
+  assert.equal(retained.schema, 'dharma.codex-local-work-capture/v2');
+  assert.deepEqual(retained.request, request);
+  assert.match(String(retained.requestHash), /^sha256:[a-f0-9]{64}$/);
+  assert.equal(retained.captureScope, 'turn_request_and_notifications');
+  assert.equal(retained.executedModel, null);
+  assert.equal(retained.acceptedLearningObservation, false);
+  assert.equal('request' in result, false);
+});
+
+test('credential-bearing work is rejected before provider calls, reservation or capture', { skip: process.platform !== 'linux' }, async () => {
+  for (const prompt of ['Use dhab_PRIVATE_TEST_GRANT', 'authorization: Bearer private-fixture',
+    '{"access_token":"private-fixture"}', '{"apiKey":"private-fixture"}',
+    'password: private-fixture', 'cookie=private-fixture', 'apiKey: private-fixture']) {
+    const f = fixture();
+    let reserved = false, captured = false;
+    f.budget.reserve = async () => { reserved = true; return true; };
+    await assert.rejects(runCodexLocalWork({ ...f, prompt,
+      onTurnEvidence: async () => { captured = true; } }), /codex_session_work_credentials_forbidden/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(reserved, false);
+    assert.equal(captured, false);
+  }
+});
+
+test('a maximum-length work prompt is retained without truncating the native instruction prefix', { skip: process.platform !== 'linux' }, async () => {
+  const f = fixture();
+  let capture: CodexLocalWorkCapture | undefined;
+  const prompt = 'x'.repeat(10000);
+  await runCodexLocalWork({ ...f, prompt, onTurnEvidence: async value => { capture = value; } });
+  assert.equal(capture?.schema, 'dharma.codex-local-work-capture/v2');
+  if (capture?.schema !== 'dharma.codex-local-work-capture/v2') return;
+  assert.ok(capture.request.params.input[0].text.startsWith(`Local coding work work-1: ${prompt}\n`));
+  assert.deepEqual(capture.request.params, f.calls.find(call => call.method === 'turn/start')!.params);
+  assert.ok(capture.request.params.input[0].text.length > prompt.length);
 });
 
 test('expanded local write profile fails before reservation or a turn', { skip: process.platform !== 'linux' }, async () => {

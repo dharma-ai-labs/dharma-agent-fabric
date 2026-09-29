@@ -49,6 +49,51 @@ async function withVault(operation: (vault: LocalVault, root: string) => Promise
   try { await operation(vault, root); } finally { vault.close(); }
 }
 
+function withRequest(input = fixture()) {
+  const request = { method: 'turn/start' as const, params: { threadId: input.binding.sessionId,
+    input: [{ type: 'text' as const, text: 'EXACT_PUBLIC_WORK_REQUEST' }] as [{ type: 'text'; text: string }],
+    cwd: input.binding.workspaceRoot, approvalPolicy: 'never' as const, permissions: 'dharma_work' as const } };
+  return { ...input, capture: { ...input.capture, schema: 'dharma.codex-local-work-capture/v2' as const,
+    captureScope: 'turn_request_and_notifications' as const, request,
+    requestHash: `sha256:${createHash('sha256').update(JSON.stringify(request)).digest('hex')}` } };
+}
+
+test('the exact native request reaches the encrypted outbox under the existing disclosure boundary', async () => {
+  await withVault(async vault => {
+    const input = withRequest();
+    const result = await queueNamedSessionEvidence({ ...input, vault });
+    const capsule = (await vault.listPendingCapsuleSyncs())[0]!.capsule;
+    assert.equal(JSON.stringify(capsule).includes('EXACT_PUBLIC_WORK_REQUEST'), false);
+    assert.ok((await vault.getBlob(result.captureHash)).includes(Buffer.from('EXACT_PUBLIC_WORK_REQUEST')));
+    const missing = (capsule.coverage as Record<string, unknown>).missingFields as string[];
+    assert.ok(missing.includes('retained_context_unavailable'));
+    assert.ok(missing.includes('executed_model_unreported'));
+    assert.equal(missing.includes('turn_notifications_only'), false);
+    assert.equal(result.acceptedLearningObservation, false);
+    assert.deepEqual(await queueNamedSessionEvidence({ ...input, vault }), result);
+    assert.equal((await vault.listPendingCapsuleSyncs()).length, 1);
+  });
+});
+
+test('native request hashes, authority, scope and credentials are checked before vault admission', async () => {
+  await withVault(async vault => {
+    for (const key of ['threadId', 'cwd']) {
+      const input = withRequest();
+      Object.assign(input.capture.request.params, { [key]: 'foreign' });
+      input.capture.requestHash = `sha256:${createHash('sha256').update(JSON.stringify(input.capture.request)).digest('hex')}`;
+      await assert.rejects(queueNamedSessionEvidence({ ...input, vault }), /scope_mismatch/);
+    }
+    const tampered = withRequest(); tampered.capture.request.params.input[0].text = 'Changed task.';
+    await assert.rejects(queueNamedSessionEvidence({ ...tampered, vault }), /integrity_failed/);
+    const secret = withRequest(); secret.capture.request.params.input[0].text = 'Use dhab_PRIVATE_TEST_GRANT';
+    secret.capture.requestHash = `sha256:${createHash('sha256').update(JSON.stringify(secret.capture.request)).digest('hex')}`;
+    await assert.rejects(queueNamedSessionEvidence({ ...secret, vault }), /credentials_forbidden/);
+    const expanded = withRequest(); Object.assign(expanded.capture.request.params, { permissions: 'unrestricted' });
+    await assert.rejects(queueNamedSessionEvidence({ ...expanded, vault }), /evidence_invalid/);
+    assert.equal((await vault.listPendingCapsuleSyncs()).length, 0);
+  });
+});
+
 test('native named turns enter the encrypted relay outbox, not the accepted learning counter', async () => {
   await withVault(async (vault, root) => {
     const input = fixture();
@@ -141,7 +186,7 @@ test('unconfirmed and empty turns remain local and explicit; failed executions a
 
 test('signed content disclosure filters protected provider fields, secrets and private paths', async () => {
   await withVault(async vault => {
-    const input = fixture(), keys = generateKeyPairSync('ed25519');
+    const input = withRequest(), keys = generateKeyPairSync('ed25519');
     input.policy.evidence.pseudonymizeIdentity = true;
     const disclosure = { mode: 'customer_authorized_content' as const, consentReceiptId: 'approved-test-consent',
       allowedContentClasses: ['native_provider_payload' as const] };
@@ -163,6 +208,7 @@ test('signed content disclosure filters protected provider fields, secrets and p
       organizationId: input.binding.organizationId, workspaceId: input.binding.workspaceId });
     await queueNamedSessionEvidence({ ...input, vault });
     const wire = JSON.stringify((await vault.listPendingCapsuleSyncs())[0]!.capsule);
+    assert.ok(wire.includes('EXACT_PUBLIC_WORK_REQUEST'));
     assert.ok(wire.includes('SYNTHETIC_TEST_OUTPUT'));
     for (const excluded of ['PROTECTED_NATIVE_CANARY', 'SECRET_FIELD_CANARY', 'PRIVATE_GRADER_CANARY']) {
       assert.equal(wire.includes(excluded), false);

@@ -127,3 +127,31 @@ test('unidentified and unterminated turns remain unavailable or partial', () => 
   assert.equal(result.providerTurnState, 'unconfirmed');
   assert.equal(result.coverage, 'partial');
 });
+
+test('the request snapshot is immutable, versioned and bound to this workspace and thread', async () => {
+  const capture = fixture();
+  const params = { threadId: 'thread-1', input: [{ type: 'text' as const, text: 'Run public tests.' }] as [{ type: 'text'; text: string }],
+    cwd: resolve('repo'), approvalPolicy: 'never' as const, permissions: 'dharma_work' as const };
+  capture.retainRequest(params);
+  params.input[0].text = 'mutated';
+  capture.bind('turn-1'); capture.observe(terminal());
+  const result = capture.finish('completed');
+  assert.equal(result.schema, 'dharma.codex-local-work-capture/v2');
+  if (result.schema !== 'dharma.codex-local-work-capture/v2') return;
+  assert.equal(result.request.params.input[0].text, 'Run public tests.');
+  assert.equal(result.requestHash, `sha256:${createHash('sha256').update(JSON.stringify(result.request)).digest('hex')}`);
+  assert.equal((await validateContract(resolve(import.meta.dirname, '../../../schemas'),
+    'https://schemas.dharma-ai.io/codex-local-work-capture/v2', result)).ok, true);
+  for (const invalid of [{ ...result, requestHash: undefined }, { ...result, executedModel: 'configured' },
+    { ...result, request: { ...result.request, params: { ...result.request.params, permissions: 'unrestricted' } } }]) {
+    assert.equal((await validateContract(resolve(import.meta.dirname, '../../../schemas'),
+      'https://schemas.dharma-ai.io/codex-local-work-capture/v2', invalid)).ok, false);
+  }
+  result.request.params.input[0].text = 'second mutation';
+  const again = capture.finish('completed');
+  assert.equal(again.schema === 'dharma.codex-local-work-capture/v2' && again.request.params.input[0].text, 'Run public tests.');
+  assert.throws(() => capture.retainRequest(params), /request_invalid/);
+  for (const change of [{ threadId: 'foreign' }, { cwd: resolve('foreign') }]) {
+    assert.throws(() => fixture().retainRequest({ ...params, ...change }), /request_invalid/);
+  }
+});

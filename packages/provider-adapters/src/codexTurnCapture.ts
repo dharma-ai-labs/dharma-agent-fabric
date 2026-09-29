@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CodexBridgeBinding } from './codexAppServerSession.js';
 
-export interface CodexLocalWorkCapture {
-  schema: 'dharma.codex-local-work-capture/v1';
+interface CodexWorkCaptureFields {
   captureId: string;
   organizationId: string;
   repositoryBindingId: string;
@@ -19,7 +18,6 @@ export interface CodexLocalWorkCapture {
   closedAt: string;
   workOutcome: 'completed' | 'failed';
   providerTurnState: 'completed' | 'failed' | 'interrupted' | 'unconfirmed';
-  captureScope: 'turn_notifications';
   coverage: 'observed' | 'partial' | 'unavailable';
   limitations: string[];
   droppedEvents: number;
@@ -27,6 +25,24 @@ export interface CodexLocalWorkCapture {
   executedModel: null;
   eventsHash: string;
   events: Array<{ sequence: number; receivedAt: string; notification: Record<string, unknown> }>;
+}
+
+export interface CodexWorkRequest {
+  method: 'turn/start';
+  params: { threadId: string; input: [{ type: 'text'; text: string }]; cwd: string;
+    approvalPolicy: 'never'; permissions: 'dharma_work' };
+}
+
+export type CodexLocalWorkCapture = CodexWorkCaptureFields & (
+  { schema: 'dharma.codex-local-work-capture/v1'; captureScope: 'turn_notifications' }
+  | { schema: 'dharma.codex-local-work-capture/v2'; captureScope: 'turn_request_and_notifications';
+    request: CodexWorkRequest; requestHash: string }
+);
+
+export function codexWorkCaptureSchemaId(capture: CodexLocalWorkCapture) {
+  return capture.schema === 'dharma.codex-local-work-capture/v2'
+    ? 'https://schemas.dharma-ai.io/codex-local-work-capture/v2'
+    : 'https://schemas.dharma-ai.io/codex-local-work-capture/v1';
 }
 
 export type CodexTurnEvidenceSink = (capture: CodexLocalWorkCapture) => Promise<void>;
@@ -45,7 +61,7 @@ function containsCredential(value: unknown, depth = 0): boolean {
     if (/^[\[{]/.test(value.trim())) {
       try { return containsCredential(JSON.parse(value), depth + 1); } catch { /* Inspect non-JSON text below. */ }
     }
-    return /["']?(?:authorization|access_token|refresh_token|api_key|private_key|credential|grant)["']?\s*[:=]/i.test(value);
+    return /["']?(?:authorization|cookie|access[_-]?token|refresh[_-]?token|api[_-]?key|private[_-]?key|client[_-]?secret|credentials?|grant|password|secret)["']?\s*[:=]/i.test(value);
   }
   if (Array.isArray(value)) return value.some(item => containsCredential(item, depth + 1));
   if (record(value)) return Object.entries(value as Record<string, unknown>).some(([key, item]) => {
@@ -57,11 +73,19 @@ function containsCredential(value: unknown, depth = 0): boolean {
   return false;
 }
 
+export function assertCodexWorkPrompt(prompt: unknown, nativeRequest = false): asserts prompt is string {
+  if (typeof prompt !== 'string' || prompt.length < 1 || prompt.length > (nativeRequest ? 12000 : 10000)) {
+    throw new Error('codex_session_work_invalid');
+  }
+  if (containsCredential(prompt)) throw new Error('codex_session_work_credentials_forbidden');
+}
+
 export function createCodexTurnCapture(binding: CodexBridgeBinding, workId: string) {
   const startedAt = new Date().toISOString();
   type Entry = CodexLocalWorkCapture['events'][number] & { turnId: string; bytes: number };
   let turnId: string | null = null, bytes = 0, sequence = 0, droppedEvents = 0;
   let events: Entry[] = [];
+  let request: CodexWorkRequest | undefined;
   const limitations = new Set<string>();
   let providerTurnState: CodexLocalWorkCapture['providerTurnState'] = 'unconfirmed';
 
@@ -100,6 +124,14 @@ export function createCodexTurnCapture(binding: CodexBridgeBinding, workId: stri
 
   return {
     observe,
+    retainRequest(params: CodexWorkRequest['params']) {
+      assertCodexWorkPrompt(params.input[0].text, true);
+      if (request || params.threadId !== binding.threadId || params.cwd !== binding.workspaceRoot
+        || params.permissions !== 'dharma_work' || params.approvalPolicy !== 'never') {
+        throw new Error('codex_session_evidence_request_invalid');
+      }
+      request = structuredClone({ method: 'turn/start', params });
+    },
     bind(id: string) {
       turnId = id;
       events = events.filter(event => event.turnId === id);
@@ -118,12 +150,16 @@ export function createCodexTurnCapture(binding: CodexBridgeBinding, workId: stri
       if (providerTurnState === 'unconfirmed') limitations.add('terminal_unconfirmed');
       const captured = events.map(({ turnId: _turnId, bytes: _bytes, ...event }) => event);
       return {
-        schema: 'dharma.codex-local-work-capture/v1', captureId: randomUUID(),
+        ...(request ? { schema: 'dharma.codex-local-work-capture/v2' as const,
+          captureScope: 'turn_request_and_notifications' as const, request: structuredClone(request),
+          requestHash: `sha256:${createHash('sha256').update(JSON.stringify(request)).digest('hex')}` }
+          : { schema: 'dharma.codex-local-work-capture/v1' as const, captureScope: 'turn_notifications' as const }),
+        captureId: randomUUID(),
         organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
         workspaceId: binding.workspaceId, endpointId: binding.endpointId, membershipId: binding.membershipId,
         deviceId: binding.deviceId, bindingId: binding.bindingId, workId, provider: 'codex',
         providerThreadId: binding.threadId, providerTurnId: turnId, startedAt, closedAt: new Date().toISOString(),
-        workOutcome, providerTurnState, captureScope: 'turn_notifications',
+        workOutcome, providerTurnState,
         coverage: !captured.length ? 'unavailable' : limitations.size ? 'partial' : 'observed',
         limitations: [...limitations].sort(), droppedEvents, acceptedLearningObservation: false, executedModel: null,
         eventsHash: `sha256:${createHash('sha256').update(JSON.stringify(captured)).digest('hex')}`, events: captured,
