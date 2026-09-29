@@ -36,7 +36,7 @@
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.11",
     "@dharma-ai-labs/agent-fabric-evidence-reduction": "0.2.23",
-    "@dharma-ai-labs/agent-fabric-local-vault": "0.1.22",
+    "@dharma-ai-labs/agent-fabric-local-vault": "0.1.23",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.4",
     "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.25",
     "@dharma-ai-labs/agent-fabric-relay-client": "0.2.24",
