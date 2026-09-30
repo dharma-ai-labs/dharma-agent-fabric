@@ -9,6 +9,7 @@ import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-a
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { prepareNamedSessionTaskExport } from './namedSessionTaskExport.js';
+import { stageNamedSessionTaskExport, syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
@@ -180,6 +181,120 @@ test('policy size limits are enforced and repeats preserve one deterministic exp
     { state: 'blocked', code: 'task_export_size_or_schema_invalid', acceptedLearningObservation: false });
 });
 
+async function queuedExportFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'task-export-sync-'));
+  const key = randomBytes(32), f = fixture();
+  const scope = { organizationId: f.input.binding.organizationId, repositoryBindingId: f.input.binding.repositoryBindingId,
+    workspaceId: f.input.binding.workspaceId, endpointId: f.input.binding.endpointId,
+    membershipId: f.input.binding.membershipId, deviceId: f.input.binding.deviceId, provider: f.input.binding.provider };
+  const vault = await LocalVault.open({ root, masterKey: key });
+  vault.saveProviderSessionBinding(f.input.binding);
+  const staged = await stageNamedSessionTaskExport(vault, f.input);
+  if (staged.exported.state !== 'ready' || !staged.outbox) throw new Error('Outbox not ready');
+  return { root, key, f, scope, vault, staged, request: { schema: 'dharma.codex-task-export-upload/v1' as const,
+    exportBytes: staged.exported.bytes, exportHash: staged.exported.exportHash },
+    response: { ok: true, organizationId: scope.organizationId, correlationId: randomUUID(),
+      receipt: { id: randomUUID(), status: 'retained', exportHash: staged.exported.exportHash,
+        contentExpiresAt: new Date(Date.now() + 86400000).toISOString(), acceptedLearningObservation: false } } };
+}
+
+test('lost export response reopens encrypted outbox and sends identical bytes without rerunning work', async () => {
+  const q = await queuedExportFixture();
+  let vault = q.vault, sends = 0;
+  const run = () => syncNamedSessionTaskExports({ vault, bindingId: q.f.input.binding.bindingId, identity: q.scope,
+    loadPolicy: async () => q.f.input.policy, send: async body => {
+      assert.deepEqual(body, q.request);
+      if (++sends === 1) throw new Error('PRIVATE_LOST_RESPONSE_CANARY');
+      return { ...q.response, receipt: { ...q.response.receipt, status: 'duplicate' } };
+    } });
+  try {
+    const repeat = await stageNamedSessionTaskExport(vault, q.f.input);
+    assert.deepEqual(repeat.outbox, q.staged.outbox);
+    assert.equal((await run()).state, 'pending');
+    vault.close(); vault = await LocalVault.open({ root: q.root, masterKey: q.key });
+    const recovered = await run();
+    assert.equal(recovered.state, 'delivered');
+    assert.equal(recovered.pending, 0); assert.equal(recovered.delivered, 1);
+    assert.equal(recovered.acceptedLearningObservation, false);
+    assert.equal(recovered.lastReceipt?.receipt.acceptedLearningObservation, false);
+    const receiptHash = sha256(canonicalize(recovered.lastReceipt));
+    assert.equal(JSON.parse((await vault.getBlob(receiptHash)).toString()).receipt.id, q.response.receipt.id);
+    vault.close(); vault = await LocalVault.open({ root: q.root, masterKey: q.key });
+    const idle = await run();
+    assert.equal(idle.state, 'idle'); assert.equal(sends, 2);
+    assert.deepEqual(idle.lastReceipt, recovered.lastReceipt);
+    assert.deepEqual(vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope), []);
+  } finally { vault.close(); await rm(q.root, { recursive: true, force: true }); }
+});
+
+test('export acknowledgement rejects foreign, altered, expired and learning-admission receipts', async () => {
+  for (const change of [
+    (value: Awaited<ReturnType<typeof queuedExportFixture>>['response']) => { value.organizationId = 'org_foreign'; },
+    (value: Awaited<ReturnType<typeof queuedExportFixture>>['response']) => { value.receipt.exportHash = `sha256:${'0'.repeat(64)}`; },
+    (value: Awaited<ReturnType<typeof queuedExportFixture>>['response']) => { value.receipt.acceptedLearningObservation = true; },
+    (value: Awaited<ReturnType<typeof queuedExportFixture>>['response']) => { value.receipt.contentExpiresAt = new Date(Date.now() - 1000).toISOString(); },
+    (value: Awaited<ReturnType<typeof queuedExportFixture>>['response'] & { grant?: string }) => { value.grant = 'PRIVATE_RESPONSE_CANARY'; },
+  ]) {
+    const q = await queuedExportFixture();
+    try {
+      const response = structuredClone(q.response); change(response);
+      const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+        identity: q.scope, loadPolicy: async () => q.f.input.policy, send: async () => response });
+      assert.equal(result.code, 'task_export_receipt_invalid');
+      assert.equal(result.state, 'blocked'); assert.equal(result.delivered, 0);
+      assert.equal(result.lastReceipt, undefined);
+      assert.equal(JSON.stringify(result).includes('PRIVATE_'), false);
+      assert.equal(q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope).length, 1);
+    } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+  }
+});
+
+test('export retries require original consent and current exclusion limits immediately before sending', async () => {
+  for (const change of ['revision', 'consent', 'exclusion', 'binding'] as const) {
+    const q = await queuedExportFixture();
+    let refreshes = 0, sends = 0;
+    try {
+      const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+        identity: q.scope, loadPolicy: async () => {
+          if (++refreshes === 2) {
+            if (change === 'revision') q.f.input.policy.revision = 'new-revision';
+            if (change === 'consent') q.f.input.policy.evidence.automaticDisclosure!.consentReceiptId = `consent_${randomUUID()}`;
+            if (change === 'exclusion') q.f.input.policy.evidence.excludePaths = ['**/src/**'];
+            if (change === 'binding') q.vault.revokeProviderSessionBinding(q.f.input.binding.bindingId, q.scope);
+            q.f.authorize();
+          }
+          return q.f.input.policy;
+        }, send: async () => { sends++; return q.response; } });
+      assert.equal(result.state, 'blocked', change);
+      assert.equal(result.delivered, 0); assert.equal(sends, 0);
+    } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+  }
+});
+
+test('empty outbox does not refresh authority or send network requests', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'task-export-idle-')), f = fixture();
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  try {
+    vault.saveProviderSessionBinding(f.input.binding);
+    const result = await syncNamedSessionTaskExports({ vault, bindingId: f.input.binding.bindingId, identity: f.input.binding,
+      loadPolicy: async () => { throw new Error('must not refresh'); }, send: async () => { throw new Error('must not send'); } });
+    assert.equal(result.state, 'idle'); assert.equal(result.pending, 0);
+  } finally { vault.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('expired raw evidence blocks export without recreating content or executing a provider', async () => {
+  const q = await queuedExportFixture();
+  try {
+    const expired = await q.vault.enforceRawEvidenceRetention({ retentionDays: 30, now: new Date(Date.now() + 31 * 86400000) });
+    assert.equal(expired.deleted, 1);
+    const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+      identity: q.scope, loadPolicy: async () => { throw new Error('must not request authority'); },
+      send: async () => { throw new Error('must not send'); } });
+    assert.equal(result.state, 'blocked'); assert.equal(result.code, 'task_export_retained_content_unavailable');
+    assert.equal(result.delivered, 0); assert.equal(result.acceptedLearningObservation, false);
+  } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+});
+
 test('repository-state retention keeps raw and portable evidence in separate encrypted blobs', async t => {
   const root = await mkdtemp(join(tmpdir(), 'task-portable-retention-'));
   let vault: LocalVault | undefined;
@@ -189,6 +304,7 @@ test('repository-state retention keeps raw and portable evidence in separate enc
   if (f.input.capture.schema !== 'dharma.codex-local-work-capture/v2') throw new Error('Missing request');
   f.input.capture.request.params.cwd = root; f.input.capture.requestHash = sha256(JSON.stringify(f.input.capture.request));
   const { binding } = f.input;
+  vault.saveProviderSessionBinding(binding);
   const policy: RepositorySourceAuthorization['policy'] = { action: 'authorize', confirmed: true,
     requestId: randomUUID(), repositoryBindingId: binding.repositoryBindingId, expectedRevision: 0,
     allowedContentClasses: ['approved_outputs', 'repository_content', 'repository_skills'], approvedRepositoryPaths: ['README.md'], approvedOutputFolders: [],

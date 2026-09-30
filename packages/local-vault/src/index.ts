@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, renameSync } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
@@ -214,6 +214,7 @@ export class LocalVault {
         descriptor_hash text not null references blobs(content_id),
         created_at text not null,
         acknowledged_at text,
+        receipt_hash text references blobs(content_id),
         primary key (binding_id, work_key)
       );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
@@ -222,6 +223,14 @@ export class LocalVault {
       create index if not exists capsule_content_refs_lookup_idx
         on capsule_content_refs(content_id, available_locally, trajectory_id, revision);
     `);
+    database.exec('begin immediate');
+    try {
+      const columns = database.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
+      if (!columns.some(column => column.name === 'receipt_hash')) {
+        database.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
+      }
+      database.exec('commit');
+    } catch (error) { database.exec('rollback'); database.close(); throw error; }
     const vault = new LocalVault(options, database);
     await vault.#recoverRetentionQuarantine();
     await vault.#backfillCapsuleContentRefs();
@@ -245,19 +254,25 @@ export class LocalVault {
     const envelope = Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, tag, ciphertext]);
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
-    await rename(temporary, path);
+    let started = false;
     try {
+      // Publish under the SQLite write fence without yielding between metadata
+      // insertion and rename. A failed INSERT never creates an unindexed final blob.
+      this.#database.exec('savepoint vault_blob_write'); started = true;
       const result = this.#database.prepare(
         'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?) on conflict(content_id) do nothing',
       ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
-      return { contentId, created: Number(result.changes) === 1 };
+      const created = Number(result.changes) === 1;
+      if (created) renameSync(temporary, path);
+      this.#database.exec('release vault_blob_write'); started = false;
+      return { contentId, created };
     } catch (error) {
-      // Another writer may already reference this content-addressed file.
-      if (!this.#database.prepare('select 1 from blobs where content_id = ?').get(contentId)) {
-        await rm(path, { force: true });
+      if (started) {
+        try { this.#database.exec('rollback to vault_blob_write; release vault_blob_write'); } catch {}
       }
+      // The final address may already belong to a committed writer. Never unlink it.
       throw error;
-    }
+    } finally { await rm(temporary, { force: true }); }
   }
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
@@ -305,18 +320,37 @@ export class LocalVault {
   }
 
   acknowledgeProviderSessionTaskExport(bindingId: string, identity: LocalProviderSessionIdentity,
-    workKey: string, descriptorHash: string): void {
+    workKey: string, descriptorHash: string, receiptHash?: string): void {
     if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    if (receiptHash && (!/^sha256:[a-f0-9]{64}$/.test(receiptHash)
+      || !this.#database.prepare('select 1 from blobs where content_id = ?').get(receiptHash))) {
+      throw new Error('provider_session_task_export_conflict');
+    }
     const row = this.#database.prepare(`
-      select descriptor_hash from provider_session_task_exports where binding_id = ? and work_key = ?
-    `).get(bindingId, workKey) as { descriptor_hash: string } | undefined;
-    if (!row || row.descriptor_hash !== descriptorHash) throw new Error('provider_session_task_export_conflict');
+      select descriptor_hash, receipt_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string; receipt_hash: string | null } | undefined;
+    if (!row || row.descriptor_hash !== descriptorHash || (receiptHash && row.receipt_hash && row.receipt_hash !== receiptHash)) {
+      throw new Error('provider_session_task_export_conflict');
+    }
     const updated = this.#database.prepare(`
-      update provider_session_task_exports set acknowledged_at = coalesce(acknowledged_at, ?)
+      update provider_session_task_exports set acknowledged_at = coalesce(acknowledged_at, ?), receipt_hash = coalesce(receipt_hash, ?)
       where binding_id = ? and work_key = ? and descriptor_hash = ?
         and exists (select 1 from provider_session_bindings where binding_id = ? and revoked_at is null)
-    `).run(new Date().toISOString(), bindingId, workKey, descriptorHash, bindingId);
+        and (receipt_hash is null or ? is null or receipt_hash = ?)
+    `).run(new Date().toISOString(), receiptHash ?? null, bindingId, workKey, descriptorHash, bindingId,
+      receiptHash ?? null, receiptHash ?? null);
     if (Number(updated.changes) !== 1) throw new Error('provider_session_binding_unavailable');
+  }
+
+  latestProviderSessionTaskExportReceipt(bindingId: string, identity: LocalProviderSessionIdentity):
+    { descriptorHash: string; receiptHash: string } | null {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select descriptor_hash as descriptorHash, receipt_hash as receiptHash from provider_session_task_exports
+      where binding_id = ? and acknowledged_at is not null and receipt_hash is not null
+      order by acknowledged_at desc, work_key desc limit 1
+    `).get(bindingId) as { descriptorHash: string; receiptHash: string } | undefined;
+    return row ? { descriptorHash: row.descriptorHash, receiptHash: row.receiptHash } : null;
   }
 
   async stageProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,

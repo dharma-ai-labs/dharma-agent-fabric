@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-task-export-outbox/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "bindingId", "workId", "workKey", "captureHash", "contextHash", "exportHash", "policyRevision", "consentReceiptId", "createdAt"],
+  "properties": {
+    "schema": { "const": "dharma.named-session-task-export-outbox/v1" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "workspaceId": { "$ref": "#/$defs/uuid" },
+    "endpointId": { "$ref": "#/$defs/uuid" },
+    "membershipId": { "$ref": "#/$defs/uuid" },
+    "deviceId": { "$ref": "#/$defs/uuid" },
+    "bindingId": { "$ref": "#/$defs/uuid" },
+    "workId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "workKey": { "$ref": "#/$defs/hash" },
+    "captureHash": { "$ref": "#/$defs/hash" },
+    "contextHash": { "$ref": "#/$defs/hash" },
+    "exportHash": { "$ref": "#/$defs/hash" },
+    "policyRevision": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "consentReceiptId": { "type": "string", "pattern": "^(consent_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "createdAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

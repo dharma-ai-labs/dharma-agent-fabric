@@ -107,6 +107,7 @@ export async function runNamedSessionService(input: {
   authorizeLocalWork(): Promise<boolean>;
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
+  syncTaskExports?(): Promise<import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult>;
   withActivationBoundary<T>(operation: () => Promise<T>, work?: { workId: string }): Promise<T>;
   signal: AbortSignal;
 }) {
@@ -125,10 +126,11 @@ export async function runNamedSessionService(input: {
   const responses = new Set<Promise<void>>();
   let closing = false, pending = 0, serial = Promise.resolve();
   let lastObservation: unknown = { state: 'starting' };
+  let taskExports: import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult | undefined;
   const status = () => ({ ok: true, schema: 'dharma.named-session-status/v1', name: registration.name,
     bindingId: binding.bindingId, sessionId: binding.sessionId, ...registration.identity,
     state: closing ? 'stopping' : pending ? 'executing' : 'running', budget: budget.status(),
-    queued: pending, lastObservation, lastWork: budget.lastWork() });
+    queued: pending, lastObservation, lastWork: budget.lastWork(), ...(taskExports ? { taskExports } : {}) });
   let healthWrites = Promise.resolve();
   const health = () => {
     const snapshot = JSON.stringify({ ...status(), pid: process.pid, observedAt: new Date().toISOString() });
@@ -267,7 +269,17 @@ export async function runNamedSessionService(input: {
       server!.once('error', reject); server!.listen(paths.socket, resolveListen);
     });
     await chmod(paths.socket, 0o600); await health();
+    let nextExportSyncAt = 0;
     while (!closing && !input.signal.aborted) {
+      if (input.syncTaskExports && Date.now() >= nextExportSyncAt) {
+        await enqueue(async () => {
+          try { taskExports = await input.syncTaskExports!(); }
+          catch { taskExports = { state: 'pending', pending: null, delivered: 0,
+            code: 'task_export_sync_unavailable', acceptedLearningObservation: false }; }
+        });
+        nextExportSyncAt = Date.now() + 30000;
+        await health();
+      }
       let result: Awaited<ReturnType<NonNullable<typeof owner>['runNext']>>;
       try { result = await enqueue(() => input.withActivationBoundary(() => owner!.runNext())); }
       catch (error) { if (closing || input.signal.aborted) break; throw error; }

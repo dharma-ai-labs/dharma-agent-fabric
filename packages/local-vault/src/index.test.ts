@@ -153,6 +153,75 @@ test('SQL revocation fences task export writes after their last identity read', 
   }
 });
 
+test('an INSERT failure cannot unlink content committed by a later writer', { timeout: 30000 }, async () => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import { createHash, randomBytes } from 'node:crypto';
+    import * as fs from 'node:fs/promises';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { DatabaseSync } from 'node:sqlite';
+    import { mock } from 'node:test';
+    const root = await fs.mkdtemp(join(tmpdir(), 'dharma-blob-insert-race-'));
+    const bytes = Buffer.from('synthetic retained coding evidence');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const hash = 'sha256:' + digest;
+    const path = join(root, 'blobs', digest.slice(0, 2), digest + '.blob');
+    let vault, db, attemptedUnlink = false;
+    const replacement = mock.module('node:fs/promises', { namedExports: { ...fs,
+      rm: async (target, options) => {
+        if (target === path && !attemptedUnlink) {
+          attemptedUnlink = true;
+          db.exec('drop trigger fixture_reject_blob');
+          assert.equal(await vault.putBlob(bytes, 'raw-provider-turn'), hash);
+        }
+        return fs.rm(target, options);
+      }
+    } });
+    try {
+      const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
+      vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+      db = new DatabaseSync(join(root, 'vault.sqlite'));
+      db.exec("create trigger fixture_reject_blob before insert on blobs begin select raise(abort, 'fixture_insert_failure'); end;");
+      await assert.rejects(vault.putBlob(bytes, 'raw-provider-turn'), /fixture_insert_failure/);
+      if (!attemptedUnlink) {
+        db.exec('drop trigger fixture_reject_blob');
+        assert.equal(await vault.putBlob(bytes, 'raw-provider-turn'), hash);
+      }
+      assert.deepEqual(await vault.getBlob(hash), bytes);
+      assert.equal(attemptedUnlink, false);
+    } finally {
+      db?.close(); vault?.close(); replacement.restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  `;
+  const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks: Buffer[] = [];
+  child.stdout.on('data', bytes => chunks.push(bytes));
+  child.stderr.on('data', bytes => chunks.push(bytes));
+  const code = await new Promise<number | null>((resolveExit, reject) => { child.on('error', reject); child.on('exit', resolveExit); });
+  assert.equal(code, 0, Buffer.concat(chunks).toString('utf8'));
+});
+
+test('opening an older export outbox migrates receipt lookup without changing queued evidence', async () => {
+  const { root, key, vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+  const hash = await vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor);
+  vault.close();
+  const db = new DatabaseSync(join(root, 'vault.sqlite'));
+  db.exec('alter table provider_session_task_exports drop column receipt_hash'); db.close();
+  const reopened = await LocalVault.open({ root, masterKey: key });
+  try {
+    assert.deepEqual(reopened.listProviderSessionTaskExports(binding.bindingId, identity), [{ workKey, descriptorHash: hash }]);
+    assert.equal(reopened.latestProviderSessionTaskExportReceipt(binding.bindingId, identity), null);
+    const receiptHash = await reopened.putBlob(Buffer.from('synthetic validated receipt'), 'named-session-task-export-receipt');
+    reopened.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey, hash, receiptHash);
+    assert.deepEqual(reopened.latestProviderSessionTaskExportReceipt(binding.bindingId, identity), { descriptorHash: hash, receiptHash });
+    assert.throws(() => reopened.latestProviderSessionTaskExportReceipt(binding.bindingId,
+      { ...identity, organizationId: 'org_foreign' }), /scope_mismatch/);
+  } finally { reopened.close(); }
+});
+
 test('provider session binding is encrypted, scoped, immutable, and revocable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-binding-'));
   const key = randomBytes(32);

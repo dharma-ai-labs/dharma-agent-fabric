@@ -87,6 +87,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
+import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
@@ -3891,6 +3892,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
       localWriteRoots: writeRoots,
+      syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
+        identity: registration!.identity,
+        loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
+        send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
       withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
