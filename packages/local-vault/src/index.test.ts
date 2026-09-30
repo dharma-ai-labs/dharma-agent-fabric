@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -200,6 +200,102 @@ test('an INSERT failure cannot unlink content committed by a later writer', { ti
   const chunks: Buffer[] = [];
   child.stdout.on('data', bytes => chunks.push(bytes));
   child.stderr.on('data', bytes => chunks.push(bytes));
+  const code = await new Promise<number | null>((resolveExit, reject) => { child.on('error', reject); child.on('exit', resolveExit); });
+  assert.equal(code, 0, Buffer.concat(chunks).toString('utf8'));
+});
+
+for (const afterRename of [false, true]) {
+  test(`vault recovers abandoned encrypted writes after process exit ${afterRename ? 'after' : 'before'} publication`, { timeout: 30000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-vault-crashed-write-'));
+    const key = randomBytes(32);
+    const bytes = Buffer.from('synthetic crashed evidence');
+    const hash = sha256(bytes), digest = hash.slice('sha256:'.length);
+    const path = join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`);
+    let vault = await LocalVault.open({ root, masterKey: key });
+    const retainedBytes = Buffer.from('synthetic committed evidence');
+    const retained = await vault.putBlob(retainedBytes, 'raw-provider-turn');
+    vault.close();
+    const source = `
+      import * as fs from 'node:fs';
+      import { mock } from 'node:test';
+      mock.module('node:fs', { namedExports: { ...fs, renameSync: (from, to) => {
+        ${afterRename ? 'fs.renameSync(from, to);' : ''}
+        process.exit(77);
+      } } });
+      const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
+      const vault = await LocalVault.open({ root: ${JSON.stringify(root)}, masterKey: Buffer.from('${key.toString('hex')}', 'hex') });
+      await vault.putBlob(Buffer.from('synthetic crashed evidence'), 'raw-provider-turn');
+      process.exit(78);
+    `;
+    try {
+      const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
+        { stdio: ['ignore', 'pipe', 'pipe'] });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
+      const code = await new Promise<number | null>((resolveExit, reject) => {
+        child.on('error', reject); child.on('exit', resolveExit);
+      });
+      assert.equal(code, 77, Buffer.concat(chunks).toString('utf8'));
+      const directory = join(root, 'blobs', digest.slice(0, 2));
+      const files = (await readdir(directory)).filter(name => name.startsWith(digest));
+      assert.equal(files.length, 1);
+      assert.equal((await readFile(join(directory, files[0]!))).includes(bytes), false);
+      const db = new DatabaseSync(join(root, 'vault.sqlite'));
+      try { assert.equal(db.prepare('select 1 from blobs where content_id = ?').get(hash), undefined); }
+      finally { db.close(); }
+      const activeTemporary = `${path}.${process.pid}.abcdef01.tmp`;
+      await writeFile(activeTemporary, Buffer.from('synthetic active writer'), { flag: 'wx' });
+      vault = await LocalVault.open({ root, masterKey: key });
+      assert.deepEqual((await readdir(directory)).filter(name => name.startsWith(digest)), [activeTemporary.slice(directory.length + 1)]);
+      assert.deepEqual(await vault.getBlob(retained), retainedBytes);
+      assert.equal(await vault.putBlob(bytes, 'raw-provider-turn'), hash);
+      await vault.enforceRawEvidenceRetention();
+      assert.deepEqual(await vault.getBlob(hash), bytes);
+      assert.equal((await readFile(activeTemporary)).toString(), 'synthetic active writer');
+      vault.close();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test('orphan cleanup preserves a writer committed after its directory snapshot', { timeout: 30000 }, async () => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import * as fs from 'node:fs/promises';
+    import { randomBytes, createHash } from 'node:crypto';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { mock } from 'node:test';
+    const root = await fs.mkdtemp(join(tmpdir(), 'dharma-cleanup-commit-race-'));
+    const key = randomBytes(32), bytes = Buffer.from('synthetic concurrent retained evidence');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const directory = join(root, 'blobs', digest.slice(0, 2));
+    let writer, reader, armed = false, committed = false;
+    const replacement = mock.module('node:fs/promises', { namedExports: { ...fs,
+      readdir: async (path, options) => {
+        const snapshot = await fs.readdir(path, options);
+        if (armed && path === directory) {
+          armed = false;
+          assert.equal(await writer.putBlob(bytes, 'raw-provider-turn'), 'sha256:' + digest);
+          committed = true;
+        }
+        return snapshot;
+      }
+    } });
+    try {
+      const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
+      writer = await LocalVault.open({ root, masterKey: key });
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(join(directory, digest + '.blob'), Buffer.from('unindexed synthetic placeholder'));
+      armed = true;
+      reader = await LocalVault.open({ root, masterKey: key });
+      assert.equal(committed, true);
+      assert.deepEqual(await reader.getBlob('sha256:' + digest), bytes);
+    } finally { reader?.close(); writer?.close(); replacement.restore(); await fs.rm(root, { recursive: true, force: true }); }
+  `;
+  const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks: Buffer[] = [];
+  child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
   const code = await new Promise<number | null>((resolveExit, reject) => { child.on('error', reject); child.on('exit', resolveExit); });
   assert.equal(code, 0, Buffer.concat(chunks).toString('utf8'));
 });

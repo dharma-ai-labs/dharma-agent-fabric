@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { createReadStream, renameSync } from 'node:fs';
+import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
@@ -939,6 +939,7 @@ export class LocalVault {
     const now = input.now ?? new Date();
     if (!Number.isFinite(now.getTime())) throw new Error('Raw evidence retention time is invalid.');
     const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
+    await this.#recoverUnindexedBlobs();
     await this.#backfillCapsuleContentRefs();
     let examined = 0;
     let deleted = 0;
@@ -1085,6 +1086,34 @@ export class LocalVault {
     for (const record of records) {
       const capsule = JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as Record<string, unknown>;
       this.#recordCapsuleContentRefs(record.trajectory_id, record.revision, capsule);
+    }
+  }
+
+  async #recoverUnindexedBlobs(): Promise<void> {
+    const blobsRoot = resolve(this.root, 'blobs');
+    for (const prefix of await readdir(blobsRoot, { withFileTypes: true })) {
+      if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
+      const directory = resolve(blobsRoot, prefix.name);
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const final = /^([a-f0-9]{64})\.blob$/.exec(entry.name);
+        const temporary = /^([a-f0-9]{64})\.blob\.([1-9][0-9]*)\.[a-f0-9]{8}\.tmp$/.exec(entry.name);
+        if (!entry.isFile() || (!final && !temporary)) continue;
+        const digest = (final ?? temporary)![1]!;
+        if (digest.slice(0, 2) !== prefix.name) continue;
+        if (temporary && processIsAlive(Number(temporary[2]))) continue;
+        const path = resolve(directory, entry.name);
+        // Final publication uses this same SQLite write fence. Recheck metadata
+        // and unlink without yielding so a concurrent commit cannot lose its blob.
+        this.#database.exec('begin immediate');
+        try {
+          const retained = final && this.#database.prepare('select 1 from blobs where content_id = ?').get(`sha256:${digest}`);
+          if (!retained) {
+            try { if (lstatSync(path).isFile()) unlinkSync(path); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+          this.#database.exec('commit');
+        } catch (error) { this.#database.exec('rollback'); throw error; }
+      }
     }
   }
 
