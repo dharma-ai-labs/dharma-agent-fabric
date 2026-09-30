@@ -144,8 +144,10 @@ npm exec --yes -- @dharma-ai-labs/agent-fabric@<version> bootstrap \
 The selected remote flag is omitted only when the command is already running
 from a verified intended checkout. It is not a credential and does not alter
 repository policy. A failed checkout reports `repository_selection` and leaves
-the grant unused. Successful receipts include the actual `repositorySelection.workspace`;
-run later repository commands from that checkout.
+the grant unused. After correcting Git access, the unchanged command may be
+retried once before the grant expires; do not retry a redeemed grant. Successful
+receipts include the actual `repositorySelection.workspace`; run later
+repository commands from that checkout.
 
 `bootstrap` opens the authenticated browser device-approval page. After the
 recipient approves the matching fingerprint, it redeems the short-lived grant into an
