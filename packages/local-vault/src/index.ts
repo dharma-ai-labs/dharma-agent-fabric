@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
@@ -208,12 +208,29 @@ export class LocalVault {
         acknowledged_at text,
         primary key (binding_id, question_id)
       );
+      create table if not exists provider_session_task_exports (
+        binding_id text not null references provider_session_bindings(binding_id),
+        work_key text not null,
+        descriptor_hash text not null references blobs(content_id),
+        created_at text not null,
+        acknowledged_at text,
+        receipt_hash text references blobs(content_id),
+        primary key (binding_id, work_key)
+      );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
       create index if not exists capsule_content_refs_lookup_idx
         on capsule_content_refs(content_id, available_locally, trajectory_id, revision);
     `);
+    database.exec('begin immediate');
+    try {
+      const columns = database.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
+      if (!columns.some(column => column.name === 'receipt_hash')) {
+        database.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
+      }
+      database.exec('commit');
+    } catch (error) { database.exec('rollback'); database.close(); throw error; }
     const vault = new LocalVault(options, database);
     await vault.#recoverRetentionQuarantine();
     await vault.#backfillCapsuleContentRefs();
@@ -222,6 +239,8 @@ export class LocalVault {
   }
 
   async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
+    // Hash and encrypt one immutable snapshot across asynchronous filesystem writes.
+    plaintext = Buffer.from(plaintext);
     const contentId = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
     const path = this.#blobPath(contentId);
     const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
@@ -235,20 +254,103 @@ export class LocalVault {
     const envelope = Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, tag, ciphertext]);
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
-    await rename(temporary, path);
+    let started = false;
     try {
-      this.#database.prepare(
-        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
+      // Publish under the SQLite write fence without yielding between metadata
+      // insertion and rename. A failed INSERT never creates an unindexed final blob.
+      this.#database.exec('savepoint vault_blob_write'); started = true;
+      const result = this.#database.prepare(
+        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?) on conflict(content_id) do nothing',
       ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
-      return { contentId, created: true };
+      const created = Number(result.changes) === 1;
+      if (created) renameSync(temporary, path);
+      this.#database.exec('release vault_blob_write'); started = false;
+      return { contentId, created };
     } catch (error) {
-      await rm(path, { force: true });
+      if (started) {
+        try { this.#database.exec('rollback to vault_blob_write; release vault_blob_write'); } catch {}
+      }
+      // The final address may already belong to a committed writer. Never unlink it.
       throw error;
-    }
+    } finally { await rm(temporary, { force: true }); }
   }
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
     return (await this.#putBlob(plaintext, kind)).contentId;
+  }
+
+  async stageProviderSessionTaskExport(bindingId: string, identity: LocalProviderSessionIdentity,
+    workKey: string, descriptor: Uint8Array): Promise<string> {
+    if (!/^sha256:[a-f0-9]{64}$/.test(workKey) || descriptor.byteLength < 1 || descriptor.byteLength > 16384) {
+      throw new Error('provider_session_task_export_invalid');
+    }
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const hash = `sha256:${createHash('sha256').update(descriptor).digest('hex')}`;
+    const prior = this.#database.prepare(`
+      select descriptor_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string } | undefined;
+    if (prior) {
+      if (prior.descriptor_hash !== hash) throw new Error('provider_session_task_export_conflict');
+      return hash;
+    }
+    const stored = await this.putBlob(descriptor, 'provider-session-task-export-descriptor');
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    this.#database.prepare(`
+      insert into provider_session_task_exports(binding_id, work_key, descriptor_hash, created_at)
+      select ?, ?, ?, ? where exists (
+        select 1 from provider_session_bindings where binding_id = ? and revoked_at is null
+      ) on conflict(binding_id, work_key) do nothing
+    `).run(bindingId, workKey, stored, new Date().toISOString(), bindingId);
+    const row = this.#database.prepare(`
+      select descriptor_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string } | undefined;
+    if (!row) throw new Error('provider_session_binding_unavailable');
+    if (row.descriptor_hash !== hash) throw new Error('provider_session_task_export_conflict');
+    return stored;
+  }
+
+  listProviderSessionTaskExports(bindingId: string, identity: LocalProviderSessionIdentity):
+    Array<{ workKey: string; descriptorHash: string }> {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const rows = this.#database.prepare(`
+      select work_key as workKey, descriptor_hash as descriptorHash from provider_session_task_exports
+      where binding_id = ? and acknowledged_at is null order by created_at, work_key limit 100
+    `).all(bindingId) as Array<{ workKey: string; descriptorHash: string }>;
+    return rows.map(row => ({ workKey: row.workKey, descriptorHash: row.descriptorHash }));
+  }
+
+  acknowledgeProviderSessionTaskExport(bindingId: string, identity: LocalProviderSessionIdentity,
+    workKey: string, descriptorHash: string, receiptHash?: string): void {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    if (receiptHash && (!/^sha256:[a-f0-9]{64}$/.test(receiptHash)
+      || !this.#database.prepare('select 1 from blobs where content_id = ?').get(receiptHash))) {
+      throw new Error('provider_session_task_export_conflict');
+    }
+    const row = this.#database.prepare(`
+      select descriptor_hash, receipt_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string; receipt_hash: string | null } | undefined;
+    if (!row || row.descriptor_hash !== descriptorHash || (receiptHash && row.receipt_hash && row.receipt_hash !== receiptHash)) {
+      throw new Error('provider_session_task_export_conflict');
+    }
+    const updated = this.#database.prepare(`
+      update provider_session_task_exports set acknowledged_at = coalesce(acknowledged_at, ?), receipt_hash = coalesce(receipt_hash, ?)
+      where binding_id = ? and work_key = ? and descriptor_hash = ?
+        and exists (select 1 from provider_session_bindings where binding_id = ? and revoked_at is null)
+        and (receipt_hash is null or ? is null or receipt_hash = ?)
+    `).run(new Date().toISOString(), receiptHash ?? null, bindingId, workKey, descriptorHash, bindingId,
+      receiptHash ?? null, receiptHash ?? null);
+    if (Number(updated.changes) !== 1) throw new Error('provider_session_binding_unavailable');
+  }
+
+  latestProviderSessionTaskExportReceipt(bindingId: string, identity: LocalProviderSessionIdentity):
+    { descriptorHash: string; receiptHash: string } | null {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select descriptor_hash as descriptorHash, receipt_hash as receiptHash from provider_session_task_exports
+      where binding_id = ? and acknowledged_at is not null and receipt_hash is not null
+      order by acknowledged_at desc, work_key desc limit 1
+    `).get(bindingId) as { descriptorHash: string; receiptHash: string } | undefined;
+    return row ? { descriptorHash: row.descriptorHash, receiptHash: row.receiptHash } : null;
   }
 
   async stageProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
@@ -837,6 +939,7 @@ export class LocalVault {
     const now = input.now ?? new Date();
     if (!Number.isFinite(now.getTime())) throw new Error('Raw evidence retention time is invalid.');
     const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
+    await this.#recoverUnindexedBlobs();
     await this.#backfillCapsuleContentRefs();
     let examined = 0;
     let deleted = 0;
@@ -983,6 +1086,34 @@ export class LocalVault {
     for (const record of records) {
       const capsule = JSON.parse((await this.getBlob(record.blob_content_id)).toString('utf8')) as Record<string, unknown>;
       this.#recordCapsuleContentRefs(record.trajectory_id, record.revision, capsule);
+    }
+  }
+
+  async #recoverUnindexedBlobs(): Promise<void> {
+    const blobsRoot = resolve(this.root, 'blobs');
+    for (const prefix of await readdir(blobsRoot, { withFileTypes: true })) {
+      if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
+      const directory = resolve(blobsRoot, prefix.name);
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const final = /^([a-f0-9]{64})\.blob$/.exec(entry.name);
+        const temporary = /^([a-f0-9]{64})\.blob\.([1-9][0-9]*)\.[a-f0-9]{8}\.tmp$/.exec(entry.name);
+        if (!entry.isFile() || (!final && !temporary)) continue;
+        const digest = (final ?? temporary)![1]!;
+        if (digest.slice(0, 2) !== prefix.name) continue;
+        if (temporary && processIsAlive(Number(temporary[2]))) continue;
+        const path = resolve(directory, entry.name);
+        // Final publication uses this same SQLite write fence. Recheck metadata
+        // and unlink without yielding so a concurrent commit cannot lose its blob.
+        this.#database.exec('begin immediate');
+        try {
+          const retained = final && this.#database.prepare('select 1 from blobs where content_id = ?').get(`sha256:${digest}`);
+          if (!retained) {
+            try { if (lstatSync(path).isFile()) unlinkSync(path); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+          this.#database.exec('commit');
+        } catch (error) { this.#database.exec('rollback'); throw error; }
+      }
     }
   }
 

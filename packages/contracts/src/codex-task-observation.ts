@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import type { KeyObject } from 'node:crypto';
 import schema from './codex-task-observation.schema.json' with { type: 'json' };
+import captureSchema from './codex-local-work-capture-v2.schema.json' with { type: 'json' };
 import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject } from './index.js';
 
 export interface CodexTaskScope {
@@ -79,6 +80,74 @@ const ajv = new Ajv({ allErrors: true, strict: true });
 require('ajv-formats').default(ajv);
 const validate = ajv.compile(schema) as (value: unknown) => boolean;
 const validateOutcome = ajv.compile({ $defs: schema.$defs, ...schema.properties.outcome }) as (value: unknown) => boolean;
+const validateCapture = ajv.compile(captureSchema) as (value: unknown) => boolean;
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** Exact local capture integrity only; this does not authorize disclosure or attest execution. */
+export function verifyCodexTaskCaptureBytes(bytes: unknown, input: {
+  scope: CodexTaskScope;
+  capture: CodexTaskObservation['capture'];
+  now?: Date;
+}): { ok: true } | { ok: false; reason: string } {
+  if (!(bytes instanceof Uint8Array)) return { ok: false, reason: 'codex_task_capture_bytes_unavailable' };
+  if (bytes.byteLength > 3 * 1024 * 1024) return { ok: false, reason: 'codex_task_capture_bytes_invalid' };
+  let text: string, value: Record<string, unknown>;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const parsed: unknown = JSON.parse(text);
+    if (!validateCapture(parsed) || JSON.stringify(parsed) !== text) {
+      return { ok: false, reason: 'codex_task_capture_bytes_invalid' };
+    }
+    value = parsed as Record<string, unknown>;
+  } catch { return { ok: false, reason: 'codex_task_capture_bytes_invalid' }; }
+  if (sha256(bytes) !== input.capture.captureHash) return { ok: false, reason: 'codex_task_capture_hash_mismatch' };
+  if (Object.keys(input.scope).some(key => value[key] !== input.scope[key as keyof CodexTaskScope])
+    || value.captureId !== input.capture.captureId || value.providerThreadId !== input.capture.threadId
+    || value.providerTurnId !== input.capture.turnId || value.startedAt !== input.capture.startedAt
+    || value.closedAt !== input.capture.completedAt || value.providerTurnState !== input.capture.terminalState) {
+    return { ok: false, reason: 'codex_task_capture_scope_mismatch' };
+  }
+  if (value.coverage !== 'observed' || value.droppedEvents !== 0 || (value.limitations as unknown[]).length
+    || !value.providerTurnId) return { ok: false, reason: 'codex_task_capture_not_observed' };
+  const request = value.request as Record<string, unknown>, params = request.params as Record<string, unknown>;
+  const events = value.events as Array<{ sequence: number; receivedAt: string; notification: Record<string, unknown> }>;
+  if (params.threadId !== input.capture.threadId) return { ok: false, reason: 'codex_task_capture_scope_mismatch' };
+  if (value.requestHash !== input.capture.requestHash || value.eventsHash !== input.capture.eventsHash
+    || sha256(JSON.stringify(request)) !== value.requestHash || sha256(JSON.stringify(events)) !== value.eventsHash) {
+    return { ok: false, reason: 'codex_task_capture_hash_mismatch' };
+  }
+  const start = Date.parse(input.capture.startedAt), end = Date.parse(input.capture.completedAt);
+  const now = (input.now ?? new Date()).getTime();
+  if (!Number.isFinite(now) || start > end || end > now + 300_000) {
+    return { ok: false, reason: 'codex_task_time_invalid' };
+  }
+  let sequence = -1, terminalObserved = false;
+  for (const event of events) {
+    const notification = event.notification, eventParams = record(notification.params);
+    const turn = record(eventParams?.turn);
+    const receivedAt = Date.parse(event.receivedAt);
+    if (event.sequence <= sequence || receivedAt < start || receivedAt > end) {
+      return { ok: false, reason: 'codex_task_capture_event_order_invalid' };
+    }
+    sequence = event.sequence;
+    if (typeof notification.method !== 'string'
+      || !/^(?:item\/|turn\/|thread\/tokenUsage\/updated$|error$)/.test(notification.method)
+      || eventParams?.threadId !== input.capture.threadId
+      || (eventParams?.turnId === undefined && turn?.id === undefined)
+      || (eventParams?.turnId !== undefined && eventParams.turnId !== input.capture.turnId)
+      || (turn?.id !== undefined && turn.id !== input.capture.turnId)) {
+      return { ok: false, reason: 'codex_task_capture_scope_mismatch' };
+    }
+    if (notification.method === 'turn/completed') {
+      if (turn?.status !== input.capture.terminalState) return { ok: false, reason: 'codex_task_capture_terminal_mismatch' };
+      terminalObserved = true;
+    }
+  }
+  return terminalObserved ? { ok: true } : { ok: false, reason: 'codex_task_capture_terminal_unavailable' };
+}
 
 function canonicalSignature(value: string) {
   const bytes = Buffer.from(value, 'base64url');
@@ -160,6 +229,7 @@ export function verifyCodexTaskObservation(value: unknown, input: {
   package: CodexTaskPackage | null;
   retained: {
     capture: CodexTaskObservation['capture'];
+    captureBytes?: Uint8Array;
     sourceSnapshotHash: string;
     resultSnapshotHash: string;
     provider: CodexTaskObservation['provider'];
@@ -199,6 +269,10 @@ export function verifyCodexTaskObservation(value: unknown, input: {
     || observation.outcome.publicEvidenceHash !== retained.publicEvidenceHash) {
     return { ok: false, reason: 'codex_task_retained_evidence_mismatch' };
   }
+  const nativeCapture = verifyCodexTaskCaptureBytes(retained.captureBytes, {
+    scope: input.scope, capture: retained.capture, now: input.now,
+  });
+  if (!nativeCapture.ok) return nativeCapture;
   const outcome = observation.outcome;
   const started = Date.parse(observation.capture.startedAt), completed = Date.parse(observation.capture.completedAt);
   if (started > completed) {

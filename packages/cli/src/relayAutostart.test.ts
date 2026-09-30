@@ -1,14 +1,149 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
 import test from 'node:test';
 import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
-  startRelayAutostart,
+  startRelayAutostart, stopRelayAutostart, inspectOwnedRelayAutostart, macRelayLaunchAgent,
 } from './relayAutostart.js';
+
+async function macFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-mac-startup-'));
+  const calls: string[][] = [];
+  let loaded = false, disabled = true, foreign = false;
+  const options = { platform: 'darwin' as const, uid: 501, userHome: root, home: join(root, 'dharma'),
+    workspace: '/Users/fixture/Repo Space', launcher: '/Users/fixture/Repo Space/.dharma/bin/dharma',
+    policy: '/Users/fixture/Repo Space/.dharma/policy.json', version: '0.2.130',
+    run: async (file: string, args: string[]) => {
+      calls.push([file, ...args]);
+      if (file === '/usr/bin/plutil') return { stdout: 'OK\n' };
+      assert.equal(file, '/bin/launchctl');
+      if (args[0] === 'print') {
+        if (!loaded) throw Object.assign(new Error('not loaded'), { code: 113, stderr: 'Could not find service' });
+        return { stdout: `gui/501/io.dharma.agent-fabric.relay = {\n`
+          + ` path = ${join(root, 'Library', 'LaunchAgents', 'io.dharma.agent-fabric.relay.plist')}\n`
+          + ` program = ${foreign ? '/foreign' : options.launcher}\n arguments = {\n`
+          + ` ${options.launcher}\n relay\n supervise\n --policy\n ${options.policy}\n }\n`
+          + ` working directory = ${options.workspace}\n environment = {\n DHARMA_HOME => ${options.home}\n }\n}\n` };
+      }
+      if (args[0] === 'print-disabled') return { stdout: `disabled services = {\n "io.dharma.agent-fabric.relay" => ${disabled}\n}\n` };
+      if (args[0] === 'enable') disabled = false;
+      if (args[0] === 'disable') disabled = true;
+      if (args[0] === 'bootstrap') { assert.equal(loaded, false); loaded = true; }
+      if (args[0] === 'bootout') loaded = false;
+      return { stdout: '' };
+    } };
+  return { options, calls, plist: join(root, 'Library', 'LaunchAgents', 'io.dharma.agent-fabric.relay.plist'),
+    setForeign: () => { foreign = true; }, setLoaded: () => { loaded = true; } };
+}
+
+test('macOS owned registration supports restart, stop, same-device upgrade and disable', async () => {
+  const { options, calls, plist } = await macFixture();
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const xml = await readFile(plist, 'utf8');
+  assert.match(xml, /RunAtLoad/);
+  assert.match(xml, /KeepAlive/);
+  assert.doesNotMatch(xml, /--grant|token|password/);
+  assert.equal((await inspectOwnedRelayAutostart(options)).backend, 'launchd-user');
+  await stopRelayAutostart(options);
+  assert.equal((await relayAutostartStatus(options)).state, 'enabled');
+  await startRelayAutostart(options);
+  assert.equal(calls.filter(call => call[1] === 'bootstrap').length, 2);
+  assert.equal((await enableRelayAutostart({ ...options, version: '0.2.131' })).state, 'enabled');
+  assert.equal((await relayAutostartStatus(options)).version, '0.2.131');
+  assert.equal((await disableRelayAutostart(options)).state, 'disabled');
+  assert.equal((await relayAutostartStatus(options)).state, 'disabled');
+});
+
+test('macOS preserves the established startup anchor for another repository', async () => {
+  const { options, calls, plist } = await macFixture();
+  await enableRelayAutostart(options);
+  const before = await readFile(plist, 'utf8');
+  calls.length = 0;
+  await enableRelayAutostart({ ...options, workspace: '/Users/other', launcher: '/Users/other/dharma',
+    policy: '/Users/other/policy.json', preserveStandardAnchor: true });
+  assert.equal(await readFile(plist, 'utf8'), before);
+  assert.ok(!calls.some(call => ['bootstrap', 'bootout'].includes(call[1]!)));
+});
+
+test('macOS refuses foreign loaded services and tampered startup files', async () => {
+  const fixture = await macFixture();
+  await enableRelayAutostart(fixture.options);
+  fixture.setForeign();
+  fixture.calls.length = 0;
+  await assert.rejects(enableRelayAutostart(fixture.options), /autostart_conflict/);
+  await assert.rejects(stopRelayAutostart(fixture.options), /autostart_conflict/);
+  await assert.rejects(disableRelayAutostart(fixture.options), /autostart_conflict/);
+  assert.ok(!fixture.calls.some(call => ['bootout', 'disable'].includes(call[1]!)));
+  const clean = await macFixture();
+  await enableRelayAutostart(clean.options);
+  await writeFile(clean.plist, 'foreign');
+  clean.calls.length = 0;
+  assert.equal((await relayAutostartStatus(clean.options)).reason, 'autostart_conflict');
+  await assert.rejects(disableRelayAutostart(clean.options), /autostart_conflict/);
+  assert.deepEqual(clean.calls, []);
+});
+
+test('macOS will not take over a loaded service without a receipt', async () => {
+  const fixture = await macFixture();
+  fixture.setLoaded();
+  await assert.rejects(enableRelayAutostart(fixture.options), /without an ownership receipt/);
+  assert.ok(!fixture.calls.some(call => call[1] === 'bootout'));
+});
+
+test('macOS will not follow a plist symlink', { skip: process.platform === 'win32' }, async () => {
+  const linked = await macFixture();
+  await mkdir(join(linked.options.userHome, 'Library', 'LaunchAgents'), { recursive: true });
+  await writeFile(join(linked.options.userHome, 'foreign.plist'), 'foreign');
+  await symlink(join(linked.options.userHome, 'foreign.plist'), linked.plist);
+  await assert.rejects(enableRelayAutostart(linked.options), /private regular file/);
+  assert.equal(await readFile(linked.plist, 'utf8'), 'foreign');
+});
+
+test('macOS loaded scope and argument mismatches fail before mutation', async () => {
+  for (const [from, to] of [[' supervise\n', ' bootstrap\n'], [' working directory = ', ' wrong directory = '],
+    [' DHARMA_HOME => ', ' FOREIGN_HOME => '], [' path = ', ' unknown path = ']]) {
+    const fixture = await macFixture();
+    await enableRelayAutostart(fixture.options);
+    const run = fixture.options.run;
+    const modified = { ...fixture.options, run: async (file: string, args: string[]) => {
+      const result = await run(file, args);
+      return { stdout: args[0] === 'print' ? result.stdout.replace(from!, to!) : result.stdout };
+    } };
+    fixture.calls.length = 0;
+    assert.equal((await relayAutostartStatus(modified)).reason, 'autostart_conflict');
+    await assert.rejects(enableRelayAutostart(modified), /autostart_conflict/);
+    await assert.rejects(disableRelayAutostart(modified), /autostart_conflict/);
+    assert.ok(!fixture.calls.some(call => ['bootout', 'disable'].includes(call[1]!)));
+  }
+});
+
+test('macOS rejects relative or control-character paths and root registration', async () => {
+  assert.throws(() => macRelayLaunchAgent('relative', null, '/repo', '/home'), /absolute/);
+  assert.throws(() => macRelayLaunchAgent('/bin/true', null, '/repo\tbad', '/home'), /Invalid LaunchAgent path/);
+  const { options, calls } = await macFixture();
+  await assert.rejects(enableRelayAutostart({ ...options, uid: 0 }), /non-root/);
+  assert.deepEqual(calls, []);
+});
+
+test('macOS launchd failure does not produce enabled status', async () => {
+  const { options } = await macFixture();
+  await enableRelayAutostart(options);
+  const unavailable = { ...options, run: async () => { throw new Error('GUI domain unavailable'); } };
+  assert.equal((await relayAutostartStatus(unavailable)).state, 'unavailable');
+  await assert.rejects(startRelayAutostart(unavailable), /autostart_conflict/);
+});
+
+test('macOS generated plist passes the native property-list parser', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-native-plist-'));
+  const file = join(root, 'test.plist');
+  await writeFile(file, macRelayLaunchAgent('/bin/true', '/Users/test/Policy & "quote"', '/Users/test/Repo Space', root));
+  const result = spawnSync('/usr/bin/plutil', ['-lint', file], { encoding: 'utf8', timeout: 15_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
 
 // Mock Linux OS paths remain POSIX even when receipt files live on Windows.
 const linuxWorkspace = (root: string, name: string) => posix.join('/fixtures', basename(root), name);

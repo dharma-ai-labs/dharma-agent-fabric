@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,6 +10,313 @@ import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey,
   type LocalProviderSessionBinding } from './index.js';
+
+async function taskExportFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-task-export-'));
+  const key = randomBytes(32);
+  const binding: LocalProviderSessionBinding = {
+    schema: 'dharma.local-provider-session-binding/v1', owner: 'dharma_bridge',
+    organizationId: 'org_synthetic', repositoryBindingId: '40000000-0000-4000-8000-000000000001',
+    workspaceId: '40000000-0000-4000-8000-000000000002', endpointId: '40000000-0000-4000-8000-000000000003',
+    membershipId: '40000000-0000-4000-8000-000000000004', deviceId: '40000000-0000-4000-8000-000000000005',
+    bindingId: '40000000-0000-4000-8000-000000000006', provider: 'codex', sessionId: 'private-export-thread',
+    workspaceRoot: resolve(root, 'repo'), createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 86400000).toISOString(), maximumProviderCostCents: 25,
+  };
+  const identity = { organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
+    workspaceId: binding.workspaceId, endpointId: binding.endpointId, membershipId: binding.membershipId,
+    deviceId: binding.deviceId, provider: binding.provider };
+  const vault = await LocalVault.open({ root, masterKey: key });
+  vault.saveProviderSessionBinding(binding);
+  return { root, key, binding, identity, vault, workKey: sha256('synthetic-work'),
+    descriptor: Buffer.from('private-task-export-descriptor-canary') };
+}
+
+test('task export outbox survives reopening, encrypts descriptors and acknowledges only exact scoped records', async () => {
+  const fixture = await taskExportFixture();
+  const { root, key, binding, identity, workKey, descriptor } = fixture;
+  let vault = fixture.vault;
+  try {
+    const hash = await vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor);
+    assert.equal(hash, sha256(descriptor));
+    await assert.rejects(vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey,
+      Buffer.from('changed descriptor')), /export_conflict/);
+    for (const field of ['organizationId', 'repositoryBindingId', 'workspaceId', 'endpointId', 'membershipId', 'deviceId'] as const) {
+      assert.throws(() => vault.listProviderSessionTaskExports(binding.bindingId,
+        { ...identity, [field]: field === 'organizationId' ? 'org_foreign' : '40000000-0000-4000-8000-000000000099' }), /scope_mismatch/);
+    }
+    assert.throws(() => vault.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey,
+      sha256('wrong hash')), /export_conflict/);
+    vault.close();
+    vault = await LocalVault.open({ root, masterKey: key });
+    assert.deepEqual(vault.listProviderSessionTaskExports(binding.bindingId, identity), [{ workKey, descriptorHash: hash }]);
+    assert.deepEqual(await vault.getBlob(hash), descriptor);
+    assert.equal((await readFile(join(root, 'vault.sqlite'))).includes(descriptor), false);
+    const digest = hash.slice('sha256:'.length);
+    assert.equal((await readFile(join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`))).includes(descriptor), false);
+    vault.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey, hash);
+    vault.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey, hash);
+    assert.equal(await vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor), hash);
+    assert.deepEqual(vault.listProviderSessionTaskExports(binding.bindingId, identity), []);
+    vault.close();
+    vault = await LocalVault.open({ root, masterKey: key });
+    assert.deepEqual(vault.listProviderSessionTaskExports(binding.bindingId, identity), []);
+    vault.revokeProviderSessionBinding(binding.bindingId, identity);
+    assert.throws(() => vault.listProviderSessionTaskExports(binding.bindingId, identity), /binding_unavailable/);
+    await assert.rejects(vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor), /binding_unavailable/);
+  } finally { vault.close(); }
+});
+
+test('concurrent identical task export staging converges on one intact encrypted descriptor', async () => {
+  const { root, key, vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+  const second = await LocalVault.open({ root, masterKey: key });
+  try {
+    const outcomes = await Promise.allSettled([
+      vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor),
+      second.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor),
+    ]);
+    assert.ok(outcomes.every(outcome => outcome.status === 'fulfilled'), JSON.stringify(outcomes));
+    assert.deepEqual(await second.getBlob(sha256(descriptor)), descriptor);
+    assert.equal(vault.listProviderSessionTaskExports(binding.bindingId, identity).length, 1);
+  } finally { second.close(); vault.close(); }
+});
+
+test('task export descriptor bytes cannot change while asynchronous encryption is pending', async () => {
+  const { vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+  try {
+    const expected = Buffer.from(descriptor);
+    const pending = vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor);
+    descriptor.fill(120);
+    const hash = await pending;
+    assert.equal(hash, sha256(expected));
+    assert.deepEqual(await vault.getBlob(hash), expected);
+  } finally { vault.close(); }
+});
+
+test('revocation during descriptor encryption prevents enqueue and acknowledgement', async () => {
+  const { root, vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+  try {
+    const write = vault.putBlob.bind(vault);
+    vault.putBlob = async (bytes, kind) => {
+      const hash = await write(bytes, kind);
+      vault.revokeProviderSessionBinding(binding.bindingId, identity);
+      return hash;
+    };
+    await assert.rejects(vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor), /binding_unavailable/);
+    assert.throws(() => vault.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey,
+      sha256(descriptor)), /binding_unavailable/);
+    const db = new DatabaseSync(join(root, 'vault.sqlite'));
+    assert.equal((db.prepare('select count(*) as count from provider_session_task_exports').get() as { count: number }).count, 0);
+    db.close();
+  } finally { vault.close(); }
+});
+
+test('task export outbox rejects malformed keys and unbounded descriptors without staging records', async () => {
+  const { root, vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+  try {
+    for (const [key, bytes] of [['raw-work-id', descriptor], [workKey, Buffer.alloc(0)],
+      [workKey, Buffer.alloc(16385)]] as Array<[string, Buffer]>) {
+      await assert.rejects(vault.stageProviderSessionTaskExport(binding.bindingId, identity, key, bytes), /export_invalid/);
+    }
+    const db = new DatabaseSync(join(root, 'vault.sqlite'));
+    try {
+      assert.equal((db.prepare('select count(*) as count from provider_session_task_exports').get() as { count: number }).count, 0);
+    } finally { db.close(); }
+  } finally { vault.close(); }
+});
+
+test('SQL revocation fences task export writes after their last identity read', async () => {
+  for (const operation of ['stage', 'acknowledge'] as const) {
+    const { root, vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+    const db = new DatabaseSync(join(root, 'vault.sqlite'));
+    try {
+      const hash = operation === 'acknowledge'
+        ? await vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor) : sha256(descriptor);
+      const get = vault.getProviderSessionBinding.bind(vault);
+      let reads = 0;
+      vault.getProviderSessionBinding = (id, scope) => {
+        const result = get(id, scope);
+        if (++reads === (operation === 'stage' ? 2 : 1)) {
+          db.prepare('update provider_session_bindings set revoked_at = ? where binding_id = ?')
+            .run(new Date().toISOString(), binding.bindingId);
+        }
+        return result;
+      };
+      if (operation === 'stage') {
+        await assert.rejects(vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor), /binding_unavailable/);
+        assert.equal((db.prepare('select count(*) as count from provider_session_task_exports').get() as { count: number }).count, 0);
+      } else {
+        assert.throws(() => vault.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey, hash), /binding_unavailable/);
+        assert.equal((db.prepare('select acknowledged_at from provider_session_task_exports').get() as { acknowledged_at: string | null }).acknowledged_at, null);
+      }
+    } finally { db.close(); vault.close(); }
+  }
+});
+
+test('an INSERT failure cannot unlink content committed by a later writer', { timeout: 30000 }, async () => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import { createHash, randomBytes } from 'node:crypto';
+    import * as fs from 'node:fs/promises';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { DatabaseSync } from 'node:sqlite';
+    import { mock } from 'node:test';
+    const root = await fs.mkdtemp(join(tmpdir(), 'dharma-blob-insert-race-'));
+    const bytes = Buffer.from('synthetic retained coding evidence');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const hash = 'sha256:' + digest;
+    const path = join(root, 'blobs', digest.slice(0, 2), digest + '.blob');
+    let vault, db, attemptedUnlink = false;
+    const replacement = mock.module('node:fs/promises', { namedExports: { ...fs,
+      rm: async (target, options) => {
+        if (target === path && !attemptedUnlink) {
+          attemptedUnlink = true;
+          db.exec('drop trigger fixture_reject_blob');
+          assert.equal(await vault.putBlob(bytes, 'raw-provider-turn'), hash);
+        }
+        return fs.rm(target, options);
+      }
+    } });
+    try {
+      const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
+      vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+      db = new DatabaseSync(join(root, 'vault.sqlite'));
+      db.exec("create trigger fixture_reject_blob before insert on blobs begin select raise(abort, 'fixture_insert_failure'); end;");
+      await assert.rejects(vault.putBlob(bytes, 'raw-provider-turn'), /fixture_insert_failure/);
+      if (!attemptedUnlink) {
+        db.exec('drop trigger fixture_reject_blob');
+        assert.equal(await vault.putBlob(bytes, 'raw-provider-turn'), hash);
+      }
+      assert.deepEqual(await vault.getBlob(hash), bytes);
+      assert.equal(attemptedUnlink, false);
+    } finally {
+      db?.close(); vault?.close(); replacement.restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  `;
+  const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks: Buffer[] = [];
+  child.stdout.on('data', bytes => chunks.push(bytes));
+  child.stderr.on('data', bytes => chunks.push(bytes));
+  const code = await new Promise<number | null>((resolveExit, reject) => { child.on('error', reject); child.on('exit', resolveExit); });
+  assert.equal(code, 0, Buffer.concat(chunks).toString('utf8'));
+});
+
+for (const afterRename of [false, true]) {
+  test(`vault recovers abandoned encrypted writes after process exit ${afterRename ? 'after' : 'before'} publication`, { timeout: 30000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-vault-crashed-write-'));
+    const key = randomBytes(32);
+    const bytes = Buffer.from('synthetic crashed evidence');
+    const hash = sha256(bytes), digest = hash.slice('sha256:'.length);
+    const path = join(root, 'blobs', digest.slice(0, 2), `${digest}.blob`);
+    let vault = await LocalVault.open({ root, masterKey: key });
+    const retainedBytes = Buffer.from('synthetic committed evidence');
+    const retained = await vault.putBlob(retainedBytes, 'raw-provider-turn');
+    vault.close();
+    const source = `
+      import * as fs from 'node:fs';
+      import { mock } from 'node:test';
+      mock.module('node:fs', { namedExports: { ...fs, renameSync: (from, to) => {
+        ${afterRename ? 'fs.renameSync(from, to);' : ''}
+        process.exit(77);
+      } } });
+      const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
+      const vault = await LocalVault.open({ root: ${JSON.stringify(root)}, masterKey: Buffer.from('${key.toString('hex')}', 'hex') });
+      await vault.putBlob(Buffer.from('synthetic crashed evidence'), 'raw-provider-turn');
+      process.exit(78);
+    `;
+    try {
+      const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
+        { stdio: ['ignore', 'pipe', 'pipe'] });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
+      const code = await new Promise<number | null>((resolveExit, reject) => {
+        child.on('error', reject); child.on('exit', resolveExit);
+      });
+      assert.equal(code, 77, Buffer.concat(chunks).toString('utf8'));
+      const directory = join(root, 'blobs', digest.slice(0, 2));
+      const files = (await readdir(directory)).filter(name => name.startsWith(digest));
+      assert.equal(files.length, 1);
+      assert.equal((await readFile(join(directory, files[0]!))).includes(bytes), false);
+      const db = new DatabaseSync(join(root, 'vault.sqlite'));
+      try { assert.equal(db.prepare('select 1 from blobs where content_id = ?').get(hash), undefined); }
+      finally { db.close(); }
+      const activeTemporary = `${path}.${process.pid}.abcdef01.tmp`;
+      await writeFile(activeTemporary, Buffer.from('synthetic active writer'), { flag: 'wx' });
+      vault = await LocalVault.open({ root, masterKey: key });
+      assert.deepEqual((await readdir(directory)).filter(name => name.startsWith(digest)), [activeTemporary.slice(directory.length + 1)]);
+      assert.deepEqual(await vault.getBlob(retained), retainedBytes);
+      assert.equal(await vault.putBlob(bytes, 'raw-provider-turn'), hash);
+      await vault.enforceRawEvidenceRetention();
+      assert.deepEqual(await vault.getBlob(hash), bytes);
+      assert.equal((await readFile(activeTemporary)).toString(), 'synthetic active writer');
+      vault.close();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test('orphan cleanup preserves a writer committed after its directory snapshot', { timeout: 30000 }, async () => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import * as fs from 'node:fs/promises';
+    import { randomBytes, createHash } from 'node:crypto';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { mock } from 'node:test';
+    const root = await fs.mkdtemp(join(tmpdir(), 'dharma-cleanup-commit-race-'));
+    const key = randomBytes(32), bytes = Buffer.from('synthetic concurrent retained evidence');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const directory = join(root, 'blobs', digest.slice(0, 2));
+    let writer, reader, armed = false, committed = false;
+    const replacement = mock.module('node:fs/promises', { namedExports: { ...fs,
+      readdir: async (path, options) => {
+        const snapshot = await fs.readdir(path, options);
+        if (armed && path === directory) {
+          armed = false;
+          assert.equal(await writer.putBlob(bytes, 'raw-provider-turn'), 'sha256:' + digest);
+          committed = true;
+        }
+        return snapshot;
+      }
+    } });
+    try {
+      const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
+      writer = await LocalVault.open({ root, masterKey: key });
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(join(directory, digest + '.blob'), Buffer.from('unindexed synthetic placeholder'));
+      armed = true;
+      reader = await LocalVault.open({ root, masterKey: key });
+      assert.equal(committed, true);
+      assert.deepEqual(await reader.getBlob('sha256:' + digest), bytes);
+    } finally { reader?.close(); writer?.close(); replacement.restore(); await fs.rm(root, { recursive: true, force: true }); }
+  `;
+  const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chunks: Buffer[] = [];
+  child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
+  const code = await new Promise<number | null>((resolveExit, reject) => { child.on('error', reject); child.on('exit', resolveExit); });
+  assert.equal(code, 0, Buffer.concat(chunks).toString('utf8'));
+});
+
+test('opening an older export outbox migrates receipt lookup without changing queued evidence', async () => {
+  const { root, key, vault, binding, identity, workKey, descriptor } = await taskExportFixture();
+  const hash = await vault.stageProviderSessionTaskExport(binding.bindingId, identity, workKey, descriptor);
+  vault.close();
+  const db = new DatabaseSync(join(root, 'vault.sqlite'));
+  db.exec('alter table provider_session_task_exports drop column receipt_hash'); db.close();
+  const reopened = await LocalVault.open({ root, masterKey: key });
+  try {
+    assert.deepEqual(reopened.listProviderSessionTaskExports(binding.bindingId, identity), [{ workKey, descriptorHash: hash }]);
+    assert.equal(reopened.latestProviderSessionTaskExportReceipt(binding.bindingId, identity), null);
+    const receiptHash = await reopened.putBlob(Buffer.from('synthetic validated receipt'), 'named-session-task-export-receipt');
+    reopened.acknowledgeProviderSessionTaskExport(binding.bindingId, identity, workKey, hash, receiptHash);
+    assert.deepEqual(reopened.latestProviderSessionTaskExportReceipt(binding.bindingId, identity), { descriptorHash: hash, receiptHash });
+    assert.throws(() => reopened.latestProviderSessionTaskExportReceipt(binding.bindingId,
+      { ...identity, organizationId: 'org_foreign' }), /scope_mismatch/);
+  } finally { reopened.close(); }
+});
 
 test('provider session binding is encrypted, scoped, immutable, and revocable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-binding-'));

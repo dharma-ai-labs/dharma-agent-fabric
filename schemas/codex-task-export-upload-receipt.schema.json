@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/codex-task-export-upload-receipt/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "organizationId", "receipt", "correlationId"],
+  "properties": {
+    "ok": { "const": true },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "correlationId": { "type": "string", "format": "uuid" },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "exportHash", "contentExpiresAt", "acceptedLearningObservation"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "status": { "enum": ["retained", "duplicate"] },
+        "exportHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "contentExpiresAt": { "type": "string", "format": "date-time" },
+        "acceptedLearningObservation": { "const": false }
+      }
+    }
+  }
+}

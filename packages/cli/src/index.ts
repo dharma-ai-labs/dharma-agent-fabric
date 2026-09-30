@@ -87,6 +87,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
+import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
@@ -2448,7 +2449,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
-  const startupReady = !['win32', 'linux'].includes(process.platform) || autostart.state === 'enabled';
+  const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform) || autostart.state === 'enabled';
   const complete = sharedRepositoryReady && namedSessionReady && firstLearningReady
     && roleReady && relayReady && startupReady;
   return {
@@ -3894,6 +3895,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
       localWriteRoots: writeRoots,
+      syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
+        identity: registration!.identity,
+        loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
+        send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
       withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
@@ -3909,11 +3914,6 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
               if (!binding) throw new Error('named_session_binding_unavailable');
               const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
-              if (containsDisallowedLocalPath(retained.context)
-                || canonicalize(redactValue(retained.context, { classes: new Set<string>(), redactedValues: 0,
-                  excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) !== retained.bytes) {
-                throw new Error('named_session_context_disclosure_forbidden');
-              }
               taskStateFailure = 'runtime_version_unavailable';
               const version = (await execFileAsync('codex', ['--version'], { timeout: 10_000, maxBuffer: 4096,
                 env: providerProcessEnvironment(process.env) })).stdout.trim();
@@ -3955,7 +3955,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
         if (!binding) throw new Error('named_session_binding_unavailable');
         const receipt = await retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
-          before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash });
+          before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash,
+          taskExport: { policy: current, contextBytes: await vault.getBlob(taskState.providerContext.contextContentHash),
+            contextHash: taskState.providerContext.retainedContextHash } });
         return { ...receipt, providerContext: taskState.providerContext,
           packageContent: { manifestHash: taskState.packageContent.manifestHash,
             catalogHash: taskState.packageContent.catalogHash, skillsHash: taskState.packageContent.skillsHash } };

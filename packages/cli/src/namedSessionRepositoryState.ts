@@ -1,6 +1,9 @@
 import type { LocalVault, LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { serializeRepositoryPackageSnapshot, type RepositoryPackageSnapshot } from './repositoryPackage.js';
+import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import type { NamedSessionTaskExportResult } from './namedSessionTaskExport.js';
+import { stageNamedSessionTaskExport } from './namedSessionTaskExportSync.js';
 
 export interface NamedSessionRepositoryState {
   schema: 'dharma.named-session-repository-state/v1';
@@ -15,6 +18,9 @@ export interface NamedSessionRepositoryState {
   packageContent?: { manifestHash: string; catalogHash: string; skillsHash: string };
   providerContext?: { retainedContextHash: string; contextContentHash: string; runtimeVersion: string;
     requestedModel: string; executedModel: null; replayMode: 'task_level' };
+  portableExport?: Omit<Extract<NamedSessionTaskExportResult, { state: 'ready' }>, 'bytes'>
+    | Exclude<NamedSessionTaskExportResult, { state: 'ready' }>;
+  exportOutbox?: { state: 'pending'; workKey: string; descriptorHash: string; acceptedLearningObservation: false };
   acceptedLearningObservation: false;
 }
 
@@ -32,6 +38,7 @@ export async function retainNamedSessionRepositoryState(input: {
   after: RepositoryPackageSnapshot;
   activeBundleId: string;
   activeBundleHash: string;
+  taskExport?: { policy: OrganizationPolicy; contextBytes: Uint8Array; contextHash: string };
 }): Promise<NamedSessionRepositoryState> {
   const { binding, capture, before, after } = input;
   for (const key of ['organizationId', 'repositoryBindingId', 'workspaceId', 'deviceId',
@@ -56,11 +63,25 @@ export async function retainNamedSessionRepositoryState(input: {
   }
   const sourceBytes = serializeRepositoryPackageSnapshot(before);
   const resultBytes = serializeRepositoryPackageSnapshot(after);
+  let portableExport: NamedSessionRepositoryState['portableExport'];
+  let exportOutbox: NamedSessionRepositoryState['exportOutbox'];
+  if (input.taskExport) {
+    const staged = await stageNamedSessionTaskExport(input.vault, { capture, binding, ...input.taskExport });
+    const exported = staged.exported;
+    if (exported.state === 'ready') {
+      const storedHash = await input.vault.putBlob(Buffer.from(exported.bytes), 'named-session-portable-task-export');
+      if (storedHash !== exported.exportHash) throw new Error('named_session_portable_export_integrity_failed');
+      portableExport = { state: 'ready', exportHash: storedHash, acceptedLearningObservation: false };
+      exportOutbox = staged.outbox;
+    } else portableExport = exported;
+  }
   return { schema: 'dharma.named-session-repository-state/v1', workId: capture.workId,
     captureHash: await input.vault.putBlob(Buffer.from(JSON.stringify(capture)), 'raw-provider-turn'),
     sourceSnapshotHash: before.manifest.snapshotHash, resultSnapshotHash: after.manifest.snapshotHash,
     sourceContentHash: await input.vault.putBlob(Buffer.from(sourceBytes), 'named-session-source-state'),
     resultContentHash: await input.vault.putBlob(Buffer.from(resultBytes), 'named-session-result-state'),
     activeBundleId: input.activeBundleId, activeBundleHash: input.activeBundleHash,
+    ...(portableExport ? { portableExport } : {}),
+    ...(exportOutbox ? { exportOutbox } : {}),
     acceptedLearningObservation: false };
 }

@@ -121,9 +121,15 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
     };
     let boundaryWorkId: string | null = null;
     const retainedWorkIds: string[] = [];
+    let exportSyncs = 0;
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
       authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => true,
+      syncTaskExports: async () => {
+        assert.equal(active, 0); assert.equal(boundaryWorkId, null); exportSyncs++;
+        if (queueFailure) throw new Error('PRIVATE_EXPORT_SYNC_DIAGNOSTIC_MUST_NOT_LEAK');
+        return { state: 'idle', pending: 0, delivered: 0, acceptedLearningObservation: false };
+      },
       retainRepositoryState: async capture => {
         assert.equal(capture.workId, boundaryWorkId);
         retainedWorkIds.push(capture.workId);
@@ -167,6 +173,12 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         await new Promise(resolveWait => setTimeout(resolveWait, 10));
       }
       assert.ok(idleHealth, 'an idle inbox poll must persist a running, empty-queue health snapshot');
+      assert.equal(exportSyncs, 1);
+      const exports = idleHealth.taskExports as { state: string; pending: number | null; acceptedLearningObservation: boolean };
+      assert.equal(exports.state, queueFailure ? 'pending' : 'idle');
+      assert.equal(exports.pending, queueFailure ? null : 0);
+      assert.equal(exports.acceptedLearningObservation, false);
+      assert.equal(JSON.stringify(idleHealth).includes('PRIVATE_EXPORT_SYNC'), false);
       const workId = randomUUID();
       const putBlob = vault.putBlob.bind(vault);
       let secretPersisted = false;
