@@ -60,8 +60,13 @@ function bootstrapDependencies(onboarding: Onboarding) {
     retryBootstrapOnboarding: async (operation: () => Promise<unknown>) => operation(),
     onboard: async () => { await record('onboard'); return {
       firstLearningEvidence: { state: 'synchronized', discovered: 0, disclosureReady: false,
-        captured: 0, synced: 0 }, ...onboarding,
+        captured: 0, synced: 0 }, repositoryRole: { stage: 'registered' }, ...onboarding,
     }; },
+    joinExistingRepository: async () => { await record('join_existing'); return {
+      firstLearningEvidence: { state: 'shared_package_inherited', discovered: 0, disclosureReady: false },
+      repositoryRole: { stage: 'registered' }, ...onboarding,
+    }; },
+    UUID_PATTERN: /^[0-9a-f-]{36}$/i,
     installStableRepositoryLauncher: async () => { await record('launcher');
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
     dharmaHome: () => '/fixture-home',
@@ -173,6 +178,153 @@ test('bootstrap preserves only a verified current-device startup anchor before e
   };
   await (await caller('bootstrap', f.dependencies))(bootstrapFlags());
   assert.ok(f.calls.indexOf('verify_existing_anchor') < f.calls.indexOf('autostart'));
+});
+
+test('bootstrap selects the authorized remote before redeeming and reports its actual checkout', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.resolveBootstrapRepositoryWorkspace = async () => {
+    f.calls.push('selected_checkout');
+    return { workspace: '/managed/customer-jobs', selection: 'managed_cloned' };
+  };
+  f.dependencies.redeemBootstrapGrant = async () => {
+    f.calls.push('redeem');
+    return { deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
+      relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] };
+  };
+  f.dependencies.dharmaHome = () => '/fixture-home';
+  f.dependencies.normalizeGitRemoteIdentity = () => 'github.com/customer/jobs';
+  f.dependencies.acquirePidLock = async () => async () => {};
+  const flags = bootstrapFlags();
+  flags.set('repository-url-base64url', Buffer.from('https://github.com/customer/jobs.git').toString('base64url'));
+  const receipt = await (await caller('bootstrap', f.dependencies))(flags);
+  assert.deepEqual(f.calls.slice(0, 3), ['selected_checkout', 'preflight', 'redeem']);
+  assert.equal((receipt.repositorySelection as Record<string, unknown>).workspace, '/managed/customer-jobs');
+  assert.equal((receipt.repositorySelection as Record<string, unknown>).selection, 'managed_cloned');
+});
+
+test('existing organization binding enrolls without a Git checkout or source inventory', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.redeemBootstrapGrant = async (input: { repositoryFingerprint: string }) => {
+    assert.equal(input.repositoryFingerprint, '');
+    f.calls.push('redeem');
+    return { deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
+      relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] };
+  };
+  const flags = bootstrapFlags();
+  const bindingId = '22222222-2222-4222-8222-222222222222';
+  flags.set('join-repository-binding-id', bindingId);
+  flags.set('join-source-fingerprint', `sha256:${'a'.repeat(64)}`);
+  const receipt = await (await caller('bootstrap', f.dependencies))(flags);
+  assert.equal((receipt.repositorySelection as Record<string, unknown>).selection, 'existing_organization_binding');
+  assert.ok(f.calls.indexOf('redeem') < f.calls.indexOf('join_existing'));
+  assert.ok(!f.calls.includes('preflight'));
+  assert.ok(!f.calls.includes('onboard'));
+});
+
+test('joining an existing package registers only a managed knowledge endpoint', async () => {
+  const calls: string[] = [];
+  const bindingId = '22222222-2222-4222-8222-222222222222';
+  const fingerprint = `sha256:${'a'.repeat(64)}`;
+  let item: Record<string, unknown> | null = null;
+  const dependencies = {
+    readDeviceConfig: async () => ({ organizationId: 'org_fixture', deviceId: 'device_fixture', hqUrl: 'https://fixture.invalid' }),
+    required: (flags: Map<string, string>, name: string) => String(flags.get(name)),
+    dharmaHome: () => '/fixture-home', resolve, realpath: async (path: string) => path,
+    mkdir: async () => undefined,
+    readFile: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+    readdir: async () => [],
+    writeJsonAtomic: async () => { calls.push('marker'); },
+    gitValue: async () => null,
+    execFileAsync: async (_bin: string, args: string[]) => { calls.push(args.includes('init') ? 'managed_git_init' : 'managed_empty_commit'); },
+    workspaceIdForDevice: () => '33333333-3333-4333-8333-333333333333',
+    selectDeviceWorkspace: () => item,
+    registry: async () => item ? [item] : [],
+    createHash, canonicalize: (value: unknown) => JSON.stringify(value),
+    sha256: (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`,
+    saveWorkspaceRecord: async (entry: Record<string, unknown>) => { item = entry; calls.push('registry'); },
+    client: async () => ({}),
+    syncWorkspacePolicy: async () => { calls.push('policy'); return { workspace: { id: item?.workspaceId, status: 'active' } }; },
+    reconcileWorkspaceRegistration: () => item,
+    bindRepositoryAgent: async (_fabric: unknown, entry: Record<string, unknown>, selected: string) => {
+      assert.equal(selected, bindingId); calls.push('bind_existing');
+      return { ...entry, repositoryBindingId: bindingId,
+        repositoryAgentId: '44444444-4444-4444-8444-444444444444',
+        endpointId: '55555555-5555-4555-8555-555555555555',
+        repositoryPackage: { state: 'published' } };
+    },
+    repositoryRoleScope: () => ({}),
+    registerRepositoryRoleMetadata: async () => ({ role: { revision: 1 } }),
+    receiptAwareProviderCapabilities: async () => [{ provider: 'codex' }],
+    selectedProviderAdapters: () => [{ capability: async () => ({ provider: 'codex' }) }],
+    installAvailableNativeAgentFabricBootstraps: async () => ({ installed: ['codex'], failures: [] }),
+    startRelayDaemon: async () => ({ state: 'running' }),
+    repositorySharedReady: async () => true,
+    isLocalProviderId: (value: string) => value === 'codex',
+    basename,
+  };
+  const result = await (await caller('joinExistingRepository', dependencies))(
+    new Map([['organization-id', 'org_fixture'], ['policy-revision', 'policy-v1'], ['provider', 'codex']]),
+    bindingId, fingerprint);
+  assert.equal(result.accessMode, 'knowledge_only');
+  assert.equal(result.sharedRepositoryReady, true);
+  assert.equal((result.firstLearningEvidence as Record<string, unknown>).state, 'shared_package_inherited');
+  assert.deepEqual(calls.slice(0, 5), ['marker', 'managed_git_init', 'managed_empty_commit', 'registry', 'policy']);
+  assert.ok(calls.includes('bind_existing'));
+});
+
+test('knowledge-only workspaces cannot be promoted through source registration or inventory', async () => {
+  const workspace = resolve('/fixture-home', 'joined-repositories', 'binding');
+  const record = { path: workspace, organizationId: 'org_fixture', workspaceId: 'workspace_fixture',
+    accessMode: 'knowledge_only' };
+  const add = await caller('workspaceAdd', {
+    realpath: async () => workspace, registry: async () => [record],
+  });
+  await assert.rejects(() => add(new Map(), [workspace]), /repository_join_source_operation_denied/);
+  const snapshot = await caller('repositorySnapshotCommand', {
+    registry: async () => [record], resolve,
+  });
+  await assert.rejects(() => snapshot(new Map([
+    ['workspace', workspace], ['organization-id', 'org_fixture'], ['workspace-id', 'workspace_fixture'],
+  ]), []), /repository_join_source_operation_denied/);
+});
+
+test('knowledge-only task preflight rejects writable authority before policy or provider access', async () => {
+  const events: unknown[] = [];
+  const task = { taskId: 'task_fixture', workspaceId: 'workspace_fixture', taskType: 'external_request',
+    authority: { readPaths: ['.'], writePaths: ['src/**'], commands: [], network: 'deny' },
+    acceptance: { commands: [], requiredArtifacts: [] } };
+  const fabric = {
+    pollTask: async () => ({ task: { envelope: task } }),
+    postTaskEvent: async (...args: unknown[]) => { events.push(args); },
+  };
+  const run = await caller('executeOneTask', {
+    registry: async () => [{ workspaceId: 'workspace_fixture', accessMode: 'knowledge_only' }],
+    refreshVerifiedWorkspacePolicyForTransmission: async () => { throw new Error('must not read policy'); },
+  });
+  const result = await run(fabric, 30);
+  assert.equal(result.code, 'knowledge_only_task_denied');
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [['task_fixture', 'failed', {
+    phase: 'preflight', code: 'knowledge_only_task_denied',
+  }]]);
+});
+
+test('repository checkout failure returns a typed receipt without redeeming the grant', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.resolveBootstrapRepositoryWorkspace = async () => {
+    throw new Error('repository_checkout_failed: helper exposed SECRET');
+  };
+  f.dependencies.dharmaHome = () => '/fixture-home';
+  f.dependencies.normalizeGitRemoteIdentity = () => 'github.com/customer/jobs';
+  f.dependencies.acquirePidLock = async () => async () => {};
+  const flags = bootstrapFlags();
+  flags.set('repository-url-base64url', Buffer.from('https://github.com/customer/jobs.git').toString('base64url'));
+  const receipt = await (await caller('bootstrap', f.dependencies))(flags);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.stage, 'repository_selection');
+  assert.equal(receipt.code, 'repository_checkout_failed');
+  assert.equal(receipt.grantRedeemed, false);
+  assert.deepEqual(f.calls, []);
+  assert.doesNotMatch(JSON.stringify(receipt), /SECRET|fixture_grant/);
 });
 
 test('bootstrap passes recipient approval to the verified browser opener before storing credentials', async () => {
@@ -355,6 +507,28 @@ test('missing first-learning disposition cannot produce a complete receipt', asy
   const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
   assert.equal(actual.ok, false);
   assert.equal(actual.stage, 'first_learning_pending');
+});
+
+test('bootstrap cannot report complete without a registered role, running relay, and startup', async () => {
+  const missingRole = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture', repositoryRole: null });
+  const roleResult = await (await caller('bootstrap', missingRole.dependencies))(bootstrapFlags(true));
+  assert.equal(roleResult.ok, false);
+  assert.equal(roleResult.stage, 'role_registration_pending');
+
+  const stoppedRelay = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture' });
+  stoppedRelay.dependencies.startRelayDaemon = async () => ({ started: false, state: 'stopped' });
+  const relayResult = await (await caller('bootstrap', stoppedRelay.dependencies))(bootstrapFlags(true));
+  assert.equal(relayResult.ok, false);
+  assert.equal(relayResult.stage, 'synchronization_pending');
+
+  const disabledStartup = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture' });
+  disabledStartup.dependencies.enableRelayAutostart = async () => ({ state: 'disabled', backend: null });
+  const startupResult = await (await caller('bootstrap', disabledStartup.dependencies))(bootstrapFlags(true));
+  assert.equal(startupResult.ok, false);
+  assert.equal(startupResult.stage, 'autostart_pending');
 });
 
 test('a failed named session cannot produce a complete bootstrap receipt', async () => {

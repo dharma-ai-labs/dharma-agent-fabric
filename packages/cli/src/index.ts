@@ -56,6 +56,7 @@ import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRep
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
+import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { prepareProvidersIndependently, startSkillPreparationPump } from './skillPreparationPump.js';
@@ -91,7 +92,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.125';
+const VERSION = '0.2.128';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -143,6 +144,7 @@ interface WorkspaceRecord {
   controlBranch?: string | null;
   defaultBranch: string | null;
   status: 'active';
+  accessMode?: 'source' | 'knowledge_only';
 }
 
 export function parseCliOptions(args: string[]): {
@@ -1855,9 +1857,14 @@ async function supervisedDemoCycle(registration: DemoWatchRegistration, signal: 
   const workspace = await realpath(registration.workspace);
   if (workspace !== registration.workspace) throw new Error('Demo watch checkout is no longer canonical.');
   const root = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
-  const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
-  if (!root || !remote || normalizeGitRemoteIdentity(remote) !== registration.normalizedRepository) {
-    throw Object.assign(new Error('Demo watch repository binding changed.'), { code: 'demo_watch_repository_changed' });
+  if (registration.knowledgeOnly) {
+    if (root) throw Object.assign(new Error('Demo knowledge-only workspace became a Git checkout.'),
+      { code: 'demo_watch_workspace_changed' });
+  } else {
+    const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+    if (!root || !remote || normalizeGitRemoteIdentity(remote) !== registration.normalizedRepository) {
+      throw Object.assign(new Error('Demo watch repository binding changed.'), { code: 'demo_watch_repository_changed' });
+    }
   }
   const scope = { hqUrl: registration.hqUrl, organizationId: registration.organizationId,
     repositoryId: registration.repositoryId, normalizedRepository: registration.normalizedRepository,
@@ -1873,6 +1880,7 @@ async function supervisedDemoCycle(registration: DemoWatchRegistration, signal: 
         signal: options?.signal ? AbortSignal.any([options.signal, signal]) : signal });
     } });
     return demoRepositoryPackage({ scope, workspace, provider: registration.provider,
+      knowledgeOnly: registration.knowledgeOnly,
       nativeSkillDirectory: nativeDirectory }, deps);
   });
 }
@@ -2114,15 +2122,58 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const organizationId = required(flags, 'organization-id');
   const resuming = flags.has('resume');
   const bootstrapToken = resuming ? null : required(flags, 'grant');
-  const workspace = await realpath(String(flags.get('workspace') || '.'));
+  const selectedRemote = flags.get('repository-url-base64url');
+  const joinedBindingId = typeof flags.get('join-repository-binding-id') === 'string'
+    ? String(flags.get('join-repository-binding-id')) : null;
+  const joinedFingerprint = typeof flags.get('join-source-fingerprint') === 'string'
+    ? String(flags.get('join-source-fingerprint')) : null;
+  if (joinedBindingId && (!UUID_PATTERN.test(joinedBindingId) || !/^sha256:[a-f0-9]{64}$/.test(joinedFingerprint || '')
+    || selectedRemote || flags.has('repository-key'))) {
+    throw new Error('repository_join_selection_invalid: joining requires an exact existing binding and fingerprint, without a source selection.');
+  }
+  if (!joinedBindingId && joinedFingerprint) throw new Error('repository_join_selection_invalid');
+  let repositorySelection: { workspace: string; selection: string };
+  try {
+    if (flags.has('repository-url-base64url') && typeof selectedRemote !== 'string') {
+      throw new Error('repository_selection_invalid_url: selected repository URL is missing.');
+    }
+    if (selectedRemote && flags.has('repository-key')) {
+      throw new Error('repository_selection_invalid_url: selected remote cannot be combined with a repository key.');
+    }
+    repositorySelection = joinedBindingId
+      ? { workspace: resolve(dharmaHome(), 'joined-repositories', joinedBindingId), selection: 'existing_organization_binding' }
+      : typeof selectedRemote === 'string'
+      ? await resolveBootstrapRepositoryWorkspace({
+        workspace: String(flags.get('workspace') || '.'),
+        selectedRemoteBase64url: selectedRemote,
+        organizationId,
+        home: dharmaHome(),
+        normalizeRemote: normalizeGitRemoteIdentity,
+        withLock: (path) => acquirePidLock(path, 30_000,
+          'repository_checkout_busy: another setup is selecting this repository; retry after it finishes.'),
+      })
+      : { workspace: await realpath(String(flags.get('workspace') || '.')), selection: 'provided' };
+  } catch (error) {
+    const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+      ? error.message : '';
+    const code = /^repository_[a-z_]+:/.exec(message)?.[0].slice(0, -1) || 'repository_selection_failed';
+    return { ok: false, stage: 'repository_selection', code, grantRedeemed: false,
+      message: code === 'repository_checkout_failed'
+        ? 'Git could not clone the selected repository with this device\'s existing access. Confirm repository access or use a matching checkout; the grant was not redeemed.'
+        : message.startsWith('repository_') ? message : 'Selected repository could not be verified; the grant was not redeemed.' };
+  }
+  const workspace = repositorySelection.workspace;
+  if (selectedRemote) process.stderr.write(`Agent Fabric repository checkout: ${workspace}\n`);
   const policyRevision = required(flags, 'policy-revision');
-  const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(
-    workspace,
-    typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
-  );
+  const repositoryIdentity = joinedBindingId
+    ? { fingerprint: joinedFingerprint! }
+    : await preflightBootstrapWorkspaceIdentity(
+      workspace,
+      typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
+    );
   const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
   const provider = requestedProvider === 'auto'
-    ? await detectBootstrapProvider(workspace)
+    ? await detectBootstrapProvider(joinedBindingId ? String(flags.get('workspace') || '.') : workspace)
     : requestedProvider;
   if (!isLocalProviderId(provider)) {
     throw new Error('Bootstrap provider must be auto, codex, claude, agy, or hermes.');
@@ -2159,7 +2210,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       name,
       platform: devicePlatform,
       publicKeyEd25519: identity.publicKeyEd25519,
-      repositoryFingerprint: repositoryIdentity.fingerprint,
+      repositoryFingerprint: joinedBindingId ? '' : repositoryIdentity.fingerprint,
       onRecipientApprovalRequired: async (approval) => {
         recipientApproval.required = true;
         recipientApproval.browserOpened = flags.has('no-browser')
@@ -2228,6 +2279,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     return {
       ok: false,
       stage: 'organization_api_credentials',
+      repositorySelection,
       code: credentialFailure,
       message: 'The enrolled device is preserved, but its organization API credential is unavailable. Contact Dharma support for device-bound credential recovery; do not repeat enrollment or use another member\'s token.',
       sharedRepositoryReady: false,
@@ -2244,13 +2296,14 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
   onboardFlags.set('provider', provider);
-  const onboarded = await retryBootstrapOnboarding(
-    async () => await onboard(onboardFlags) as Record<string, unknown>,
-  );
+  const onboarded = await retryBootstrapOnboarding(async () => joinedBindingId
+    ? await joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!) as Record<string, unknown>
+    : await onboard(onboardFlags) as Record<string, unknown>);
   if (onboarded.ok !== true || onboarded.stage === 'approve_device') {
     return {
       ok: onboarded.ok === true,
       stage: onboarded.stage,
+      repositorySelection,
       code: onboarded.code,
       sharedRepositoryReady: false,
       enrollment: {
@@ -2269,7 +2322,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const autostart = flags.has('no-relay-daemon')
     ? { state: 'disabled' as const, backend: null }
     : await withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
-      `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+      `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
+        + (joinedBindingId ? ` --join-repository-binding-id ${joinedBindingId} --join-source-fingerprint ${joinedFingerprint}` : ''),
       () => withRelayStartupMutation(async () => {
         const home = dharmaHome();
         const existing = await relayAutostartStatus({ home });
@@ -2304,6 +2358,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     return {
       ok: true,
       stage: sharedRepositoryReady ? onboarded.stage : 'shared_repository_pending',
+      repositorySelection,
       localStage: onboarded.localStage ?? onboarded.stage,
       sharedRepositoryReady,
       enrollment: {
@@ -2325,7 +2380,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
   const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
   const firstLearning = (onboarded as Record<string, unknown>).firstLearningEvidence as Record<string, unknown> | undefined;
-  const firstLearningReady = firstLearning?.state === 'synchronized' || firstLearning?.state === 'denied_disclosure';
+  const firstLearningReady = firstLearning?.state === 'synchronized' || firstLearning?.state === 'denied_disclosure'
+    || joinedBindingId !== null && firstLearning?.state === 'shared_package_inherited';
   const relay = flags.has('no-relay-daemon')
     ? { started: false, ...(await waitForRelayReadiness()) }
     : await startRelayDaemon(policyPath);
@@ -2369,7 +2425,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     usage,
   });
   const operatingContract = await loadAgentFabricOnboardingContract();
-  const namedSession = provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
+  const namedSession = !joinedBindingId && provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
     ? await withOnboardingStage('named_session', String(onboarded.workspaceId),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
       () => namedSessionCommand('start', new Map<string, string | boolean>([
@@ -2380,13 +2436,24 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     ]))) as Record<string, unknown>
     : null;
   const repositoryReceipt = onboarded as Record<string, unknown>;
-  const namedSessionReady = provider !== 'codex' || process.platform !== 'linux'
+  const namedSessionReady = Boolean(joinedBindingId) || provider !== 'codex' || process.platform !== 'linux'
     || Boolean(namedSession?.ok === true && ['running', 'executing'].includes(String(namedSession.state)));
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
+  const roleReady = Boolean(role);
+  const relayReady = relay.state === 'running';
+  const startupReady = !['win32', 'linux'].includes(process.platform) || autostart.state === 'enabled';
+  const complete = sharedRepositoryReady && namedSessionReady && firstLearningReady
+    && roleReady && relayReady && startupReady;
   return {
-    ok: sharedRepositoryReady && namedSessionReady && firstLearningReady,
-    stage: sharedRepositoryReady ? namedSessionReady ? firstLearningReady ? 'complete' : 'first_learning_pending' : 'named_session_pending'
-      : repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending',
+    ok: complete,
+    stage: !sharedRepositoryReady
+      ? repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending'
+      : !namedSessionReady ? 'named_session_pending'
+      : !firstLearningReady ? 'first_learning_pending'
+      : !roleReady ? 'role_registration_pending'
+      : !relayReady ? 'synchronization_pending'
+      : !startupReady ? 'autostart_pending' : 'complete',
+    repositorySelection,
     localStage: 'complete',
     sharedRepositoryReady,
     enrollment: {
@@ -2420,13 +2487,13 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     },
     workflowReadiness: {
       sharedPackage: sharedRepositoryReady ? 'ready' : 'pending',
-      roleRegistration: role ? 'ready' : 'pending',
+      roleRegistration: roleReady ? 'ready' : 'pending',
       firstLearning: firstLearning?.state === 'synchronized'
         ? Number(firstLearning.discovered || 0) > 0 ? 'synchronized' : 'no_eligible_history'
         : String(firstLearning?.state || 'pending'),
       synchronization: relay.state === 'running' ? 'running' : 'pending',
       namedSession: namedSession && namedSessionReady ? 'ready'
-        : provider === 'codex' && process.platform === 'linux' ? 'pending' : 'not_supported',
+        : joinedBindingId ? 'not_requested' : provider === 'codex' && process.platform === 'linux' ? 'pending' : 'not_supported',
     },
   };
 }
@@ -3188,6 +3255,9 @@ async function evidencePreview(flags: Map<string, string | boolean>): Promise<Ou
 
 async function workspaceAdd(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
   const path = await realpath(positional[0] || required(flags, 'path'));
+  if ((await registry()).some(record => record.path === path && record.accessMode === 'knowledge_only')) {
+    throw new Error('repository_join_source_operation_denied');
+  }
   const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const organizationId = String(flags.get('organization-id') || device.organizationId);
   if (organizationId !== device.organizationId) throw new Error('Workspace organization must match the enrolled device.');
@@ -3569,7 +3639,8 @@ export function canonicalEndpointRole(value: unknown): WorkspaceRecord['reposito
   return { revision: Number(row.revision), profileHash: row.profileHash };
 }
 
-async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRecord): Promise<WorkspaceRecord> {
+async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRecord,
+  joinExistingBindingId?: string): Promise<WorkspaceRecord> {
   const remote = await gitValue(item.path, ['config', '--get', 'remote.origin.url']);
   const currentIdentity = item.repositoryIdentityVersion === 'normalized-v1'
     ? item.repositoryRemoteHash
@@ -3583,6 +3654,7 @@ async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRec
     defaultSourceRef: item.defaultBranch,
     workspaceId: item.workspaceId,
     legacySourceFingerprint: item.repositoryIdentityVersion === 'normalized-v1' ? null : item.repositoryRemoteHash,
+    ...(joinExistingBindingId ? { joinExistingBindingId } : {}),
   });
   const repositoryAgent = response.repositoryAgent && typeof response.repositoryAgent === 'object'
     ? response.repositoryAgent as Record<string, unknown>
@@ -3624,6 +3696,9 @@ async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRec
     || !/^repo:[a-f0-9]{24}$/.test(updated.repositoryAgentKey || '')
     || !/^agents\/[a-z0-9][a-z0-9._-]*-[a-f0-9]{8}$/.test(updated.controlBranch || '')) {
     throw new Error('Dharma HQ returned an invalid repository-agent binding.');
+  }
+  if (joinExistingBindingId && updated.repositoryBindingId !== joinExistingBindingId) {
+    throw new Error('repository_join_binding_mismatch');
   }
   await saveWorkspaceRecord(updated);
   return updated;
@@ -3933,6 +4008,99 @@ async function registerWorkspaceBeforeRepositoryBind(
   return { registered, synchronized };
 }
 
+async function joinExistingRepository(flags: Map<string, string | boolean>, bindingId: string,
+  sourceFingerprint: string): Promise<Output> {
+  const config = await readDeviceConfig();
+  if (!config || config.organizationId !== required(flags, 'organization-id')) {
+    throw new Error('repository_join_enrollment_required');
+  }
+  const workspace = resolve(dharmaHome(), 'joined-repositories', bindingId);
+  await mkdir(workspace, { recursive: true, mode: 0o700 });
+  if (await realpath(workspace) !== workspace) throw new Error('repository_join_workspace_symlink_denied');
+  const markerPath = resolve(workspace, '.dharma', 'join-identity.json');
+  const expectedMarker = { organizationId: config.organizationId, bindingId, sourceFingerprint };
+  const existingMarker = await readFile(markerPath, 'utf8').then(value => JSON.parse(value) as Record<string, unknown>)
+    .catch(error => { if (error?.code === 'ENOENT') return null; throw error; });
+  if (existingMarker && canonicalize(existingMarker) !== canonicalize(expectedMarker)) {
+    throw new Error('repository_join_workspace_identity_conflict');
+  }
+  if (!existingMarker) {
+    const entries = await readdir(workspace);
+    if (entries.length) throw new Error('repository_join_workspace_not_empty');
+    await mkdir(resolve(workspace, '.dharma'), { recursive: true, mode: 0o700 });
+    await writeJsonAtomic(markerPath, expectedMarker);
+  }
+  if (!await gitValue(workspace, ['rev-parse', '--verify', 'HEAD'])) {
+    const template = resolve(workspace, '.dharma', 'empty-git-template');
+    await mkdir(template, { recursive: true, mode: 0o700 });
+    await execFileAsync('git', ['-c', `init.templateDir=${template}`, 'init', '--initial-branch=main', workspace]);
+    await execFileAsync('git', ['-C', workspace, '-c', 'user.name=Dharma Agent Fabric',
+      '-c', 'user.email=agent-fabric@localhost', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${template}`,
+      'commit', '--allow-empty', '-m', 'Initialize isolated knowledge workspace']);
+  }
+  const workspaceId = workspaceIdForDevice({ organizationId: config.organizationId,
+    deviceId: config.deviceId, path: workspace });
+  let item = selectDeviceWorkspace(await registry(), { organizationId: config.organizationId,
+    deviceId: config.deviceId, path: workspace, repositoryRemoteHash: sourceFingerprint });
+  if (item && item.accessMode !== 'knowledge_only') throw new Error('repository_join_workspace_mode_conflict');
+  if (!item) {
+    item = {
+      workspaceId, organizationId: config.organizationId, name: `joined-${bindingId.slice(0, 8)}`,
+      path: workspace, routeHash: `sha256:${createHash('sha256').update(workspace).digest('hex')}`,
+      repositoryRemoteHash: sourceFingerprint, repositoryIdentityVersion: 'normalized-v1',
+      repositoryAgentId: null, repositoryBindingId: null, repositoryAgentKey: null,
+      controlBranch: null, defaultBranch: null, status: 'active', accessMode: 'knowledge_only',
+    };
+    await saveWorkspaceRecord(item);
+  }
+  const provider = String(flags.get('provider') || 'codex');
+  if (!isLocalProviderId(provider)) throw new Error('repository_join_provider_invalid');
+  const fabric = await client();
+  const synchronized = await syncWorkspacePolicy(fabric, item, required(flags, 'policy-revision'), true, [provider]);
+  item = reconcileWorkspaceRegistration(await registry(), item, synchronized);
+  item = await bindRepositoryAgent(fabric, item, bindingId);
+  if (item.repositoryPackage?.state !== 'published' || !item.repositoryAgentId || !item.endpointId) {
+    return { ok: false, stage: 'shared_repository_pending', code: 'repository_join_package_unavailable',
+      workspaceId: item.workspaceId, sharedRepositoryReady: false };
+  }
+  const roleInput = {
+    roleName: String(flags.get('role-name') || 'Knowledge collaborator'),
+    questionCategories: (typeof flags.get('question-categories') === 'string'
+      ? String(flags.get('question-categories')).split(',').map(value => value.trim()).filter(Boolean)
+      : ['repository-knowledge', 'lexicon', 'skills']).sort(),
+    description: String(flags.get('role-description') || 'Uses the signed repository package and answers bounded knowledge questions.'),
+  };
+  const profileHash = sha256(canonicalize(roleInput));
+  const role = item.repositoryRole?.profileHash === profileHash
+    ? { stage: 'repository_role_observed', reused: true }
+    : await registerRepositoryRoleMetadata(fabric, repositoryRoleScope(item), {
+      expectedRevision: item.repositoryRole?.revision || 0, ...roleInput,
+    });
+  if (item.repositoryRole?.profileHash !== profileHash) {
+    const revision = Number(((role as Record<string, unknown>).role as Record<string, unknown> | undefined)?.revision);
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('repository_join_role_registration_failed');
+    item = { ...item, repositoryRole: { revision, profileHash } };
+    await saveWorkspaceRecord(item);
+  }
+  const providers = await receiptAwareProviderCapabilities(
+    await Promise.all(selectedProviderAdapters([provider]).map(adapter => adapter.capability())));
+  const nativeSkills = await installAvailableNativeAgentFabricBootstraps({ providers,
+    workspace, workspaceId: item.workspaceId, organizationId: config.organizationId, hqUrl: config.hqUrl });
+  const relay = flags.has('no-relay-daemon') ? { started: false, state: 'not_started' }
+    : await startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json'));
+  const sharedRepositoryReady = await repositorySharedReady(item);
+  return { ok: true, stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
+    localStage: 'ready', sharedRepositoryReady, organizationId: config.organizationId,
+    workspaceId: item.workspaceId, deviceId: config.deviceId, accessMode: 'knowledge_only',
+    repositoryAgent: { id: item.repositoryAgentId, key: item.repositoryAgentKey,
+      bindingId: item.repositoryBindingId, controlBranch: item.controlBranch },
+    repositoryPackage: item.repositoryPackage, repositoryRole: role, providers,
+    firstLearningEvidence: { state: 'shared_package_inherited', discovered: 0,
+      disclosureReady: false, note: 'No local source or trajectory history was read.' },
+    nativeSkills: nativeSkills.installed, nativeSkillFailures: nativeSkills.failures,
+    workspaceSync: synchronized, relay };
+}
+
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
   try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
   catch { return null; }
@@ -4201,6 +4369,9 @@ async function repositorySnapshotCommand(flags: Map<string, string | boolean>, o
   }
   const registeredWorkspace = (await registry()).find(record => record.path === resolve(workspace)
     && record.organizationId === flags.get('organization-id') && record.workspaceId === flags.get('workspace-id'));
+  if (registeredWorkspace?.accessMode === 'knowledge_only') {
+    throw new Error('repository_join_source_operation_denied');
+  }
   const sourceAuthorization = registeredWorkspace?.repositoryAgentId && registeredWorkspace.repositoryBindingId
     ? await fetchRepositorySourceAuthorization(await client(), {
       organizationId: registeredWorkspace.organizationId,
@@ -4257,7 +4428,6 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     ? [String(flags.get('providers'))]
     : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
   const repositoryKey = typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null;
-  const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(workspace, repositoryKey);
   const registryState = await inspectRegistryRecoveryFile<WorkspaceRecord>(workspaceRegistryPath());
   if (registryState.kind === 'corrupt_zero') {
     const anchor = await inspectOwnedRelayAutostart({ home: dharmaHome() });
@@ -4266,6 +4436,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       ['workspace', anchor.workspace], ['apply', true],
     ]));
   }
+  if ((await registry()).some(record => record.path === workspace && record.accessMode === 'knowledge_only')) {
+    throw new Error('repository_join_source_operation_denied');
+  }
+  const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(workspace, repositoryKey);
   let registered = selectDeviceWorkspace(await registry(), {
     organizationId,
     deviceId: config.deviceId,
@@ -5108,6 +5282,16 @@ async function executeOneTask(
   const task = taskRow.envelope;
   const workspace = (await registry()).find((item) => item.workspaceId === task.workspaceId);
   if (!workspace) throw new Error('Task workspace is not registered on this device.');
+  if (workspace.accessMode === 'knowledge_only' && !(task.taskType === 'external_request'
+    && task.authority.readPaths.length === 1 && task.authority.readPaths[0] === '.'
+    && task.authority.writePaths.length === 0 && task.authority.commands.length === 0
+    && task.authority.network === 'deny' && task.acceptance.commands.length === 0
+    && task.acceptance.requiredArtifacts.length === 0)) {
+    await fabric.postTaskEvent(task.taskId, 'failed', {
+      phase: 'preflight', code: 'knowledge_only_task_denied',
+    });
+    return { ok: false, taskId: task.taskId, code: 'knowledge_only_task_denied' };
+  }
   const taskPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
     resolve(workspace.path, '.dharma', 'approved-policy.json'),
     workspace.workspaceId,
@@ -6550,7 +6734,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     || (canonicalWorkspace.repositoryPackage?.state === 'published'
       && canonicalWorkspace.repositoryPackage.snapshotHash === canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash
       ? canonicalWorkspace.repositoryPackage.snapshotHash : null);
-  if (canonicalWorkspace.repositoryPackage && canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
+  if (canonicalWorkspace.accessMode !== 'knowledge_only' && canonicalWorkspace.repositoryPackage
+    && canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
     try {
       const recovered = await recoverPublishedLocalSourceBaseline({
         workspace: canonicalWorkspace.path, organizationId: canonicalWorkspace.organizationId,
@@ -6742,7 +6927,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         }
         nextPolicyRefreshAt = Date.now() + 60_000;
       }
-      if (!sourceScanFlight && canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
+      if (canonicalWorkspace.accessMode !== 'knowledge_only' && !sourceScanFlight
+        && canonicalWorkspace.repositoryBindingId && canonicalWorkspace.repositoryAgentId) {
         try {
           const current = await pollRepositoryCandidate({ transport: fabric,
             outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
@@ -6767,7 +6953,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         } catch { repositorySourceFailures += 1; }
       }
       let evidenceRequestId: string | undefined;
-      if (evidencePolicyFresh && !stopping) {
+      if (canonicalWorkspace.accessMode !== 'knowledge_only' && evidencePolicyFresh && !stopping) {
         const evidenceCycle = await withRepositoryRelayStage('evidence_sync', () => deferUnavailableRelayRetention(async () => {
           const synced = await syncPendingRetentionCapsules(
             vault,
@@ -6835,7 +7021,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         }
         nextSkillActivationAt = performance.now() + 60_000;
       }
-      if (!stopping && !sourceScanFlight && performance.now() >= nextRepositorySourceScanAt) {
+      if (canonicalWorkspace.accessMode !== 'knowledge_only' && !stopping && !sourceScanFlight
+        && performance.now() >= nextRepositorySourceScanAt) {
         const sourceWorkspace = canonicalWorkspace;
         const sourceBaselineHash = publishedLocalSnapshotHash;
         sourceScanFlight = (async () => {
@@ -6910,19 +7097,27 @@ export async function run(argv: string[]): Promise<Output> {
     const organizationId = required(flags, 'organization-id');
     const repositoryId = required(flags, 'repository-id');
     const normalizedRepository = required(flags, 'normalized-repository');
+    const knowledgeOnly = flags.has('knowledge-only');
+    if (knowledgeOnly && !flags.has('workspace')) {
+      throw new Error('Demo knowledge-only setup requires an explicit private --workspace outside Git.');
+    }
     const workspace = await realpath(String(flags.get('workspace') || '.'));
     const root = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
-    if (!root) throw new Error('Demo device setup must run inside the exact Git repository.');
-    const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
-    if (!remote || normalizeGitRemoteIdentity(remote) !== normalizedRepository) {
-      throw new Error('Local Git remote does not match the private Demo repository binding.');
+    if (knowledgeOnly) {
+      if (root) throw new Error('Demo knowledge-only workspace must be outside every Git checkout.');
+    } else {
+      if (!root) throw new Error('Demo device setup must run inside the exact Git repository.');
+      const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+      if (!remote || normalizeGitRemoteIdentity(remote) !== normalizedRepository) {
+        throw new Error('Local Git remote does not match the private Demo repository binding.');
+      }
     }
     const watchControl = ['watch-enable', 'watch-status', 'watch-disable'].includes(String(subcommand));
     const signingProof = ['signing-client-proof', 'signing-owner-proof'].includes(String(subcommand));
     if (signingProof && subcommand === 'signing-owner-proof' && flags.has('submit')) {
       throw new Error('Owner signing approval requires explicit browser confirmation.');
     }
-    if (watchControl && await realpath(root) !== workspace) {
+    if (watchControl && !knowledgeOnly && await realpath(root!) !== workspace) {
       throw new Error('Demo watch setup must select the exact Git repository root.');
     }
     let transportOrigin: string | null = null;
@@ -6936,6 +7131,7 @@ export async function run(argv: string[]): Promise<Output> {
     if (flags.has('dry-run')) return { ok: true, stage: transportOrigin ? 'demo_transport_plan' : signingProof ? 'demo_signing_proof_plan'
       : watchControl ? 'demo_watch_plan' : 'demo_device_plan',
       organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
+      ...(knowledgeOnly ? { workspaceMode: 'knowledge_only' } : {}),
       repositoryPackageState: 'not_connected', ...(transportOrigin ? { transportOrigin } : {}) };
     const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
     const scope = {
@@ -6957,7 +7153,8 @@ export async function run(argv: string[]): Promise<Output> {
         ?? (subcommand === 'watch-enable' ? await detectBootstrapProvider(workspace) : 'codex');
       if (!isLocalProviderId(provider)) throw new Error('Demo watch provider must be auto, codex, claude, agy, or hermes.');
       const registration: DemoWatchRegistration = { schema: 'dharma.demo-watch/v1',
-        hqUrl, organizationId, repositoryId, normalizedRepository, provider, workspace };
+        hqUrl, organizationId, repositoryId, normalizedRepository, provider, workspace,
+        ...(knowledgeOnly ? { knowledgeOnly: true as const } : {}) };
       const input = { home: dharmaHome(), registration, version: VERSION };
       const deps: DemoWatchControlDependencies = {
         verify: async () => { await withDemoDeviceLock(scope, async () =>
@@ -6991,6 +7188,7 @@ export async function run(argv: string[]): Promise<Output> {
           : nativeSkillDirectory(provider);
       const cycle = () => withDemoDeviceLock(scope, async () => demoRepositoryPackage({ scope, workspace,
         statusOnly: subcommand === 'package-status', provider,
+        knowledgeOnly,
         nativeSkillDirectory: demoNativeSkillDirectory }, await createDemoDeviceTransport(scope)));
       if (subcommand !== 'watch') return cycle();
       const rawInterval = flags.get('interval-ms');

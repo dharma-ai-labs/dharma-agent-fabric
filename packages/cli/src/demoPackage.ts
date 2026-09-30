@@ -562,6 +562,7 @@ async function syncPublishedDemoSource(input: {
 export async function demoRepositoryPackage(input: {
   scope: DemoDeviceScope;
   workspace: string;
+  knowledgeOnly?: boolean;
   statusOnly?: boolean;
   provider?: ProviderId;
   nativeSkillDirectory?: string;
@@ -627,6 +628,11 @@ export async function demoRepositoryPackage(input: {
         activationState: 'signed_delivery_pending' };
     }
     if (installed && 'policyTransition' in installed) {
+      if (input.knowledgeOnly) {
+        return { ok: true, stage: 'demo_repository_package_owner_policy_pending',
+          repositoryId: scope.repositoryId, repositoryPackageState: 'published',
+          candidate: null, ready: false, activationState: 'owner_policy_pending' };
+      }
       if (installed.releaseId !== view.activeReleaseId) {
         throw new Error('Demo active release changed during policy transition.');
       }
@@ -654,6 +660,12 @@ export async function demoRepositoryPackage(input: {
     if (installed) {
       const acknowledgement = await acknowledgeDemoInstallation({ scope, nativeSkillDirectory,
         installed }, deps);
+      if (input.knowledgeOnly) {
+        return { ok: true, stage: 'demo_repository_package_knowledge_only_installed',
+          repositoryId: scope.repositoryId, repositoryPackageState: 'published',
+          candidate: null, installed, acknowledgement,
+          ready: false, activationState: 'signed_package_active' };
+      }
       const sourceSync = await syncPublishedDemoSource({ scope, workspace: input.workspace,
         workspaceId: view.workspaceId, authorization: sourceAuthorization,
         publishedSourceFingerprint: view.publishedSourceFingerprint,
@@ -666,6 +678,11 @@ export async function demoRepositoryPackage(input: {
     return { ok: true, stage: 'demo_repository_package_delivery_pending',
       repositoryId: scope.repositoryId, repositoryPackageState: 'published',
       candidate: null, ready: false, activationState: 'signed_delivery_pending' };
+  }
+  if (input.knowledgeOnly) {
+    return { ok: true, stage: 'demo_repository_package_awaiting_owner',
+      repositoryId: scope.repositoryId, repositoryPackageState: 'not_connected',
+      candidate: null, ready: false, activationState: 'owner_publication_pending' };
   }
   const knowledge = await ensureDemoLocalKnowledge({ workspace: input.workspace,
     scope, workspaceId: view.workspaceId });

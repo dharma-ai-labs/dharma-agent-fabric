@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
-import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -502,6 +502,26 @@ test('Demo command dry-run verifies the local repository without a grant or devi
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
   }
+});
+
+test('knowledge-only Demo command requires an explicit non-Git workspace', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-demo-join-'));
+  const workspace = resolve(root, 'knowledge');
+  const checkout = resolve(root, 'checkout');
+  await mkdir(workspace);
+  await mkdir(checkout);
+  execFileSync('git', ['init', checkout]);
+  const scope = ['--portal-url', hqUrl, '--organization-id', orgId,
+    '--repository-id', repositoryId, '--normalized-repository', normalizedRepository];
+  for (const command of ['connect', 'package', 'watch-enable', 'peers']) {
+    const receipt = await run(['demo', command, '--dry-run', '--knowledge-only',
+      '--workspace', workspace, ...scope]) as { workspaceMode: string };
+    assert.equal(receipt.workspaceMode, 'knowledge_only');
+  }
+  await assert.rejects(run(['demo', 'connect', '--dry-run', '--knowledge-only', ...scope]),
+    /explicit private --workspace/);
+  await assert.rejects(run(['demo', 'connect', '--dry-run', '--knowledge-only',
+    '--workspace', checkout, ...scope]), /outside every Git checkout/);
 });
 
 test('lost status response resumes grant-free with exact replay, then retries an unseen expired sequence', async () => {

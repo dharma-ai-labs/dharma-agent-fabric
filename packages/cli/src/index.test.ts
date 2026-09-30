@@ -1278,9 +1278,7 @@ test('repository onboarding skill records scoped API metadata without local path
   const connection = await readFile(join(workspace, result.connectionPath), 'utf8');
   assert.ok(skill.includes((await loadAgentFabricOnboardingContract()).markdown));
   assert.match(skill, /bounded, task-related question/);
-  assert.match(skill, /dharma skills verify --provider codex --workspace \./);
-  assert.match(skill, /dharma skills verify --provider claude --workspace \./);
-  assert.match(skill, /dharma skills verify --provider agy --workspace \./);
+  assert.match(skill, /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   assert.doesNotMatch(skill, /--grant|bootstrapGrant|organizationApiToken/);
   assert.match(connection, /workspace-northstar/);
   assert.equal(connection.includes(workspace), false);
@@ -2248,7 +2246,7 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
   });
   assert.equal(installed.verified, true);
   const installedSkill = await readFile(installed.skillPath, 'utf8');
-  assert.match(installedSkill, /supports both first-time repository onboarding and operation after connection/);
+  assert.match(installedSkill, /supports both connecting a new source repository and joining an existing organization repository agent/);
   assert.match(installedSkill, /native action-time approval/);
   assert.doesNotMatch(installedSkill, /Use this skill only inside a repository containing/);
   assert.deepEqual(calls[0], {
@@ -2329,7 +2327,7 @@ test('native bootstrap installation makes the repository skill verifiable by Cod
   });
   assert.equal(installed.verified, true);
   assert.equal(installed.activation, 'next_session');
-  assert.match(await readFile(installed.skillPath, 'utf8'), /dharma skills verify --provider codex/);
+  assert.match(await readFile(installed.skillPath, 'utf8'), /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   const verified = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace, home });
   assert.equal(verified.ready, true);
   assert.equal(verified.repositoryInstalled, true);

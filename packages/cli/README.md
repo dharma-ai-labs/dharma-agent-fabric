@@ -54,12 +54,15 @@ readiness receipt after the supported grant-free resume.
 
 ## Demo peer collaboration
 
-After a recipient approves a Demo device, run these commands from the exact
+After a recipient approves a Demo device, run these commands for the exact
 repository named by that recipient's private Demo binding. All commands require
 `--organization-id`, `--repository-id`, and `--normalized-repository`; pass
-`--portal-url` when using a staging portal. The CLI verifies the Git remote and
-uses the enrolled device key. It does not grant access to another participant's
-repository or publish a shared package.
+`--portal-url` when using a staging portal. Source-authorized devices verify the
+Git remote. Invited knowledge-only members use a dedicated non-Git directory and
+pass `--knowledge-only --workspace <absolute-private-directory>` on every Demo
+command. Their enrolled device key installs the same signed repository package
+and receives updates without inventorying that directory or publishing source.
+Neither mode grants access to another participant's repository.
 
 ```bash
 dharma demo status --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote>
@@ -122,11 +125,13 @@ browser-authorized re-enrollment, never editing local trust files.
 
 Requires Node.js 22.20.0 through 24.x.
 
-An organization administrator copies the one-shot setup instruction from
-**Portal → Agent Fabric → Instructions** into the coding agent that is already
-open in the intended source repository. The instruction authorizes one pinned
-command. The coding harness may show one native approval for that exact command;
-after approval, no additional terminal steps or provider selection are required.
+An organization administrator copies the recipient-bound setup instruction from
+the portal into the coding agent. The instruction authorizes one pinned command
+and may name a selected credential-free HTTPS repository remote. A matching
+current checkout is reused; otherwise the CLI clones only that remote into a
+managed checkout before redeeming the grant. The coding harness may show one
+native approval for the exact command; the recipient separately approves the
+device in the browser.
 
 ```bash
 npm exec --yes -- @dharma-ai-labs/agent-fabric@<version> bootstrap \
@@ -134,12 +139,21 @@ npm exec --yes -- @dharma-ai-labs/agent-fabric@<version> bootstrap \
   --organization-id <organization-id> \
   --grant <single-use-grant> \
   --workspace . \
+  --repository-url-base64url <base64url-of-selected-https-remote> \
   --policy-revision <dashboard-policy-revision> \
-  --provider auto \
   --complete
 ```
 
-`bootstrap` does not open a browser. It redeems the short-lived grant into an
+The selected remote flag is omitted only when the command is already running
+from a verified intended checkout. It is not a credential and does not alter
+repository policy. A failed checkout reports `repository_selection` and leaves
+the grant unused. After correcting Git access, the unchanged command may be
+retried once before the grant expires; do not retry a redeemed grant. Successful
+receipts include the actual `repositorySelection.workspace`; run later
+repository commands from that checkout.
+
+`bootstrap` opens the authenticated browser device-approval page. After the
+recipient approves the matching fingerprint, it redeems the short-lived grant into an
 Ed25519 device identity and a revocable, device-scoped organization API token,
 stores both in the operating-system credential store, connects only the current
 repository, obtains its signed policy, detects the active host, installs and

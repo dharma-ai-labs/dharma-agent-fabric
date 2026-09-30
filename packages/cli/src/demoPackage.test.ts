@@ -829,3 +829,29 @@ test('a published candidate is not ready until its signed release is installed',
   assert.equal(result.ready, false);
   assert.equal(result.activationState, 'signed_delivery_pending');
 });
+
+test('knowledge-only Demo join waits for the owner without inventorying local source', async () => {
+  const f = await fixture({ sourcePolicy: true });
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    knowledgeOnly: true }, { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.stage, 'demo_repository_package_awaiting_owner');
+  assert.equal(result.activationState, 'owner_publication_pending');
+  assert.equal(f.uploads.length, 0);
+  await assert.rejects(readFile(resolve(f.workspace,
+    '.agents/skills/dharma-agent-fabric/knowledge/CATALOG.json')), { code: 'ENOENT' });
+});
+
+test('knowledge-only Demo join installs the signed release without publishing source', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const result = await demoRepositoryPackage({ scope: f.scope, workspace: f.workspace,
+    knowledgeOnly: true, provider: 'codex',
+    nativeSkillDirectory: resolve(f.workspace, '.agents/skills') },
+  { store: f.store, fetcher: f.fetcher });
+  assert.equal(result.stage, 'demo_repository_package_knowledge_only_installed');
+  assert.equal(result.installed?.releaseId, f.release?.releaseId);
+  assert.equal(result.sourceSync, undefined);
+  assert.equal(f.uploads.length, 0);
+  assert.equal(f.acknowledgements.length, 1);
+  assert.match(await readFile(resolve(f.workspace,
+    '.agents/skills/dharma-agent-fabric/SKILL.md'), 'utf8'), /Repository Agent Fabric/);
+});

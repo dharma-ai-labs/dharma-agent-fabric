@@ -144,6 +144,18 @@ test('a foreign checkout cannot inspect or remove an existing scope', async () =
   } finally { await f.cleanup(); }
 });
 
+test('knowledge-only and source watch status cannot impersonate each other', async () => {
+  const f = await fixture();
+  try {
+    const member = { ...f.input, registration: { ...f.input.registration,
+      knowledgeOnly: true as const } };
+    await enableDemoWatch(member, f.deps);
+    await assert.rejects(demoWatchStatus(f.input, f.deps), /demo_watch_registration_conflict/);
+    await assert.rejects(disableDemoWatch(f.input, f.deps), /demo_watch_registration_conflict/);
+    assert.equal((await listDemoWatchRegistrations(f.input.home))[0]?.knowledgeOnly, true);
+  } finally { await f.cleanup(); }
+});
+
 test('supervisor inspection rejects stale bindings, invalid PID and legacy/version mismatch', async () => {
   const f = await fixture();
   try {
