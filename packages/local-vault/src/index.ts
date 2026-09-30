@@ -208,6 +208,14 @@ export class LocalVault {
         acknowledged_at text,
         primary key (binding_id, question_id)
       );
+      create table if not exists provider_session_task_exports (
+        binding_id text not null references provider_session_bindings(binding_id),
+        work_key text not null,
+        descriptor_hash text not null references blobs(content_id),
+        created_at text not null,
+        acknowledged_at text,
+        primary key (binding_id, work_key)
+      );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -222,6 +230,8 @@ export class LocalVault {
   }
 
   async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
+    // Hash and encrypt one immutable snapshot across asynchronous filesystem writes.
+    plaintext = Buffer.from(plaintext);
     const contentId = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
     const path = this.#blobPath(contentId);
     const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
@@ -237,18 +247,76 @@ export class LocalVault {
     await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
     await rename(temporary, path);
     try {
-      this.#database.prepare(
-        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
+      const result = this.#database.prepare(
+        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?) on conflict(content_id) do nothing',
       ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
-      return { contentId, created: true };
+      return { contentId, created: Number(result.changes) === 1 };
     } catch (error) {
-      await rm(path, { force: true });
+      // Another writer may already reference this content-addressed file.
+      if (!this.#database.prepare('select 1 from blobs where content_id = ?').get(contentId)) {
+        await rm(path, { force: true });
+      }
       throw error;
     }
   }
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
     return (await this.#putBlob(plaintext, kind)).contentId;
+  }
+
+  async stageProviderSessionTaskExport(bindingId: string, identity: LocalProviderSessionIdentity,
+    workKey: string, descriptor: Uint8Array): Promise<string> {
+    if (!/^sha256:[a-f0-9]{64}$/.test(workKey) || descriptor.byteLength < 1 || descriptor.byteLength > 16384) {
+      throw new Error('provider_session_task_export_invalid');
+    }
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const hash = `sha256:${createHash('sha256').update(descriptor).digest('hex')}`;
+    const prior = this.#database.prepare(`
+      select descriptor_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string } | undefined;
+    if (prior) {
+      if (prior.descriptor_hash !== hash) throw new Error('provider_session_task_export_conflict');
+      return hash;
+    }
+    const stored = await this.putBlob(descriptor, 'provider-session-task-export-descriptor');
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    this.#database.prepare(`
+      insert into provider_session_task_exports(binding_id, work_key, descriptor_hash, created_at)
+      select ?, ?, ?, ? where exists (
+        select 1 from provider_session_bindings where binding_id = ? and revoked_at is null
+      ) on conflict(binding_id, work_key) do nothing
+    `).run(bindingId, workKey, stored, new Date().toISOString(), bindingId);
+    const row = this.#database.prepare(`
+      select descriptor_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string } | undefined;
+    if (!row) throw new Error('provider_session_binding_unavailable');
+    if (row.descriptor_hash !== hash) throw new Error('provider_session_task_export_conflict');
+    return stored;
+  }
+
+  listProviderSessionTaskExports(bindingId: string, identity: LocalProviderSessionIdentity):
+    Array<{ workKey: string; descriptorHash: string }> {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const rows = this.#database.prepare(`
+      select work_key as workKey, descriptor_hash as descriptorHash from provider_session_task_exports
+      where binding_id = ? and acknowledged_at is null order by created_at, work_key limit 100
+    `).all(bindingId) as Array<{ workKey: string; descriptorHash: string }>;
+    return rows.map(row => ({ workKey: row.workKey, descriptorHash: row.descriptorHash }));
+  }
+
+  acknowledgeProviderSessionTaskExport(bindingId: string, identity: LocalProviderSessionIdentity,
+    workKey: string, descriptorHash: string): void {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select descriptor_hash from provider_session_task_exports where binding_id = ? and work_key = ?
+    `).get(bindingId, workKey) as { descriptor_hash: string } | undefined;
+    if (!row || row.descriptor_hash !== descriptorHash) throw new Error('provider_session_task_export_conflict');
+    const updated = this.#database.prepare(`
+      update provider_session_task_exports set acknowledged_at = coalesce(acknowledged_at, ?)
+      where binding_id = ? and work_key = ? and descriptor_hash = ?
+        and exists (select 1 from provider_session_bindings where binding_id = ? and revoked_at is null)
+    `).run(new Date().toISOString(), bindingId, workKey, descriptorHash, bindingId);
+    if (Number(updated.changes) !== 1) throw new Error('provider_session_binding_unavailable');
   }
 
   async stageProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
