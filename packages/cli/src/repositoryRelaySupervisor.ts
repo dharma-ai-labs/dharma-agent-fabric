@@ -3,7 +3,8 @@ import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboard
 import { relayRestartDelayMs } from './relaySupervisor.js';
 
 export interface RepositoryRelayRegistration { workspaceId: string; policyPath: string }
-export type RepositoryRelayStage = 'policy_verification' | 'trajectory_recovery' | 'evidence_sync' | 'task_poll' | 'worker_run';
+export type RepositoryRelayStage = 'policy_verification' | 'trajectory_recovery' | 'evidence_sync'
+  | 'pending_capsule_sync' | 'evidence_request' | 'task_poll' | 'worker_run';
 export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_ready' | 'policy_invalid' | 'unexpected';
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
   category?: RepositoryRelayFailureCategory }
@@ -16,7 +17,7 @@ class StagedRepositoryRelayError extends Error {
 
 export async function withRepositoryRelayStage<T>(stage: RepositoryRelayStage, operation: () => Promise<T>): Promise<T> {
   try { return await operation(); }
-  catch (error) { throw new StagedRepositoryRelayError(stage, error); }
+  catch (error) { throw error instanceof StagedRepositoryRelayError ? error : new StagedRepositoryRelayError(stage, error); }
 }
 
 function failureCategory(error: unknown): RepositoryRelayFailureCategory {
@@ -43,7 +44,8 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
     || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000
     || (input.lastSuccessfulPollAt && Date.parse(value.at) <= Date.parse(input.lastSuccessfulPollAt))
-    || !['policy_verification', 'trajectory_recovery', 'evidence_sync', 'task_poll', 'worker_run'].includes(String(value.stage))
+    || !['policy_verification', 'trajectory_recovery', 'evidence_sync', 'pending_capsule_sync',
+      'evidence_request', 'task_poll', 'worker_run'].includes(String(value.stage))
     || !['policy_boundary', 'retention_not_ready', 'policy_invalid', 'unexpected'].includes(String(value.category))) {
     return null;
   }

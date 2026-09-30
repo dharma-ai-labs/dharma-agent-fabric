@@ -7034,19 +7034,19 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       }
       let evidenceRequestId: string | undefined;
       if (canonicalWorkspace.accessMode !== 'knowledge_only' && evidencePolicyFresh && !stopping) {
-        const evidenceCycle = await withRepositoryRelayStage('evidence_sync', () => deferUnavailableRelayRetention(async () => {
-          const synced = await syncPendingRetentionCapsules(
-            vault,
-            fabric,
-            policy,
-            canonicalWorkspace.workspaceId,
-          );
-          const evidence = await processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId);
-          return {
-            synced,
-            evidenceRequestId: typeof evidence.requestId === 'string' ? evidence.requestId : undefined,
-          };
-        }));
+        const evidenceCycle = await withRepositoryRelayStage('evidence_sync', async () => {
+          const synced = await withRepositoryRelayStage('pending_capsule_sync', () =>
+            deferUnavailableRelayRetention(() => syncPendingRetentionCapsules(
+              vault, fabric, policy, canonicalWorkspace.workspaceId)));
+          if (synced.state === 'deferred') return synced;
+          const evidence = await withRepositoryRelayStage('evidence_request', () =>
+            deferUnavailableRelayRetention(() => processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId)));
+          if (evidence.state === 'deferred') return evidence;
+          return { state: 'completed' as const, value: {
+            synced: synced.value,
+            evidenceRequestId: typeof evidence.value.requestId === 'string' ? evidence.value.requestId : undefined,
+          } };
+        });
         if (evidenceCycle.state === 'deferred') {
           evidencePolicyFresh = false;
         } else {

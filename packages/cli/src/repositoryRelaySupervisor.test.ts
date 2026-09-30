@@ -106,6 +106,21 @@ test('a denied evidence worker reports only its repository, stage, and safe cate
   assert.ok(!JSON.stringify(events).includes('private-payload'));
 });
 
+test('nested evidence substages retain the original safe cause without leaking its text', async () => {
+  const controller = new AbortController();
+  const events: unknown[] = [];
+  let tick = 0;
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a], now: () => 0,
+    run: () => withRepositoryRelayStage('evidence_sync', () => withRepositoryRelayStage('pending_capsule_sync',
+      async () => { throw new Error('policy_boundary:secret_disclosure_forbidden private-payload'); })),
+    observe: event => { events.push(event); },
+    wait: async () => { await Promise.resolve(); await Promise.resolve(); if (++tick === 3) controller.abort(); },
+  });
+  assert.deepEqual(events, [{ workspaceId: 'a', code: 'repository_relay_failed',
+    stage: 'pending_capsule_sync', category: 'policy_boundary' }]);
+  assert.ok(!JSON.stringify(events).includes('private-payload'));
+});
+
 test('an observer that never settles cannot block worker retry or supervisor shutdown', async () => {
   const controller = new AbortController();
   let started = 0;
@@ -135,6 +150,10 @@ test('diagnostics show only a current-process failure newer than its last succes
     relayPidMtimeMs, relayPidCtimeMs,
     lastSuccessfulPollAt: '2026-09-29T16:00:00.000Z', now: Date.parse(at) + 1000 };
   assert.deepEqual(currentRepositoryRelayFailure(input), { at, stage: 'evidence_sync', category: 'policy_boundary' });
+  for (const stage of ['pending_capsule_sync', 'evidence_request']) {
+    assert.deepEqual(currentRepositoryRelayFailure({ ...input, receipt: { ...receipt, stage } }),
+      { at, stage, category: 'policy_boundary' });
+  }
   for (const changed of [{ organizationId: 'org_b' }, { deviceId: 'device_b' },
     { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { relayPidMtimeMs: relayPidMtimeMs + 1 },
     { relayPidCtimeMs: relayPidCtimeMs + 1 }, { relayPidMtimeMs: null },
