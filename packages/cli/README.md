@@ -356,5 +356,35 @@ IDs from environment variables or historical transcripts are not ownership proof
 See [session routing](../../docs/24-provider-session-routing.md) for the exact
 contract, failure recovery and remaining live qualification boundaries.
 
+## Named coding work evidence
+
+On a source-authorized named Codex endpoint, the activation boundary can retain
+before/after approved repository inventories in the encrypted local vault. This
+requires the current customer-authorized evidence policy as well as the selected
+repository's source policy. Peer read-only questions do not capture source state.
+Join-only membership does not grant source-capture or publication authority.
+
+The native work receipt reports hashes, the verified active bundle, and an
+explicit blocked/not-authorized disposition if capture fails or consent changes.
+When available, the boundary also retains this exact thread's public history
+and configured model/provider using the Codex app-server. Protected reasoning
+is removed; credentials, a changed thread/workspace, nonterminal history, or
+oversized history block learning preparation. The encrypted history is linked
+by hash along with the reported Codex runtime version. This is task-level public
+context, not an exact replay of hidden context or proof of the executed model.
+
+Repository bytes and history are not included in the public receipt. Capture failure does
+not retry the coding task or replace its actual outcome. Retained snapshots are
+local inventories, not signed releases or independent grades; they do not enter
+the accepted learning counter. Server intake, trusted independent grading,
+logical-work deduplication, and live qualification are still required.
+
+Named task receipts pin manifest, knowledge catalog and skill-tree hashes from
+the verified active bytes, not a fresh inventory or a caller's declarations.
+The device-targeted delivery bundle ID is not the shared repository release ID;
+server admission must resolve the logical release separately from those content
+hashes. Codex task-level history must not be relabeled as exact native replay or
+routed through the managed Gemini replay adapter.
+
 Licensed under MIT. Do not report security vulnerabilities in a public issue;
 use the private security-reporting channel in the GitHub repository.

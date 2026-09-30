@@ -49,7 +49,7 @@ import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRec
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
-import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
@@ -86,13 +86,17 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
+import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
+import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
+import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
+import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.129';
+const VERSION = '0.2.130';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3775,7 +3779,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   if (!['start', 'serve'].includes(action)) throw new Error('named_session_action_invalid');
   if (!flags.has('apply')) return { ok: true, planned: true, name, workspaceId,
     provider: 'codex', localWork: 'workspace_write', peerQuestions: 'read_only', network: 'deny' };
-  if (!await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
+  await verifyNamedSessionVisibleSkill(
+    await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path }),
+    await repositorySharedReady(item),
+  );
   if (action === 'start') {
     if (existing && !existing.enabled) await saveNamedSession(dharmaHome(), { ...existing, enabled: true });
     try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Start an owned worker below. */ }
@@ -3872,14 +3879,84 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     } };
     // The durable reservation already suppresses duplicate provider execution.
     const consumed = new Set<string>();
+    let taskState: { workId: string; before: RepositoryPackageSnapshot; bundleId: string; bundleHash: string;
+      evidenceRevision: string; consentReceiptId: string | undefined;
+      packageContent: import('./namedSessionPackageGate.js').NamedSessionPackageContent;
+      providerContext: NonNullable<import('./namedSessionRepositoryState.js').NamedSessionRepositoryState['providerContext']> } | null = null;
+    let taskStateFailure: 'source_state_unavailable' | 'public_context_unavailable' | 'runtime_version_unavailable' = 'source_state_unavailable';
+    const taskSnapshot = async () => {
+      const sourceAuthorization = await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item));
+      return inventoryRepositoryPackage({ workspace: item.path, organizationId: item.organizationId,
+        workspaceId, repositoryBindingId: item.repositoryBindingId!, repositoryAgentId: item.repositoryAgentId!, sourceAuthorization });
+    };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
       localWriteRoots: writeRoots,
-      withActivationBoundary: operation => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
-        if (!skill.ready || !await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
-        return operation();
+        const packageContent = await readNamedSessionPackageContent(skill, await repositorySharedReady(item));
+        const bundleId = packageContent.bundleId;
+        taskState = null;
+        taskStateFailure = 'source_state_unavailable';
+        if (work) {
+          const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+          if (current.evidence.automaticDisclosure?.mode === 'customer_authorized_content' && skill.activeBundleHash) {
+            try {
+              taskStateFailure = 'public_context_unavailable';
+              const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+              if (!binding) throw new Error('named_session_binding_unavailable');
+              const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
+              if (containsDisallowedLocalPath(retained.context)
+                || canonicalize(redactValue(retained.context, { classes: new Set<string>(), redactedValues: 0,
+                  excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) !== retained.bytes) {
+                throw new Error('named_session_context_disclosure_forbidden');
+              }
+              taskStateFailure = 'runtime_version_unavailable';
+              const version = (await execFileAsync('codex', ['--version'], { timeout: 10_000, maxBuffer: 4096,
+                env: providerProcessEnvironment(process.env) })).stdout.trim();
+              if (!/^codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version)) {
+                throw new Error('named_session_runtime_version_unavailable');
+              }
+              const contextContentHash = await vault.putBlob(Buffer.from(retained.bytes), 'named-session-public-context');
+              if (contextContentHash !== retained.contextHash) throw new Error('named_session_context_integrity_failed');
+              taskStateFailure = 'source_state_unavailable';
+              const before = await taskSnapshot();
+              const sourceContentHash = await vault.putBlob(Buffer.from(serializeRepositoryPackageSnapshot(before)), 'named-session-source-state');
+              await vault.putBlob(Buffer.from(JSON.stringify({ workId: work.workId, bindingId: registration!.bindingId,
+                sourceContentHash, sourceSnapshotHash: before.manifest.snapshotHash, bundleId, bundleHash: skill.activeBundleHash,
+                packageContent, contextContentHash, evidenceRevision: current.revision,
+                consentReceiptId: current.evidence.automaticDisclosure.consentReceiptId })),
+              'named-session-source-boundary');
+              taskState = { workId: work.workId, before, bundleId, bundleHash: skill.activeBundleHash, packageContent,
+                evidenceRevision: current.revision, consentReceiptId: current.evidence.automaticDisclosure.consentReceiptId,
+                providerContext: { retainedContextHash: retained.contextHash, contextContentHash,
+                  runtimeVersion: version.slice('codex-cli '.length), requestedModel: retained.context.configuredModel,
+                  executedModel: null, replayMode: 'task_level' } };
+            }
+            catch { /* Source capture failure must not replay or rewrite a coding task. */ }
+          }
+        }
+        try { return await operation(); }
+        finally { taskState = null; }
       }),
+      retainRepositoryState: async capture => {
+        const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+        if (current.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') {
+          return { state: 'not_authorized', acceptedLearningObservation: false };
+        }
+        if (!taskState) return { state: 'blocked', code: taskStateFailure, acceptedLearningObservation: false };
+        if (current.revision !== taskState.evidenceRevision
+          || current.evidence.automaticDisclosure.consentReceiptId !== taskState.consentReceiptId) {
+          throw new Error('named_session_repository_state_consent_changed');
+        }
+        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        if (!binding) throw new Error('named_session_binding_unavailable');
+        const receipt = await retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
+          before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash });
+        return { ...receipt, providerContext: taskState.providerContext,
+          packageContent: { manifestHash: taskState.packageContent.manifestHash,
+            catalogHash: taskState.packageContent.catalogHash, skillsHash: taskState.packageContent.skillsHash } };
+      },
       authorizeLocalWork: async () => {
         const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
         return writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`));
@@ -5820,9 +5897,10 @@ export async function verifyAgentFabricSkillInstallation(input: {
   }
   const bootstrapReady = repositoryInstalled && nativeInstalled && nativeDiscovered;
   const config = await readDeviceConfig();
-  const activeBundleId = workspaceId && organizationAgentId && config
-    ? (await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config))?.bundleId ?? null
+  const activeAuthorization = workspaceId && organizationAgentId && config
+    ? await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config)
     : null;
+  const activeBundleId = activeAuthorization?.bundleId ?? null;
   let activationAttested = !['agy', 'hermes'].includes(input.provider) ? nativeInstalled : false;
   if (['agy', 'hermes'].includes(input.provider) && activeBundleId && workspaceId) {
     try {
@@ -5862,6 +5940,8 @@ export async function verifyAgentFabricSkillInstallation(input: {
     nativeSkillPath,
     workspaceId: workspaceId || null,
     activeBundleId,
+    activeBundleHash: activeAuthorization?.bundleHash ?? null,
+    signedMarkerBundleId,
     activation: input.provider === 'agy' ? (activationAttested ? 'attested' : 'manual_invocation_required') : 'next_session',
     nextAction: input.provider === 'agy' && bootstrapReady && !activationAttested
         ? 'The Agy bootstrap is installed and discoverable. A signed remediation bundle must include and pass the content-bound activation challenge before full lifecycle support is reported.'

@@ -3,6 +3,8 @@ import { isAbsolute, resolve } from 'node:path';
 import { assertCodexWorkPrompt, createCodexTurnCapture, type CodexTurnEvidenceSink, type CodexWorkRequest } from './codexTurnCapture.js';
 export type { CodexLocalWorkCapture, CodexTurnEvidenceSink } from './codexTurnCapture.js';
 export { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from './codexTurnCapture.js';
+export { readCodexPublicContext } from './codexPublicContext.js';
+export type { CodexPublicContext } from './codexPublicContext.js';
 import {
   inspectSessionQuestionForBinding,
   verifySessionQuestionForBinding,

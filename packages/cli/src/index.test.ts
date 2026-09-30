@@ -2330,6 +2330,7 @@ test('native bootstrap installation makes the repository skill verifiable by Cod
   assert.match(await readFile(installed.skillPath, 'utf8'), /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   const verified = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace, home });
   assert.equal(verified.ready, true);
+  assert.equal(verified.signedMarkerBundleId, null);
   assert.equal(verified.repositoryInstalled, true);
   assert.equal(verified.nativeInstalled, true);
 });
@@ -2361,6 +2362,7 @@ test('signed native ownership remains installed after bootstrap replacement', as
   assert.equal(verified.nativeInstalled, true);
   assert.equal(verified.nativeManaged, true);
   assert.equal(verified.nativeDiscovered, true);
+  assert.equal(verified.signedMarkerBundleId, '11111111-1111-4111-8111-111111111111');
   assert.equal(verified.signedLifecycleReady, false);
 });
 

@@ -119,9 +119,17 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       if (result.registration) delete (result.registration as Record<string, unknown>).organizationId;
       return result as Awaited<ReturnType<typeof rawPost>>;
     };
+    let boundaryWorkId: string | null = null;
+    const retainedWorkIds: string[] = [];
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
       authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => true,
+      retainRepositoryState: async capture => {
+        assert.equal(capture.workId, boundaryWorkId);
+        retainedWorkIds.push(capture.workId);
+        if (queueFailure) throw new Error('RAW_STATE_FAILURE_MUST_NOT_LEAK');
+        return { state: 'not_authorized', acceptedLearningObservation: false };
+      },
       queueEvidence: async capture => {
         if (queueFailure) throw new Error('RAW_QUEUE_FAILURE_DIAGNOSTIC_MUST_NOT_LEAK');
         return queueNamedSessionEvidence({ vault, capture, binding, policy: {
@@ -133,7 +141,12 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
           skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
         } });
       },
-      withActivationBoundary: operation => operation() });
+      withActivationBoundary: async (operation, work) => {
+        assert.equal(boundaryWorkId, null);
+        boundaryWorkId = work?.workId ?? null;
+        try { return await operation(); }
+        finally { boundaryWorkId = null; }
+      } });
     try {
       for (let n = 0; n < 40; n++) {
         try { await namedSessionRequest(home, 'implementer', { action: 'status' }); break; }
@@ -141,8 +154,13 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       }
       let idleHealth: Record<string, unknown> | undefined;
       for (let n = 0; n < 100; n++) {
-        const candidate = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
-        if (candidate.lastObservation?.state === 'idle' && candidate.state === 'running' && candidate.queued === 0) {
+        // The socket can answer before the first atomic health write completes.
+        const serialized = await readFile(namedSessionPaths(home, 'implementer').health, 'utf8').catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        const candidate = serialized === null ? null : JSON.parse(serialized);
+        if (candidate?.lastObservation?.state === 'idle' && candidate.state === 'running' && candidate.queued === 0) {
           idleHealth = candidate;
           break;
         }
@@ -177,6 +195,8 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         assert.equal(failedIntent.workId, failedId);
         assert.equal(failedIntent.prompt, 'A failing native task.');
         assert.equal(failure.nativeEvidence.acceptedLearningObservation, false);
+        assert.deepEqual(retainedWorkIds, [workId, failedId]);
+        assert.equal(failure.nativeEvidence.repositoryState.state, queueFailure ? 'blocked' : 'not_authorized');
         assert.equal(failure.nativeEvidence.providerTurnState, 'failed');
         assert.equal(failure.nativeEvidence.synchronization.state, queueFailure ? 'blocked' : 'queued');
         assert.equal((await vault.listPendingCapsuleSyncs()).length, queueFailure ? 0 : 2);
@@ -198,6 +218,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         assert.equal('prompt' in receipt, false);
         const evidence = receipt.nativeEvidence as Record<string, unknown>;
         assert.equal(evidence.acceptedLearningObservation, false);
+        assert.equal((evidence.repositoryState as Record<string, unknown>).state, queueFailure ? 'blocked' : 'not_authorized');
         const synchronization = evidence.synchronization as Record<string, unknown>;
         assert.equal(synchronization.state, queueFailure ? 'blocked' : 'queued');
         assert.equal(synchronization.acceptedLearningObservation, false);
@@ -224,6 +245,8 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       for (let n = 0; n < 150 && !replies.length; n++) await new Promise(resolveWait => setTimeout(resolveWait, 10));
       assert.equal(replies.length, 1);
       assert.equal(maximumActive, 1);
+      assert.deepEqual(retainedWorkIds, workReceipts.map(receipt => receipt.workId));
+      assert.equal(JSON.stringify(workReceipts).includes('RAW_STATE_FAILURE_MUST_NOT_LEAK'), false);
       assert.deepEqual(turns, ['dharma_work', 'dharma_work', 'dharma_bridge']);
       await assert.rejects(namedSessionRequest(home, 'implementer', { action: 'work', workId, prompt: 'Replay' }), /work_already_recorded/);
       assert.equal(turns.length, 3);

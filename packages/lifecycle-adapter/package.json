@@ -12,8 +12,8 @@
   "engines": { "node": ">=22.20.0 <25.0.0" },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
-    "@dharma-ai-labs/agent-fabric-contracts": "0.1.11",
-    "@dharma-ai-labs/agent-fabric-evidence-reduction": "0.2.24",
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.12",
+    "@dharma-ai-labs/agent-fabric-evidence-reduction": "0.2.25",
     "@dharma-ai-labs/agent-fabric-sdk": "0.1.10",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1"

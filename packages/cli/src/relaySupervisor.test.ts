@@ -37,11 +37,15 @@ test('Demo-only supervisor consumes registrations without a standard device or s
   try {
     let binding: { pid: number; policyPath: null; demoWatches: boolean; version: string } | null = null;
     let health = null;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    let cycleLine: string | undefined;
+    for (let attempt = 0; attempt < 150; attempt += 1) {
       binding = await readFile(join(home, 'relay', 'supervisor-workspace.json'), 'utf8')
         .then(value => JSON.parse(value)).catch(() => null);
-      if (binding && observations.includes('demo_watch_cycle')) {
-        const observation = JSON.parse(observations.trim());
+      // Process startup can exceed five seconds under the full parallel suite.
+      // Read a complete JSONL record, not a partial stderr chunk.
+      cycleLine = observations.split('\n').slice(0, -1).find(line => line.includes('demo_watch_cycle'));
+      if (binding && cycleLine) {
+        const observation = JSON.parse(cycleLine);
         health = await readDemoWatchHealth(home, observation.key, binding);
         if (health) break;
       }
@@ -50,7 +54,8 @@ test('Demo-only supervisor consumes registrations without a standard device or s
     assert.equal(binding?.policyPath, null);
     assert.equal(binding?.demoWatches, true);
     assert.equal(typeof binding?.version, 'string');
-    const observation = JSON.parse(observations.trim());
+    assert.ok(cycleLine, 'the supervisor must emit a complete cycle record within the bounded startup wait');
+    const observation = JSON.parse(cycleLine);
     assert.equal(observation.event, 'demo_watch_cycle');
     assert.equal(observation.state, 'failed');
     // A native store may be unavailable, or available but empty for this new home.

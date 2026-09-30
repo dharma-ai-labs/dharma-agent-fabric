@@ -54,7 +54,7 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function containsCredential(value: unknown, depth = 0): boolean {
+export function containsCredential(value: unknown, depth = 0): boolean {
   if (depth > 32) return true;
   if (typeof value === 'string') {
     if (/dhab_[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(value)) return true;

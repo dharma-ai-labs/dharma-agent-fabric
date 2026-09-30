@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/codex-task-observation/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "bindingId", "workId", "logicalRequestId", "capture", "sourceSnapshotHash", "resultSnapshotHash", "package", "consent", "provider", "outcome", "signature"],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "uuid": { "type": "string", "format": "uuid" },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" },
+    "logicalId": { "type": "string", "pattern": "^codex-task:[a-f0-9]{64}$" }
+  },
+  "properties": {
+    "schema": { "const": "dharma.codex-task-observation/v1" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "workspaceId": { "$ref": "#/$defs/uuid" },
+    "endpointId": { "$ref": "#/$defs/uuid" },
+    "membershipId": { "$ref": "#/$defs/uuid" },
+    "deviceId": { "$ref": "#/$defs/uuid" },
+    "bindingId": { "$ref": "#/$defs/uuid" },
+    "workId": { "$ref": "#/$defs/name" },
+    "logicalRequestId": { "$ref": "#/$defs/logicalId" },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["captureId", "captureHash", "requestHash", "eventsHash", "threadId", "turnId", "startedAt", "completedAt", "terminalState", "coverage", "droppedEvents"],
+      "properties": {
+        "captureId": { "$ref": "#/$defs/uuid" },
+        "captureHash": { "$ref": "#/$defs/hash" },
+        "requestHash": { "$ref": "#/$defs/hash" },
+        "eventsHash": { "$ref": "#/$defs/hash" },
+        "threadId": { "$ref": "#/$defs/name" },
+        "turnId": { "$ref": "#/$defs/name" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "terminalState": { "enum": ["completed", "failed", "interrupted"] },
+        "coverage": { "const": "observed" },
+        "droppedEvents": { "const": 0 }
+      }
+    },
+    "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+    "resultSnapshotHash": { "$ref": "#/$defs/hash" },
+    "package": {
+      "type": "object", "additionalProperties": false,
+      "required": ["releaseId", "manifestHash", "catalogHash", "skillsHash"],
+      "properties": {
+        "releaseId": { "$ref": "#/$defs/uuid" },
+        "manifestHash": { "$ref": "#/$defs/hash" },
+        "catalogHash": { "$ref": "#/$defs/hash" },
+        "skillsHash": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "consent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policyId", "revision", "receiptId"],
+      "properties": {
+        "policyId": { "$ref": "#/$defs/uuid" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "receiptId": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "provider": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "runtimeVersion", "requestedModel", "executedModel", "retainedContextHash", "replayMode"],
+      "properties": {
+        "name": { "const": "codex" },
+        "runtimeVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$" },
+        "requestedModel": { "$ref": "#/$defs/name" },
+        "executedModel": { "type": "null" },
+        "retainedContextHash": { "$ref": "#/$defs/hash" },
+        "replayMode": { "const": "task_level" }
+      }
+    },
+    "outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receiptId", "logicalRequestId", "captureHash", "sourceSnapshotHash", "resultSnapshotHash", "evaluationContractHash", "publicEvidenceHash", "status", "completedAt", "signerKeyVersion", "signature"],
+      "properties": {
+        "receiptId": { "$ref": "#/$defs/uuid" },
+        "logicalRequestId": { "$ref": "#/$defs/logicalId" },
+        "captureHash": { "$ref": "#/$defs/hash" },
+        "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+        "resultSnapshotHash": { "$ref": "#/$defs/hash" },
+        "evaluationContractHash": { "$ref": "#/$defs/hash" },
+        "publicEvidenceHash": { "$ref": "#/$defs/hash" },
+        "status": { "enum": ["passed", "failed", "error"] },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "signerKeyVersion": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^[^\\r\\n\\u0000]+$" },
+        "signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "signature": { "$ref": "#/$defs/signature" }
+  }
+}
