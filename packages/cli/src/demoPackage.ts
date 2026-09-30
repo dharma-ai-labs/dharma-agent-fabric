@@ -264,9 +264,19 @@ async function installActiveDemoPackage(input: {
     organizationAgentId: scope.repositoryId, provider: input.provider, store: deps.store };
   const prior = await loadActiveSkillAuthorizationAnchor(anchorInput);
   if (prior) {
-    const priorBundle = JSON.parse(await readFile(resolve(input.nativeSkillDirectory,
-      '.dharma-managed', 'workspaces', installerWorkspaceId, 'active', 'AUTHORIZATION.json'),
-    'utf8')) as SkillBundle;
+    const missingInstallation = () => Object.assign(new Error(
+      'demo_package_installation_missing: A protected receipt exists, but this provider installation is incomplete or belongs to another directory. '
+      + 'Resume from the original provider installation if available. Do not delete the protected receipt, change signing trust, or create replacement authorization files.'),
+    { code: 'demo_package_installation_missing' });
+    let priorBundle: SkillBundle;
+    try {
+      priorBundle = JSON.parse(await readFile(resolve(input.nativeSkillDirectory,
+        '.dharma-managed', 'workspaces', installerWorkspaceId, 'active', 'AUTHORIZATION.json'),
+      'utf8')) as SkillBundle;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missingInstallation();
+      throw error;
+    }
     const priorSigningKey = trust.keyset.keys.filter(key =>
       ['active', 'overlap'].includes(key.status)
       && Date.parse(key.notBefore) <= now && Date.parse(key.notAfter) > now)
@@ -277,14 +287,21 @@ async function installActiveDemoPackage(input: {
         catch { return false; }
       });
     if (!priorSigningKey) throw new Error('Active Demo package is not signed by a currently trusted key.');
-    const priorAuthorization = await getActiveSkillBundleAuthorization({ nativeSkillDirectory: input.nativeSkillDirectory,
-      workspaceId: installerWorkspaceId, provider: input.provider,
-      organizationId: scope.organizationId, organizationAgentId: scope.repositoryId,
-      deviceId: trust.deviceId, serverPublicKey: priorSigningKey,
-      devicePublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
-        x: (JSON.parse(await readFile(scopePath(scope, config.hqUrl), 'utf8')) as DeviceConfig).publicKeyEd25519 }, format: 'jwk' }),
-      expectedReceiptHash: prior.receiptHash });
-    if (!priorAuthorization || priorAuthorization.bundleId !== prior.bundleId) {
+    const devicePublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519',
+      x: (JSON.parse(await readFile(scopePath(scope, config.hqUrl), 'utf8')) as DeviceConfig).publicKeyEd25519 }, format: 'jwk' });
+    let priorAuthorization: Awaited<ReturnType<typeof getActiveSkillBundleAuthorization>>;
+    try {
+      priorAuthorization = await getActiveSkillBundleAuthorization({ nativeSkillDirectory: input.nativeSkillDirectory,
+        workspaceId: installerWorkspaceId, provider: input.provider,
+        organizationId: scope.organizationId, organizationAgentId: scope.repositoryId,
+        deviceId: trust.deviceId, serverPublicKey: priorSigningKey,
+        devicePublicKey, expectedReceiptHash: prior.receiptHash });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missingInstallation();
+      throw error;
+    }
+    if (!priorAuthorization) throw missingInstallation();
+    if (priorAuthorization.bundleId !== prior.bundleId) {
       throw new Error('Protected Demo package receipt does not match the active installation.');
     }
     if (prior.bundleId === bundle.bundleId) return { releaseId, bundleId: bundle.bundleId,
