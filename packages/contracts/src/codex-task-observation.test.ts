@@ -54,6 +54,25 @@ test('real task contract requires device and independent grader signatures with 
   assert.equal(value.provider.executedModel, null);
 });
 
+test('platform consent receipt retains its exact consent_ identity through signed intake', () => {
+  const { value, input, resign } = fixture();
+  value.consent.receiptId = `consent_${randomUUID()}`;
+  const signed = resign();
+  assert.equal(verifyCodexTaskObservation(signed, input).ok, true);
+  assert.deepEqual(verifyCodexTaskObservation(signed, { ...input,
+    consent: { ...input.consent, receiptId: value.consent.receiptId.slice('consent_'.length) } }),
+  { ok: false, reason: 'codex_task_consent_inactive' });
+});
+
+test('provider disclosure consent cannot be replaced by source consent, a grant or an arbitrary string', () => {
+  for (const receiptId of [`repo_consent_${randomUUID()}`, `consent_${randomUUID()}\n`,
+    'consent_not-a-uuid', 'dhab_example', 'Bearer example', 'x'.repeat(1000)]) {
+    const { value, resign } = fixture();
+    value.consent.receiptId = receiptId;
+    assert.throws(resign, /codex_task_observation_invalid/);
+  }
+});
+
 test('logical identity is stable for provider retries and differs for distinct work and repository bindings', () => {
   const { input } = fixture();
   const initial = codexTaskLogicalRequestId(input.scope);
