@@ -39,8 +39,9 @@ import {
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
 import { superviseRelay } from './relaySupervisor.js';
-import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
-  serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
+import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
+  selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
+  withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
@@ -6477,7 +6478,17 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
       if (!Array.isArray(records)) throw new Error('Invalid workspace registry.');
       return selectRepositoryRelayRegistrations(records, config, loadOrganizationPolicy);
     }, run: (row, signal) => relayWorkspaceLoop(new Map([...flags, ['policy', row.policyPath]]), signal, serialized),
-    observe: event => process.stderr.write(`${JSON.stringify({ event: 'repository_relay', ...event })}\n`) });
+    observe: async event => {
+      process.stderr.write(`${JSON.stringify({ event: 'repository_relay', ...event })}\n`);
+      if (event.code === 'repository_relay_failed' && event.workspaceId && UUID_PATTERN.test(event.workspaceId)) {
+        await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', event.workspaceId,
+          'last-failure.json'), {
+          schema: 'dharma.local-repository-relay-failure/v1', organizationId: config.organizationId,
+          deviceId: config.deviceId, workspaceId: event.workspaceId, pid: process.pid,
+          at: new Date().toISOString(), stage: event.stage, category: event.category,
+        });
+      }
+    } });
     return { ok: true, stopped: true };
   } finally {
     controller.abort();
@@ -6502,7 +6513,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     throw new Error('Relay policy must be the canonical policy of one registered workspace.');
   }
   let canonicalWorkspace: WorkspaceRecord = selectedWorkspace;
-  let policy = await loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId);
+  let policy = await withRepositoryRelayStage('policy_verification',
+    () => loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
   const fabric = await client();
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
@@ -6699,10 +6711,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   };
   try {
     signal.throwIfAborted();
-    const recoveredTaskTrajectories = await deferUnavailableRelayRetention(async () => finalizeRecoveredSignedTaskTrajectories(
-      fabric,
-      policy,
-    ));
+    const recoveredTaskTrajectories = await withRepositoryRelayStage('trajectory_recovery',
+      () => deferUnavailableRelayRetention(async () => finalizeRecoveredSignedTaskTrajectories(fabric, policy)));
     if (recoveredTaskTrajectories.state === 'completed') {
       taskTrajectoriesRecovered += recoveredTaskTrajectories.value.length;
     }
@@ -6745,7 +6755,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       }
       let evidenceRequestId: string | undefined;
       if (evidencePolicyFresh && !stopping) {
-        const evidenceCycle = await deferUnavailableRelayRetention(async () => {
+        const evidenceCycle = await withRepositoryRelayStage('evidence_sync', () => deferUnavailableRelayRetention(async () => {
           const synced = await syncPendingRetentionCapsules(
             vault,
             fabric,
@@ -6757,7 +6767,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
             synced,
             evidenceRequestId: typeof evidence.requestId === 'string' ? evidence.requestId : undefined,
           };
-        });
+        }));
         if (evidenceCycle.state === 'deferred') {
           evidencePolicyFresh = false;
         } else {
@@ -6766,10 +6776,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
           if (evidenceRequestId) evidenceResponsesCompleted += 1;
         }
       }
-      const result = await serialized(async () => {
+      const result = await withRepositoryRelayStage('task_poll', () => serialized(async () => {
         if (stopping) return { taskId: null };
         return executeOneTask(fabric, leaseSeconds);
-      });
+      }));
       if (!stopping && Date.now() - lastPollReceiptAt >= 30_000) {
         const observation = {
           at: new Date().toISOString(), workspaceId: canonicalWorkspace.workspaceId, version: VERSION, pid: process.pid,
@@ -7107,10 +7117,16 @@ export async function run(argv: string[]): Promise<Output> {
             for (const row of registered) {
               const observation = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
                 'last-successful-poll.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              const lastSuccessfulPollAt = typeof observation?.at === 'string' ? observation.at : null;
+              const failure = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
+                'last-failure.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              const lastFailure = currentRepositoryRelayFailure({ receipt: failure,
+                organizationId: config.organizationId, deviceId: config.deviceId,
+                workspaceId: row.workspaceId, pid: relayPid, lastSuccessfulPollAt });
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
-                lastSuccessfulPollAt: typeof observation?.at === 'string' ? observation.at : null });
+                lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
-  serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
+import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
+  serializeRelayWork, waitForRelayRefresh, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { workspaceIdForDevice } from './onboardingWorkspace.js';
 
 function deferred<T = void>() {
@@ -79,6 +79,48 @@ test('a failed repository backs off while a healthy worker remains running', asy
   });
   assert.deepEqual(started, ['a', 'b']);
   assert.ok(events.some(event => event.code === 'repository_relay_failed'));
+});
+
+test('a denied evidence worker reports only its repository, stage, and safe category', async () => {
+  const controller = new AbortController();
+  const events: unknown[] = [];
+  const started: string[] = [];
+  let tick = 0;
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a, b], now: () => 0,
+    run: async (row, signal) => {
+      started.push(row.workspaceId);
+      if (row.workspaceId === 'a') {
+        await withRepositoryRelayStage('evidence_sync', async () => {
+          throw new Error('policy_boundary:secret_disclosure_forbidden private-payload');
+        });
+      } else {
+        await new Promise<void>(accept => signal.addEventListener('abort', () => accept(), { once: true }));
+      }
+    }, observe: event => { events.push(event); }, wait: async () => {
+      await Promise.resolve(); await Promise.resolve(); if (++tick === 4) controller.abort();
+    },
+  });
+  assert.deepEqual(started, ['a', 'b']);
+  assert.deepEqual(events, [{ workspaceId: 'a', code: 'repository_relay_failed',
+    stage: 'evidence_sync', category: 'policy_boundary' }]);
+  assert.ok(!JSON.stringify(events).includes('private-payload'));
+});
+
+test('diagnostics show only a current-process failure newer than its last successful poll', () => {
+  const at = '2026-09-29T16:01:00.000Z';
+  const receipt = { schema: 'dharma.local-repository-relay-failure/v1', organizationId: 'org_a',
+    deviceId: 'device_a', workspaceId: 'a', pid: 50,
+    at, stage: 'evidence_sync', category: 'policy_boundary', privatePayload: 'must-not-leak' };
+  const input = { receipt, organizationId: 'org_a', deviceId: 'device_a', workspaceId: 'a', pid: 50,
+    lastSuccessfulPollAt: '2026-09-29T16:00:00.000Z', now: Date.parse(at) + 1000 };
+  assert.deepEqual(currentRepositoryRelayFailure(input), { at, stage: 'evidence_sync', category: 'policy_boundary' });
+  for (const changed of [{ organizationId: 'org_b' }, { deviceId: 'device_b' },
+    { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { lastSuccessfulPollAt: at },
+    { receipt: { ...receipt, stage: 'private-payload' } },
+    { receipt: { ...receipt, category: 'private-payload' } },
+    { receipt: { ...receipt, at: 'invalid' } }]) {
+    assert.equal(currentRepositoryRelayFailure({ ...input, ...changed }), null);
+  }
 });
 
 test('changed policy paths cannot replace a worker before its shutdown finishes', async () => {

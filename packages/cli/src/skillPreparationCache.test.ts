@@ -13,6 +13,7 @@ import { calculateBundleHash, type SkillBundle } from '@dharma-ai-labs/agent-fab
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
+import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 type PublishInput = { home: string; workspaceId: string; provider: 'codex'; sourceRoot: string;
@@ -203,6 +204,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       flight = Promise.resolve().then(async () => { for (let index = 0; index < cycles; index++) await input.prepare(assertRunning); });
       return { requestStop: () => { stopped = true; }, stop: async () => { await flight; stopped = true; } };
     },
+    withRepositoryRelayStage,
     deferUnavailableRelayRetention: async (operation: () => Promise<unknown>) => ({ state: 'completed', value: await operation() }),
     finalizeRecoveredSignedTaskTrajectories: async () => [], syncWorkspacePolicy: async () => {},
     pollRepositoryCandidate: async () => { candidatePolls++; return null; },
