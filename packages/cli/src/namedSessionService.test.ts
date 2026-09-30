@@ -154,8 +154,13 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       }
       let idleHealth: Record<string, unknown> | undefined;
       for (let n = 0; n < 100; n++) {
-        const candidate = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
-        if (candidate.lastObservation?.state === 'idle' && candidate.state === 'running' && candidate.queued === 0) {
+        // The socket can answer before the first atomic health write completes.
+        const serialized = await readFile(namedSessionPaths(home, 'implementer').health, 'utf8').catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        const candidate = serialized === null ? null : JSON.parse(serialized);
+        if (candidate?.lastObservation?.state === 'idle' && candidate.state === 'running' && candidate.queued === 0) {
           idleHealth = candidate;
           break;
         }
