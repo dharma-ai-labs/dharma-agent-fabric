@@ -367,6 +367,48 @@ test('bootstrap opens one validated recipient approval and polls the immutable r
   assert.equal(new URL(approvals[0]!.url).origin, 'https://www.dharma-ai.io');
 });
 
+test('knowledge-only join accepts an approval without a source fingerprint but rejects an injected one', async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const body = bootstrapApprovalBody({ expiresAt });
+  const approvalUrl = new URL(body.approval.url);
+  const destination = new URL(approvalUrl.searchParams.get('redirect_url')!);
+  const fragment = new URLSearchParams(destination.hash.slice(1));
+  fragment.delete('repositoryFingerprint');
+  destination.hash = fragment.toString();
+  approvalUrl.searchParams.set('redirect_url', destination.toString());
+  body.approval.url = approvalUrl.toString();
+  let opened = 0;
+  const input = {
+    hqUrl: 'https://www.dharma-ai.io', organizationId: 'org_a',
+    bootstrapToken: `dhab_${'a'.repeat(43)}`, name: 'Knowledge device', platform: 'linux' as const,
+    publicKeyEd25519: 'device-public-key', repositoryFingerprint: '',
+    onRecipientApprovalRequired: () => { opened += 1; },
+  };
+  let attempt = 0;
+  const joined = await redeemBootstrapGrant({
+    ...input,
+    fetcher: async () => {
+      attempt += 1;
+      return new Response(JSON.stringify(attempt === 1 ? body : bootstrapApprovedBody()), {
+        status: attempt === 1 ? 409 : 201,
+      });
+    },
+    sleep: async () => undefined,
+  });
+  assert.equal(joined.status, 'approved');
+  assert.equal(opened, 1);
+
+  destination.hash = new URLSearchParams({ ...Object.fromEntries(fragment), repositoryFingerprint: `sha256:${'e'.repeat(64)}` }).toString();
+  approvalUrl.searchParams.set('redirect_url', destination.toString());
+  body.approval.url = approvalUrl.toString();
+  opened = 0;
+  await assert.rejects(() => redeemBootstrapGrant({
+    ...input,
+    fetcher: async () => new Response(JSON.stringify(body), { status: 409 }),
+  }), /HTTP 409|bootstrap_recipient_approval_required/);
+  assert.equal(opened, 0);
+});
+
 test('bootstrap rejects changed approval context and terminal errors without further polling', async () => {
   let clock = Date.parse('2026-09-19T00:00:00.000Z');
   const firstDeadline = new Date(clock + 60_000).toISOString();
