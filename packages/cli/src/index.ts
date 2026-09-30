@@ -86,6 +86,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
+import { requireNamedSessionSignedPackage } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
@@ -3775,7 +3776,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   if (!['start', 'serve'].includes(action)) throw new Error('named_session_action_invalid');
   if (!flags.has('apply')) return { ok: true, planned: true, name, workspaceId,
     provider: 'codex', localWork: 'workspace_write', peerQuestions: 'read_only', network: 'deny' };
-  if (!await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
+  requireNamedSessionSignedPackage(
+    await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path }),
+    await repositorySharedReady(item),
+  );
   if (action === 'start') {
     if (existing && !existing.enabled) await saveNamedSession(dharmaHome(), { ...existing, enabled: true });
     try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Start an owned worker below. */ }
@@ -3877,7 +3881,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       withActivationBoundary: operation => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
-        if (!skill.ready || !await repositorySharedReady(item)) throw new Error('named_session_repository_package_pending');
+        requireNamedSessionSignedPackage(skill, await repositorySharedReady(item));
         return operation();
       }),
       authorizeLocalWork: async () => {
@@ -5862,6 +5866,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     nativeSkillPath,
     workspaceId: workspaceId || null,
     activeBundleId,
+    signedMarkerBundleId,
     activation: input.provider === 'agy' ? (activationAttested ? 'attested' : 'manual_invocation_required') : 'next_session',
     nextAction: input.provider === 'agy' && bootstrapReady && !activationAttested
         ? 'The Agy bootstrap is installed and discoverable. A signed remediation bundle must include and pass the content-bound activation challenge before full lifecycle support is reported.'

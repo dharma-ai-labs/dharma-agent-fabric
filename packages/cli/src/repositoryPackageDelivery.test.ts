@@ -16,6 +16,7 @@ import {
   planRepositoryPackageTransferV2, type RepositoryTransferFile,
 } from './repositoryPackageTransfer.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
+import { requireNamedSessionSignedPackage } from './namedSessionPackageGate.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 
 const keys = generateKeyPairSync('ed25519');
@@ -767,6 +768,9 @@ test('filesystem integration: delivered five-file package installs through the p
     });
     assert.equal(authorization?.bundleId, delivery.bundle.bundleId);
     assert.equal(authorization?.bundleHash, delivery.bundle.bundleHash);
+    assert.equal(requireNamedSessionSignedPackage({ signedLifecycleReady: true,
+      activeBundleId: authorization!.bundleId, signedMarkerBundleId: ownership.bundleId }, true),
+    delivery.bundle.bundleId);
   } finally {
     await rm(owned, { recursive: true, force: true });
   }
