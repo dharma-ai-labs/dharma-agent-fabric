@@ -37,6 +37,15 @@ key. Failed and interrupted work can retain failed outcomes; they cannot claim
 a passing grade. The provider's requested model remains separate from its
 unreported executed model, and replay is explicitly task-level.
 
+`verifyCodexTaskOutcome()` applies the same outcome binding, time and independent
+signature checks without requiring a device-signed observation envelope. A
+successful result returns the receipt ID, canonical receipt hash and actual
+grade for task-detail evidence references. Supply authoritative logical work,
+capture, snapshot, evaluation-contract and public-evidence hashes, the work's
+terminal state and completion time, the enrolled device key and trusted grader
+resolver. A verified outcome alone does not prove current consent or enrollment
+and must not be counted as an admitted learning observation.
+
 The caller must obtain verification inputs from enrollment, authorized evidence
 storage, and trusted grading records rather than echoing the observation's
 declarations. Verification does not store or count an observation, deduplicate

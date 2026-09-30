@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { codexTaskLogicalRequestId, signCodexTaskObservation, verifyCodexTaskObservation,
+import { codexTaskLogicalRequestId, signCodexTaskObservation, verifyCodexTaskObservation, verifyCodexTaskOutcome,
   signCanonicalObject, type CodexTaskObservation, type CodexTaskScope } from './index.js';
 
 const digest = (char: string) => `sha256:${char.repeat(64)}`;
@@ -174,4 +174,62 @@ test('published schema and packaged validator schema stay identical', async () =
   const packaged = JSON.parse(await readFile(new URL('./codex-task-observation.schema.json', import.meta.url), 'utf8'));
   const published = JSON.parse(await readFile(new URL('../../../schemas/codex-task-observation.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(packaged, published);
+});
+
+function outcomeFixture() {
+  const { value, input } = fixture();
+  return { outcome: value.outcome, input: {
+    logicalRequestId: value.logicalRequestId, captureHash: value.capture.captureHash,
+    sourceSnapshotHash: value.sourceSnapshotHash, resultSnapshotHash: value.resultSnapshotHash,
+    evaluationContractHash: input.evaluationContractHash, publicEvidenceHash: input.retained.publicEvidenceHash,
+    workCompletedAt: value.capture.completedAt, terminalState: value.capture.terminalState,
+    devicePublicKey: input.devicePublicKey, resolveGraderPublicKey: input.resolveGraderPublicKey, now: input.now,
+  } };
+}
+
+test('standalone outcome read path returns a stable verified receipt reference', () => {
+  const { outcome, input } = outcomeFixture();
+  const result = verifyCodexTaskOutcome(outcome, input);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.receiptId, outcome.receiptId);
+    assert.equal(result.status, 'passed');
+    assert.match(result.receiptHash, /^sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(verifyCodexTaskOutcome(structuredClone(outcome), input), result);
+  }
+});
+
+test('standalone outcomes require every retained evidence and evaluation binding', () => {
+  const { outcome, input } = outcomeFixture();
+  for (const key of ['logicalRequestId', 'captureHash', 'sourceSnapshotHash', 'resultSnapshotHash',
+    'evaluationContractHash', 'publicEvidenceHash'] as const) {
+    assert.deepEqual(verifyCodexTaskOutcome(outcome, { ...input, [key]: 'unrelated' }),
+      { ok: false, reason: 'codex_task_outcome_mismatch' });
+  }
+  assert.deepEqual(verifyCodexTaskOutcome({ ...outcome, privateGraderPath: '/hidden' }, input),
+    { ok: false, reason: 'codex_task_outcome_invalid' });
+});
+
+test('standalone outcomes reject forged or self-signed receipts and unavailable trust', () => {
+  const { outcome, input } = outcomeFixture();
+  assert.deepEqual(verifyCodexTaskOutcome({ ...outcome, receiptId: randomUUID() }, input),
+    { ok: false, reason: 'codex_task_grader_signature_invalid' });
+  const { signature: _signature, ...payload } = outcome;
+  const selfSigned = { ...payload, signature: signCanonicalObject(payload, device.privateKey) };
+  assert.deepEqual(verifyCodexTaskOutcome(selfSigned, { ...input, resolveGraderPublicKey: () => device.publicKey }),
+    { ok: false, reason: 'codex_task_grader_signature_invalid' });
+  assert.deepEqual(verifyCodexTaskOutcome(outcome, { ...input, resolveGraderPublicKey: () => null }),
+    { ok: false, reason: 'codex_task_grader_signature_invalid' });
+});
+
+test('standalone outcomes reject invalid work time and passing interrupted work', () => {
+  const { outcome, input } = outcomeFixture();
+  for (const workCompletedAt of ['invalid', '2026-09-30T00:03:00Z']) {
+    assert.deepEqual(verifyCodexTaskOutcome(outcome, { ...input, workCompletedAt }),
+      { ok: false, reason: 'codex_task_time_invalid' });
+  }
+  assert.deepEqual(verifyCodexTaskOutcome(outcome, { ...input, terminalState: 'interrupted' }),
+    { ok: false, reason: 'codex_task_outcome_mismatch' });
+  assert.deepEqual(verifyCodexTaskOutcome(outcome, { ...input, now: new Date('invalid') }),
+    { ok: false, reason: 'codex_task_time_invalid' });
 });

@@ -78,6 +78,7 @@ const Ajv = require('ajv/dist/2020').default;
 const ajv = new Ajv({ allErrors: true, strict: true });
 require('ajv-formats').default(ajv);
 const validate = ajv.compile(schema) as (value: unknown) => boolean;
+const validateOutcome = ajv.compile({ $defs: schema.$defs, ...schema.properties.outcome }) as (value: unknown) => boolean;
 
 function canonicalSignature(value: string) {
   const bytes = Buffer.from(value, 'base64url');
@@ -101,6 +102,50 @@ export function signCodexTaskObservation(value: Omit<CodexTaskObservation, 'sign
 export type CodexTaskObservationVerification =
   | { ok: true; logicalRequestId: string; observationHash: string; outcome: CodexTaskOutcome['status'] }
   | { ok: false; reason: string };
+
+export type CodexTaskOutcomeVerification =
+  | { ok: true; receiptId: string; receiptHash: string; status: CodexTaskOutcome['status'] }
+  | { ok: false; reason: string };
+
+/** Verify a public outcome against authoritative retained work, not agent claims. */
+export function verifyCodexTaskOutcome(value: unknown, input: {
+  logicalRequestId: string;
+  captureHash: string;
+  sourceSnapshotHash: string;
+  resultSnapshotHash: string;
+  evaluationContractHash: string;
+  publicEvidenceHash: string;
+  workCompletedAt: string;
+  terminalState: CodexTaskObservation['capture']['terminalState'];
+  devicePublicKey: KeyObject;
+  resolveGraderPublicKey(version: string): KeyObject | null;
+  now?: Date;
+}): CodexTaskOutcomeVerification {
+  if (!validateOutcome(value)) return { ok: false, reason: 'codex_task_outcome_invalid' };
+  const outcome = value as CodexTaskOutcome;
+  const keys = ['logicalRequestId', 'captureHash', 'sourceSnapshotHash', 'resultSnapshotHash',
+    'evaluationContractHash', 'publicEvidenceHash'] as const;
+  if (keys.some(key => outcome[key] !== input[key])
+    || !['completed', 'failed', 'interrupted'].includes(input.terminalState)
+    || input.terminalState !== 'completed' && outcome.status === 'passed') {
+    return { ok: false, reason: 'codex_task_outcome_mismatch' };
+  }
+  const completed = Date.parse(input.workCompletedAt), graded = Date.parse(outcome.completedAt);
+  const now = (input.now ?? new Date()).getTime();
+  if (!Number.isFinite(completed) || !Number.isFinite(now) || completed > graded || graded > now + 300_000) {
+    return { ok: false, reason: 'codex_task_time_invalid' };
+  }
+  const { signature, ...payload } = outcome;
+  try {
+    const graderKey = input.resolveGraderPublicKey(outcome.signerKeyVersion);
+    if (!canonicalSignature(signature) || !graderKey || graderKey.export({ type: 'spki', format: 'der' }).equals(
+      input.devicePublicKey.export({ type: 'spki', format: 'der' }))
+      || !verifyCanonicalObject(payload, signature, graderKey)) {
+      return { ok: false, reason: 'codex_task_grader_signature_invalid' };
+    }
+  } catch { return { ok: false, reason: 'codex_task_grader_signature_invalid' }; }
+  return { ok: true, receiptId: outcome.receiptId, receiptHash: sha256(canonicalize(outcome)), status: outcome.status };
+}
 
 /**
  * Authoritative inputs come from current enrollment and retained server evidence.
@@ -155,27 +200,17 @@ export function verifyCodexTaskObservation(value: unknown, input: {
     return { ok: false, reason: 'codex_task_retained_evidence_mismatch' };
   }
   const outcome = observation.outcome;
-  if (outcome.logicalRequestId !== logicalRequestId || outcome.captureHash !== observation.capture.captureHash
-    || outcome.sourceSnapshotHash !== observation.sourceSnapshotHash
-    || outcome.resultSnapshotHash !== observation.resultSnapshotHash
-    || outcome.evaluationContractHash !== input.evaluationContractHash
-    || observation.capture.terminalState !== 'completed' && outcome.status === 'passed') {
-    return { ok: false, reason: 'codex_task_outcome_mismatch' };
-  }
-  const now = (input.now ?? new Date()).getTime();
   const started = Date.parse(observation.capture.startedAt), completed = Date.parse(observation.capture.completedAt);
-  const graded = Date.parse(outcome.completedAt);
-  if (!Number.isFinite(now) || started > completed || completed > graded || graded > now + 300_000) {
+  if (started > completed) {
     return { ok: false, reason: 'codex_task_time_invalid' };
   }
-  const { signature: gradeSignature, ...gradePayload } = outcome;
-  try {
-    const graderKey = input.resolveGraderPublicKey(outcome.signerKeyVersion);
-    if (!canonicalSignature(gradeSignature) || !graderKey || graderKey.export({ type: 'spki', format: 'der' }).equals(
-      input.devicePublicKey.export({ type: 'spki', format: 'der' }))
-      || !verifyCanonicalObject(gradePayload, gradeSignature, graderKey)) {
-      return { ok: false, reason: 'codex_task_grader_signature_invalid' };
-    }
-  } catch { return { ok: false, reason: 'codex_task_grader_signature_invalid' }; }
+  const grade = verifyCodexTaskOutcome(outcome, {
+    logicalRequestId, captureHash: observation.capture.captureHash,
+    sourceSnapshotHash: observation.sourceSnapshotHash, resultSnapshotHash: observation.resultSnapshotHash,
+    evaluationContractHash: input.evaluationContractHash, publicEvidenceHash: retained.publicEvidenceHash,
+    workCompletedAt: observation.capture.completedAt, terminalState: observation.capture.terminalState,
+    devicePublicKey: input.devicePublicKey, resolveGraderPublicKey: input.resolveGraderPublicKey, now: input.now,
+  });
+  if (!grade.ok) return grade;
   return { ok: true, logicalRequestId, observationHash: sha256(canonicalize(observation)), outcome: outcome.status };
 }
