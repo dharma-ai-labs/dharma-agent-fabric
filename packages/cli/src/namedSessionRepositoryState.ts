@@ -12,6 +12,7 @@ export interface NamedSessionRepositoryState {
   resultContentHash: string;
   activeBundleId: string;
   activeBundleHash: string;
+  packageContent?: { manifestHash: string; catalogHash: string; skillsHash: string };
   providerContext?: { retainedContextHash: string; contextContentHash: string; runtimeVersion: string;
     requestedModel: string; executedModel: null; replayMode: 'task_level' };
   acceptedLearningObservation: false;

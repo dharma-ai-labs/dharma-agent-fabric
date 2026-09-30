@@ -87,12 +87,20 @@ async function skillTree(root: string) {
   return { contentHash: `sha256:${hash.digest('hex')}`, files };
 }
 
-export async function verifyNamedSessionVisibleSkill(
+export interface NamedSessionPackageContent {
+  bundleId: string;
+  bundleHash: string;
+  manifestHash: string;
+  catalogHash: string;
+  skillsHash: string;
+}
+
+export async function readNamedSessionPackageContent(
   installation: { signedLifecycleReady: boolean; activeBundleId: string | null;
     signedMarkerBundleId: string | null; activeBundleHash: string | null;
     workspaceId: string | null; nativeSkillPath: string },
   sharedRepositoryReady: boolean,
-): Promise<string> {
+): Promise<NamedSessionPackageContent> {
   const bundleId = requireNamedSessionSignedPackage(installation, sharedRepositoryReady);
   if (!installation.workspaceId || !installation.activeBundleHash) {
     throw new Error('named_session_repository_package_pending');
@@ -123,5 +131,14 @@ export async function verifyNamedSessionVisibleSkill(
   if (!authorizationBytes.equals(await readStableFile(authorizationPath, 1_048_576))) {
     throw new Error('named_session_repository_package_pending');
   }
-  return bundleId;
+  const manifestHash = active.files.get('MANIFEST.json'), catalogHash = active.files.get('knowledge/CATALOG.json');
+  if (!manifestHash || !catalogHash) throw new Error('named_session_repository_package_pending');
+  return { bundleId, bundleHash: bundle.bundleHash, skillsHash: skill.contentHash,
+    manifestHash: `sha256:${manifestHash}`, catalogHash: `sha256:${catalogHash}` };
+}
+
+export async function verifyNamedSessionVisibleSkill(
+  installation: Parameters<typeof readNamedSessionPackageContent>[0], sharedRepositoryReady: boolean,
+): Promise<string> {
+  return (await readNamedSessionPackageContent(installation, sharedRepositoryReady)).bundleId;
 }

@@ -379,5 +379,12 @@ local inventories, not signed releases or independent grades; they do not enter
 the accepted learning counter. Server intake, trusted independent grading,
 logical-work deduplication, and live qualification are still required.
 
+Named task receipts pin manifest, knowledge catalog and skill-tree hashes from
+the verified active bytes, not a fresh inventory or a caller's declarations.
+The device-targeted delivery bundle ID is not the shared repository release ID;
+server admission must resolve the logical release separately from those content
+hashes. Codex task-level history must not be relabeled as exact native replay or
+routed through the managed Gemini replay adapter.
+
 Licensed under MIT. Do not report security vulnerabilities in a public issue;
 use the private security-reporting channel in the GitHub repository.

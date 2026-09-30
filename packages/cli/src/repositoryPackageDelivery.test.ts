@@ -16,7 +16,7 @@ import {
   planRepositoryPackageTransferV2, type RepositoryTransferFile,
 } from './repositoryPackageTransfer.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
-import { verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
+import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 
 const keys = generateKeyPairSync('ed25519');
@@ -773,6 +773,15 @@ test('filesystem integration: delivered five-file package installs through the p
       signedMarkerBundleId: ownership.bundleId, workspaceId: input.scope.workspaceId,
       nativeSkillPath: resolve(native, 'dharma-agent-fabric', 'SKILL.md') };
     assert.equal(await verifyNamedSessionVisibleSkill(installation, true), delivery.bundle.bundleId);
+    const packageContent = await readNamedSessionPackageContent(installation, true);
+    assert.equal(packageContent.bundleId, delivery.bundle.bundleId);
+    assert.equal(packageContent.bundleHash, delivery.bundle.bundleHash);
+    assert.equal(packageContent.skillsHash, delivery.bundle.skills[0]!.contentHash);
+    assert.equal(packageContent.manifestHash, hash(await readFile(resolve(native, 'dharma-agent-fabric/MANIFEST.json'))));
+    assert.equal(packageContent.catalogHash, hash(await readFile(resolve(native, 'dharma-agent-fabric/knowledge/CATALOG.json'))));
+    assert.equal(packageContent.manifestHash, input.envelope.descriptor.manifestHash);
+    assert.equal(packageContent.catalogHash, input.envelope.descriptor.catalogHash);
+    assert.equal('releaseId' in packageContent, false);
     const visibleSkill = installation.nativeSkillPath;
     const original = await readFile(visibleSkill);
     await writeFile(visibleSkill, 'post-install tamper');

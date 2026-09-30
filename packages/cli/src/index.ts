@@ -88,7 +88,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
-import { verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
+import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -3881,6 +3881,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const consumed = new Set<string>();
     let taskState: { workId: string; before: RepositoryPackageSnapshot; bundleId: string; bundleHash: string;
       evidenceRevision: string; consentReceiptId: string | undefined;
+      packageContent: import('./namedSessionPackageGate.js').NamedSessionPackageContent;
       providerContext: NonNullable<import('./namedSessionRepositoryState.js').NamedSessionRepositoryState['providerContext']> } | null = null;
     let taskStateFailure: 'source_state_unavailable' | 'public_context_unavailable' | 'runtime_version_unavailable' = 'source_state_unavailable';
     const taskSnapshot = async () => {
@@ -3893,7 +3894,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
-        const bundleId = await verifyNamedSessionVisibleSkill(skill, await repositorySharedReady(item));
+        const packageContent = await readNamedSessionPackageContent(skill, await repositorySharedReady(item));
+        const bundleId = packageContent.bundleId;
         taskState = null;
         taskStateFailure = 'source_state_unavailable';
         if (work) {
@@ -3921,9 +3923,11 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               const before = await taskSnapshot();
               const sourceContentHash = await vault.putBlob(Buffer.from(serializeRepositoryPackageSnapshot(before)), 'named-session-source-state');
               await vault.putBlob(Buffer.from(JSON.stringify({ workId: work.workId, bindingId: registration!.bindingId,
-                sourceContentHash, sourceSnapshotHash: before.manifest.snapshotHash, bundleId, bundleHash: skill.activeBundleHash })),
+                sourceContentHash, sourceSnapshotHash: before.manifest.snapshotHash, bundleId, bundleHash: skill.activeBundleHash,
+                packageContent, contextContentHash, evidenceRevision: current.revision,
+                consentReceiptId: current.evidence.automaticDisclosure.consentReceiptId })),
               'named-session-source-boundary');
-              taskState = { workId: work.workId, before, bundleId, bundleHash: skill.activeBundleHash,
+              taskState = { workId: work.workId, before, bundleId, bundleHash: skill.activeBundleHash, packageContent,
                 evidenceRevision: current.revision, consentReceiptId: current.evidence.automaticDisclosure.consentReceiptId,
                 providerContext: { retainedContextHash: retained.contextHash, contextContentHash,
                   runtimeVersion: version.slice('codex-cli '.length), requestedModel: retained.context.configuredModel,
@@ -3949,7 +3953,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         if (!binding) throw new Error('named_session_binding_unavailable');
         const receipt = await retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
           before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash });
-        return { ...receipt, providerContext: taskState.providerContext };
+        return { ...receipt, providerContext: taskState.providerContext,
+          packageContent: { manifestHash: taskState.packageContent.manifestHash,
+            catalogHash: taskState.packageContent.catalogHash, skillsHash: taskState.packageContent.skillsHash } };
       },
       authorizeLocalWork: async () => {
         const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
