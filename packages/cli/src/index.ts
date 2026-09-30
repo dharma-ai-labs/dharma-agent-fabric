@@ -187,6 +187,15 @@ function print(value: Output): void {
   process.stdout.write(typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
 }
 
+export function commandExitCode(argv: string[], value: Output): number {
+  const { positional, flags } = parseCliOptions(argv);
+  if (positional[0] !== 'bootstrap' || flags.has('help') || flags.has('version')) return 0;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 1;
+  const receipt = value as Record<string, unknown>;
+  if (receipt.ok !== true) return 1;
+  return flags.has('complete') && (receipt.stage !== 'complete' || receipt.sharedRepositoryReady !== true) ? 1 : 0;
+}
+
 async function loadVaultModule() {
   const original = process.emitWarning;
   process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
@@ -2351,7 +2360,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const firstLearning = repositoryReceipt.firstLearningEvidence as Record<string, unknown> | undefined;
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   return {
-    ok: repositoryReadiness?.outcome !== 'blocked' && namedSessionReady,
+    ok: sharedRepositoryReady && namedSessionReady,
     stage: sharedRepositoryReady ? namedSessionReady ? 'complete' : 'named_session_pending'
       : repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending',
     localStage: 'complete',
@@ -7148,7 +7157,11 @@ export async function run(argv: string[]): Promise<Output> {
 }
 
 if (isDirectExecution(process.argv[1], import.meta.url)) {
-  run(process.argv.slice(2)).then(print).catch((error: unknown) => {
+  const argv = process.argv.slice(2);
+  run(argv).then((value) => {
+    print(value);
+    process.exitCode = commandExitCode(argv, value);
+  }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
     process.exitCode = 2;

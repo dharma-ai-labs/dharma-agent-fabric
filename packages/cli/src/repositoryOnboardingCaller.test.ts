@@ -309,6 +309,7 @@ test('bootstrap complete cannot report shared completion while its canonical rep
   const onboarding = { ok: true, stage: 'shared_repository_pending', localStage: 'ready', sharedRepositoryReady: false };
   const f = bootstrapDependencies(onboarding);
   const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.ok, false);
   assert.equal(actual.stage, 'shared_repository_pending');
   assert.equal(actual.localStage, 'complete');
   assert.equal(actual.sharedRepositoryReady, false);

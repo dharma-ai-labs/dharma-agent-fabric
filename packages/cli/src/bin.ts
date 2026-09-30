@@ -29,9 +29,10 @@ if (args.includes('--help') || args.includes('-h')) {
     }
   }
 } else {
-  const { run } = await import('./index.js');
+  const { run, commandExitCode } = await import('./index.js');
   run(args).then((value: unknown) => {
     process.stdout.write(typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
+    process.exitCode = commandExitCode(args, value);
   }).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 2;
