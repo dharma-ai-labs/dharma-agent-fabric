@@ -54,12 +54,15 @@ readiness receipt after the supported grant-free resume.
 
 ## Demo peer collaboration
 
-After a recipient approves a Demo device, run these commands from the exact
+After a recipient approves a Demo device, run these commands for the exact
 repository named by that recipient's private Demo binding. All commands require
 `--organization-id`, `--repository-id`, and `--normalized-repository`; pass
-`--portal-url` when using a staging portal. The CLI verifies the Git remote and
-uses the enrolled device key. It does not grant access to another participant's
-repository or publish a shared package.
+`--portal-url` when using a staging portal. Source-authorized devices verify the
+Git remote. Invited knowledge-only members use a dedicated non-Git directory and
+pass `--knowledge-only --workspace <absolute-private-directory>` on every Demo
+command. Their enrolled device key installs the same signed repository package
+and receives updates without inventorying that directory or publishing source.
+Neither mode grants access to another participant's repository.
 
 ```bash
 dharma demo status --organization-id <org> --repository-id <repo> --normalized-repository <normalized-remote>

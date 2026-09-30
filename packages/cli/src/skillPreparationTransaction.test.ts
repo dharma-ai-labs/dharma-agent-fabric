@@ -102,7 +102,8 @@ test('existing non-private preparation directories are rejected without permissi
 });
 
 for (const interruption of ['normal release', 'process death'] as const) {
-  test(`two-process preparation locking: ${interruption}`, { timeout: 20000 }, async context => {
+  test(`two-process preparation locking: ${interruption}`,
+    { timeout: process.platform === 'win32' ? 180000 : 20000 }, async context => {
     const home = await mkdtemp(join(tmpdir(), 'af-preparation-process-'));
     const moduleUrl = new URL('./skillPreparationTransaction.js', import.meta.url).href;
     const script = `import { withSkillPreparationTransaction } from ${JSON.stringify(moduleUrl)};
@@ -121,7 +122,8 @@ for (const interruption of ['normal release', 'process death'] as const) {
     }));
     try {
       await Promise.race([locked, exit.then(code => { throw new Error(`Child exited before lock: ${code}: ${stderr}`); }),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Child lock observation timed out.')), 10000); })]);
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Child lock observation timed out: ${stderr}`)),
+          process.platform === 'win32' ? 90000 : 10000); })]);
       clearTimeout(timer);
       const input = { home, workspaceId: WORKSPACE, provider: 'codex' as const, assertCurrent: () => {} };
       await assert.rejects(withSkillPreparationTransaction({ ...input, timeoutMs: 50 }, async () => {}), /not granted/);

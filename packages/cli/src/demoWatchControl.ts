@@ -40,8 +40,9 @@ function key(input: Input) {
 async function registered(input: Input) {
   const selected = (await listDemoWatchRegistrations(input.home))
     .find(row => demoWatchRegistrationKey(row) === key(input));
-  if (selected && (Object.keys(selected) as (keyof DemoWatchRegistration)[])
-    .some(field => selected[field] !== input.registration[field])) {
+  if (selected && (selected.knowledgeOnly !== input.registration.knowledgeOnly
+    || (Object.keys(selected) as (keyof DemoWatchRegistration)[])
+      .some(field => selected[field] !== input.registration[field]))) {
     fail('demo_watch_registration_conflict', 'local_registration_validation');
   }
   return Boolean(selected);

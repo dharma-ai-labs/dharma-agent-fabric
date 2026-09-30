@@ -16,6 +16,7 @@ export type DemoWatchRegistration = {
   normalizedRepository: string;
   provider: 'codex' | 'claude' | 'agy' | 'hermes';
   workspace: string;
+  knowledgeOnly?: true;
 };
 
 function validate(value: unknown): DemoWatchRegistration {
@@ -25,7 +26,9 @@ function validate(value: unknown): DemoWatchRegistration {
   const row = value as Record<string, unknown>;
   const keys = ['schema', 'hqUrl', 'organizationId', 'repositoryId',
     'normalizedRepository', 'provider', 'workspace'];
-  if (Object.keys(row).length !== keys.length || keys.some(key => !Object.hasOwn(row, key))
+  if (Object.keys(row).length !== keys.length + (row.knowledgeOnly === true ? 1 : 0)
+    || keys.some(key => !Object.hasOwn(row, key))
+    || (Object.hasOwn(row, 'knowledgeOnly') && row.knowledgeOnly !== true)
     || row.schema !== 'dharma.demo-watch/v1'
     || typeof row.hqUrl !== 'string' || normalizeHqUrl(row.hqUrl) !== row.hqUrl
     || typeof row.organizationId !== 'string' || !/^org_[A-Za-z0-9]+$/.test(row.organizationId)
@@ -106,8 +109,8 @@ function assertSame(existing: DemoWatchRegistration, requested: DemoWatchRegistr
     throw new Error('demo_watch_provider_conflict: this repository has another provider registration.');
   }
   if (JSON.stringify(existing) !== JSON.stringify(requested)) {
-    const keys = Object.keys(requested) as (keyof DemoWatchRegistration)[];
-    if (keys.some(key => existing[key] !== requested[key])) {
+    const keys = new Set([...Object.keys(existing), ...Object.keys(requested)]) as Set<keyof DemoWatchRegistration>;
+    if ([...keys].some(key => existing[key] !== requested[key])) {
       throw new Error('Demo watch registration conflicts with its existing scope.');
     }
   }
