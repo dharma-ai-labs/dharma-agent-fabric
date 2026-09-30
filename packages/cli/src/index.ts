@@ -3906,11 +3906,6 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
               if (!binding) throw new Error('named_session_binding_unavailable');
               const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
-              if (containsDisallowedLocalPath(retained.context)
-                || canonicalize(redactValue(retained.context, { classes: new Set<string>(), redactedValues: 0,
-                  excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) !== retained.bytes) {
-                throw new Error('named_session_context_disclosure_forbidden');
-              }
               taskStateFailure = 'runtime_version_unavailable';
               const version = (await execFileAsync('codex', ['--version'], { timeout: 10_000, maxBuffer: 4096,
                 env: providerProcessEnvironment(process.env) })).stdout.trim();
@@ -3952,7 +3947,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
         if (!binding) throw new Error('named_session_binding_unavailable');
         const receipt = await retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
-          before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash });
+          before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash,
+          taskExport: { policy: current, contextBytes: await vault.getBlob(taskState.providerContext.contextContentHash),
+            contextHash: taskState.providerContext.retainedContextHash } });
         return { ...receipt, providerContext: taskState.providerContext,
           packageContent: { manifestHash: taskState.packageContent.manifestHash,
             catalogHash: taskState.packageContent.catalogHash, skillsHash: taskState.packageContent.skillsHash } };

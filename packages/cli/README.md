@@ -386,5 +386,18 @@ server admission must resolve the logical release separately from those content
 hashes. Codex task-level history must not be relabeled as exact native replay or
 routed through the managed Gemini replay adapter.
 
+When current signed content policy permits it, named work also prepares an
+encrypted `dharma.codex-task-replay-export/v1` artifact. It removes local paths,
+protected reasoning and sensitive fields using the shared disclosure reducer;
+configured excluded material produces an explicit excluded disposition. Original
+capture, request, event and public-context digests remain separate from the
+portable projection's digests. The portable context has its own schema identity.
+Work receipts expose only `portableExport` status and its blob hash, never the
+artifact content or a bootstrap grant. Policy scope, expiry, immutability and
+size are checked again during preparation. The artifact is task-level evidence,
+not native-wire replay, a publication, an independent grade or an admitted
+learning observation. This local preparation does not upload it. Server retention,
+device authentication, current authority and dedicated admission remain required.
+
 Licensed under MIT. Do not report security vulnerabilities in a public issue;
 use the private security-reporting channel in the GitHub repository.
