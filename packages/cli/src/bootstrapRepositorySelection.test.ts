@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -57,7 +57,7 @@ test('matching checkout is used without cloning or modifying source', async () =
     await committedRepository(workspace, 'git@github.com:customer/jobs.git');
     let clones = 0;
     const result = await resolveBootstrapRepositoryWorkspace(selection(home, workspace, async () => { clones++; }));
-    assert.equal(result.workspace, workspace);
+    assert.equal(result.workspace, await realpath(workspace));
     assert.equal(result.selection, 'existing');
     assert.equal(clones, 0);
     assert.equal((await readdir(workspace)).includes('README.md'), true);
