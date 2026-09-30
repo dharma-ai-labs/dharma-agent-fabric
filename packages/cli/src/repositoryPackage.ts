@@ -109,7 +109,19 @@ function safeContent(bytes: Buffer) {
   // its secret classes, and check absolute paths at an actual path boundary.
   if ([...stats.classes].some(name => name !== 'local_path') || /-----BEGIN (?:[A-Z ]*PRIVATE KEY|OPENSSH PRIVATE KEY)-----/.test(text)
     || /\b(?:[A-Za-z0-9_]*(?:password|passwd|secret|api_key|access_token|refresh_token|credential)[A-Za-z0-9_]*|token)["']?\s*[:=]\s*["']?[^\s"',;]+/i.test(text)) return 'secret_content';
-  if (/(?:^|[\s"'(=])(?:\/(?:home|Users|root|mnt)\/|[A-Za-z]:[\\/]|\\\\)/m.test(text)) return 'local_path_content';
+  // Inspect decoded strings, including object keys. JSON serialization escapes
+  // quotation marks and backslashes; those bytes are not themselves UNC paths.
+  const pending: unknown[] = [value];
+  while (pending.length) {
+    const item = pending.pop();
+    if (typeof item === 'string') {
+      if (/(?:^|[\s"'(=])(?:\/(?:home|Users|root|mnt)\/|[A-Za-z]:[\\/]|\\\\)/m.test(item)) return 'local_path_content';
+    } else if (Array.isArray(item)) {
+      for (const child of item) pending.push(child);
+    } else if (item && typeof item === 'object') {
+      for (const [key, child] of Object.entries(item)) pending.push(key, child);
+    }
+  }
   return null;
 }
 
