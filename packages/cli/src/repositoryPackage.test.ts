@@ -260,6 +260,36 @@ test('excludes environment, credentials, binary content and secrets rather than 
   assert.ok(!serialized.includes(`ghp_${'a'.repeat(30)}`));
 });
 
+test('JSON quotation escapes are not absolute paths and source bytes remain intact', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/review/SKILL.md', '# Safe');
+  const path = 'skills/review/references/catalog.json';
+  const content = JSON.stringify({ concepts: [{ definition: 'Examples: \\"Why is X failing?\\"' }] });
+  await f.put(path, content);
+  const snapshot = await inventoryRepositoryPackage(f);
+  const file = snapshot.manifest.files.find(file => file.path === path);
+  assert.ok(file, 'escaped quotation marks must not exclude the JSON source');
+  assert.equal(Buffer.from(snapshot.blobs.find(blob => blob.sha256 === file.sha256)!.contentBase64, 'base64').toString(), content);
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot });
+});
+
+test('decoded JSON keys and nested values still exclude absolute paths and secrets', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/review/SKILL.md', '# Safe');
+  for (const [name, content] of Object.entries({
+    drive: JSON.stringify({ nested: [{ path: 'C:\\Users\\customer\\private.md' }] }),
+    unc: JSON.stringify({ nested: ['\\\\server\\share\\private.md'] }),
+    posix: JSON.stringify({ '/home/customer/private.md': 'source' }),
+    escaped: '{"path":"\\u0043:\\u005cUsers\\u005ccustomer\\u005cprivate.md"}',
+    auth: JSON.stringify({ nested: [{ access_token: 'abcdefgh123456789' }] }),
+  })) await f.put(`skills/review/references/${name}.json`, content);
+  const snapshot = await inventoryRepositoryPackage(f);
+  assert.equal(snapshot.manifest.files.length, 1);
+  assert.equal(snapshot.manifest.exclusions.filter(item => /content$/.test(item.reason)).length, 5);
+});
+
 test('observations require the exact skill and an approved immutable source snapshot', async () => {
   const f = await fixture();
   await f.put('skills/review/SKILL.md', '# Safe');

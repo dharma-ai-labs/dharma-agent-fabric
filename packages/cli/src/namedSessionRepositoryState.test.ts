@@ -14,9 +14,12 @@ import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 
 test('task source states retain approved bytes encrypted and reject foreign or changed authority', async t => {
   const root = await mkdtemp(join(tmpdir(), 'named-state-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const vault = await LocalVault.open({ root: join(root, 'vault'), masterKey: randomBytes(32) });
-  t.after(() => vault.close());
+  let vault: LocalVault | undefined;
+  t.after(async () => {
+    vault?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  vault = await LocalVault.open({ root: join(root, 'vault'), masterKey: randomBytes(32) });
   const binding: LocalProviderSessionBinding = { schema: 'dharma.local-provider-session-binding/v1',
     organizationId: 'org_synthetic', workspaceId: randomUUID(), repositoryBindingId: randomUUID(),
     endpointId: randomUUID(), membershipId: randomUUID(), deviceId: randomUUID(), bindingId: randomUUID(),

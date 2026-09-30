@@ -3,7 +3,7 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { codexTaskLogicalRequestId, signCodexTaskObservation, verifyCodexTaskObservation, verifyCodexTaskOutcome,
-  signCanonicalObject, type CodexTaskObservation, type CodexTaskScope } from './index.js';
+  verifyCodexTaskCaptureBytes, sha256, signCanonicalObject, type CodexTaskObservation, type CodexTaskScope } from './index.js';
 
 const digest = (char: string) => `sha256:${char.repeat(64)}`;
 const device = generateKeyPairSync('ed25519'), grader = generateKeyPairSync('ed25519');
@@ -32,14 +32,39 @@ function fixture() {
     value.outcome.signature = signCanonicalObject(grade, grader.privateKey);
     return signCodexTaskObservation(value, device.privateKey);
   };
+  const captureBytes = () => {
+    const request = { method: 'turn/start', params: { threadId: value.capture.threadId,
+      input: [{ type: 'text', text: 'Fix synthetic duplicate job handling.' }], cwd: '/synthetic/repository',
+      approvalPolicy: 'never', permissions: 'dharma_work' } };
+    const events = [{ sequence: 0, receivedAt: value.capture.completedAt, notification: {
+      method: 'turn/completed', params: { threadId: value.capture.threadId,
+        turn: { id: value.capture.turnId, status: value.capture.terminalState, items: [] } } } }];
+    value.capture.requestHash = sha256(JSON.stringify(request));
+    value.capture.eventsHash = sha256(JSON.stringify(events));
+    const bytes = Buffer.from(JSON.stringify({ schema: 'dharma.codex-local-work-capture/v2', ...scope,
+      captureId: value.capture.captureId, provider: 'codex', providerThreadId: value.capture.threadId,
+      providerTurnId: value.capture.turnId, startedAt: value.capture.startedAt, closedAt: value.capture.completedAt,
+      workOutcome: value.capture.terminalState === 'completed' ? 'completed' : 'failed',
+      providerTurnState: value.capture.terminalState, captureScope: 'turn_request_and_notifications',
+      coverage: 'observed', limitations: [], droppedEvents: 0, acceptedLearningObservation: false,
+      executedModel: null, request, requestHash: value.capture.requestHash, events, eventsHash: value.capture.eventsHash }));
+    value.capture.captureHash = sha256(bytes.toString());
+    value.outcome.captureHash = value.capture.captureHash;
+    return bytes;
+  };
+  const retainedBytes = captureBytes();
   const input = { scope, devicePublicKey: device.publicKey, deviceActive: true, consent: value.consent,
-    package: value.package, retained: { capture: structuredClone(value.capture), sourceSnapshotHash: value.sourceSnapshotHash,
+    package: value.package, retained: { capture: structuredClone(value.capture), captureBytes: retainedBytes, sourceSnapshotHash: value.sourceSnapshotHash,
       resultSnapshotHash: value.resultSnapshotHash, provider: structuredClone(value.provider),
       publicEvidenceHash: value.outcome.publicEvidenceHash }, evaluationContractHash: value.outcome.evaluationContractHash,
     resolveGraderPublicKey: (version: string) => version === 'grader-1' ? grader.publicKey : null,
     now: new Date('2026-09-30T00:03:00Z') };
   resign();
-  return { value, input, resign };
+  const refreshCapture = () => {
+    input.retained.captureBytes = captureBytes();
+    input.retained.capture = structuredClone(value.capture);
+  };
+  return { value, input, resign, refreshCapture };
 }
 
 test('real task contract requires device and independent grader signatures with retained evidence', () => {
@@ -52,6 +77,32 @@ test('real task contract requires device and independent grader signatures with 
     assert.match(verified.observationHash, /^sha256:[a-f0-9]{64}$/);
   }
   assert.equal(value.provider.executedModel, null);
+});
+
+test('matching retained descriptors alone do not prove retained native capture bytes', () => {
+  const { input, resign } = fixture();
+  const { captureBytes: _captureBytes, ...retained } = input.retained;
+  assert.deepEqual(verifyCodexTaskObservation(resign(), { ...input, retained }),
+    { ok: false, reason: 'codex_task_capture_bytes_unavailable' });
+});
+
+test('platform consent receipt retains its exact consent_ identity through signed intake', () => {
+  const { value, input, resign } = fixture();
+  value.consent.receiptId = `consent_${randomUUID()}`;
+  const signed = resign();
+  assert.equal(verifyCodexTaskObservation(signed, input).ok, true);
+  assert.deepEqual(verifyCodexTaskObservation(signed, { ...input,
+    consent: { ...input.consent, receiptId: value.consent.receiptId.slice('consent_'.length) } }),
+  { ok: false, reason: 'codex_task_consent_inactive' });
+});
+
+test('provider disclosure consent cannot be replaced by source consent, a grant or an arbitrary string', () => {
+  for (const receiptId of [`repo_consent_${randomUUID()}`, `consent_${randomUUID()}\n`,
+    'consent_not-a-uuid', 'dhab_example', 'Bearer example', 'x'.repeat(1000)]) {
+    const { value, resign } = fixture();
+    value.consent.receiptId = receiptId;
+    assert.throws(resign, /codex_task_observation_invalid/);
+  }
 });
 
 test('logical identity is stable for provider retries and differs for distinct work and repository bindings', () => {
@@ -116,9 +167,9 @@ test('tampering, missing grader trust, self-grading and unrelated grade contract
 
 test('failed and interrupted work retain actual failures; neither can produce a passing grade', () => {
   for (const state of ['failed', 'interrupted'] as const) {
-    const { value, input, resign } = fixture();
+    const { value, input, resign, refreshCapture } = fixture();
     value.capture.terminalState = state;
-    input.retained.capture.terminalState = state;
+    refreshCapture();
     assert.deepEqual(verifyCodexTaskObservation(resign(), input), { ok: false, reason: 'codex_task_outcome_mismatch' });
     value.outcome.status = 'failed';
     const result = verifyCodexTaskObservation(resign(), input);
@@ -174,6 +225,80 @@ test('published schema and packaged validator schema stay identical', async () =
   const packaged = JSON.parse(await readFile(new URL('./codex-task-observation.schema.json', import.meta.url), 'utf8'));
   const published = JSON.parse(await readFile(new URL('../../../schemas/codex-task-observation.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(packaged, published);
+  const capturePackaged = JSON.parse(await readFile(new URL('./codex-local-work-capture-v2.schema.json', import.meta.url), 'utf8'));
+  const capturePublished = JSON.parse(await readFile(new URL('../../../schemas/codex-local-work-capture-v2.schema.json', import.meta.url), 'utf8'));
+  assert.deepEqual(capturePackaged, capturePublished);
+});
+
+test('retained native bytes must match the signed exact-byte digest', () => {
+  const { input, resign } = fixture();
+  const bytes = Buffer.from(input.retained.captureBytes.toString().replace('synthetic/repository', 'synthetic/different'));
+  assert.deepEqual(verifyCodexTaskObservation(resign(), { ...input, retained: { ...input.retained, captureBytes: bytes } }),
+    { ok: false, reason: 'codex_task_capture_hash_mismatch' });
+});
+
+test('capture parser rejects ambiguous serialization, invalid UTF-8, v1 and excessive bytes', () => {
+  const { input } = fixture(), text = input.retained.captureBytes.toString();
+  const captureInput = { scope: input.scope, capture: input.retained.capture, now: input.now };
+  for (const bytes of [Buffer.from(text + '\n'), Buffer.from(`{"schema":"ignored",${text.slice(1)}`),
+    Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text)]),
+    Buffer.from([0xc3, 0x28]), Buffer.alloc(3 * 1024 * 1024 + 1),
+    Buffer.from(text.replace('dharma.codex-local-work-capture/v2', 'dharma.codex-local-work-capture/v1'))]) {
+    assert.deepEqual(verifyCodexTaskCaptureBytes(bytes, captureInput),
+      { ok: false, reason: 'codex_task_capture_bytes_invalid' });
+  }
+});
+
+test('capture verification checks time bounds and returns no private content on rejection', () => {
+  const { input } = fixture(), raw = JSON.parse(input.retained.captureBytes.toString());
+  const captureInput = { scope: input.scope, capture: input.retained.capture };
+  for (const now of [new Date('invalid'), new Date('2026-09-29T23:00:00Z')]) {
+    assert.deepEqual(verifyCodexTaskCaptureBytes(input.retained.captureBytes, { ...captureInput, now }),
+      { ok: false, reason: 'codex_task_time_invalid' });
+  }
+  raw.request.params.input[0].text = 'PRIVATE_CONTENT_CANARY';
+  const failure = verifyCodexTaskCaptureBytes(Buffer.from(JSON.stringify(raw)), { ...captureInput, now: input.now });
+  assert.equal(failure.ok, false);
+  assert.equal(JSON.stringify(failure).includes('PRIVATE_CONTENT_CANARY'), false);
+});
+
+test('capture verification recomputes request and event hashes rather than trusting matching descriptors', () => {
+  for (const field of ['request', 'events'] as const) {
+    const { input } = fixture(), raw = JSON.parse(input.retained.captureBytes.toString());
+    if (field === 'request') raw.request.params.input[0].text = 'Changed task';
+    else raw.events[0].notification.params.turn.items = [{ type: 'agentMessage', text: 'Changed answer' }];
+    const bytes = Buffer.from(JSON.stringify(raw));
+    assert.deepEqual(verifyCodexTaskCaptureBytes(bytes, { scope: input.scope, now: input.now,
+      capture: { ...input.retained.capture, captureHash: sha256(bytes.toString()) } }),
+    { ok: false, reason: 'codex_task_capture_hash_mismatch' });
+  }
+});
+
+test('rehashing forged captures cannot hide foreign events, missing termination or contradictory coverage', () => {
+  const mutations: Array<[string, (raw: any) => void]> = [
+    ['codex_task_capture_scope_mismatch', raw => { raw.deviceId = randomUUID(); }],
+    ['codex_task_capture_scope_mismatch', raw => { raw.request.params.threadId = 'foreign'; }],
+    ['codex_task_capture_scope_mismatch', raw => { raw.events[0].notification.params.threadId = 'foreign'; }],
+    ['codex_task_capture_scope_mismatch', raw => { raw.events[0].notification.params.turnId = 'foreign'; }],
+    ['codex_task_capture_scope_mismatch', raw => { raw.events[0].notification.method = 'unrelated/event'; }],
+    ['codex_task_capture_terminal_unavailable', raw => { raw.events = []; }],
+    ['codex_task_capture_terminal_mismatch', raw => { raw.events[0].notification.params.turn.status = 'failed'; }],
+    ['codex_task_capture_not_observed', raw => { raw.coverage = 'partial'; }],
+    ['codex_task_capture_not_observed', raw => { raw.droppedEvents = 1; }],
+    ['codex_task_capture_not_observed', raw => { raw.limitations = ['capture_limit']; }],
+    ['codex_task_capture_event_order_invalid', raw => { raw.events.push(structuredClone(raw.events[0])); }],
+    ['codex_task_capture_event_order_invalid', raw => { raw.events[0].receivedAt = '2026-09-29T23:59:00Z'; }],
+    ['codex_task_capture_event_order_invalid', raw => { raw.events[0].receivedAt = '2026-09-30T00:04:00Z'; }],
+  ];
+  for (const [reason, mutate] of mutations) {
+    const { input } = fixture(), raw = JSON.parse(input.retained.captureBytes.toString());
+    mutate(raw);
+    raw.requestHash = sha256(JSON.stringify(raw.request)); raw.eventsHash = sha256(JSON.stringify(raw.events));
+    const bytes = Buffer.from(JSON.stringify(raw));
+    assert.deepEqual(verifyCodexTaskCaptureBytes(bytes, { scope: input.scope, now: input.now,
+      capture: { ...input.retained.capture, captureHash: sha256(bytes.toString()),
+        requestHash: raw.requestHash, eventsHash: raw.eventsHash } }), { ok: false, reason }, reason);
+  }
 });
 
 function outcomeFixture() {

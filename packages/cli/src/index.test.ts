@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import {
   acceptedTrajectoryHead,
   activateAgyPlugin,
@@ -310,9 +311,9 @@ test('eligible history without disclosure is reported as denied, not synchronize
 });
 
 test('relay defers unavailable retention without stopping signed task polling', async () => {
-  const result = await deferUnavailableRelayRetention(async () => {
+  const result = await withRepositoryRelayStage('pending_capsule_sync', () => deferUnavailableRelayRetention(async () => {
     throw new Error('agent_fabric_retention_not_ready: Content synchronization is unavailable until retention is enabled.');
-  });
+  }));
   assert.deepEqual(result, { state: 'deferred', reason: 'retention_not_ready' });
 });
 

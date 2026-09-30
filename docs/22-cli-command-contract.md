@@ -113,7 +113,7 @@ dharma relay autostart disable
 dharma status
 ```
 
-Complete bootstrap starts a detached supervisor and registers per-user startup on Windows or Linux with a systemd user session. `relay start` is a foreground receiver; `relay stop` gracefully stops the current supervisor and receiver without deleting enrolled identity or vault data. The startup entry remains for the next user sign-in until `relay autostart disable` removes it. `status` reports startup registration and the last successful relay poll; `relay probe` independently checks the signed connection. Unsupported user-session startup is reported as an incomplete bootstrap stage.
+Complete bootstrap starts a detached supervisor and registers per-user startup on Windows, Linux with a systemd user session, or macOS with the recipient's graphical login session. `relay start` is a foreground receiver; `relay stop` gracefully stops the current supervisor and receiver without deleting enrolled identity or vault data. The startup entry remains for the next user sign-in until `relay autostart disable` removes it. `status` reports startup registration and the last successful relay poll; `relay probe` independently checks the signed connection. Unavailable user-session startup is an incomplete bootstrap stage. Registration is not native reboot or signed skill activation proof; macOS qualification remains required.
 
 ## Exit codes
 

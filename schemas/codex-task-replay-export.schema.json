@@ -1,0 +1,375 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/codex-task-replay-export/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "repositoryBindingId",
+    "workspaceId",
+    "endpointId",
+    "membershipId",
+    "deviceId",
+    "bindingId",
+    "workId",
+    "captureId",
+    "providerThreadId",
+    "providerTurnId",
+    "timeRange",
+    "terminalState",
+    "policy",
+    "original",
+    "exported",
+    "request",
+    "events",
+    "context",
+    "redaction",
+    "coverage",
+    "limitations",
+    "acceptedLearningObservation"
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestHash",
+        "eventsHash",
+        "contextHash"
+      ],
+      "properties": {
+        "requestHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "eventsHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "contextHash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema": {
+      "const": "dharma.codex-task-replay-export/v1"
+    },
+    "organizationId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"
+    },
+    "repositoryBindingId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "endpointId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "membershipId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "deviceId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "bindingId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "workId": {
+      "$ref": "#/$defs/name"
+    },
+    "captureId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "providerThreadId": {
+      "$ref": "#/$defs/name"
+    },
+    "providerTurnId": {
+      "$ref": "#/$defs/name"
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startedAt",
+        "completedAt"
+      ],
+      "properties": {
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "terminalState": {
+      "enum": [
+        "completed",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "consentReceiptId",
+        "contentClass",
+        "purpose"
+      ],
+      "properties": {
+        "revision": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,200}$"
+        },
+        "consentReceiptId": {
+          "type": "string",
+          "pattern": "^consent_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "contentClass": {
+          "const": "native_provider_payload"
+        },
+        "purpose": {
+          "const": "continuous_evaluation"
+        }
+      }
+    },
+    "original": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureHash",
+        "requestHash",
+        "eventsHash",
+        "contextHash"
+      ],
+      "properties": {
+        "captureHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "requestHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "eventsHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "contextHash": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "exported": {
+      "$ref": "#/$defs/hashes"
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "const": "turn/start"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "threadId",
+            "input",
+            "cwd",
+            "approvalPolicy",
+            "permissions"
+          ],
+          "properties": {
+            "threadId": {
+              "$ref": "#/$defs/name"
+            },
+            "input": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "text"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 12000
+                  }
+                }
+              }
+            },
+            "cwd": {
+              "const": "[REDACTED:local_path]"
+            },
+            "approvalPolicy": {
+              "const": "never"
+            },
+            "permissions": {
+              "const": "dharma_work"
+            }
+          }
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2048,
+      "items": {
+        "type": "object"
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "threadId",
+        "capturedAt",
+        "configuredModel",
+        "configuredModelProvider",
+        "configuredReasoningEffort",
+        "executedModel",
+        "replayMode",
+        "limitations",
+        "turns"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.codex-task-portable-context/v1"
+        },
+        "threadId": {
+          "$ref": "#/$defs/name"
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "configuredModel": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "configuredModelProvider": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "configuredReasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "executedModel": {
+          "type": "null"
+        },
+        "replayMode": {
+          "const": "task_level"
+        },
+        "limitations": {
+          "const": [
+            "public_history_only",
+            "executed_model_unreported"
+          ]
+        },
+        "turns": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "status",
+              "items"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/name"
+              },
+              "status": {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "interrupted"
+                ]
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classes",
+        "redactedValues"
+      ],
+      "properties": {
+        "classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_]{1,80}$"
+          }
+        },
+        "redactedValues": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "coverage": {
+      "const": "redacted_task_level"
+    },
+    "limitations": {
+      "const": [
+        "not_full_native_capture",
+        "protected_reasoning_excluded",
+        "local_paths_redacted",
+        "executed_model_unreported"
+      ]
+    },
+    "acceptedLearningObservation": {
+      "const": false
+    }
+  }
+}
