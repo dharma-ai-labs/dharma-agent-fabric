@@ -106,7 +106,8 @@ export async function runNamedSessionService(input: {
   localWriteRoots: string[];
   authorizeLocalWork(): Promise<boolean>;
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
-  withActivationBoundary<T>(operation: () => Promise<T>): Promise<T>;
+  retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
+  withActivationBoundary<T>(operation: () => Promise<T>, work?: { workId: string }): Promise<T>;
   signal: AbortSignal;
 }) {
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
@@ -209,6 +210,11 @@ export async function runNamedSessionService(input: {
                       ...(capture.schema === 'dharma.codex-local-work-capture/v2' ? { requestHash: capture.requestHash } : {}),
                       coverage: capture.coverage, limitations: capture.limitations, providerTurnState: capture.providerTurnState,
                       acceptedLearningObservation: false };
+                    if (input.retainRepositoryState) {
+                      try { nativeEvidence.repositoryState = await input.retainRepositoryState(capture); }
+                      catch { nativeEvidence.repositoryState = { state: 'blocked', code: 'repository_state_retention_failed',
+                        acceptedLearningObservation: false }; }
+                    }
                     if (input.queueEvidence) {
                       let synchronization: NamedSessionEvidenceReceipt;
                       try {
@@ -229,7 +235,7 @@ export async function runNamedSessionService(input: {
                       }
                       nativeEvidence.synchronization = synchronization;
                     }
-                  } }));
+                  } }), { workId: request.workId });
                 const receipt = { ...result, intentHash: intent, nativeEvidence };
                 const blob = await input.vault.putBlob(Buffer.from(JSON.stringify(receipt)), 'named-session-work');
                 budget.finishWork(request.workId, 'completed', blob);

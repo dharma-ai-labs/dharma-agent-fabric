@@ -49,7 +49,7 @@ import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRec
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
-import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
@@ -86,6 +86,8 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
+import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
+import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -3876,14 +3878,53 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     } };
     // The durable reservation already suppresses duplicate provider execution.
     const consumed = new Set<string>();
+    let taskState: { workId: string; before: RepositoryPackageSnapshot; bundleId: string; bundleHash: string;
+      evidenceRevision: string; consentReceiptId: string | undefined } | null = null;
+    const taskSnapshot = async () => {
+      const sourceAuthorization = await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item));
+      return inventoryRepositoryPackage({ workspace: item.path, organizationId: item.organizationId,
+        workspaceId, repositoryBindingId: item.repositoryBindingId!, repositoryAgentId: item.repositoryAgentId!, sourceAuthorization });
+    };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
       localWriteRoots: writeRoots,
-      withActivationBoundary: operation => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
-        await verifyNamedSessionVisibleSkill(skill, await repositorySharedReady(item));
-        return operation();
+        const bundleId = await verifyNamedSessionVisibleSkill(skill, await repositorySharedReady(item));
+        taskState = null;
+        if (work) {
+          const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+          if (current.evidence.automaticDisclosure?.mode === 'customer_authorized_content' && skill.activeBundleHash) {
+            try {
+              const before = await taskSnapshot();
+              const sourceContentHash = await vault.putBlob(Buffer.from(serializeRepositoryPackageSnapshot(before)), 'named-session-source-state');
+              await vault.putBlob(Buffer.from(JSON.stringify({ workId: work.workId, bindingId: registration!.bindingId,
+                sourceContentHash, sourceSnapshotHash: before.manifest.snapshotHash, bundleId, bundleHash: skill.activeBundleHash })),
+              'named-session-source-boundary');
+              taskState = { workId: work.workId, before, bundleId, bundleHash: skill.activeBundleHash,
+                evidenceRevision: current.revision, consentReceiptId: current.evidence.automaticDisclosure.consentReceiptId };
+            }
+            catch { /* Source capture failure must not replay or rewrite a coding task. */ }
+          }
+        }
+        try { return await operation(); }
+        finally { taskState = null; }
       }),
+      retainRepositoryState: async capture => {
+        const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+        if (current.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') {
+          return { state: 'not_authorized', acceptedLearningObservation: false };
+        }
+        if (!taskState) return { state: 'blocked', code: 'source_state_unavailable', acceptedLearningObservation: false };
+        if (current.revision !== taskState.evidenceRevision
+          || current.evidence.automaticDisclosure.consentReceiptId !== taskState.consentReceiptId) {
+          throw new Error('named_session_repository_state_consent_changed');
+        }
+        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        if (!binding) throw new Error('named_session_binding_unavailable');
+        return retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
+          before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash });
+      },
       authorizeLocalWork: async () => {
         const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
         return writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`));
