@@ -2445,7 +2445,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
-  const startupReady = !['win32', 'linux'].includes(process.platform) || autostart.state === 'enabled';
+  const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform) || autostart.state === 'enabled';
   const complete = sharedRepositoryReady && namedSessionReady && firstLearningReady
     && roleReady && relayReady && startupReady;
   return {
