@@ -69,7 +69,8 @@ test('relay polls candidate state independently and activates only after an idle
   const relay = source.slice(source.indexOf('async function relayWorkspaceLoop('), source.indexOf('export async function run('));
   assert.match(relay, /await pollRepositoryCandidate\(/);
   assert.ok(relay.indexOf('await pollRepositoryCandidate(') < relay.indexOf('scanRepositorySourceChanges('));
-  assert.ok(relay.indexOf('const result = await serialized(') >= 0);
-  assert.ok(relay.indexOf('const result = await serialized(') < relay.indexOf('await takeCachedSkillUpdate('));
+  assert.ok(relay.indexOf("const result = await withRepositoryRelayStage('task_poll', () => serialized(") >= 0);
+  assert.ok(relay.indexOf("const result = await withRepositoryRelayStage('task_poll', () => serialized(")
+    < relay.indexOf('await takeCachedSkillUpdate('));
   assert.match(relay, /if \(!stopping && !result\.taskId && performance\.now\(\) >= nextSkillActivationAt\)/);
 });

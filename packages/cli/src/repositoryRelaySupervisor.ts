@@ -3,7 +3,52 @@ import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboard
 import { relayRestartDelayMs } from './relaySupervisor.js';
 
 export interface RepositoryRelayRegistration { workspaceId: string; policyPath: string }
-interface Observation { workspaceId: string | null; code: string }
+export type RepositoryRelayStage = 'policy_verification' | 'trajectory_recovery' | 'evidence_sync' | 'task_poll' | 'worker_run';
+export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_ready' | 'policy_invalid' | 'unexpected';
+interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
+  category?: RepositoryRelayFailureCategory }
+
+class StagedRepositoryRelayError extends Error {
+  constructor(readonly stage: RepositoryRelayStage, cause: unknown) {
+    super('Repository relay stage failed.', { cause });
+  }
+}
+
+export async function withRepositoryRelayStage<T>(stage: RepositoryRelayStage, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new StagedRepositoryRelayError(stage, error); }
+}
+
+function failureCategory(error: unknown): RepositoryRelayFailureCategory {
+  const cause = error instanceof StagedRepositoryRelayError ? error.cause : error;
+  let message = '';
+  try { if (cause instanceof Error) message = cause.message; }
+  catch { return 'unexpected'; }
+  if (/^policy_boundary:/.test(message)) return 'policy_boundary';
+  if (/^agent_fabric_retention_not_ready:/.test(message)) return 'retention_not_ready';
+  if (/^agent_fabric_policy_invalid:/.test(message)) return 'policy_invalid';
+  return 'unexpected';
+}
+
+export function currentRepositoryRelayFailure(input: { receipt: unknown; organizationId: string; deviceId: string;
+  workspaceId: string; pid: number; relayPidMtimeMs: number | null; relayPidCtimeMs: number | null;
+  lastSuccessfulPollAt: string | null; now?: number }) {
+  const value = input.receipt as Record<string, unknown> | null;
+  if (!value || value.schema !== 'dharma.local-repository-relay-failure/v1'
+    || value.organizationId !== input.organizationId || value.deviceId !== input.deviceId
+    || value.workspaceId !== input.workspaceId || value.pid !== input.pid
+    || !Number.isSafeInteger(input.pid) || input.pid <= 0
+    || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))
+    || !Number.isFinite(input.relayPidMtimeMs) || !Number.isFinite(input.relayPidCtimeMs)
+    || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
+    || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000
+    || (input.lastSuccessfulPollAt && Date.parse(value.at) <= Date.parse(input.lastSuccessfulPollAt))
+    || !['policy_verification', 'trajectory_recovery', 'evidence_sync', 'task_poll', 'worker_run'].includes(String(value.stage))
+    || !['policy_boundary', 'retention_not_ready', 'policy_invalid', 'unexpected'].includes(String(value.category))) {
+    return null;
+  }
+  return { at: value.at, stage: value.stage, category: value.category };
+}
 
 export async function selectRepositoryRelayRegistrations<T extends OnboardingWorkspaceRecord & { routeHash: string }>(
   records: readonly T[], enrollment: { organizationId: string; deviceId: string },
@@ -76,7 +121,7 @@ export async function runRegisteredRepositoryRelays(input: {
   signal: AbortSignal;
   list: () => Promise<readonly RepositoryRelayRegistration[]>;
   run: (registration: RepositoryRelayRegistration, signal: AbortSignal) => Promise<unknown>;
-  observe?: (observation: Observation) => void;
+  observe?: (observation: Observation) => void | Promise<void>;
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => number;
 }) {
@@ -86,7 +131,10 @@ export async function runRegisteredRepositoryRelays(input: {
     flight: Promise<void>; done: boolean; failed: boolean }>();
   const failures = new Map<string, { count: number; retryAt: number }>();
   // Diagnostics must never turn a caught worker failure into an unhandled rejection.
-  const observe = (event: Observation) => { try { input.observe?.(event); } catch { /* Preserve worker lifecycle. */ } };
+  const observe = (event: Observation) => {
+    try { void Promise.resolve(input.observe?.(event)).catch(() => {}); }
+    catch { /* Preserve worker lifecycle. */ }
+  };
   const abort = () => { for (const worker of workers.values()) worker.controller.abort(); };
   input.signal.addEventListener('abort', abort, { once: true });
   try {
@@ -119,12 +167,20 @@ export async function runRegisteredRepositoryRelays(input: {
           if (controller.signal.aborted || input.signal.aborted) return;
           try {
             await input.run(row, controller.signal);
-            if (!controller.signal.aborted) worker.failed = true;
-          } catch {
-            if (!controller.signal.aborted) worker.failed = true;
+            if (!controller.signal.aborted) {
+              worker.failed = true;
+              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
+                stage: 'worker_run', category: 'unexpected' });
+            }
+          } catch (error) {
+            if (!controller.signal.aborted) {
+              worker.failed = true;
+              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
+                stage: error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run',
+                category: failureCategory(error) });
+            }
           } finally {
             worker.done = true;
-            if (worker.failed) observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed' });
           }
         });
       }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
-  serializeRelayWork, waitForRelayRefresh } from './repositoryRelaySupervisor.js';
+import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
+  serializeRelayWork, waitForRelayRefresh, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { workspaceIdForDevice } from './onboardingWorkspace.js';
 
 function deferred<T = void>() {
@@ -81,6 +81,71 @@ test('a failed repository backs off while a healthy worker remains running', asy
   assert.ok(events.some(event => event.code === 'repository_relay_failed'));
 });
 
+test('a denied evidence worker reports only its repository, stage, and safe category', async () => {
+  const controller = new AbortController();
+  const events: unknown[] = [];
+  const started: string[] = [];
+  let tick = 0;
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a, b], now: () => 0,
+    run: async (row, signal) => {
+      started.push(row.workspaceId);
+      if (row.workspaceId === 'a') {
+        await withRepositoryRelayStage('evidence_sync', async () => {
+          throw new Error('policy_boundary:secret_disclosure_forbidden private-payload');
+        });
+      } else {
+        await new Promise<void>(accept => signal.addEventListener('abort', () => accept(), { once: true }));
+      }
+    }, observe: event => { events.push(event); }, wait: async () => {
+      await Promise.resolve(); await Promise.resolve(); if (++tick === 4) controller.abort();
+    },
+  });
+  assert.deepEqual(started, ['a', 'b']);
+  assert.deepEqual(events, [{ workspaceId: 'a', code: 'repository_relay_failed',
+    stage: 'evidence_sync', category: 'policy_boundary' }]);
+  assert.ok(!JSON.stringify(events).includes('private-payload'));
+});
+
+test('an observer that never settles cannot block worker retry or supervisor shutdown', async () => {
+  const controller = new AbortController();
+  let started = 0;
+  let tick = 0;
+  const run = runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a],
+    now: () => tick * 100_000, run: async () => { started++; throw new Error('worker failed'); },
+    observe: () => new Promise<void>(() => {}),
+    wait: async () => { await Promise.resolve(); if (++tick === 4) controller.abort(); },
+  });
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([run, new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('observer blocked relay')), 1000);
+    })]);
+  } finally { if (timeout) clearTimeout(timeout); }
+  assert.ok(started >= 2, 'the failed worker should retry while diagnostics are pending');
+});
+
+test('diagnostics show only a current-process failure newer than its last successful poll', () => {
+  const at = '2026-09-29T16:01:00.000Z';
+  const relayPidMtimeMs = Date.parse(at) + 0.5;
+  const relayPidCtimeMs = Date.parse(at) + 0.75;
+  const receipt = { schema: 'dharma.local-repository-relay-failure/v1', organizationId: 'org_a',
+    deviceId: 'device_a', workspaceId: 'a', pid: 50, relayPidMtimeMs, relayPidCtimeMs,
+    at, stage: 'evidence_sync', category: 'policy_boundary', privatePayload: 'must-not-leak' };
+  const input = { receipt, organizationId: 'org_a', deviceId: 'device_a', workspaceId: 'a', pid: 50,
+    relayPidMtimeMs, relayPidCtimeMs,
+    lastSuccessfulPollAt: '2026-09-29T16:00:00.000Z', now: Date.parse(at) + 1000 };
+  assert.deepEqual(currentRepositoryRelayFailure(input), { at, stage: 'evidence_sync', category: 'policy_boundary' });
+  for (const changed of [{ organizationId: 'org_b' }, { deviceId: 'device_b' },
+    { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { relayPidMtimeMs: relayPidMtimeMs + 1 },
+    { relayPidCtimeMs: relayPidCtimeMs + 1 }, { relayPidMtimeMs: null },
+    { lastSuccessfulPollAt: at },
+    { receipt: { ...receipt, stage: 'private-payload' } },
+    { receipt: { ...receipt, category: 'private-payload' } },
+    { receipt: { ...receipt, at: 'invalid' } }]) {
+    assert.equal(currentRepositoryRelayFailure({ ...input, ...changed }), null);
+  }
+});
+
 test('changed policy paths cannot replace a worker before its shutdown finishes', async () => {
   const controller = new AbortController();
   const release = deferred();
@@ -117,6 +182,19 @@ test('device task turns serialize across repositories and release after failure'
   await assert.rejects(first, /failed/);
   assert.equal(await second, 2);
   assert.deepEqual(order, ['a', 'b']);
+});
+
+test('delayed earlier diagnostic writes cannot overwrite a newer failure', async () => {
+  const writeDiagnostic = serializeRelayWork();
+  const release = deferred();
+  let lastFailure = '';
+  const earlier = writeDiagnostic(async () => { await release.promise; lastFailure = 'earlier'; });
+  const later = writeDiagnostic(async () => { lastFailure = 'later'; });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(lastFailure, '');
+  release.resolve();
+  await Promise.all([earlier, later]);
+  assert.equal(lastFailure, 'later');
 });
 
 test('diagnostic failure never escapes a caught worker rejection', async () => {
