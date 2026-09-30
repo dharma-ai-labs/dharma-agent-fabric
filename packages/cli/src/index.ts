@@ -55,6 +55,7 @@ import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRep
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
+import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { prepareProvidersIndependently, startSkillPreparationPump } from './skillPreparationPump.js';
@@ -90,7 +91,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.125';
+const VERSION = '0.2.126';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2113,7 +2114,37 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const organizationId = required(flags, 'organization-id');
   const resuming = flags.has('resume');
   const bootstrapToken = resuming ? null : required(flags, 'grant');
-  const workspace = await realpath(String(flags.get('workspace') || '.'));
+  const selectedRemote = flags.get('repository-url-base64url');
+  let repositorySelection: { workspace: string; selection: string };
+  try {
+    if (flags.has('repository-url-base64url') && typeof selectedRemote !== 'string') {
+      throw new Error('repository_selection_invalid_url: selected repository URL is missing.');
+    }
+    if (selectedRemote && flags.has('repository-key')) {
+      throw new Error('repository_selection_invalid_url: selected remote cannot be combined with a repository key.');
+    }
+    repositorySelection = typeof selectedRemote === 'string'
+      ? await resolveBootstrapRepositoryWorkspace({
+        workspace: String(flags.get('workspace') || '.'),
+        selectedRemoteBase64url: selectedRemote,
+        organizationId,
+        home: dharmaHome(),
+        normalizeRemote: normalizeGitRemoteIdentity,
+        withLock: (path) => acquirePidLock(path, 30_000,
+          'repository_checkout_busy: another setup is selecting this repository; retry after it finishes.'),
+      })
+      : { workspace: await realpath(String(flags.get('workspace') || '.')), selection: 'provided' };
+  } catch (error) {
+    const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+      ? error.message : '';
+    const code = /^repository_[a-z_]+:/.exec(message)?.[0].slice(0, -1) || 'repository_selection_failed';
+    return { ok: false, stage: 'repository_selection', code, grantRedeemed: false,
+      message: code === 'repository_checkout_failed'
+        ? 'Git could not clone the selected repository with this device\'s existing access. Confirm repository access or use a matching checkout; the grant was not redeemed.'
+        : message.startsWith('repository_') ? message : 'Selected repository could not be verified; the grant was not redeemed.' };
+  }
+  const workspace = repositorySelection.workspace;
+  if (selectedRemote) process.stderr.write(`Agent Fabric repository checkout: ${workspace}\n`);
   const policyRevision = required(flags, 'policy-revision');
   const repositoryIdentity = await preflightBootstrapWorkspaceIdentity(
     workspace,
@@ -2227,6 +2258,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     return {
       ok: false,
       stage: 'organization_api_credentials',
+      repositorySelection,
       code: credentialFailure,
       message: 'The enrolled device is preserved, but its organization API credential is unavailable. Contact Dharma support for device-bound credential recovery; do not repeat enrollment or use another member\'s token.',
       sharedRepositoryReady: false,
@@ -2250,6 +2282,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     return {
       ok: onboarded.ok === true,
       stage: onboarded.stage,
+      repositorySelection,
       code: onboarded.code,
       sharedRepositoryReady: false,
       enrollment: {
@@ -2303,6 +2336,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     return {
       ok: true,
       stage: sharedRepositoryReady ? onboarded.stage : 'shared_repository_pending',
+      repositorySelection,
       localStage: onboarded.localStage ?? onboarded.stage,
       sharedRepositoryReady,
       enrollment: {
@@ -2386,6 +2420,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     ok: sharedRepositoryReady && namedSessionReady && firstLearningReady,
     stage: sharedRepositoryReady ? namedSessionReady ? firstLearningReady ? 'complete' : 'first_learning_pending' : 'named_session_pending'
       : repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending',
+    repositorySelection,
     localStage: 'complete',
     sharedRepositoryReady,
     enrollment: {

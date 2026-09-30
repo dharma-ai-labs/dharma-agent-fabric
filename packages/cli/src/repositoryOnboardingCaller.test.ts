@@ -175,6 +175,47 @@ test('bootstrap preserves only a verified current-device startup anchor before e
   assert.ok(f.calls.indexOf('verify_existing_anchor') < f.calls.indexOf('autostart'));
 });
 
+test('bootstrap selects the authorized remote before redeeming and reports its actual checkout', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.resolveBootstrapRepositoryWorkspace = async () => {
+    f.calls.push('selected_checkout');
+    return { workspace: '/managed/customer-jobs', selection: 'managed_cloned' };
+  };
+  f.dependencies.redeemBootstrapGrant = async () => {
+    f.calls.push('redeem');
+    return { deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
+      relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] };
+  };
+  f.dependencies.dharmaHome = () => '/fixture-home';
+  f.dependencies.normalizeGitRemoteIdentity = () => 'github.com/customer/jobs';
+  f.dependencies.acquirePidLock = async () => async () => {};
+  const flags = bootstrapFlags();
+  flags.set('repository-url-base64url', Buffer.from('https://github.com/customer/jobs.git').toString('base64url'));
+  const receipt = await (await caller('bootstrap', f.dependencies))(flags);
+  assert.deepEqual(f.calls.slice(0, 3), ['selected_checkout', 'preflight', 'redeem']);
+  assert.equal((receipt.repositorySelection as Record<string, unknown>).workspace, '/managed/customer-jobs');
+  assert.equal((receipt.repositorySelection as Record<string, unknown>).selection, 'managed_cloned');
+});
+
+test('repository checkout failure returns a typed receipt without redeeming the grant', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.resolveBootstrapRepositoryWorkspace = async () => {
+    throw new Error('repository_checkout_failed: helper exposed SECRET');
+  };
+  f.dependencies.dharmaHome = () => '/fixture-home';
+  f.dependencies.normalizeGitRemoteIdentity = () => 'github.com/customer/jobs';
+  f.dependencies.acquirePidLock = async () => async () => {};
+  const flags = bootstrapFlags();
+  flags.set('repository-url-base64url', Buffer.from('https://github.com/customer/jobs.git').toString('base64url'));
+  const receipt = await (await caller('bootstrap', f.dependencies))(flags);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.stage, 'repository_selection');
+  assert.equal(receipt.code, 'repository_checkout_failed');
+  assert.equal(receipt.grantRedeemed, false);
+  assert.deepEqual(f.calls, []);
+  assert.doesNotMatch(JSON.stringify(receipt), /SECRET|fixture_grant/);
+});
+
 test('bootstrap passes recipient approval to the verified browser opener before storing credentials', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
   f.dependencies.redeemBootstrapGrant = async (input: {
