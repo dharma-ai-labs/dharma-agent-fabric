@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import {
@@ -16,7 +16,7 @@ import {
   planRepositoryPackageTransferV2, type RepositoryTransferFile,
 } from './repositoryPackageTransfer.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
-import { requireNamedSessionSignedPackage } from './namedSessionPackageGate.js';
+import { verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 
 const keys = generateKeyPairSync('ed25519');
@@ -768,9 +768,35 @@ test('filesystem integration: delivered five-file package installs through the p
     });
     assert.equal(authorization?.bundleId, delivery.bundle.bundleId);
     assert.equal(authorization?.bundleHash, delivery.bundle.bundleHash);
-    assert.equal(requireNamedSessionSignedPackage({ signedLifecycleReady: true,
-      activeBundleId: authorization!.bundleId, signedMarkerBundleId: ownership.bundleId }, true),
-    delivery.bundle.bundleId);
+    const installation = { signedLifecycleReady: true,
+      activeBundleId: authorization!.bundleId, activeBundleHash: authorization!.bundleHash,
+      signedMarkerBundleId: ownership.bundleId, workspaceId: input.scope.workspaceId,
+      nativeSkillPath: resolve(native, 'dharma-agent-fabric', 'SKILL.md') };
+    assert.equal(await verifyNamedSessionVisibleSkill(installation, true), delivery.bundle.bundleId);
+    const visibleSkill = installation.nativeSkillPath;
+    const original = await readFile(visibleSkill);
+    await writeFile(visibleSkill, 'post-install tamper');
+    await assert.rejects(verifyNamedSessionVisibleSkill(installation, true),
+      { message: 'named_session_repository_package_pending' });
+    await writeFile(visibleSkill, original);
+    const unexpected = resolve(native, 'dharma-agent-fabric', 'unexpected.txt');
+    await writeFile(unexpected, 'unapproved content');
+    await assert.rejects(verifyNamedSessionVisibleSkill(installation, true),
+      { message: 'named_session_repository_package_pending' });
+    await rm(unexpected);
+    await symlink(visibleSkill, unexpected);
+    await assert.rejects(verifyNamedSessionVisibleSkill(installation, true),
+      { message: 'named_session_skill_tree_invalid' });
+    await rm(unexpected);
+    await link(visibleSkill, unexpected);
+    await assert.rejects(verifyNamedSessionVisibleSkill(installation, true),
+      { message: 'named_session_skill_tree_invalid' });
+    await rm(unexpected);
+    const activeSkill = resolve(native, '.dharma-managed', 'workspaces', input.scope.workspaceId,
+      'active', 'dharma-agent-fabric', 'SKILL.md');
+    await writeFile(activeSkill, 'release tamper');
+    await assert.rejects(verifyNamedSessionVisibleSkill(installation, true),
+      { message: 'named_session_repository_package_pending' });
   } finally {
     await rm(owned, { recursive: true, force: true });
   }

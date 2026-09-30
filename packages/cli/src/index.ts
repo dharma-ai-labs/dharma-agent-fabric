@@ -86,7 +86,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
-import { requireNamedSessionSignedPackage } from './namedSessionPackageGate.js';
+import { verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
@@ -3776,7 +3776,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   if (!['start', 'serve'].includes(action)) throw new Error('named_session_action_invalid');
   if (!flags.has('apply')) return { ok: true, planned: true, name, workspaceId,
     provider: 'codex', localWork: 'workspace_write', peerQuestions: 'read_only', network: 'deny' };
-  requireNamedSessionSignedPackage(
+  await verifyNamedSessionVisibleSkill(
     await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path }),
     await repositorySharedReady(item),
   );
@@ -3881,7 +3881,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       withActivationBoundary: operation => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
-        requireNamedSessionSignedPackage(skill, await repositorySharedReady(item));
+        await verifyNamedSessionVisibleSkill(skill, await repositorySharedReady(item));
         return operation();
       }),
       authorizeLocalWork: async () => {
@@ -5824,9 +5824,10 @@ export async function verifyAgentFabricSkillInstallation(input: {
   }
   const bootstrapReady = repositoryInstalled && nativeInstalled && nativeDiscovered;
   const config = await readDeviceConfig();
-  const activeBundleId = workspaceId && organizationAgentId && config
-    ? (await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config))?.bundleId ?? null
+  const activeAuthorization = workspaceId && organizationAgentId && config
+    ? await activeSkillAuthorization(input.provider, workspaceId, organizationAgentId, config)
     : null;
+  const activeBundleId = activeAuthorization?.bundleId ?? null;
   let activationAttested = !['agy', 'hermes'].includes(input.provider) ? nativeInstalled : false;
   if (['agy', 'hermes'].includes(input.provider) && activeBundleId && workspaceId) {
     try {
@@ -5866,6 +5867,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     nativeSkillPath,
     workspaceId: workspaceId || null,
     activeBundleId,
+    activeBundleHash: activeAuthorization?.bundleHash ?? null,
     signedMarkerBundleId,
     activation: input.provider === 'agy' ? (activationAttested ? 'attested' : 'manual_invocation_required') : 'next_session',
     nextAction: input.provider === 'agy' && bootstrapReady && !activationAttested
