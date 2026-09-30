@@ -272,7 +272,7 @@ test('export retries require original consent and current exclusion limits immed
 });
 
 test('empty outbox does not refresh authority or send network requests', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'task-export-idle-')), f = fixture();
+  const root = await mkdtemp(join(tmpdir(), 'task-export-idle-')), f = fixture(join(root, 'repository'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
   try {
     vault.saveProviderSessionBinding(f.input.binding);
