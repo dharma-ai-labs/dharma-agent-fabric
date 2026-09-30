@@ -12,12 +12,14 @@ export interface NamedSessionRepositoryState {
   resultContentHash: string;
   activeBundleId: string;
   activeBundleHash: string;
+  providerContext?: { retainedContextHash: string; contextContentHash: string; runtimeVersion: string;
+    requestedModel: string; executedModel: null; replayMode: 'task_level' };
   acceptedLearningObservation: false;
 }
 
 export type NamedSessionRepositoryStateDisposition = NamedSessionRepositoryState
   | { state: 'not_authorized'; acceptedLearningObservation: false }
-  | { state: 'blocked'; code: 'source_state_unavailable'; acceptedLearningObservation: false };
+  | { state: 'blocked'; code: 'source_state_unavailable' | 'public_context_unavailable' | 'runtime_version_unavailable'; acceptedLearningObservation: false };
 
 // Local inventory proves captured bytes, not an independent grade or server acceptance.
 export async function retainNamedSessionRepositoryState(input: {

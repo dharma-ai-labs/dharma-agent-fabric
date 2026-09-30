@@ -366,7 +366,14 @@ Join-only membership does not grant source-capture or publication authority.
 
 The native work receipt reports hashes, the verified active bundle, and an
 explicit blocked/not-authorized disposition if capture fails or consent changes.
-Repository bytes are not included in the public receipt. Capture failure does
+When available, the boundary also retains this exact thread's public history
+and configured model/provider using the Codex app-server. Protected reasoning
+is removed; credentials, a changed thread/workspace, nonterminal history, or
+oversized history block learning preparation. The encrypted history is linked
+by hash along with the reported Codex runtime version. This is task-level public
+context, not an exact replay of hidden context or proof of the executed model.
+
+Repository bytes and history are not included in the public receipt. Capture failure does
 not retry the coding task or replace its actual outcome. Retained snapshots are
 local inventories, not signed releases or independent grades; they do not enter
 the accepted learning counter. Server intake, trusted independent grading,
