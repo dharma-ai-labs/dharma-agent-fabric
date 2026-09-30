@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/codex-local-work-capture/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "captureId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "bindingId", "workId", "provider", "providerThreadId", "providerTurnId", "startedAt", "closedAt", "workOutcome", "providerTurnState", "captureScope", "coverage", "limitations", "droppedEvents", "acceptedLearningObservation", "executedModel", "request", "requestHash", "eventsHash", "events"],
+  "properties": {
+    "schema": { "const": "dharma.codex-local-work-capture/v2" },
+    "captureId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "repositoryBindingId": { "type": "string", "format": "uuid" },
+    "workspaceId": { "type": "string", "format": "uuid" },
+    "endpointId": { "type": "string", "format": "uuid" },
+    "membershipId": { "type": "string", "format": "uuid" },
+    "deviceId": { "type": "string", "format": "uuid" },
+    "bindingId": { "type": "string", "format": "uuid" },
+    "workId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "provider": { "const": "codex" },
+    "providerThreadId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "providerTurnId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "closedAt": { "type": "string", "format": "date-time" },
+    "workOutcome": { "enum": ["completed", "failed"] },
+    "providerTurnState": { "enum": ["completed", "failed", "interrupted", "unconfirmed"] },
+    "captureScope": { "const": "turn_request_and_notifications" },
+    "coverage": { "enum": ["observed", "partial", "unavailable"] },
+    "limitations": { "type": "array", "uniqueItems": true, "maxItems": 8,
+      "items": { "enum": ["unscoped_notification", "invalid_notification", "capture_limit", "credential_excluded", "turn_unconfirmed", "terminal_unconfirmed", "conflicting_turn_identity"] } },
+    "droppedEvents": { "type": "integer", "minimum": 0 },
+    "acceptedLearningObservation": { "const": false },
+    "executedModel": { "type": "null" },
+    "requestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "request": {
+      "type": "object", "additionalProperties": false, "required": ["method", "params"],
+      "properties": {
+        "method": { "const": "turn/start" },
+        "params": {
+          "type": "object", "additionalProperties": false,
+          "required": ["threadId", "input", "cwd", "approvalPolicy", "permissions"],
+          "properties": {
+            "threadId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+            "input": { "type": "array", "minItems": 1, "maxItems": 1,
+              "items": { "type": "object", "additionalProperties": false, "required": ["type", "text"],
+                "properties": { "type": { "const": "text" }, "text": { "type": "string", "minLength": 1, "maxLength": 12000 } } } },
+            "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\r\\n\\u0000]+$" },
+            "approvalPolicy": { "const": "never" },
+            "permissions": { "const": "dharma_work" }
+          }
+        }
+      }
+    },
+    "eventsHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "events": { "type": "array", "maxItems": 2048, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sequence", "receivedAt", "notification"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "receivedAt": { "type": "string", "format": "date-time" },
+        "notification": { "type": "object", "required": ["method", "params"],
+          "properties": { "method": { "type": "string" }, "params": { "type": "object" } } }
+      }
+    } }
+  }
+}

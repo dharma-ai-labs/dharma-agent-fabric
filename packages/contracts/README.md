@@ -37,6 +37,17 @@ key. Failed and interrupted work can retain failed outcomes; they cannot claim
 a passing grade. The provider's requested model remains separate from its
 unreported executed model, and replay is explicitly task-level.
 
+Native observation verification now requires `retained.captureBytes` from the
+authorized evidence store. Matching device-supplied hash descriptors are not
+sufficient. `verifyCodexTaskCaptureBytes()` checks the exact UTF-8 bytes, the
+strict v2 capture schema, request/event digests, all scoped identities, event
+ordering, time bounds, complete coverage and an observed terminal notification.
+Its inputs and output do not confer disclosure permission or attest execution.
+Keep raw captures encrypted locally unless separate applicable consent permits
+retention. A redacted or portable export is different evidence with a different
+digest; it cannot be passed off as the original capture. Missing original bytes
+fail closed and do not qualify for native observation admission.
+
 `verifyCodexTaskOutcome()` applies the same outcome binding, time and independent
 signature checks without requiring a device-signed observation envelope. A
 successful result returns the receipt ID, canonical receipt hash and actual

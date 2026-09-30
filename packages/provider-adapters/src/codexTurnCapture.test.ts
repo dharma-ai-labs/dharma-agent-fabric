@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import { validateContract, verifyCodexTaskCaptureBytes, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createCodexTurnCapture } from './codexTurnCapture.js';
 
 function fixture() {
@@ -19,6 +19,28 @@ const event = (turnId = 'turn-1', threadId = 'thread-1', text = 'native command 
 const terminal = (status = 'completed') => ({ method: 'turn/completed', params: {
   threadId: 'thread-1', turn: { id: 'turn-1', status, items: [] },
 } });
+
+test('native capture producer bytes satisfy the independent integrity reader without normalization', () => {
+  for (const state of ['completed', 'failed', 'interrupted'] as const) {
+    const capture = fixture();
+    capture.retainRequest({ threadId: 'thread-1', input: [{ type: 'text', text: 'Run public tests.' }],
+      cwd: resolve('repo'), approvalPolicy: 'never', permissions: 'dharma_work' });
+    capture.bind('turn-1'); capture.observe(event()); capture.observe(terminal(state));
+    const result = capture.finish(state === 'completed' ? 'completed' : 'failed');
+    assert.equal(result.schema, 'dharma.codex-local-work-capture/v2');
+    if (result.schema !== 'dharma.codex-local-work-capture/v2') throw new Error('missing request');
+    const bytes = Buffer.from(JSON.stringify(result));
+    assert.deepEqual(verifyCodexTaskCaptureBytes(bytes, {
+      scope: { organizationId: result.organizationId, repositoryBindingId: result.repositoryBindingId,
+        workspaceId: result.workspaceId, endpointId: result.endpointId, membershipId: result.membershipId,
+        deviceId: result.deviceId, bindingId: result.bindingId, workId: result.workId },
+      capture: { captureId: result.captureId, captureHash: sha256(bytes), requestHash: result.requestHash,
+        eventsHash: result.eventsHash, threadId: result.providerThreadId, turnId: result.providerTurnId!,
+        startedAt: result.startedAt, completedAt: result.closedAt, terminalState: state, coverage: 'observed', droppedEvents: 0 },
+    }), { ok: true });
+    assert.equal(result.acceptedLearningObservation, false);
+  }
+});
 
 test('early native notifications bind to only the exact thread and turn with integrity', async () => {
   const capture = fixture();
