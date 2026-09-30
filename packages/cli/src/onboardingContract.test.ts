@@ -13,6 +13,8 @@ test('the installed onboarding contract forbids product-code workarounds', async
   assert.match(contract, /do not bypass enrollment/i);
   assert.match(contract, /exact failed stage, non-sensitive error, and correlation ID/i);
   assert.match(contract, /supported retry, reconciliation, rollback, or browser-authorized re-enrollment/i);
+  assert.match(contract, /one retry of the unchanged command is permitted before grant expiry/i);
+  assert.match(contract, /Never retry a grant after redemption/i);
 });
 
 test('the installed guide names the supported knowledge and peer workflow', async () => {
