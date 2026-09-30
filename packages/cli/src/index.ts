@@ -712,7 +712,7 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
       try {
         await mkdir(recoveryCandidate);
         await writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 });
-        for (let attempt = 0; ; attempt++) {
+        for (;;) {
           try { await rename(recoveryCandidate, recoveryPath); break; }
           catch (renameError) {
             if (process.platform !== 'win32' || (renameError as NodeJS.ErrnoException).code !== 'EPERM') throw renameError;
@@ -729,7 +729,10 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
                 || !/^[1-9][0-9]*$/.test(ownerText) || !Number.isSafeInteger(owner)) throw renameError;
               windowsRecoveryOwner = owner;
             } catch (inspectionError) {
-              if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT' && attempt < 3) continue;
+              if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT' && Date.now() < deadline) {
+                await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+                continue;
+              }
               throw renameError;
             }
             throw renameError;
