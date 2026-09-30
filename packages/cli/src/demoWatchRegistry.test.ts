@@ -35,6 +35,17 @@ test('Demo watch registration is scoped, credential-free and idempotent', async 
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
+test('knowledge-only watch mode persists and cannot be changed by a source watcher', async () => {
+  const f = await fixture();
+  try {
+    const knowledgeOnly = { ...f.registration, knowledgeOnly: true as const };
+    assert.equal((await registerDemoWatch(f.home, knowledgeOnly)).created, true);
+    assert.deepEqual(await listDemoWatchRegistrations(f.home), [knowledgeOnly]);
+    await assert.rejects(registerDemoWatch(f.home, f.registration), /conflict/);
+    assert.equal(await unregisterDemoWatch(f.home, knowledgeOnly), true);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
 test('fixtures canonicalize an aliased temporary root without accepting an alias in a registration', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-watch-temp-alias-')));
   const target = join(root, 'target');
@@ -69,7 +80,8 @@ test('registration rejects untrusted fields and invalid scope', async () => {
   try {
     for (const override of [{ grant: 'never-save-me' }, { workspace: '../foreign' },
       { hqUrl: 'https://secret@example.test' }, { repositoryId: '../foreign' },
-      { provider: 'shell' }, { normalizedRepository: 'repo\ncommand' }]) {
+      { provider: 'shell' }, { normalizedRepository: 'repo\ncommand' },
+      { knowledgeOnly: false }, { knowledgeOnly: 'yes' }]) {
       await assert.rejects(registerDemoWatch(f.home,
         { ...f.registration, ...override } as DemoWatchRegistration));
     }

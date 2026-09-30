@@ -91,7 +91,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.127';
+const VERSION = '0.2.128';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1856,9 +1856,14 @@ async function supervisedDemoCycle(registration: DemoWatchRegistration, signal: 
   const workspace = await realpath(registration.workspace);
   if (workspace !== registration.workspace) throw new Error('Demo watch checkout is no longer canonical.');
   const root = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
-  const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
-  if (!root || !remote || normalizeGitRemoteIdentity(remote) !== registration.normalizedRepository) {
-    throw Object.assign(new Error('Demo watch repository binding changed.'), { code: 'demo_watch_repository_changed' });
+  if (registration.knowledgeOnly) {
+    if (root) throw Object.assign(new Error('Demo knowledge-only workspace became a Git checkout.'),
+      { code: 'demo_watch_workspace_changed' });
+  } else {
+    const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+    if (!root || !remote || normalizeGitRemoteIdentity(remote) !== registration.normalizedRepository) {
+      throw Object.assign(new Error('Demo watch repository binding changed.'), { code: 'demo_watch_repository_changed' });
+    }
   }
   const scope = { hqUrl: registration.hqUrl, organizationId: registration.organizationId,
     repositoryId: registration.repositoryId, normalizedRepository: registration.normalizedRepository,
@@ -1874,6 +1879,7 @@ async function supervisedDemoCycle(registration: DemoWatchRegistration, signal: 
         signal: options?.signal ? AbortSignal.any([options.signal, signal]) : signal });
     } });
     return demoRepositoryPackage({ scope, workspace, provider: registration.provider,
+      knowledgeOnly: registration.knowledgeOnly,
       nativeSkillDirectory: nativeDirectory }, deps);
   });
 }
@@ -7068,19 +7074,27 @@ export async function run(argv: string[]): Promise<Output> {
     const organizationId = required(flags, 'organization-id');
     const repositoryId = required(flags, 'repository-id');
     const normalizedRepository = required(flags, 'normalized-repository');
+    const knowledgeOnly = flags.has('knowledge-only');
+    if (knowledgeOnly && !flags.has('workspace')) {
+      throw new Error('Demo knowledge-only setup requires an explicit private --workspace outside Git.');
+    }
     const workspace = await realpath(String(flags.get('workspace') || '.'));
     const root = await gitValue(workspace, ['rev-parse', '--show-toplevel']);
-    if (!root) throw new Error('Demo device setup must run inside the exact Git repository.');
-    const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
-    if (!remote || normalizeGitRemoteIdentity(remote) !== normalizedRepository) {
-      throw new Error('Local Git remote does not match the private Demo repository binding.');
+    if (knowledgeOnly) {
+      if (root) throw new Error('Demo knowledge-only workspace must be outside every Git checkout.');
+    } else {
+      if (!root) throw new Error('Demo device setup must run inside the exact Git repository.');
+      const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
+      if (!remote || normalizeGitRemoteIdentity(remote) !== normalizedRepository) {
+        throw new Error('Local Git remote does not match the private Demo repository binding.');
+      }
     }
     const watchControl = ['watch-enable', 'watch-status', 'watch-disable'].includes(String(subcommand));
     const signingProof = ['signing-client-proof', 'signing-owner-proof'].includes(String(subcommand));
     if (signingProof && subcommand === 'signing-owner-proof' && flags.has('submit')) {
       throw new Error('Owner signing approval requires explicit browser confirmation.');
     }
-    if (watchControl && await realpath(root) !== workspace) {
+    if (watchControl && !knowledgeOnly && await realpath(root!) !== workspace) {
       throw new Error('Demo watch setup must select the exact Git repository root.');
     }
     let transportOrigin: string | null = null;
@@ -7094,6 +7108,7 @@ export async function run(argv: string[]): Promise<Output> {
     if (flags.has('dry-run')) return { ok: true, stage: transportOrigin ? 'demo_transport_plan' : signingProof ? 'demo_signing_proof_plan'
       : watchControl ? 'demo_watch_plan' : 'demo_device_plan',
       organizationId, repositoryId, normalizedRepository, workspaceVerified: true,
+      ...(knowledgeOnly ? { workspaceMode: 'knowledge_only' } : {}),
       repositoryPackageState: 'not_connected', ...(transportOrigin ? { transportOrigin } : {}) };
     const grant = subcommand === 'connect' ? required(flags, 'grant') : null;
     const scope = {
@@ -7115,7 +7130,8 @@ export async function run(argv: string[]): Promise<Output> {
         ?? (subcommand === 'watch-enable' ? await detectBootstrapProvider(workspace) : 'codex');
       if (!isLocalProviderId(provider)) throw new Error('Demo watch provider must be auto, codex, claude, agy, or hermes.');
       const registration: DemoWatchRegistration = { schema: 'dharma.demo-watch/v1',
-        hqUrl, organizationId, repositoryId, normalizedRepository, provider, workspace };
+        hqUrl, organizationId, repositoryId, normalizedRepository, provider, workspace,
+        ...(knowledgeOnly ? { knowledgeOnly: true as const } : {}) };
       const input = { home: dharmaHome(), registration, version: VERSION };
       const deps: DemoWatchControlDependencies = {
         verify: async () => { await withDemoDeviceLock(scope, async () =>
@@ -7149,6 +7165,7 @@ export async function run(argv: string[]): Promise<Output> {
           : nativeSkillDirectory(provider);
       const cycle = () => withDemoDeviceLock(scope, async () => demoRepositoryPackage({ scope, workspace,
         statusOnly: subcommand === 'package-status', provider,
+        knowledgeOnly,
         nativeSkillDirectory: demoNativeSkillDirectory }, await createDemoDeviceTransport(scope)));
       if (subcommand !== 'watch') return cycle();
       const rawInterval = flags.get('interval-ms');
