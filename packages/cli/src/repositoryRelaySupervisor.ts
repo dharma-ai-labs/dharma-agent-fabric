@@ -31,7 +31,7 @@ function failureCategory(error: unknown): RepositoryRelayFailureCategory {
 }
 
 export function currentRepositoryRelayFailure(input: { receipt: unknown; organizationId: string; deviceId: string;
-  workspaceId: string; pid: number;
+  workspaceId: string; pid: number; relayPidWrittenAt: number | null;
   lastSuccessfulPollAt: string | null; now?: number }) {
   const value = input.receipt as Record<string, unknown> | null;
   if (!value || value.schema !== 'dharma.local-repository-relay-failure/v1'
@@ -39,6 +39,8 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || value.workspaceId !== input.workspaceId || value.pid !== input.pid
     || !Number.isSafeInteger(input.pid) || input.pid <= 0
     || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))
+    || !Number.isFinite(input.relayPidWrittenAt) || input.relayPidWrittenAt === null
+    || Date.parse(value.at) <= input.relayPidWrittenAt
     || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000
     || (input.lastSuccessfulPollAt && Date.parse(value.at) <= Date.parse(input.lastSuccessfulPollAt))
     || !['policy_verification', 'trajectory_recovery', 'evidence_sync', 'task_poll', 'worker_run'].includes(String(value.stage))
@@ -129,8 +131,9 @@ export async function runRegisteredRepositoryRelays(input: {
     flight: Promise<void>; done: boolean; failed: boolean }>();
   const failures = new Map<string, { count: number; retryAt: number }>();
   // Diagnostics must never turn a caught worker failure into an unhandled rejection.
-  const observe = async (event: Observation) => {
-    try { await input.observe?.(event); } catch { /* Preserve worker lifecycle. */ }
+  const observe = (event: Observation) => {
+    try { void Promise.resolve(input.observe?.(event)).catch(() => {}); }
+    catch { /* Preserve worker lifecycle. */ }
   };
   const abort = () => { for (const worker of workers.values()) worker.controller.abort(); };
   input.signal.addEventListener('abort', abort, { once: true });
@@ -140,7 +143,7 @@ export async function runRegisteredRepositoryRelays(input: {
       try { rows = registrations(await input.list()); }
       catch {
         abort();
-        await observe({ workspaceId: null, code: 'repository_registry_unavailable' });
+        observe({ workspaceId: null, code: 'repository_registry_unavailable' });
         await wait(1000, input.signal);
         continue;
       }
@@ -166,13 +169,13 @@ export async function runRegisteredRepositoryRelays(input: {
             await input.run(row, controller.signal);
             if (!controller.signal.aborted) {
               worker.failed = true;
-              await observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
+              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
                 stage: 'worker_run', category: 'unexpected' });
             }
           } catch (error) {
             if (!controller.signal.aborted) {
               worker.failed = true;
-              await observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
+              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
                 stage: error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run',
                 category: failureCategory(error) });
             }

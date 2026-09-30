@@ -2,7 +2,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7106,6 +7106,9 @@ export async function run(argv: string[]): Promise<Output> {
       if (flags.has('verbose') || flags.has('diagnostic')) {
         const relayPid = await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')
           .then(value => Number(value.trim())).catch(() => 0);
+        const relayPidWrittenAt = relay === 'running'
+          ? await stat(resolve(dharmaHome(), 'relay', 'relay.pid')).then(value => value.mtimeMs).catch(() => null)
+          : null;
         try {
           const registryRead = await readWorkspaceRegistry<WorkspaceRecord>(workspaceRegistryPath());
           status.workspaceRegistry = { state: registryRead.state, count: registryRead.records.length };
@@ -7122,7 +7125,7 @@ export async function run(argv: string[]): Promise<Output> {
                 'last-failure.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
               const lastFailure = currentRepositoryRelayFailure({ receipt: failure,
                 organizationId: config.organizationId, deviceId: config.deviceId,
-                workspaceId: row.workspaceId, pid: relayPid, lastSuccessfulPollAt });
+                workspaceId: row.workspaceId, pid: relayPid, relayPidWrittenAt, lastSuccessfulPollAt });
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',

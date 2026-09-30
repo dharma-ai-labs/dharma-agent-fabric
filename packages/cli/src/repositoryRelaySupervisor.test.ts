@@ -106,16 +106,37 @@ test('a denied evidence worker reports only its repository, stage, and safe cate
   assert.ok(!JSON.stringify(events).includes('private-payload'));
 });
 
+test('an observer that never settles cannot block worker retry or supervisor shutdown', async () => {
+  const controller = new AbortController();
+  let started = 0;
+  let tick = 0;
+  const run = runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a],
+    now: () => tick * 100_000, run: async () => { started++; throw new Error('worker failed'); },
+    observe: () => new Promise<void>(() => {}),
+    wait: async () => { await Promise.resolve(); if (++tick === 4) controller.abort(); },
+  });
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([run, new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('observer blocked relay')), 1000);
+    })]);
+  } finally { if (timeout) clearTimeout(timeout); }
+  assert.ok(started >= 2, 'the failed worker should retry while diagnostics are pending');
+});
+
 test('diagnostics show only a current-process failure newer than its last successful poll', () => {
   const at = '2026-09-29T16:01:00.000Z';
   const receipt = { schema: 'dharma.local-repository-relay-failure/v1', organizationId: 'org_a',
     deviceId: 'device_a', workspaceId: 'a', pid: 50,
     at, stage: 'evidence_sync', category: 'policy_boundary', privatePayload: 'must-not-leak' };
   const input = { receipt, organizationId: 'org_a', deviceId: 'device_a', workspaceId: 'a', pid: 50,
+    relayPidWrittenAt: Date.parse(at) - 1000,
     lastSuccessfulPollAt: '2026-09-29T16:00:00.000Z', now: Date.parse(at) + 1000 };
   assert.deepEqual(currentRepositoryRelayFailure(input), { at, stage: 'evidence_sync', category: 'policy_boundary' });
   for (const changed of [{ organizationId: 'org_b' }, { deviceId: 'device_b' },
-    { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { lastSuccessfulPollAt: at },
+    { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { relayPidWrittenAt: Date.parse(at) + 1000 },
+    { relayPidWrittenAt: null },
+    { lastSuccessfulPollAt: at },
     { receipt: { ...receipt, stage: 'private-payload' } },
     { receipt: { ...receipt, category: 'private-payload' } },
     { receipt: { ...receipt, at: 'invalid' } }]) {
