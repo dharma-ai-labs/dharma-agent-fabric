@@ -126,16 +126,18 @@ test('an observer that never settles cannot block worker retry or supervisor shu
 
 test('diagnostics show only a current-process failure newer than its last successful poll', () => {
   const at = '2026-09-29T16:01:00.000Z';
+  const relayPidMtimeMs = Date.parse(at) + 0.5;
+  const relayPidCtimeMs = Date.parse(at) + 0.75;
   const receipt = { schema: 'dharma.local-repository-relay-failure/v1', organizationId: 'org_a',
-    deviceId: 'device_a', workspaceId: 'a', pid: 50,
+    deviceId: 'device_a', workspaceId: 'a', pid: 50, relayPidMtimeMs, relayPidCtimeMs,
     at, stage: 'evidence_sync', category: 'policy_boundary', privatePayload: 'must-not-leak' };
   const input = { receipt, organizationId: 'org_a', deviceId: 'device_a', workspaceId: 'a', pid: 50,
-    relayPidWrittenAt: Date.parse(at) - 1000,
+    relayPidMtimeMs, relayPidCtimeMs,
     lastSuccessfulPollAt: '2026-09-29T16:00:00.000Z', now: Date.parse(at) + 1000 };
   assert.deepEqual(currentRepositoryRelayFailure(input), { at, stage: 'evidence_sync', category: 'policy_boundary' });
   for (const changed of [{ organizationId: 'org_b' }, { deviceId: 'device_b' },
-    { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { relayPidWrittenAt: Date.parse(at) + 1000 },
-    { relayPidWrittenAt: null },
+    { workspaceId: 'b' }, { pid: 51 }, { pid: 0 }, { relayPidMtimeMs: relayPidMtimeMs + 1 },
+    { relayPidCtimeMs: relayPidCtimeMs + 1 }, { relayPidMtimeMs: null },
     { lastSuccessfulPollAt: at },
     { receipt: { ...receipt, stage: 'private-payload' } },
     { receipt: { ...receipt, category: 'private-payload' } },
@@ -180,6 +182,19 @@ test('device task turns serialize across repositories and release after failure'
   await assert.rejects(first, /failed/);
   assert.equal(await second, 2);
   assert.deepEqual(order, ['a', 'b']);
+});
+
+test('delayed earlier diagnostic writes cannot overwrite a newer failure', async () => {
+  const writeDiagnostic = serializeRelayWork();
+  const release = deferred();
+  let lastFailure = '';
+  const earlier = writeDiagnostic(async () => { await release.promise; lastFailure = 'earlier'; });
+  const later = writeDiagnostic(async () => { lastFailure = 'later'; });
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(lastFailure, '');
+  release.resolve();
+  await Promise.all([earlier, later]);
+  assert.equal(lastFailure, 'later');
 });
 
 test('diagnostic failure never escapes a caught worker rejection', async () => {

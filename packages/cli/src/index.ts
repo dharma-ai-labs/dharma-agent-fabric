@@ -6469,6 +6469,10 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   const serialized = serializeRelayWork();
   try {
     if (flags.has('once')) return await relayWorkspaceLoop(flags, controller.signal, serialized);
+    const relayPidState = stat(resolve(dharmaHome(), 'relay', 'relay.pid'))
+      .then(value => ({ relayPidMtimeMs: value.mtimeMs, relayPidCtimeMs: value.ctimeMs }))
+      .catch(() => null);
+    const diagnosticWriters = new Map<string, ReturnType<typeof serializeRelayWork>>();
     await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => {
       const currentConfig = await readDeviceConfig();
       if (currentConfig?.organizationId !== config.organizationId || currentConfig.deviceId !== config.deviceId) {
@@ -6481,12 +6485,21 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     observe: async event => {
       process.stderr.write(`${JSON.stringify({ event: 'repository_relay', ...event })}\n`);
       if (event.code === 'repository_relay_failed' && event.workspaceId && UUID_PATTERN.test(event.workspaceId)) {
-        await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', event.workspaceId,
-          'last-failure.json'), {
+        const at = new Date().toISOString();
+        const pidState = await relayPidState;
+        if (!pidState) return;
+        const failure = {
           schema: 'dharma.local-repository-relay-failure/v1', organizationId: config.organizationId,
-          deviceId: config.deviceId, workspaceId: event.workspaceId, pid: process.pid,
-          at: new Date().toISOString(), stage: event.stage, category: event.category,
-        });
+          deviceId: config.deviceId, workspaceId: event.workspaceId, pid: process.pid, ...pidState,
+          at, stage: event.stage, category: event.category,
+        };
+        let writer = diagnosticWriters.get(event.workspaceId);
+        if (!writer) {
+          writer = serializeRelayWork();
+          diagnosticWriters.set(event.workspaceId, writer);
+        }
+        await writer(() => writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', event.workspaceId!,
+          'last-failure.json'), failure));
       }
     } });
     return { ok: true, stopped: true };
@@ -7106,8 +7119,9 @@ export async function run(argv: string[]): Promise<Output> {
       if (flags.has('verbose') || flags.has('diagnostic')) {
         const relayPid = await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')
           .then(value => Number(value.trim())).catch(() => 0);
-        const relayPidWrittenAt = relay === 'running'
-          ? await stat(resolve(dharmaHome(), 'relay', 'relay.pid')).then(value => value.mtimeMs).catch(() => null)
+        const relayPidState = relay === 'running'
+          ? await stat(resolve(dharmaHome(), 'relay', 'relay.pid'))
+            .then(value => ({ relayPidMtimeMs: value.mtimeMs, relayPidCtimeMs: value.ctimeMs })).catch(() => null)
           : null;
         try {
           const registryRead = await readWorkspaceRegistry<WorkspaceRecord>(workspaceRegistryPath());
@@ -7125,7 +7139,8 @@ export async function run(argv: string[]): Promise<Output> {
                 'last-failure.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
               const lastFailure = currentRepositoryRelayFailure({ receipt: failure,
                 organizationId: config.organizationId, deviceId: config.deviceId,
-                workspaceId: row.workspaceId, pid: relayPid, relayPidWrittenAt, lastSuccessfulPollAt });
+                workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
+                relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt });
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',

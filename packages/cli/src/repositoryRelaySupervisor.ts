@@ -31,7 +31,7 @@ function failureCategory(error: unknown): RepositoryRelayFailureCategory {
 }
 
 export function currentRepositoryRelayFailure(input: { receipt: unknown; organizationId: string; deviceId: string;
-  workspaceId: string; pid: number; relayPidWrittenAt: number | null;
+  workspaceId: string; pid: number; relayPidMtimeMs: number | null; relayPidCtimeMs: number | null;
   lastSuccessfulPollAt: string | null; now?: number }) {
   const value = input.receipt as Record<string, unknown> | null;
   if (!value || value.schema !== 'dharma.local-repository-relay-failure/v1'
@@ -39,8 +39,8 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || value.workspaceId !== input.workspaceId || value.pid !== input.pid
     || !Number.isSafeInteger(input.pid) || input.pid <= 0
     || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))
-    || !Number.isFinite(input.relayPidWrittenAt) || input.relayPidWrittenAt === null
-    || Date.parse(value.at) <= input.relayPidWrittenAt
+    || !Number.isFinite(input.relayPidMtimeMs) || !Number.isFinite(input.relayPidCtimeMs)
+    || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
     || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000
     || (input.lastSuccessfulPollAt && Date.parse(value.at) <= Date.parse(input.lastSuccessfulPollAt))
     || !['policy_verification', 'trajectory_recovery', 'evidence_sync', 'task_poll', 'worker_run'].includes(String(value.stage))
