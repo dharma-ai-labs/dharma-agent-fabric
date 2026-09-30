@@ -1,9 +1,10 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, sign, verify, type JsonWebKey } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { loadOrCreateDeviceIdentity, normalizeHqUrl, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { verifyInitialServerSigningKeyset, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
 import { acceptDemoSigningUpdate, recoverDemoSigningEnrollment, resolveDemoSigningTrust, type DemoSigningDependencies } from './demoSigningTrust.js';
+import { renameDemoStateFile } from './demoStateRename.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE = /^[A-Za-z0-9_-]{43}$/;
@@ -132,7 +133,7 @@ async function writePrivateJson(path: string, value: unknown) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
-  await rename(temporary, path);
+  await renameDemoStateFile(temporary, path);
   if (process.platform !== 'win32') await chmod(path, 0o600);
 }
 
