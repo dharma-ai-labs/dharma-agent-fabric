@@ -40,7 +40,10 @@ async function macFixture() {
     setForeign: () => { foreign = true; }, setLoaded: () => { loaded = true; } };
 }
 
-test('macOS owned registration supports restart, stop, same-device upgrade and disable', async () => {
+// Windows permission bits cannot model launchd's private-file ownership checks.
+const macFilesystem = { skip: process.platform === 'win32' };
+
+test('macOS owned registration supports restart, stop, same-device upgrade and disable', macFilesystem, async () => {
   const { options, calls, plist } = await macFixture();
   assert.equal((await enableRelayAutostart(options)).state, 'enabled');
   const xml = await readFile(plist, 'utf8');
@@ -58,7 +61,7 @@ test('macOS owned registration supports restart, stop, same-device upgrade and d
   assert.equal((await relayAutostartStatus(options)).state, 'disabled');
 });
 
-test('macOS preserves the established startup anchor for another repository', async () => {
+test('macOS preserves the established startup anchor for another repository', macFilesystem, async () => {
   const { options, calls, plist } = await macFixture();
   await enableRelayAutostart(options);
   const before = await readFile(plist, 'utf8');
@@ -69,7 +72,7 @@ test('macOS preserves the established startup anchor for another repository', as
   assert.ok(!calls.some(call => ['bootstrap', 'bootout'].includes(call[1]!)));
 });
 
-test('macOS refuses foreign loaded services and tampered startup files', async () => {
+test('macOS refuses foreign loaded services and tampered startup files', macFilesystem, async () => {
   const fixture = await macFixture();
   await enableRelayAutostart(fixture.options);
   fixture.setForeign();
@@ -103,7 +106,7 @@ test('macOS will not follow a plist symlink', { skip: process.platform === 'win3
   assert.equal(await readFile(linked.plist, 'utf8'), 'foreign');
 });
 
-test('macOS loaded scope and argument mismatches fail before mutation', async () => {
+test('macOS loaded scope and argument mismatches fail before mutation', macFilesystem, async () => {
   for (const [from, to] of [[' supervise\n', ' bootstrap\n'], [' working directory = ', ' wrong directory = '],
     [' DHARMA_HOME => ', ' FOREIGN_HOME => '], [' path = ', ' unknown path = ']]) {
     const fixture = await macFixture();
@@ -129,7 +132,7 @@ test('macOS rejects relative or control-character paths and root registration', 
   assert.deepEqual(calls, []);
 });
 
-test('macOS launchd failure does not produce enabled status', async () => {
+test('macOS launchd failure does not produce enabled status', macFilesystem, async () => {
   const { options } = await macFixture();
   await enableRelayAutostart(options);
   const unavailable = { ...options, run: async () => { throw new Error('GUI domain unavailable'); } };

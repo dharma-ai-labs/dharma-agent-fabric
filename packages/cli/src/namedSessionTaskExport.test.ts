@@ -15,11 +15,11 @@ import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import type { RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 
-function fixture() {
+function fixture(workspaceRoot = '/home/synthetic/repository') {
   const binding: LocalProviderSessionBinding = { schema: 'dharma.local-provider-session-binding/v1',
     organizationId: 'org_synthetic', repositoryBindingId: randomUUID(), workspaceId: randomUUID(),
     endpointId: randomUUID(), membershipId: randomUUID(), deviceId: randomUUID(), bindingId: randomUUID(),
-    provider: 'codex', owner: 'dharma_bridge', sessionId: 'synthetic_thread', workspaceRoot: '/home/synthetic/repository',
+    provider: 'codex', owner: 'dharma_bridge', sessionId: 'synthetic_thread', workspaceRoot,
     createdAt: new Date(Date.now() - 60000).toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(),
     maximumProviderCostCents: 10 };
   const startedAt = new Date(Date.now() - 1000).toISOString(), closedAt = new Date().toISOString();
@@ -183,7 +183,7 @@ test('policy size limits are enforced and repeats preserve one deterministic exp
 
 async function queuedExportFixture() {
   const root = await mkdtemp(join(tmpdir(), 'task-export-sync-'));
-  const key = randomBytes(32), f = fixture();
+  const key = randomBytes(32), f = fixture(join(root, 'repository'));
   const scope = { organizationId: f.input.binding.organizationId, repositoryBindingId: f.input.binding.repositoryBindingId,
     workspaceId: f.input.binding.workspaceId, endpointId: f.input.binding.endpointId,
     membershipId: f.input.binding.membershipId, deviceId: f.input.binding.deviceId, provider: f.input.binding.provider };
