@@ -58,7 +58,10 @@ function bootstrapDependencies(onboarding: Onboarding) {
     saveOrganizationApiToken: async () => record('save_token'),
     loadOrganizationApiToken: async () => { await record('read_token'); return 'fixture_token'; },
     retryBootstrapOnboarding: async (operation: () => Promise<unknown>) => operation(),
-    onboard: async () => { await record('onboard'); return onboarding; },
+    onboard: async () => { await record('onboard'); return {
+      firstLearningEvidence: { state: 'synchronized', discovered: 0, disclosureReady: false,
+        captured: 0, synced: 0 }, ...onboarding,
+    }; },
     installStableRepositoryLauncher: async () => { await record('launcher');
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
     dharmaHome: () => '/fixture-home',
@@ -70,7 +73,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     },
     verifyAgentFabricSkillInstallation: async () => ({ ready: true }),
     resolve, dirname,
-    evidencePreview: async () => ({ trajectoryCount: 0, automaticDisclosure: { ready: false } }),
+    evidencePreview: async () => { throw new Error('bootstrap must reuse the onboarding evidence receipt'); },
     startRelayDaemon: async () => { await record('relay'); return { started: true, state: 'running', probe: { ok: true } }; },
     withOnboardingStage: async (_stage: string, _workspaceId: string, _resume: string,
       operation: () => Promise<unknown>) => operation(),
@@ -331,6 +334,27 @@ test('bootstrap completes after the relay installs the signed shared release', a
   assert.equal((actual.namedSession as Record<string, unknown>).state, 'running');
   assert.equal((actual.workflowReadiness as Record<string, unknown>).namedSession, 'ready');
   assert.equal(f.calls.filter(value => value === 'named_session').length, 1);
+});
+
+test('published-package secret denial stays visible without repeating evidence capture', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture',
+    firstLearningEvidence: { state: 'denied_disclosure', discovered: 20, captured: null, synced: null,
+      disclosureReady: true, reason: 'policy_boundary', errorCode: 'secret_disclosure_forbidden' } });
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.ok, true);
+  assert.equal(actual.stage, 'complete');
+  assert.equal((actual.workflowReadiness as Record<string, unknown>).firstLearning, 'denied_disclosure');
+  assert.equal(((actual.evidence as Record<string, unknown>).synchronized as Record<string, unknown>).errorCode,
+    'secret_disclosure_forbidden');
+});
+
+test('missing first-learning disposition cannot produce a complete receipt', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture', firstLearningEvidence: null });
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.ok, false);
+  assert.equal(actual.stage, 'first_learning_pending');
 });
 
 test('a failed named session cannot produce a complete bootstrap receipt', async () => {

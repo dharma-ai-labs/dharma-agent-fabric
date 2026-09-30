@@ -23,6 +23,7 @@ import {
   installNativeAgentFabricBootstrap,
   installClaudeReadOnlyProjectPermissions,
   installRepositoryAgentFabricSkill,
+  initialBootstrapEvidenceDisposition,
   isDirectExecution,
   isTransientBootstrapError,
   loadAgentFabricOnboardingContract,
@@ -44,6 +45,7 @@ import {
   providerHintFromProcessArgv,
   probeRelayConnection,
   preflightBootstrapWorkspaceIdentity,
+  publishedPackageCanDeferSecretEvidence,
   rawLocalRetentionDays,
   syncPendingRetentionCapsules,
   requireCompletedBootstrapEvidence,
@@ -79,7 +81,7 @@ import {
 import type { SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
+import { AgentFabricRequestError, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { CLI_USAGE } from './usage.js';
 import { workspaceIdForDevice } from './onboardingWorkspace.js';
 import {
@@ -235,11 +237,33 @@ test('bootstrap defers policy-rejected evidence without weakening the disclosure
   });
   assert.deepEqual(result, {
     state: 'deferred',
-    captured: 0,
-    synced: 0,
+    captured: null,
+    synced: null,
     reason: 'policy_boundary',
     errorCode: 'local_path_disclosure_forbidden',
   });
+});
+
+test('only a published package under the same source policy can defer a definitive secret rejection', async () => {
+  const denied = await synchronizeBootstrapEvidence(async () => {
+    throw new AgentFabricRequestError({ error: { code: 'policy_boundary',
+      message: 'secret_disclosure_forbidden' } }, 403, true);
+  });
+  assert.equal(denied.errorCode, 'secret_disclosure_forbidden');
+  const published = { state: 'published', releaseId: '11111111-1111-4111-8111-111111111111',
+    sourcePolicyGenerationId: '22222222-2222-4222-8222-222222222222' };
+  assert.equal(publishedPackageCanDeferSecretEvidence(denied, published as never,
+    '22222222-2222-4222-8222-222222222222'), true);
+  assert.equal(publishedPackageCanDeferSecretEvidence(denied, published as never,
+    '33333333-3333-4333-8333-333333333333'), false);
+  assert.equal(publishedPackageCanDeferSecretEvidence(denied,
+    { ...published, state: 'accepted' } as never, '22222222-2222-4222-8222-222222222222'), false);
+  const ambiguous = await synchronizeBootstrapEvidence(async () => {
+    throw new AgentFabricRequestError({ error: { code: 'policy_boundary',
+      message: 'secret_disclosure_forbidden' } }, 503, false);
+  });
+  assert.equal(publishedPackageCanDeferSecretEvidence(ambiguous, published as never,
+    '22222222-2222-4222-8222-222222222222'), false);
 });
 
 test('bootstrap reports non-policy evidence failures without returning sensitive error text', async () => {
@@ -248,8 +272,8 @@ test('bootstrap reports non-policy evidence failures without returning sensitive
   });
   assert.deepEqual(result, {
     state: 'deferred',
-    captured: 0,
-    synced: 0,
+    captured: null,
+    synced: null,
     reason: 'capture_unavailable',
     errorCode: 'evidence_capture_failed',
   });
@@ -262,8 +286,8 @@ test('bootstrap identifies unavailable retention without weakening other capture
   });
   assert.deepEqual(result, {
     state: 'deferred',
-    captured: 0,
-    synced: 0,
+    captured: null,
+    synced: null,
     reason: 'retention_not_ready',
     errorCode: 'agent_fabric_retention_not_ready',
   });
@@ -272,6 +296,17 @@ test('bootstrap identifies unavailable retention without weakening other capture
 test('bootstrap records successful evidence synchronization', async () => {
   const result = await synchronizeBootstrapEvidence(async () => ({ captured: 2, synced: 2 }));
   assert.deepEqual(result, { state: 'synchronized', captured: 2, synced: 2 });
+});
+
+test('eligible history without disclosure is reported as denied, not synchronized', () => {
+  assert.deepEqual(initialBootstrapEvidenceDisposition(3, false), {
+    state: 'denied_disclosure', captured: 0, synced: 0,
+    reason: 'policy_boundary', errorCode: 'automatic_disclosure_not_ready',
+  });
+  assert.deepEqual(initialBootstrapEvidenceDisposition(0, false), {
+    state: 'synchronized', captured: 0, synced: 0,
+  });
+  assert.throws(() => initialBootstrapEvidenceDisposition(Number.NaN, true), /invalid trajectory count/);
 });
 
 test('relay defers unavailable retention without stopping signed task polling', async () => {
@@ -1638,6 +1673,63 @@ test('queued capsules from a replaced device are retained locally but never sent
   assert.deepEqual(discarded, [{ trajectoryId: old.trajectoryId, reason: 'device_binding_changed' }]);
   assert.deepEqual(sent, [current.trajectoryId]);
   assert.equal(old.deviceId, '11111111-1111-4111-8111-111111111111');
+});
+
+test('definitive secret rejection retires only its upload queue row and leaves later work eligible', async () => {
+  const base = await materializeWorkspacePolicy({
+    workspace: await mkdtemp(join(tmpdir(), 'dharma-secret-rejection-')),
+    organizationId: 'org_northstar', revision: 'local',
+  });
+  const deviceId = '22222222-2222-4222-8222-222222222222';
+  const session = (sessionId: string) => ({
+    provider: 'codex' as const, sessionId, sourcePath: '/private/codex.jsonl',
+    workspace: '/repo', coverage: 'observed' as const,
+    startedAt: '2026-09-23T00:00:00.000Z', endedAt: '2026-09-23T00:00:01.000Z',
+    records: [{ native: { type: 'message' }, sourcePath: '/private/codex.jsonl', line: 1,
+      workspace: '/repo', timestamp: '2026-09-23T00:00:00.000Z', kind: 'metadata' as const }],
+  });
+  const capsules = ['denied', 'allowed'].map(sessionId => buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId, workspaceId: 'workspace-northstar',
+    session: session(sessionId), policy: base.policy,
+    rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 32,
+  }));
+  const pending = [...capsules];
+  const discarded: string[] = [];
+  const synced: string[] = [];
+  const vault = {
+    listPendingCapsuleSyncs: async () => pending.map(capsule => ({ trajectoryId: capsule.trajectoryId,
+      revision: capsule.revision, capsule })),
+    markCapsuleSynced: (trajectoryId: string) => {
+      synced.push(trajectoryId); pending.splice(pending.findIndex(c => c.trajectoryId === trajectoryId), 1);
+    },
+    discardPendingCapsuleSync: (trajectoryId: string, _revision: number, reason: string) => {
+      discarded.push(reason); pending.splice(pending.findIndex(c => c.trajectoryId === trajectoryId), 1);
+    },
+  };
+  const fabric = {
+    config: { organizationId: 'org_northstar', deviceId },
+    syncTrajectory: async (capsule: { trajectoryId: string }) => {
+      if (capsule.trajectoryId === capsules[0]!.trajectoryId) {
+        throw new AgentFabricRequestError({ error: { code: 'policy_boundary',
+          message: 'secret_disclosure_forbidden' } }, 403, true);
+      }
+    },
+  };
+  assert.equal(await syncPendingRetentionCapsules(vault as never, fabric as never,
+    base.policy, 'workspace-northstar'), 1);
+  assert.deepEqual(discarded, ['secret_disclosure_forbidden']);
+  assert.deepEqual(synced, [capsules[1]!.trajectoryId]);
+  assert.equal(pending.length, 0);
+
+  pending.push(capsules[0]!);
+  fabric.syncTrajectory = async () => {
+    throw new AgentFabricRequestError({ error: { code: 'policy_boundary',
+      message: 'secret_disclosure_forbidden' } }, 503, false);
+  };
+  await assert.rejects(() => syncPendingRetentionCapsules(vault as never, fabric as never,
+    base.policy, 'workspace-northstar'), /secret_disclosure_forbidden/);
+  assert.equal(pending.length, 1);
+  assert.deepEqual(discarded, ['secret_disclosure_forbidden']);
 });
 
 test('oversized queued current-device revision is retired only after checking the accepted head', async () => {

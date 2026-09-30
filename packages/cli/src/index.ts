@@ -442,8 +442,14 @@ export async function syncPendingRetentionCapsules(
           : 'An unsent oversized trajectory capsule was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n');
         continue;
       }
-      await reserveDailyContentUpload(item.capsule, policy);
-      await fabric.syncTrajectory(item.capsule);
+      try {
+        await reserveDailyContentUpload(item.capsule, policy);
+        await fabric.syncTrajectory(item.capsule);
+      } catch (error) {
+        if (!isDefinitiveSecretDisclosureRejection(error)) throw error;
+        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'secret_disclosure_forbidden');
+        continue;
+      }
       vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
@@ -1487,17 +1493,48 @@ export async function retryBootstrapOnboarding<T>(
 }
 
 type BootstrapEvidenceSynchronization = {
-  state: 'synchronized' | 'deferred';
-  captured: number;
-  synced: number;
+  state: 'synchronized' | 'deferred' | 'denied_disclosure';
+  captured: number | null;
+  synced: number | null;
   reason?: 'policy_boundary' | 'capture_unavailable' | 'retention_not_ready';
   errorCode?: string;
 };
 
 function bootstrapEvidenceErrorCode(error: unknown): string {
+  if (isDefinitiveSecretDisclosureRejection(error)) return 'secret_disclosure_forbidden';
   const message = String((error as { message?: unknown } | null)?.message || error || '');
   const candidate = message.match(/(?:^|\n)([a-z][a-z0-9_]{2,80})(?=:)/)?.[1];
   return candidate || 'evidence_capture_failed';
+}
+
+function isDefinitiveSecretDisclosureRejection(error: unknown): boolean {
+  return isDefinitiveAgentFabricRejection(error)
+    && /^policy_boundary:\s*secret_disclosure_forbidden(?:\s|\.|$)/.test(
+      String((error as Error).message),
+    );
+}
+
+export function publishedPackageCanDeferSecretEvidence(
+  evidence: BootstrapEvidenceSynchronization,
+  repositoryPackage: NonNullable<WorkspaceRecord['repositoryPackage']>,
+  sourcePolicyGenerationId: string,
+): boolean {
+  return evidence.state === 'deferred' && evidence.errorCode === 'secret_disclosure_forbidden'
+    && repositoryPackage.state === 'published' && Boolean(repositoryPackage.releaseId)
+    && repositoryPackage.sourcePolicyGenerationId === sourcePolicyGenerationId;
+}
+
+export function initialBootstrapEvidenceDisposition(
+  discovered: number,
+  disclosureReady: boolean,
+): BootstrapEvidenceSynchronization {
+  if (!Number.isSafeInteger(discovered) || discovered < 0) {
+    throw new Error('Evidence preview returned an invalid trajectory count.');
+  }
+  return discovered > 0 && !disclosureReady
+    ? { state: 'denied_disclosure', captured: 0, synced: 0,
+      reason: 'policy_boundary', errorCode: 'automatic_disclosure_not_ready' }
+    : { state: 'synchronized', captured: 0, synced: 0 };
 }
 
 export async function synchronizeBootstrapEvidence(
@@ -1512,8 +1549,8 @@ export async function synchronizeBootstrapEvidence(
     const retentionNotReady = errorCode === 'agent_fabric_retention_not_ready';
     return {
       state: 'deferred',
-      captured: 0,
-      synced: 0,
+      captured: null,
+      synced: null,
       reason: retentionNotReady ? 'retention_not_ready' : policyBoundary ? 'policy_boundary' : 'capture_unavailable',
       errorCode,
     };
@@ -2286,20 +2323,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const skill = await verifyAgentFabricSkillInstallation({ provider, workspace });
   if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
   const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
-  const evidenceFlags = new Map<string, string | boolean>([
-    ['workspace', workspace], ['provider', provider], ['policy', policyPath], ['maximum-sessions', '20'],
-  ]);
-  const preview = await evidencePreview(evidenceFlags) as Record<string, unknown>;
-  let synchronized: BootstrapEvidenceSynchronization = { state: 'synchronized', captured: 0, synced: 0 };
-  if (Number(preview.trajectoryCount || 0) > 0
-    && (preview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
-    evidenceFlags.set('sync', true);
-    synchronized = await synchronizeBootstrapEvidence(
-      async () => await retryBootstrapOnboarding(
-        async () => await capture(evidenceFlags, true) as { captured: number; synced: number },
-      ),
-    );
-  }
+  const firstLearning = (onboarded as Record<string, unknown>).firstLearningEvidence as Record<string, unknown> | undefined;
+  const firstLearningReady = firstLearning?.state === 'synchronized' || firstLearning?.state === 'denied_disclosure';
   const relay = flags.has('no-relay-daemon')
     ? { started: false, ...(await waitForRelayReadiness()) }
     : await startRelayDaemon(policyPath);
@@ -2332,7 +2357,6 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     runOrganizationCommand('skills', 'list', apiFlags),
     runOrganizationCommand('usage', 'list', apiFlags),
   ]);
-  requireCompletedBootstrapEvidence(synchronized, Number(preview.trajectoryCount || 0));
   const organizationApi = summarizeBootstrapOrganizationApi({
     organizationId,
     organization,
@@ -2357,11 +2381,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const repositoryReceipt = onboarded as Record<string, unknown>;
   const namedSessionReady = provider !== 'codex' || process.platform !== 'linux'
     || Boolean(namedSession?.ok === true && ['running', 'executing'].includes(String(namedSession.state)));
-  const firstLearning = repositoryReceipt.firstLearningEvidence as Record<string, unknown> | undefined;
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   return {
-    ok: sharedRepositoryReady && namedSessionReady,
-    stage: sharedRepositoryReady ? namedSessionReady ? 'complete' : 'named_session_pending'
+    ok: sharedRepositoryReady && namedSessionReady && firstLearningReady,
+    stage: sharedRepositoryReady ? namedSessionReady ? firstLearningReady ? 'complete' : 'first_learning_pending' : 'named_session_pending'
       : repositoryReadiness?.outcome === 'blocked' ? 'shared_repository_blocked' : 'shared_repository_pending',
     localStage: 'complete',
     sharedRepositoryReady,
@@ -2380,9 +2403,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     provider,
     skill,
     evidence: {
-      discovered: Number(preview.trajectoryCount || 0),
-      synchronized,
-      automaticDisclosure: preview.automaticDisclosure,
+      discovered: Number(firstLearning?.discovered || 0),
+      synchronized: firstLearning,
+      automaticDisclosure: { ready: firstLearning?.disclosureReady === true },
     },
     relayProbe: relay.probe,
     relay,
@@ -3007,10 +3030,17 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       capsules.push(capsule);
       if (fabric) {
         vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
-        await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
-        // An unknown delivery outcome retains the local advisory reservation.
-        // HQ performs the authoritative, idempotent organization/day charge.
-        syncResults.push(await fabric.syncTrajectory(capsule));
+        try {
+          await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
+          // An unknown delivery outcome retains the local advisory reservation.
+          // HQ performs the authoritative, idempotent organization/day charge.
+          syncResults.push(await fabric.syncTrajectory(capsule));
+        } catch (error) {
+          if (isDefinitiveSecretDisclosureRejection(error)) {
+            vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'secret_disclosure_forbidden');
+          }
+          throw error;
+        }
         vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
       }
     }
@@ -4300,6 +4330,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     controlBranch: boundRepository.controlBranch,
     policyRevision: authoritativeRevision,
   }));
+  const canonicalPackage = registered.repositoryPackage!;
   const onboardingProvider = providerIds?.[0] || 'codex';
   const onboardingEvidenceFlags = new Map<string, string | boolean>([
     ['workspace', workspace], ['provider', onboardingProvider],
@@ -4307,9 +4338,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   ]);
   const onboardingEvidencePreview = await staged('first_learning_preview',
     async () => evidencePreview(onboardingEvidenceFlags)) as Record<string, unknown>;
-  let onboardingEvidence: BootstrapEvidenceSynchronization = { state: 'synchronized', captured: 0, synced: 0 };
-  if (Number(onboardingEvidencePreview.trajectoryCount || 0) > 0
-    && (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true) {
+  const discoveredTrajectories = Number(onboardingEvidencePreview.trajectoryCount || 0);
+  const disclosureReady = (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true;
+  let onboardingEvidence = initialBootstrapEvidenceDisposition(discoveredTrajectories, disclosureReady);
+  if (discoveredTrajectories > 0 && disclosureReady) {
     onboardingEvidenceFlags.set('sync', true);
     onboardingEvidence = await staged('first_learning_sync', async () => {
       const result = await synchronizeBootstrapEvidence(
@@ -4317,7 +4349,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
           async () => await capture(onboardingEvidenceFlags, true) as { captured: number; synced: number },
         ),
       );
-      requireCompletedBootstrapEvidence(result, Number(onboardingEvidencePreview.trajectoryCount || 0));
+      if (publishedPackageCanDeferSecretEvidence(result, canonicalPackage, sourceAuthorization.generationId)) {
+        return { ...result, state: 'denied_disclosure' as const };
+      }
+      requireCompletedBootstrapEvidence(result, discoveredTrajectories);
       return result;
     });
   }
@@ -4329,7 +4364,6 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const candidateScope = { organizationId, workspaceId: registered.workspaceId,
     repositoryBindingId: registered.repositoryBindingId, repositoryAgentId: registered.repositoryAgentId };
   const outboxRoot = resolve(dharmaHome(), 'relay', 'repository-candidates');
-  const canonicalPackage = registered.repositoryPackage!;
   const refreshPolicy = repositoryPackageNeedsPolicyRefresh(canonicalPackage, sourceAuthorization.generationId);
   const retryBlockedInitial = canonicalPackage.state === 'blocked' && canonicalPackage.generation === 0
     && canonicalPackage.consolidationMode === 'initial_repository';
@@ -4436,8 +4470,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     repositorySkill: installed,
     repositoryCandidate: candidate,
     firstLearningEvidence: {
-      discovered: Number(onboardingEvidencePreview.trajectoryCount || 0),
-      disclosureReady: (onboardingEvidencePreview.automaticDisclosure as Record<string, unknown> | undefined)?.ready === true,
+      discovered: discoveredTrajectories,
+      disclosureReady,
       ...onboardingEvidence,
     },
     repositoryRole: role,
