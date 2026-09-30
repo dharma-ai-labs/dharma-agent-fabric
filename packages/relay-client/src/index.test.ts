@@ -1116,7 +1116,8 @@ for (const scenario of [
   });
 }
 
-test('content-bearing trajectory outbox is discarded before a new session can replay it', async () => {
+for (const contentRoute of ['trajectories', 'codex-task-exports']) {
+test(`content-bearing ${contentRoute} outbox is discarded before a new session can replay it`, async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-content-outbox-'));
   const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
@@ -1134,7 +1135,7 @@ test('content-bearing trajectory outbox is discarded before a new session can re
   const fetcher = async (url: string | URL | Request) => {
     const pathname = new URL(String(url)).pathname;
     paths.push(pathname);
-    if (failTrajectory && pathname.endsWith('/agent-fabric/trajectories')) {
+    if (failTrajectory && pathname.endsWith(`/agent-fabric/${contentRoute}`)) {
       failTrajectory = false;
       throw new Error('unknown trajectory delivery outcome');
     }
@@ -1142,15 +1143,18 @@ test('content-bearing trajectory outbox is discarded before a new session can re
   };
   const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await client.openSession();
-  await assert.rejects(client.syncTrajectory({ secret: 'authorized-at-the-time' }), /unknown trajectory delivery/);
+  await assert.rejects(client.signedPost(`/agent-fabric/${contentRoute}`,
+    { secret: 'authorized-at-the-time' }),
+  /unknown trajectory delivery/);
   const durableState = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(durableState.pending, null);
   assert.doesNotMatch(await readFile(statePath, 'utf8'), /authorized-at-the-time/);
   const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
   await resumed.openSession();
-  assert.equal(paths.filter((path) => path.endsWith('/agent-fabric/trajectories')).length, 1);
+  assert.equal(paths.filter((path) => path.endsWith(`/agent-fabric/${contentRoute}`)).length, 1);
   assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
 });
+}
 
 test('trajectory head lookup is device signed without becoming a content-bearing replay', async () => {
   const store = memoryStore();
