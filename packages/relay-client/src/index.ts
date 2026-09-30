@@ -566,12 +566,14 @@ function parseBootstrapRecipientApproval(
     return null;
   }
   const fragment = new URLSearchParams(destination.hash.slice(1));
+  const hasRepositoryFingerprint = Boolean(input.repositoryFingerprint);
   if (fragment.get('organizationId') !== input.organizationId
     || fragment.get('publicKeyEd25519') !== input.publicKeyEd25519
-    || fragment.get('repositoryFingerprint') !== input.repositoryFingerprint
+    || (hasRepositoryFingerprint && fragment.get('repositoryFingerprint') !== input.repositoryFingerprint)
+    || (!hasRepositoryFingerprint && fragment.has('repositoryFingerprint'))
     || !/^[a-f0-9]{64}$/.test(fragment.get('bootstrapTokenHash') || '')
-    || !/^sha256:[a-f0-9]{64}$/.test(fragment.get('repositoryFingerprint') || '')
-    || ['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash', 'repositoryFingerprint']
+    || (hasRepositoryFingerprint && !/^sha256:[a-f0-9]{64}$/.test(fragment.get('repositoryFingerprint') || ''))
+    || ['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash', ...(hasRepositoryFingerprint ? ['repositoryFingerprint'] : [])]
       .some(key => fragment.getAll(key).length !== 1)
     || [...fragment.keys()].some(key => !['organizationId', 'publicKeyEd25519', 'bootstrapTokenHash', 'repositoryFingerprint'].includes(key))) {
     return null;
