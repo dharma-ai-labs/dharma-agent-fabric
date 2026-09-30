@@ -705,10 +705,13 @@ test('durable stores reject malformed or decision-conflicting receipts', async (
   await assert.rejects(new FileActionExecutionJournal(journalRoot).get(taskId), /Task receipt is invalid/);
 });
 
-test('one embedded block receipt is consumed, contains the task, and never reaches the provider', async () => {
+for (const outcome of ['block', 'escalate', 'withhold'] as const) {
+test(`one embedded ${outcome} receipt contains the task without a protected effect`, async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-block-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
+  const protectedPath = resolve(workspace, 'protected.txt');
+  await writeFile(protectedPath, 'original protected content\n');
   assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
   assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
   assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
@@ -731,7 +734,7 @@ test('one embedded block receipt is consumed, contains the task, and never reach
     acceptance: { commands: [], requiredArtifacts: [] }, budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
     createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), nonce: randomUUID(),
   } satisfies Omit<TaskEnvelope, 'actionDecision' | 'signature'>;
-  const actionDecision = embedDecision(baseTask, 'block', decisionKeys.privateKey, now);
+  const actionDecision = embedDecision(baseTask, outcome, decisionKeys.privateKey, now);
   const unsigned = { ...baseTask, actionDecision };
   const task = { ...unsigned, signature: signCanonicalObject(unsigned, taskKeys.privateKey) } as TaskEnvelope;
   let executions = 0;
@@ -739,9 +742,15 @@ test('one embedded block receipt is consumed, contains the task, and never reach
     task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: taskKeys.publicKey,
     receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')),
     actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey, now: () => now },
-    providerExecutor: async () => { executions += 1; throw new Error('must not execute'); },
+    providerExecutor: async () => {
+      executions += 1;
+      await writeFile(protectedPath, 'unauthorized effect\n');
+      throw new Error('must not execute');
+    },
   });
   assert.equal(result.status, 'failed');
   assert.equal(executions, 0);
   assert.equal(result.actionAcknowledgement?.disposition, 'contained');
+  assert.equal(await readFile(protectedPath, 'utf8'), 'original protected content\n');
 });
+}
