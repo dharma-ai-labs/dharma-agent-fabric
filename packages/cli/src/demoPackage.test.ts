@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
-import { loadOrCreateDeviceIdentity, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
+import { loadActiveSkillAuthorizationAnchor, loadOrCreateDeviceIdentity,
+  type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { calculateBundleHash } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { scopePath } from './demoEnrollment.js';
 import { demoRepositoryPackage } from './demoPackage.js';
@@ -563,6 +564,87 @@ test('a published signed package installs once under the scoped provider and reu
   assert.equal(second.sourceSync?.state, 'unchanged');
   assert.equal(f.acknowledgements.length, 2);
 });
+
+for (const missingFile of ['AUTHORIZATION.json', 'INSTALL_RECEIPT.json', 'ACTIVE_BUNDLE']) {
+  test(`missing protected installation ${missingFile} reports recovery without replacing authority`, async () => {
+    const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+    const nativeSkillDirectory = resolve(f.workspace, '.agents/skills');
+    const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+      nativeSkillDirectory, knowledgeOnly: true };
+    const deps = { store: f.store, fetcher: f.fetcher };
+    await demoRepositoryPackage(input, deps);
+    const anchorInput = { config: { hqUrl, organizationId, deviceId }, workspaceId: repositoryId,
+      organizationAgentId: repositoryId, provider: 'codex' as const, store: f.store };
+    const before = await loadActiveSkillAuthorizationAnchor(anchorInput);
+    assert.ok(before);
+    const root = resolve(nativeSkillDirectory, '.dharma-managed/workspaces', repositoryId);
+    const path = missingFile === 'ACTIVE_BUNDLE'
+      ? resolve(root, missingFile) : resolve(root, 'active', missingFile);
+    await unlink(path);
+
+    await assert.rejects(demoRepositoryPackage(input, deps), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { code?: string }).code, 'demo_package_installation_missing');
+      assert.match(error.message, /protected receipt/);
+      assert.match(error.message, /original provider installation/);
+      assert.equal(error.message.includes(f.workspace), false);
+      return true;
+    });
+    assert.deepEqual(await loadActiveSkillAuthorizationAnchor(anchorInput), before);
+    await assert.rejects(readFile(path), { code: 'ENOENT' });
+    assert.equal(f.acknowledgements.length, 1);
+    assert.equal(f.uploads.length, 0);
+  });
+}
+
+test('a different native directory cannot silently replace a protected installation', async () => {
+  const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+  const deps = { store: f.store, fetcher: f.fetcher };
+  const nativeSkillDirectory = resolve(f.workspace, '.agents/skills');
+  const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+    nativeSkillDirectory, knowledgeOnly: true };
+  const first = await demoRepositoryPackage(input, deps);
+  const originalReceipt = resolve(nativeSkillDirectory, '.dharma-managed/workspaces',
+    repositoryId, 'active/INSTALL_RECEIPT.json');
+  const before = await readFile(originalReceipt);
+  const target = resolve(f.workspace, 'another-native-installation');
+  await assert.rejects(demoRepositoryPackage({ ...input, nativeSkillDirectory: target }, deps),
+    { code: 'demo_package_installation_missing' });
+  assert.deepEqual(await readFile(originalReceipt), before);
+  await assert.rejects(readFile(resolve(target, 'dharma-agent-fabric/SKILL.md')), { code: 'ENOENT' });
+  const resumed = await demoRepositoryPackage(input, deps);
+  assert.equal(resumed.installed?.alreadyInstalled, true);
+  assert.equal(resumed.installed?.receiptHash, first.installed?.receiptHash);
+  assert.equal(f.acknowledgements.length, 2);
+  assert.equal(f.uploads.length, 0);
+});
+
+for (const damagedFile of ['AUTHORIZATION.json', 'INSTALL_RECEIPT.json']) {
+  test(`damaged ${damagedFile} is not classified as a missing installation`, async () => {
+    const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid' });
+    const nativeSkillDirectory = resolve(f.workspace, '.agents/skills');
+    const input = { scope: f.scope, workspace: f.workspace, provider: 'codex' as const,
+      nativeSkillDirectory, knowledgeOnly: true };
+    const deps = { store: f.store, fetcher: f.fetcher };
+    await demoRepositoryPackage(input, deps);
+    const anchorInput = { config: { hqUrl, organizationId, deviceId }, workspaceId: repositoryId,
+      organizationAgentId: repositoryId, provider: 'codex' as const, store: f.store };
+    const before = await loadActiveSkillAuthorizationAnchor(anchorInput);
+    const path = resolve(nativeSkillDirectory, '.dharma-managed/workspaces', repositoryId,
+      'active', damagedFile);
+    const corrupt = '{invalid signed record';
+    await writeFile(path, corrupt);
+    await assert.rejects(demoRepositoryPackage(input, deps), (error: unknown) => {
+      assert.ok(error instanceof SyntaxError);
+      assert.notEqual((error as Error & { code?: string }).code, 'demo_package_installation_missing');
+      return true;
+    });
+    assert.deepEqual(await loadActiveSkillAuthorizationAnchor(anchorInput), before);
+    assert.equal(await readFile(path, 'utf8'), corrupt);
+    assert.equal(f.acknowledgements.length, 1);
+    assert.equal(f.uploads.length, 0);
+  });
+}
 
 test('missing checkout snapshot reseeds source history without publishing deletions', async () => {
   const f = await fixture({ sourcePolicy: true, packagePublished: true, activePackage: 'valid', remoteSkill: true });
