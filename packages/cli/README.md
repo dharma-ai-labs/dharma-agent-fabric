@@ -52,6 +52,20 @@ or replace registry/trust files by hand. Restoring local registration is not a
 complete onboarding or a relay upgrade; verify the signed package and full
 readiness receipt after the supported grant-free resume.
 
+## Inspect repository worker failures
+
+CLI 0.2.129 records sanitized per-repository worker failure stages and categories.
+From the enrolled checkout, inspect `dharma status --diagnostic`. A receipt is
+bound to the organization, device, workspace and observed relay PID-file state;
+foreign, stale or superseded failures are not treated as current.
+
+A healthy global relay does not prove that every repository worker is polling.
+Capture the selected repository's stage/category and current-process poll before
+requesting a supported repair. Diagnostics do not relax evidence policy, disclose
+raw exception text, replace enrollment or establish signed readiness. Preserve
+encrypted evidence; do not delete it or repeat unchanged bootstrap to bypass a
+failure. Require the full readiness receipt after recovery.
+
 ## Demo peer collaboration
 
 After a recipient approves a Demo device, run these commands for the exact
