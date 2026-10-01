@@ -1,5 +1,16 @@
 # AGENTS.md - Dharma Agent Fabric Engineering Contract
 
+## Owned repository skill provenance
+
+For maintained owned repository skill authoring, revision, packaging, and use,
+apply `docs/foundation/09-skill-provenance-and-adherence.md` from verified
+`dharma-ai-labs/dharmamegha` at the intended approved commit. Keep its shared
+prerequisite in each in-scope entrypoint and retain exact-byte load receipts with
+results; assess adherence and outcome separately. Update its coverage manifest
+after reviewing changed skill bytes. Vendored, plugin, and managed copies are
+excluded from this source rollout. Signed release and activation authority remain
+with their existing workflows.
+
 ## Product boundary
 
 Dharma Agent Fabric is a local-to-cloud control system for coding agents. It is not a generic remote-administration agent, employee-surveillance product, arbitrary shell service, or replacement for the customer's coding-agent provider.
