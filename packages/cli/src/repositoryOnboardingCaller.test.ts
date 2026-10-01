@@ -249,6 +249,7 @@ test('joining an existing package registers only a managed knowledge endpoint', 
       assert.equal(selected, bindingId); calls.push('bind_existing');
       return { ...entry, repositoryBindingId: bindingId,
         repositoryAgentId: '44444444-4444-4444-8444-444444444444',
+        repositoryAgentKey: `repo:${'a'.repeat(24)}`, controlBranch: 'agents/fixture-aaaaaaaa',
         endpointId: '55555555-5555-4555-8555-555555555555',
         repositoryPackage: { state: 'published' } };
     },
@@ -256,7 +257,17 @@ test('joining an existing package registers only a managed knowledge endpoint', 
     registerRepositoryRoleMetadata: async () => ({ role: { revision: 1 } }),
     receiptAwareProviderCapabilities: async () => [{ provider: 'codex' }],
     selectedProviderAdapters: () => [{ capability: async () => ({ provider: 'codex' }) }],
-    installAvailableNativeAgentFabricBootstraps: async () => ({ installed: ['codex'], failures: [] }),
+    loadAgentFabricOnboardingContract: async () => ({ markdown: '# Joined operating contract' }),
+    installRepositoryJoinConnection: async (input: Record<string, unknown>) => {
+      assert.equal(input.bindingId, bindingId);
+      assert.equal(input.sourceFingerprint, fingerprint);
+      assert.equal(input.organizationId, 'org_fixture');
+      assert.equal(input.workspaceId, '33333333-3333-4333-8333-333333333333');
+      assert.equal(input.repositoryAgentId, '44444444-4444-4444-8444-444444444444');
+      assert.equal(input.onboardingMarkdown, '# Joined operating contract');
+      calls.push('join_connection');
+    },
+    installAvailableNativeAgentFabricBootstraps: async () => { calls.push('native_bootstrap'); return { installed: ['codex'], failures: [] }; },
     startRelayDaemon: async () => ({ state: 'running' }),
     repositorySharedReady: async () => true,
     isLocalProviderId: (value: string) => value === 'codex',
@@ -270,6 +281,8 @@ test('joining an existing package registers only a managed knowledge endpoint', 
   assert.equal((result.firstLearningEvidence as Record<string, unknown>).state, 'shared_package_inherited');
   assert.deepEqual(calls.slice(0, 5), ['marker', 'managed_git_init', 'managed_empty_commit', 'registry', 'policy']);
   assert.ok(calls.includes('bind_existing'));
+  assert.ok(calls.indexOf('bind_existing') < calls.indexOf('join_connection'));
+  assert.ok(calls.indexOf('join_connection') < calls.indexOf('native_bootstrap'));
 });
 
 test('knowledge-only workspaces cannot be promoted through source registration or inventory', async () => {

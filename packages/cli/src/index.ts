@@ -54,6 +54,7 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
+import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
@@ -97,7 +98,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.131';
+const VERSION = '0.2.132';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4166,6 +4167,15 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
   }
   const providers = await receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters([provider]).map(adapter => adapter.capability())));
+  if (!item.repositoryAgentId || !item.repositoryAgentKey || !item.controlBranch) {
+    throw new Error('repository_join_binding_incomplete');
+  }
+  await installRepositoryJoinConnection({ workspace, workspaceId: item.workspaceId,
+    organizationId: config.organizationId, bindingId, sourceFingerprint,
+    repositoryAgentId: item.repositoryAgentId, repositoryAgentKey: item.repositoryAgentKey,
+    controlBranch: item.controlBranch, hqUrl: config.hqUrl,
+    policyRevision: required(flags, 'policy-revision'),
+    onboardingMarkdown: (await loadAgentFabricOnboardingContract()).markdown });
   const nativeSkills = await installAvailableNativeAgentFabricBootstraps({ providers,
     workspace, workspaceId: item.workspaceId, organizationId: config.organizationId, hqUrl: config.hqUrl });
   const relay = flags.has('no-relay-daemon') ? { started: false, state: 'not_started' }
