@@ -43,6 +43,7 @@ import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegi
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { runOwnedContainerEntrypoint } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
@@ -99,7 +100,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.134';
+const VERSION = '0.2.135';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1821,13 +1822,14 @@ async function startRelayDaemon(policyPath: string) {
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
   if (supervisorState === 'stopped') {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-      cwd: dirname(dirname(policyPath)),
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    });
-    child.unref();
+    if ((await relayAutostartStatus({ home: dharmaHome() })).backend === 'container-entrypoint') {
+      await startRelayAutostart({ home: dharmaHome() });
+    } else {
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
+        cwd: dirname(dirname(policyPath)), detached: true, stdio: 'ignore', env: process.env,
+      });
+      child.unref();
+    }
   }
   let supervisorReady = false;
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -2464,7 +2466,11 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
-  const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform) || autostart.state === 'enabled';
+  const observedAutostart = autostart.backend === 'container-entrypoint'
+    ? await relayAutostartStatus({ home: dharmaHome() }) : autostart;
+  const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform)
+    || observedAutostart.state === 'enabled'
+      && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running');
   const complete = sharedRepositoryReady && namedSessionReady && firstLearningReady
     && roleReady && relayReady && startupReady;
   return {
@@ -2490,7 +2496,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     },
     repository: onboarded,
     launcher,
-    autostart,
+    autostart: observedAutostart,
     provider,
     skill,
     evidence: {
@@ -7196,6 +7202,25 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
 export async function run(argv: string[]): Promise<Output> {
   const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
+  if (command === 'relay' && subcommand === 'container-entrypoint') {
+    if (positional.length === 2 && flags.size === 1 && flags.get('dry-run') === true) {
+      return { ok: true, stage: 'container_entrypoint_plan', started: false,
+        requiresNonRootLinuxPid1: true, requiresCanonicalCliEntrypoint: true,
+        requiresExplicitPrivateDharmaHome: true, requiresPrivateSecretService: true,
+        requiresNormalRecipientEnrollment: true, restartCoverage: 'container-entrypoint-only',
+        changesHostStartup: false };
+    }
+    if (flags.size || positional.length !== 2) throw new Error('container_entrypoint_options_forbidden: use the owned runtime configuration, without grant or policy arguments.');
+    if (process.platform !== 'linux' || process.pid !== 1 || !process.getuid?.()
+      || !process.env.DHARMA_HOME || !isAbsolute(process.env.DHARMA_HOME)) {
+      throw new Error('container_entrypoint_requires_pid1: a non-root Linux container entrypoint with an explicit private DHARMA_HOME is required.');
+    }
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.on('SIGTERM', stop); process.on('SIGINT', stop);
+    try { return { ok: true, ...await runOwnedContainerEntrypoint({ home: dharmaHome(), signal: controller.signal }) }; }
+    finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+  }
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',

@@ -27,6 +27,44 @@ Existing `--grant` integrations remain compatible. New portal instructions use
 private entry instead. After enrollment, use the exact supported grant-free
 `bootstrap --resume --complete` command; do not enter or replay the spent grant.
 
+## Owned Linux container lifecycle
+
+An unprivileged Linux container may use `relay container-entrypoint` as its
+actual non-root PID1 instead of a host systemd user service. Install the exact
+qualified CLI and supported Node runtime in the image, then exec Node with the
+absolute canonical `dist/bin.js` path and `relay container-entrypoint`. The
+command accepts no grant, policy, provider or task arguments. Inspect the
+credential-free plan with `relay container-entrypoint --dry-run` before image
+installation; it makes no local changes. Set an explicit
+private `DHARMA_HOME` before launch. An npm wrapper, shell that does not exec,
+`sleep` or init shim as PID1 does not qualify.
+
+The image/operator must provide its own protected Secret Service, private
+session bus and durable private home. Never mount a host bus or copy another
+client's credentials. Genuine provider login and private USER keyring unlock
+remain recipient actions. The entrypoint waits without enrollment or provider
+work until normal signed onboarding installs its canonical startup registration.
+It then launches the exact installed CLI supervisor, retaining all device,
+repository, policy and task checks. A locked or absent protected collection
+blocks launch; it does not select a plaintext store or request a model turn.
+
+The entrypoint owns one relay for that container OS user. It never creates a
+second host service or changes an existing systemd user unit. Owned start/stop
+controls use atomic private receipts; disable removes the registration. It
+reaps its child on normal shutdown and retries an exited child with a bounded
+delay. A new container boot renews only its own PID1 lease while retaining its
+configuration and encrypted state. Runtime-version mismatch blocks restart;
+upgrade the reviewed image/runtime together through the normal release path.
+
+`relay autostart status` distinguishes saved configuration, blocked storage,
+paused work and a freshly observed live child with matching UID, parent and
+process start time. This is container-entrypoint restart coverage only. The
+CLI does not install Docker restart policy or prove host sign-in/reboot recovery.
+A real container restart, protected-store unlock, unchanged device/session
+identity, current signed relay polling and independent operator rehearsal must
+be observed before claiming readiness. Container creation, entrypoint changes
+and persistent startup installation remain explicit operator decisions.
+
 ## Recover a committed legacy bootstrap
 
 Older repositories may contain an unsigned installer marker committed for a
