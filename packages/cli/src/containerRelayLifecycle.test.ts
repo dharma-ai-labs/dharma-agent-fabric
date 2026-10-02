@@ -417,3 +417,17 @@ test('malformed entrypoint leases cannot be silently discarded as an earlier boo
     } finally { clearTimeout(timeout); controller.abort(); }
   }
 });
+
+
+test('entrypoint never starts an owned child after shutdown arrives during consumer preflight', posix, async () => {
+  const f = await fixture(); await enableRelayAutostart(f.options);
+  const controller = new AbortController(); let checking = false; let launches = 0;
+  let release: (() => void) | undefined;
+  const consumer = new Promise<boolean>(resolveReady => { release = () => resolveReady(true); });
+  const result = entrypoint()({ home: f.home, uid: f.options.uid, signal: controller.signal,
+    containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => { checking = true; return consumer; },
+    pollMs: 10, restartDelayMs: 10, spawnRelay: () => { launches++;
+      return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); } });
+  await until(() => checking); controller.abort(); release!(); await result;
+  assert.equal(launches, 0);
+});

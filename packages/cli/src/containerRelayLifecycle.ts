@@ -42,14 +42,15 @@ async function privateDirectory(options: ContainerLifecycleOptions) {
 async function privateJson(options: ContainerLifecycleOptions, name: string): Promise<unknown | null> {
   try {
     const path = privatePath(options.home, name);
-    const stat = await lstat(path);
-    await privateDirectory(options);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== ownUid(options) || (stat.mode & 0o077) !== 0 || stat.size > 32_768) throw unavailable();
-    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Validate the opened descriptor, not two different path snapshots. An
+    // owned atomic rename can legitimately replace the path between lstat/open.
+    // O_NOFOLLOW and fstat still reject symlinks, foreign owners and unsafe modes.
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
+      await privateDirectory(options);
       const current = await file.stat();
       if (!current.isFile() || current.uid !== ownUid(options) || (current.mode & 0o077) !== 0
-        || current.size > 32_768 || current.dev !== stat.dev || current.ino !== stat.ino) throw unavailable();
+        || current.size > 32_768) throw unavailable();
       const text = await file.readFile('utf8');
       if (Buffer.byteLength(text) > 32_768) throw unavailable();
       return JSON.parse(text) as unknown;
@@ -76,7 +77,7 @@ export async function readContainerPid1Identity(): Promise<ContainerProcessIdent
 }
 
 async function publicRuntimeBytes(path: string, limit: number, executingCaller = false) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
     if (!stat.isFile() || !executingCaller && (stat.mode & 0o022) !== 0 || stat.size > limit) throw unavailable();
@@ -332,6 +333,7 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
       const compatibleRuntime = configuration?.registration.version === runtimeVersion;
       const protectedConsumer = configuration?.running && compatibleRuntime
         ? await (options.consumerStoreReady || containerConsumerStoreReady)().catch(() => false) : false;
+      if (options.signal.aborted) break; // no new child after interrupted preflight
       const shouldRun = Boolean(configuration?.running && protectedConsumer);
       if (child && (childFailed || child.exitCode !== null || child.signalCode !== null)) {
         child = null; childIdentity = null; childHash = null; childFailed = false; restarts++; retryAt = Date.now() + restartDelayMs;
