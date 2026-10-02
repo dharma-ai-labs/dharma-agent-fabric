@@ -272,7 +272,10 @@ export async function containerConsumerStoreReady(): Promise<boolean> {
 async function stopOwnedChild(child: ChildProcess, options: ContainerLifecycleOptions, identity: ContainerChildIdentity | null) {
   if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
   // Never signal a recycled PID or a process outside this owned parent/UID.
-  if (!identity || !await ownedChild(options, child.pid, identity.startTicks).catch(() => null)) return;
+  if (identity && !await ownedChild(options, child.pid, identity.startTicks).catch(() => null)) return;
+  // On an initial /proc failure, the freshly spawned ChildProcess handle is
+  // still ours. Drain it immediately; never leave unverified work running.
+  // This function accepts no raw PID and only receives this loop's own spawn.
   const exited = new Promise<void>(resolveWait => {
     child.once('exit', () => resolveWait()); child.once('error', () => resolveWait());
   });
@@ -281,7 +284,7 @@ async function stopOwnedChild(child: ChildProcess, options: ContainerLifecycleOp
   await Promise.race([exited, new Promise<void>(resolveWait => { timer = setTimeout(resolveWait, 10_000); })]);
   if (timer) clearTimeout(timer);
   if (child.exitCode === null && child.signalCode === null
-    && await ownedChild(options, child.pid, identity.startTicks).catch(() => null)) { child.kill('SIGKILL'); await exited; }
+    && (!identity || await ownedChild(options, child.pid, identity.startTicks).catch(() => null))) { child.kill('SIGKILL'); await exited; }
 }
 
 export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOptions & {

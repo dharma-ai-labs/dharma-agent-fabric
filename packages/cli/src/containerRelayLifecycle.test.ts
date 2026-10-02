@@ -431,3 +431,18 @@ test('entrypoint never starts an owned child after shutdown arrives during consu
   await until(() => checking); controller.abort(); release!(); await result;
   assert.equal(launches, 0);
 });
+
+
+test('unverifiable freshly spawned child fails closed and is reaped through its owned process handle', posix, async () => {
+  const f = await fixture(); await enableRelayAutostart(f.options);
+  const controller = new AbortController(); let child: ChildProcess | undefined;
+  const result = entrypoint()({ home: f.home, uid: f.options.uid, signal: controller.signal,
+    containerRuntime: { ...f.options.containerRuntime, childIdentity: async () => { throw new Error('CANARY_PROC_FAILURE'); } },
+    consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
+    spawnRelay: () => child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }) });
+  try {
+    await assert.rejects(result, error => { assert.match(String(error), /container_startup_unavailable/);
+      assert.doesNotMatch(String(error), /CANARY_PROC_FAILURE/); return true; });
+    assert.ok(child); await until(() => exited(child!), 100);
+  } finally { controller.abort(); if (child && !exited(child)) { child.kill('SIGTERM'); await until(() => exited(child!)); } }
+});
