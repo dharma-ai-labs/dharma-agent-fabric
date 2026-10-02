@@ -34,3 +34,12 @@ test('container lifecycle schema separates configuration from live-child receipt
   assert.equal(validate({ ...marker, uid: 0 }), false);
   assert.equal(validate({ ...control, registrationHash: 'foreign' }), false);
 });
+
+test('Docker-init marker carries both boot identities and rejects incomplete or secret-bearing authority', async () => {
+  const validate = await validator('container-relay-lifecycle.v1');
+  const marker = { schema: 'dharma.container-entrypoint/v2', home: '/private/device', pid: 42, uid: 1000,
+    startTicks: '1235', initStartTicks: '1234' };
+  assert.equal(validate(marker), true, JSON.stringify(validate.errors));
+  for (const delta of [{ pid: 1 }, { uid: 0 }, { initStartTicks: null }, { initStartTicks: 'CANARY_PRIVATE_INPUT' },
+    { startTicks: '' }, { grant: 'CANARY_PRIVATE_INPUT' }]) assert.equal(validate({ ...marker, ...delta }), false);
+});

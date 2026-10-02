@@ -7205,15 +7205,15 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'relay' && subcommand === 'container-entrypoint') {
     if (positional.length === 2 && flags.size === 1 && flags.get('dry-run') === true) {
       return { ok: true, stage: 'container_entrypoint_plan', started: false,
-        requiresNonRootLinuxPid1: true, requiresCanonicalCliEntrypoint: true,
+        requiresNonRootLinuxEntrypoint: true, supportsDirectPid1: true, supportsVerifiedDockerInitChild: true, requiresCanonicalCliEntrypoint: true,
         requiresExplicitPrivateDharmaHome: true, requiresPrivateSecretService: true,
         requiresNormalRecipientEnrollment: true, restartCoverage: 'container-entrypoint-only',
         changesHostStartup: false };
     }
     if (flags.size || positional.length !== 2) throw new Error('container_entrypoint_options_forbidden: use the owned runtime configuration, without grant or policy arguments.');
-    if (process.platform !== 'linux' || process.pid !== 1 || !process.getuid?.()
+    if (process.platform !== 'linux' || process.pid !== 1 && process.ppid !== 1 || !process.getuid?.()
       || !process.env.DHARMA_HOME || !isAbsolute(process.env.DHARMA_HOME)) {
-      throw new Error('container_entrypoint_requires_pid1: a non-root Linux container entrypoint with an explicit private DHARMA_HOME is required.');
+      throw new Error('container_entrypoint_requires_pid1: a non-root Linux PID1 or verified Docker-init direct child with an explicit private DHARMA_HOME is required.');
     }
     const controller = new AbortController();
     const stop = () => controller.abort();
