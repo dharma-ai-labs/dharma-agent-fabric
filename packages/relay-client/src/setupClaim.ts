@@ -190,19 +190,33 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         : verifyInitialServerSigningKeyset(approved.serverSigningKeyset!, createPublicKey({format: 'jwk',
           key: { kty: 'OKP', crv: 'Ed25519', x: approved.serverPublicKeyEd25519 }}), input.organizationId, new Date(now()));
       if (!verified.ok) return fail();
-      normalizeRelayUrl(approved.relayUrl);
+      const relayUrl = normalizeRelayUrl(approved.relayUrl);
       const config: DeviceConfig = { schema: 'dharma.device-config/v1', hqUrl, organizationId: input.organizationId,
         ...(input.installationId ? {installationId: input.installationId} : {}), deviceId: approved.deviceId,
         deviceName: input.name, platform: input.platform, publicKeyEd25519: identity.publicKeyEd25519,
         serverPublicKeyEd25519: approved.serverPublicKeyEd25519, serverSigningKeyset: approved.serverSigningKeyset,
-        relayUrl: approved.relayUrl, enrolledAt: existing?.enrolledAt ?? new Date(now()).toISOString(),
+        relayUrl, enrolledAt: existing?.enrolledAt ?? new Date(now()).toISOString(),
         setupClaimReference: challenge.setupReference, setupClaimRepositoryFingerprint: challenge.repositoryFingerprint };
-      // Revalidate at the commit boundary. No decrypted value is returned/logged.
-      parseSetupClaimChallenge(challenge, expected, now());
+      // Each effect is fenced by the live challenge and a readonly fresh key
+      // check. Never recreate a missing/changed identity during commit.
+      // The protected store and public config file are not a single transaction:
+      // interruption preserves partial protected writes for same-key recovery.
+      const assertCommit = async () => {
+        if (now() >= deadline) return fail();
+        parseSetupClaimChallenge(challenge, expected, now());
+        const current = await (store.getFresh ?? store.get).call(store, identity.account);
+        if (!current || canonicalize(JSON.parse(current)) !== canonicalize(identity.privateJwk)) return fail();
+        if (now() >= deadline) return fail();
+        parseSetupClaimChallenge(challenge, expected, now());
+      };
+      await assertCommit();
       await saveOrganizationApiToken({ hqUrl, organizationId: input.organizationId,
         installationId: input.installationId, token: approved.organizationApiToken, store });
+      await assertCommit();
       await saveDeviceEnrollmentAnchor({ config, store });
+      await assertCommit();
       await saveDeviceConfig(input.configPath, config);
+      await assertCommit();
       return { config, scopes: [...SCOPES] };
     }
   } catch { return fail(); }

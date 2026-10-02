@@ -318,3 +318,68 @@ test('repeated approved rate limits stop at overall deadline without new challen
     assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
+
+test('relay normalization never returns or persists an untrusted path canary',async()=>{
+  const canary='synthetic-relay-path-canary';const f=await fixture(p=>{p.relayUrl=`wss://relay.example/${canary}`;});
+  try{
+    const result=await claimSetupReference(f.input);
+    assert.equal(result.config.relayUrl,'wss://relay.example');
+    assert.equal(JSON.stringify(result).includes(canary),false);
+    assert.equal((await readFile(f.input.configPath,'utf8')).includes(canary),false);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('relay query or userinfo secrets are rejected without public output or credential commit',async t=>{
+  for(const relayUrl of ['wss://relay.example/?token=synthetic-canary','wss://synthetic-canary@relay.example'])
+    await t.test('invalid relay authority',async()=>{
+      const f=await fixture(p=>{p.relayUrl=relayUrl;});
+      try{await assert.rejects(claimSetupReference(f.input),/^Error: setup_claim_failed$/);
+        assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);}
+      finally{await rm(f.root,{recursive:true,force:true});}
+    });
+});
+test('protected device key changes after approval cannot commit enrollment credentials',async()=>{
+  const f=await fixture();const currentGet=f.memory.get;
+  f.memory.getFresh=async account=>account.startsWith('device-key-')?null:currentGet(account);
+  try{
+    await assert.rejects(claimSetupReference(f.input),/^Error: setup_claim_failed$/);
+    assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);
+    await assert.rejects(readFile(f.input.configPath));
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('expiry during protected token write stops later anchor/config publication without destructive rollback',async()=>{
+  const f=await fixture();const put=f.memory.put;let anchors=0;
+  f.memory.put=async(account,value)=>{
+    await put(account,value);
+    if(account.startsWith('organization-api-'))f.advance(60_001);
+    if(account.startsWith('device-enrollment-'))anchors++;
+  };
+  try{
+    await assert.rejects(claimSetupReference(f.input),/^Error: setup_claim_failed$/);
+    assert.equal(anchors,0);await assert.rejects(readFile(f.input.configPath));
+    // The already-written protected credential is preserved for authenticated
+    // same-key recovery; no claim of transactional native-store rollback.
+    assert.equal(Boolean(await loadOrganizationApiToken({...scope,store:f.memory})),true);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('protected token write interruption is sanitized and cannot publish a device config',async()=>{
+  const f=await fixture();const put=f.memory.put;let anchors=0;
+  f.memory.put=async(account,value)=>{
+    if(account.startsWith('organization-api-'))throw new Error('synthetic-secret-interruption');
+    if(account.startsWith('device-enrollment-'))anchors++;
+    await put(account,value);
+  };
+  try{
+    await assert.rejects(claimSetupReference(f.input),/^Error: setup_claim_failed$/);
+    assert.equal(anchors,0);await assert.rejects(readFile(f.input.configPath));
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('recipient approval cancellation stops without credential writes or a public config',async()=>{
+  const f=await fixture(undefined,true);
+  try{
+    await assert.rejects(claimSetupReference({...f.input,onRecipientApprovalRequired:()=>{
+      throw new Error('synthetic-private-cancellation');
+    }}),/^Error: setup_claim_failed$/);
+    assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);
+    await assert.rejects(readFile(f.input.configPath));assert.equal(f.calls,2);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
