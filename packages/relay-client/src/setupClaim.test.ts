@@ -240,3 +240,81 @@ test('lost response recovery uses the same protected device key with a fresh enc
     assert.equal(f.calls,4);
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
+
+test('claim name boundary rejects 121 characters and short/control names before store or HTTP effects',async()=>{
+  for(const name of ['a'.repeat(121),'a','a\n']){
+    let effects=0;const forbidden:SecureSecretStore={backend:'linux-secret-service',
+      get:async()=>{effects++;return null;},put:async()=>{effects++;},delete:async()=>{effects++;}};
+    await assert.rejects(claimSetupReference({...scope,name,store:forbidden,fetcher:async()=>{
+      effects++;return Response.json({});
+    }}),/^Error: setup_claim_failed$/);
+    assert.equal(effects,0);
+  }
+});
+test('claim name boundary permits 120 characters and request schema agrees',async()=>{
+  const f=await fixture();const name='a'.repeat(120);
+  const fetcher:typeof fetch=async(url,init)=>{
+    const request=JSON.parse(String(init?.body));
+    if(request.action==='challenge'){
+      const schemas=resolve(import.meta.dirname,'../../../schemas');
+      assert.equal((await validateContract(schemas,'https://schemas.dharma-ai.io/setup-claim-request/v1',request)).ok,true);
+      assert.equal((await validateContract(schemas,'https://schemas.dharma-ai.io/setup-claim-request/v1',{
+        ...request,device:{...request.device,name:'a'.repeat(121)}})).ok,false);
+    }
+    return f.input.fetcher(url,init);
+  };
+  try{const result=await claimSetupReference({...f.input,name,fetcher});assert.equal(result.config.deviceName,name);}
+  finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('approved rate limit retries exact signed request with Retry-After and preserves request timeout',async()=>{
+  const f=await fixture();const finalized:string[]=[];let limited=true;const waits:number[]=[];
+  const fetcher:typeof fetch=async(url,init)=>{
+    const request=JSON.parse(String(init?.body));
+    assert.ok(init?.signal);
+    if(request.action==='finalize'){
+      finalized.push(String(init?.body));
+      if(limited){limited=false;return Response.json({ok:false,error:{code:'rate_limited',message:'secret-canary'}},
+        {status:429,headers:{'retry-after':'1'}});}
+    }
+    return f.input.fetcher(url,init);
+  };
+  try{
+    const result=await claimSetupReference({...f.input,fetcher,sleep:async ms=>{waits.push(ms);f.advance(ms);}});
+    assert.equal(result.config.setupClaimReference,scope.setupReference);
+    assert.equal(finalized.length,2);assert.equal(finalized[0],finalized[1]);
+    assert.deepEqual(waits,[1_000]);assert.equal(f.calls,2);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('rate limit retry cannot exceed fixed expiry or accept malformed Retry-After/error context',async t=>{
+  for(const kind of ['deadline','missing','malformed','wrong-code'] as const)await t.test(kind,async()=>{
+    const f=await fixture();let finalized=0,waits=0;
+    const fetcher:typeof fetch=async(url,init)=>{
+      const request=JSON.parse(String(init?.body));
+      if(request.action==='finalize'){
+        finalized++;return Response.json({ok:false,error:{code:kind==='wrong-code'?'foreign':'rate_limited'}},
+          {status:429,headers:kind==='missing'?{}:{'retry-after':kind==='deadline'?'60':kind==='malformed'?'invalid':'1'}});
+      }
+      return f.input.fetcher(url,init);
+    };
+    try{
+      await assert.rejects(claimSetupReference({...f.input,fetcher,sleep:async()=>{waits++;}}),/^Error: setup_claim_failed$/);
+      assert.equal(finalized,1);assert.equal(waits,0);
+      assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+});
+test('repeated approved rate limits stop at overall deadline without new challenge or proof',async()=>{
+  const f=await fixture();const finalized:string[]=[];const waits:number[]=[];
+  const fetcher:typeof fetch=async(url,init)=>{
+    const request=JSON.parse(String(init?.body));if(request.action!=='finalize')return f.input.fetcher(url,init);
+    finalized.push(String(init?.body));return Response.json({ok:false,error:{code:'rate_limited'}},
+      {status:429,headers:{'retry-after':'1'}});
+  };
+  try{
+    await assert.rejects(claimSetupReference({...f.input,fetcher,maximumWaitMs:2_500,
+      sleep:async ms=>{waits.push(ms);f.advance(ms);}}),/^Error: setup_claim_failed$/);
+    assert.deepEqual(waits,[1_000,1_000]);assert.equal(finalized.length,3);
+    assert.equal(new Set(finalized).size,1);assert.equal(f.calls,1);
+    assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});

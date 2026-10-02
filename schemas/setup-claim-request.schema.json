@@ -6,7 +6,7 @@
     "device": {
       "type": "object", "additionalProperties": false, "required": ["name", "platform"],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
         "platform": { "enum": ["windows", "wsl", "macos", "linux"] }
       }
     }

@@ -56,6 +56,23 @@ function sameDevice(value: unknown, expected: {name: string; platform: string}):
   return Object.keys(device).sort().join(',') === 'name,platform'
     && device.name === expected.name && device.platform === expected.platform;
 }
+function quotaRetryDelay(response: Response, body: Record<string, unknown>, now: number, deadline: number): number {
+  const error = record(body.error);
+  const retryAfter = response.headers.get('retry-after');
+  if (response.status !== 429 || body.ok !== false
+    || !['rate_limited', 'rate_limit_exceeded'].includes(String(error.code))
+    || !retryAfter || retryAfter.length > 64) return fail();
+  let milliseconds: number;
+  if (/^\d{1,6}$/.test(retryAfter)) milliseconds = Number(retryAfter) * 1_000;
+  else {
+    const timestamp = Date.parse(retryAfter);
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toUTCString() !== retryAfter) return fail();
+    milliseconds = timestamp - now;
+  }
+  milliseconds = Math.max(milliseconds, 250);
+  if (!Number.isFinite(milliseconds) || milliseconds >= deadline - now) return fail();
+  return milliseconds;
+}
 export function parseSetupClaimRecipientApproval(value: unknown, challenge: SetupClaimChallenge, signature: string,
   device: {name: string; platform: string}, now: number): BootstrapRecipientApproval {
   const body = record(value); const uri = new URL(String(body.url));
@@ -79,7 +96,7 @@ export function parseSetupClaimRecipientApproval(value: unknown, challenge: Setu
 export async function claimSetupReference(input: ClaimSetupReferenceInput): Promise<{config: DeviceConfig; scopes: string[]}> {
   try {
     const hqUrl = normalizeHqUrl(input.hqUrl);
-    if (!hqUrl.startsWith('https:') || !input.name.trim() || input.name.length > 160
+    if (!hqUrl.startsWith('https:') || input.name.trim().length < 2 || input.name.length > 120
       || /[\x00-\x1f\x7f]/.test(input.name) || !['linux', 'wsl', 'macos', 'windows'].includes(input.platform)
       || !UUID.test(input.setupReference) || !UUID.test(input.recipientMembershipId)
       || !/^org_[A-Za-z0-9]+$/.test(input.organizationId)
@@ -118,7 +135,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
         signal: AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining))) });
       if (response.redirected || (response.url && response.url !== `${hqUrl}${PATH}`)
-        || response.status >= 300 && response.status !== 409) return fail();
+        || response.status >= 300 && ![409,429].includes(response.status)) return fail();
       return { response, body: await boundedJson(response) };
     };
     const initial = await send({ action: 'challenge', organizationId: input.organizationId,
@@ -135,6 +152,11 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       parseSetupClaimChallenge(challenge, expected, now());
       const result = await send(request);
       parseSetupClaimChallenge(challenge, expected, now());
+      if (result.response.status === 429) {
+        const wait = quotaRetryDelay(result.response, result.body, now(), Math.min(deadline, Date.parse(challenge.expiresAt)));
+        await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(wait);
+        continue;
+      }
       if (result.response.status === 409 && result.body.ok === false
         && result.body.status === 'recipient_approval_required') {
         if (Object.keys(result.body).sort().join(',') !== 'approval,ok,status') return fail();
@@ -144,7 +166,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         const remaining = Math.min(deadline, Date.parse(challenge.expiresAt)) - now();
         if (remaining <= 0) return fail();
         await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(
-          Math.min(Math.max(input.pollIntervalMs ?? 2_000, 250), 10_000, remaining));
+          Math.min(Math.max(input.pollIntervalMs ?? 3_000, 250), 10_000, remaining));
         continue;
       }
       if (!result.response.ok || result.body.ok !== true || result.body.status !== 'approved'
