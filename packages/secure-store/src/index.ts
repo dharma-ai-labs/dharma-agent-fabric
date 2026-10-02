@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { createWindowsFreshReader } from './windowsFreshRead.js';
 
 export interface SecureSecretStore {
@@ -229,9 +229,35 @@ function macosStore(): SecureSecretStore {
   };
 }
 
-async function isWsl(): Promise<boolean> {
-  if (process.platform !== 'linux') return false;
-  try { return /microsoft|wsl/i.test(await readFile('/proc/version', 'utf8')); } catch { return false; }
+async function hasContainerMarker(readMetadata: (path: string) => Promise<{
+  isFile(): boolean; isSymbolicLink(): boolean;
+}> = lstat): Promise<boolean> {
+  for (const path of ['/.dockerenv', '/run/.containerenv']) {
+    try {
+      const metadata = await readMetadata(path);
+      if (metadata.isFile() && !metadata.isSymbolicLink()) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('Secure-store container boundary could not be determined.');
+      }
+    }
+  }
+  return false;
+}
+
+async function isWsl(probe: {
+  platform?: NodeJS.Platform;
+  readKernel?: () => Promise<string>;
+  containerMarker?: () => Promise<boolean>;
+} = {}): Promise<boolean> {
+  if ((probe.platform ?? process.platform) !== 'linux') return false;
+  let kernel: string;
+  try { kernel = await (probe.readKernel ?? (() => readFile('/proc/version', 'utf8')))(); }
+  catch { return false; }
+  if (!/microsoft|wsl/i.test(kernel)) return false;
+  // Containers inherit the WSL host kernel, not its Windows credential bridge.
+  // They retain the ordinary Linux Secret Service path, which fails closed if unavailable.
+  return !await (probe.containerMarker ?? hasContainerMarker)();
 }
 
 export async function createSystemSecureStore(): Promise<SecureSecretStore> {
@@ -245,6 +271,8 @@ export async function createSystemSecureStore(): Promise<SecureSecretStore> {
 }
 
 export const secureStoreInternals = {
+  hasContainerMarker,
+  isWsl,
   run,
   windowsCommandSpec,
   isTransientWindowsInteropFailure,
