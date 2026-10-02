@@ -182,6 +182,45 @@
           }
         }
       ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "home",
+        "pid",
+        "uid",
+        "startTicks",
+        "initStartTicks"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.container-entrypoint/v2"
+        },
+        "home": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\r\\n\\u0000]+$"
+        },
+        "pid": {
+          "minimum": 2,
+          "type": "integer"
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startTicks": {
+          "type": "string",
+          "pattern": "^\\d{1,20}$"
+        },
+        "initStartTicks": {
+          "pattern": "^\\d{1,20}$",
+          "type": "string"
+        }
+      }
     }
   ]
 }

@@ -24,5 +24,8 @@ test('container entrypoint dry-run describes its bounded prerequisite plan witho
   assert.equal(plan.stage, 'container_entrypoint_plan');
   assert.equal(plan.started, false);
   assert.equal(plan.requiresPrivateSecretService, true);
+  assert.equal(plan.requiresNonRootLinuxEntrypoint, true);
+  assert.equal(plan.supportsDirectPid1, true);
+  assert.equal(plan.supportsVerifiedDockerInitChild, true);
   assert.equal(plan.restartCoverage, 'container-entrypoint-only');
 });

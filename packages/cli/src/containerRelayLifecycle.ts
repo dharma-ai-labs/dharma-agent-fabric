@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[] }
+export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number; processGroupId?: number; sessionId?: number }
 export interface ContainerChildIdentity { pid: number; uid: number; parentPid: number; startTicks: string }
 // OS-boundary injection for deterministic process fixtures; no CLI/environment override.
 export interface ContainerRuntime {
@@ -14,13 +14,18 @@ export interface ContainerRuntime {
   childIdentity?: (pid: number) => Promise<ContainerChildIdentity>;
   canonicalEntrypoint?: string;
   runtimeVersion?: string;
+  controllerIdentity?: (pid: number) => Promise<ContainerProcessIdentity>;
+  dockerInitVerified?: () => Promise<boolean>;
+  dockerInitMainChild?: () => Promise<number>;
+  controllerExecutableVerified?: (identity: ContainerProcessIdentity) => Promise<boolean>;
+  currentControllerPid?: number;
 }
 export interface ContainerLifecycleOptions { home: string; uid?: number; containerRuntime?: ContainerRuntime }
 export interface ContainerRelayRegistration {
   schema: 'dharma.relay-autostart/v3'; backend: 'container-entrypoint'; launcher: string;
   workspace: string; policy: string; version: string; taskName: null;
 }
-interface Marker { schema: 'dharma.container-entrypoint/v1'; home: string; pid: number; uid: number; startTicks: string }
+interface Marker { schema: 'dharma.container-entrypoint/v1' | 'dharma.container-entrypoint/v2'; home: string; pid: number; uid: number; startTicks: string; initStartTicks?: string }
 interface Control { schema: 'dharma.container-relay-control/v1'; home: string; registrationHash: string; running: boolean }
 interface Heartbeat {
   schema: 'dharma.container-relay-heartbeat/v1'; home: string; startTicks: string;
@@ -67,13 +72,62 @@ function exactObject(value: unknown, keys: string[]): value is Record<string, un
 }
 
 export async function readContainerPid1Identity(): Promise<ContainerProcessIdentity> {
+  return readContainerProcessIdentity(1);
+}
+
+export async function readContainerProcessIdentity(pid: number): Promise<ContainerProcessIdentity> {
+  if (!Number.isSafeInteger(pid) || pid < 1) throw unavailable();
   const [stat, command, owner] = await Promise.all([
-    readFile('/proc/1/stat', 'utf8'), readFile('/proc/1/cmdline'), lstat('/proc/1'),
+    readFile(`/proc/${pid}/stat`, 'utf8'), readFile(`/proc/${pid}/cmdline`), lstat(`/proc/${pid}`),
   ]);
-  if (stat.length > 8192 || command.length > 8192) throw unavailable();
+  if (stat.length > 8192 || command.length > 8192 || Number(stat.slice(0, stat.indexOf(' '))) !== pid) throw unavailable();
   const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
-  return { pid: 1, uid: owner.uid, startTicks: fields[19] || '',
+  if (fields[0] === 'Z' || fields[0] === 'X') throw unavailable();
+  return { pid, uid: owner.uid, parentPid: Number(fields[1]), processGroupId: Number(fields[2]), sessionId: Number(fields[3]), startTicks: fields[19] || '',
     argv: command.toString('utf8').split('\0').filter(Boolean) };
+}
+
+async function dockerInitMainChild() {
+  // Tini forks its main child first. Linux appends subsequently forked and
+  // adopted children to this kernel list; PPID 1 alone also admits orphans.
+  // Retain the first entry even if it is a zombie: never promote an adoptee.
+  const file = await open('/proc/1/task/1/children', constants.O_RDONLY);
+  try {
+    const bytes = Buffer.alloc(4097);
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+    if (bytesRead === 0 || bytesRead > 4096) throw unavailable();
+    const text = bytes.subarray(0, bytesRead).toString('ascii').trim();
+    if (!/^[1-9]\d*(?:\s+[1-9]\d*)*$/.test(text)) throw unavailable();
+    const children = text.split(/\s+/).map(Number);
+    if (children.length > 256 || children.some(pid => !Number.isSafeInteger(pid) || pid <= 1)
+      || new Set(children).size !== children.length) throw unavailable();
+    return children[0]!;
+  } finally { await file.close(); }
+}
+
+async function verifiedDockerInit() {
+  // Docker's --init executable is supplied by the daemon, root-owned and not
+  // writable by the client UID. Names or argv alone cannot establish this.
+  try {
+    const canonical = await realpath('/sbin/docker-init');
+    if (canonical !== '/usr/sbin/docker-init' && canonical !== '/sbin/docker-init') return false;
+    if (await realpath('/proc/1/exe') !== canonical) return false;
+    const [file, running] = await Promise.all([lstat(canonical), stat('/proc/1/exe')]);
+    return file.isFile() && file.uid === 0 && (file.mode & 0o022) === 0
+      && file.dev === running.dev && file.ino === running.ino;
+  } catch { return false; }
+}
+
+async function verifiedControllerExecutable(identity: ContainerProcessIdentity) {
+  try {
+    const candidate = identity.argv[0];
+    if (!candidate || !isAbsolute(candidate)) return false;
+    const canonical = await realpath(candidate);
+    if (await realpath(`/proc/${identity.pid}/exe`) !== canonical) return false;
+    const [file, running] = await Promise.all([lstat(canonical), stat(`/proc/${identity.pid}/exe`)]);
+    return file.isFile() && file.uid === 0 && (file.mode & 0o022) === 0
+      && file.dev === running.dev && file.ino === running.ino;
+  } catch { return false; }
 }
 
 async function publicRuntimeBytes(path: string, limit: number, executingCaller = false) {
@@ -110,9 +164,63 @@ async function canonicalEntrypoint(options: ContainerLifecycleOptions, identity:
 }
 
 function ownedIdentity(identity: ContainerProcessIdentity, uid: number, entrypoint: string) {
-  return identity.pid === 1 && identity.uid === uid && Number.isSafeInteger(uid) && uid > 0 && /^\d{1,20}$/.test(identity.startTicks)
+  return Number.isSafeInteger(identity.pid) && identity.pid >= 1 && identity.uid === uid && Number.isSafeInteger(uid) && uid > 0 && /^\d{1,20}$/.test(identity.startTicks)
     && identity.argv.length === 4 && identity.argv[2] === 'relay' && identity.argv[3] === 'container-entrypoint'
     && identity.argv[1] === entrypoint && isAbsolute(entrypoint);
+}
+
+function validMarker(value: unknown): value is Marker {
+  const init = Boolean(value && typeof value === 'object' && (value as Marker).schema === 'dharma.container-entrypoint/v2');
+  return exactObject(value, ['schema', 'home', 'pid', 'uid', 'startTicks', ...(init ? ['initStartTicks'] : [])])
+    && (init ? value.schema === 'dharma.container-entrypoint/v2' && Number.isSafeInteger(value.pid) && Number(value.pid) > 1
+      && typeof value.initStartTicks === 'string' && /^\d{1,20}$/.test(value.initStartTicks)
+      : value.schema === 'dharma.container-entrypoint/v1' && value.pid === 1)
+    && typeof value.home === 'string' && Number.isSafeInteger(value.uid) && Number(value.uid) > 0
+    && typeof value.startTicks === 'string' && /^\d{1,20}$/.test(value.startTicks);
+}
+
+async function ownedController(options: ContainerLifecycleOptions, pid?: number) {
+  const init = await (options.containerRuntime?.identity || readContainerPid1Identity)();
+  if (init.pid !== 1 || init.uid !== ownUid(options) || !/^\d{1,20}$/.test(init.startTicks)) throw unavailable();
+  if (init.argv[2] === 'relay' && init.argv[3] === 'container-entrypoint') {
+    if (pid !== undefined && pid !== 1 || !ownedIdentity(init, ownUid(options), await canonicalEntrypoint(options, init))) throw unavailable();
+    return { identity: init, initStartTicks: undefined };
+  }
+  // Bounded migration of the existing official Node-image startup. Neither an
+  // arbitrary init/wrapper nor a foreground exec can claim this lifecycle.
+  if (init.parentPid !== 0 || init.argv.length !== 5 || init.argv[0] !== '/sbin/docker-init' || init.argv[1] !== '--'
+    || init.argv[2] !== 'docker-entrypoint.sh' || init.argv[3] !== 'sleep' || init.argv[4] !== 'infinity'
+    || !await (options.containerRuntime?.dockerInitVerified || verifiedDockerInit)()) throw unavailable();
+  const controller = await (options.containerRuntime?.controllerIdentity || readContainerProcessIdentity)(
+    pid ?? options.containerRuntime?.currentControllerPid ?? process.pid);
+  if (controller.pid <= 1 || controller.parentPid !== 1
+    || !Number.isSafeInteger(init.sessionId) || Number(init.sessionId) <= 0
+    || controller.sessionId !== init.sessionId || controller.processGroupId !== controller.pid
+    || await (options.containerRuntime?.dockerInitMainChild || dockerInitMainChild)() !== controller.pid
+    || !ownedIdentity(controller, ownUid(options), await canonicalEntrypoint(options, controller))
+    || !await (options.containerRuntime?.controllerExecutableVerified || verifiedControllerExecutable)(controller)) throw unavailable();
+  const [freshInit, freshController, freshMainChild] = await Promise.all([
+    (options.containerRuntime?.identity || readContainerPid1Identity)(),
+    (options.containerRuntime?.controllerIdentity || readContainerProcessIdentity)(controller.pid),
+    (options.containerRuntime?.dockerInitMainChild || dockerInitMainChild)(),
+  ]);
+  if (freshInit.pid !== init.pid || freshInit.uid !== init.uid || freshInit.startTicks !== init.startTicks
+    || JSON.stringify(freshInit.argv) !== JSON.stringify(init.argv)
+    || freshInit.sessionId !== init.sessionId || freshInit.processGroupId !== init.processGroupId
+    || freshController.pid !== controller.pid || freshController.uid !== controller.uid
+    || freshController.parentPid !== 1 || freshController.startTicks !== controller.startTicks
+    || freshMainChild !== controller.pid || freshController.sessionId !== init.sessionId
+    || freshController.processGroupId !== controller.pid
+    || JSON.stringify(freshController.argv) !== JSON.stringify(controller.argv)) throw unavailable();
+  return { identity: controller, initStartTicks: init.startTicks };
+}
+
+async function liveMarker(options: ContainerLifecycleOptions) {
+  const marker = await privateJson(options, 'container-entrypoint.json');
+  if (!validMarker(marker) || marker.home !== options.home || marker.uid !== ownUid(options)) throw unavailable();
+  const live = await ownedController(options, marker.pid);
+  if (live.identity.startTicks !== marker.startTicks || live.initStartTicks !== marker.initStartTicks) throw unavailable();
+  return marker;
 }
 
 export async function readContainerChildIdentity(pid: number): Promise<ContainerChildIdentity> {
@@ -124,9 +232,14 @@ export async function readContainerChildIdentity(pid: number): Promise<Container
   return { pid, uid: owner.uid, parentPid: Number(fields[1]), startTicks: fields[19]! };
 }
 
-async function ownedChild(options: ContainerLifecycleOptions, pid: number, startTicks?: string) {
+async function ownedChild(options: ContainerLifecycleOptions, pid: number, startTicks?: string, controller?: Marker) {
+  const parent = controller || await liveMarker(options);
+  if (controller) {
+    const live = await ownedController(options, controller.pid);
+    if (live.identity.startTicks !== controller.startTicks || live.initStartTicks !== controller.initStartTicks) throw unavailable();
+  }
   const identity = await (options.containerRuntime?.childIdentity || readContainerChildIdentity)(pid);
-  if (identity.pid !== pid || identity.uid !== ownUid(options) || identity.parentPid !== 1
+  if (identity.pid !== pid || identity.uid !== ownUid(options) || identity.parentPid !== parent.pid
     || !/^\d{1,20}$/.test(identity.startTicks) || startTicks !== undefined && identity.startTicks !== startTicks) throw unavailable();
   return identity;
 }
@@ -134,11 +247,7 @@ async function ownedChild(options: ContainerLifecycleOptions, pid: number, start
 export async function containerEntrypointAvailable(options: ContainerLifecycleOptions): Promise<boolean> {
   const value = await privateJson(options, 'container-entrypoint.json');
   if (value === null) return false;
-  if (!exactObject(value, ['schema', 'home', 'pid', 'uid', 'startTicks'])) throw unavailable();
-  const identity = await (options.containerRuntime?.identity || readContainerPid1Identity)().catch(() => { throw unavailable(); });
-  if (value.schema !== 'dharma.container-entrypoint/v1' || value.home !== options.home
-    || value.pid !== 1 || value.uid !== ownUid(options) || value.startTicks !== identity.startTicks
-    || !ownedIdentity(identity, ownUid(options), await canonicalEntrypoint(options, identity))) throw unavailable();
+  await liveMarker(options);
   return true;
 }
 
@@ -269,10 +378,10 @@ export async function containerConsumerStoreReady(): Promise<boolean> {
   } catch { return false; }
 }
 
-async function stopOwnedChild(child: ChildProcess, options: ContainerLifecycleOptions, identity: ContainerChildIdentity | null) {
+async function stopOwnedChild(child: ChildProcess, options: ContainerLifecycleOptions, identity: ContainerChildIdentity | null, controller: Marker) {
   if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
   // Never signal a recycled PID or a process outside this owned parent/UID.
-  if (identity && !await ownedChild(options, child.pid, identity.startTicks).catch(() => null)) return;
+  if (identity && !await ownedChild(options, child.pid, identity.startTicks, controller).catch(() => null)) return;
   // On an initial /proc failure, the freshly spawned ChildProcess handle is
   // still ours. Drain it immediately; never leave unverified work running.
   // This function accepts no raw PID and only receives this loop's own spawn.
@@ -284,14 +393,15 @@ async function stopOwnedChild(child: ChildProcess, options: ContainerLifecycleOp
   await Promise.race([exited, new Promise<void>(resolveWait => { timer = setTimeout(resolveWait, 10_000); })]);
   if (timer) clearTimeout(timer);
   if (child.exitCode === null && child.signalCode === null
-    && (!identity || await ownedChild(options, child.pid, identity.startTicks).catch(() => null))) { child.kill('SIGKILL'); await exited; }
+    && (!identity || await ownedChild(options, child.pid, identity.startTicks, controller).catch(() => null))) { child.kill('SIGKILL'); await exited; }
 }
 
 export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOptions & {
   signal: AbortSignal; spawnRelay?: (registration: ContainerRelayRegistration) => ChildProcess;
   consumerStoreReady?: () => Promise<boolean>; pollMs?: number; restartDelayMs?: number;
 }) {
-  const identity = await (options.containerRuntime?.identity || readContainerPid1Identity)();
+  const live = await ownedController(options);
+  const identity = live.identity;
   const bin = await canonicalEntrypoint(options, identity);
   const runtimeVersion: unknown = options.containerRuntime?.runtimeVersion
     ?? (JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }).version;
@@ -299,19 +409,18 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
   if (!ownedIdentity(identity, ownUid(options), bin)) throw unavailable();
   await mkdir(join(options.home, 'relay'), { recursive: true, mode: 0o700 });
   await privateDirectory(options);
-  const marker: Marker = { schema: 'dharma.container-entrypoint/v1', home: options.home,
-    pid: 1, uid: identity.uid, startTicks: identity.startTicks };
+  const marker: Marker = { schema: live.initStartTicks === undefined ? 'dharma.container-entrypoint/v1' : 'dharma.container-entrypoint/v2', home: options.home,
+    pid: identity.pid, uid: identity.uid, startTicks: identity.startTicks,
+    ...(live.initStartTicks === undefined ? {} : { initStartTicks: live.initStartTicks }) };
   const previous = await privateJson(options, 'container-entrypoint.json');
-  if (previous !== null && (!exactObject(previous, ['schema', 'home', 'pid', 'uid', 'startTicks'])
-    || previous.schema !== marker.schema || previous.home !== marker.home || previous.uid !== marker.uid || previous.pid !== 1
-    || typeof previous.startTicks !== 'string' || !/^\d{1,20}$/.test(previous.startTicks))) throw unavailable();
+  if (previous !== null && (!validMarker(previous) || previous.schema !== marker.schema
+    || previous.home !== marker.home || previous.uid !== marker.uid)) throw unavailable();
   const lockPath = privatePath(options.home, 'container-entrypoint.lock');
   const oldLock = await privateJson(options, 'container-entrypoint.lock');
   if (oldLock !== null) {
-    if (!exactObject(oldLock, ['schema', 'home', 'pid', 'uid', 'startTicks'])
-      || oldLock.schema !== marker.schema || oldLock.home !== marker.home || oldLock.uid !== marker.uid || oldLock.pid !== 1
-      || typeof oldLock.startTicks !== 'string' || !/^\d{1,20}$/.test(oldLock.startTicks)) throw unavailable();
-    if (oldLock.startTicks === marker.startTicks) throw new Error('container_entrypoint_busy: an owned entrypoint is already active.');
+    if (!validMarker(oldLock) || oldLock.schema !== marker.schema || oldLock.home !== marker.home || oldLock.uid !== marker.uid) throw unavailable();
+    if (marker.initStartTicks === undefined ? oldLock.startTicks === marker.startTicks : oldLock.initStartTicks === marker.initStartTicks)
+      throw new Error('container_entrypoint_busy: an owned entrypoint is already active.');
     await rm(lockPath); // an earlier boot's private lock; actual PID1 identity was verified
   }
   try { await writeFile(lockPath, JSON.stringify(marker), { mode: 0o600, flag: 'wx' }); }
@@ -342,13 +451,13 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
         child = null; childIdentity = null; childHash = null; childFailed = false; restarts++; retryAt = Date.now() + restartDelayMs;
       }
       if (child && (!shouldRun || hash !== childHash)) {
-        await stopOwnedChild(child, options, childIdentity); child = null; childIdentity = null; childHash = null;
+        await stopOwnedChild(child, options, childIdentity, marker); child = null; childIdentity = null; childHash = null;
       }
       if (shouldRun && !child && Date.now() >= retryAt) {
         child = spawnRelay(configuration!.registration);
         childHash = hash;
         child.on('error', () => { childFailed = true; });
-        childIdentity = child.pid ? await ownedChild(options, child.pid).catch(() => null) : null;
+        childIdentity = child.pid ? await ownedChild(options, child.pid, undefined, marker).catch(() => null) : null;
         if (child.pid && !childIdentity && child.exitCode === null && child.signalCode === null) throw unavailable();
       }
       const running = Boolean(child?.pid && childIdentity && !childFailed && child.exitCode === null && child.signalCode === null);
@@ -365,13 +474,13 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
     return { stopped: true, restarts };
   } catch { throw unavailable(); }
   finally {
-    if (child) await stopOwnedChild(child, options, childIdentity);
+    if (child) await stopOwnedChild(child, options, childIdentity, marker);
     const current = await privateJson(options, 'container-entrypoint.json').catch(() => null) as Marker | null;
-    if (current?.startTicks === marker.startTicks && current.home === marker.home) {
+    if (current?.startTicks === marker.startTicks && current.home === marker.home && current.pid === marker.pid && current.initStartTicks === marker.initStartTicks) {
       await rm(privatePath(options.home, 'container-entrypoint.json'), { force: true });
       await rm(privatePath(options.home, 'container-heartbeat.json'), { force: true });
     }
     const lock = await privateJson(options, 'container-entrypoint.lock').catch(() => null) as Marker | null;
-    if (lock?.startTicks === marker.startTicks && lock.home === marker.home) await rm(lockPath, { force: true });
+    if (lock?.startTicks === marker.startTicks && lock.home === marker.home && lock.pid === marker.pid && lock.initStartTicks === marker.initStartTicks) await rm(lockPath, { force: true });
   }
 }

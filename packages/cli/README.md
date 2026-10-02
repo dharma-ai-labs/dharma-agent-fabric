@@ -37,7 +37,18 @@ command accepts no grant, policy, provider or task arguments. Inspect the
 credential-free plan with `relay container-entrypoint --dry-run` before image
 installation; it makes no local changes. Set an explicit
 private `DHARMA_HOME` before launch. An npm wrapper, shell that does not exec,
-`sleep` or init shim as PID1 does not qualify.
+`sleep` or an arbitrary init shim as PID1 does not qualify. A narrowly verified
+Docker `--init` route also supports the canonical CLI as the non-root direct
+child of Docker's root-owned, non-writable `/sbin/docker-init` executable. This
+route retains the existing official Node-image command
+`docker-entrypoint.sh sleep infinity`; an explicitly approved public entrypoint
+migration must exec the canonical Node/CLI command as that init's main child.
+The CLI checks the executable inode, UID, both process start times and the
+kernel's first init-child identity, retaining zombies rather than promoting
+adopted processes. The controller must also retain init's session and its own
+process group. The main-child and process identities are checked again before
+control is admitted; a foreground or orphaned `docker exec` or a fabricated
+marker cannot claim startup.
 
 The image/operator must provide its own protected Secret Service, private
 session bus and durable private home. Never mount a host bus or copy another
@@ -52,7 +63,7 @@ The entrypoint owns one relay for that container OS user. It never creates a
 second host service or changes an existing systemd user unit. Owned start/stop
 controls use atomic private receipts; disable removes the registration. It
 reaps its child on normal shutdown and retries an exited child with a bounded
-delay. A new container boot renews only its own PID1 lease while retaining its
+delay. A new container boot renews only its own entrypoint lease while retaining its
 configuration and encrypted state. Runtime-version mismatch blocks restart;
 upgrade the reviewed image/runtime together through the normal release path.
 
