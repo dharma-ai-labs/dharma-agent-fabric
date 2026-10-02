@@ -7,6 +7,7 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import { appendRecoveredWorkspace, resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
+import { bootstrapGrantMode } from './privateGrantInput.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -33,6 +34,8 @@ function bootstrapDependencies(onboarding: Onboarding) {
   const calls: string[] = [];
   const record = async (name: string) => { calls.push(name); };
   const dependencies: Record<string, unknown> = {
+    bootstrapGrantMode,
+    readPrivateBootstrapGrant: async () => { await record('private_grant'); return 'fixture_private_grant'; },
     normalizeHqUrl: (value: string) => value,
     portalUrl: () => 'https://fixture.invalid',
     required: (flags: Map<string, string | boolean>, key: string) => {
@@ -370,6 +373,61 @@ function bootstrapFlags(complete = false) {
   if (complete) flags.set('complete', true);
   return flags;
 }
+
+test('private grant entry follows preflight, uses the unchanged redemption scope and stays out of onboard flags', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  const flags = bootstrapFlags(); flags.delete('grant'); flags.set('grant-prompt', true);
+  const originalOnboard = f.dependencies.onboard as (flags: Map<string, string | boolean>) => Promise<unknown>;
+  f.dependencies.onboard = async (onboardFlags: Map<string, string | boolean>) => {
+    assert.equal(onboardFlags.has('grant'), false);
+    assert.equal(onboardFlags.has('grant-prompt'), false);
+    return originalOnboard(onboardFlags);
+  };
+  f.dependencies.redeemBootstrapGrant = async (input: Record<string, unknown>) => {
+    assert.equal(input.bootstrapToken, 'fixture_private_grant');
+    assert.equal(input.organizationId, 'org_fixture');
+    assert.equal(input.hqUrl, 'https://fixture.invalid');
+    assert.equal(input.repositoryFingerprint, `sha256:${'e'.repeat(64)}`);
+    assert.equal(typeof input.onRecipientApprovalRequired, 'function');
+    f.calls.push('redeem');
+    return { deviceId: 'fixture_device', serverPublicKeyEd25519: 'fixture_server_key',
+      relayUrl: 'wss://fixture.invalid', organizationApiToken: 'fixture_token', organizationApiTokenScopes: [] };
+  };
+  await (await caller('bootstrap', f.dependencies))(flags);
+  assert.ok(f.calls.indexOf('preflight') < f.calls.indexOf('private_grant'));
+  assert.ok(f.calls.indexOf('private_grant') < f.calls.indexOf('redeem'));
+});
+
+test('foreign enrollment and grant-option conflict stop before private entry or redemption', async () => {
+  for (const conflict of [false, true]) {
+    const f = bootstrapDependencies({ ok: true });
+    const flags = bootstrapFlags(); flags.set('grant-prompt', true);
+    if (!conflict) {
+      flags.delete('grant');
+      f.dependencies.readDeviceConfig = async () => ({ organizationId: 'org_other', hqUrl: 'https://fixture.invalid' });
+    }
+    f.dependencies.redeemBootstrapGrant = async () => { throw new Error('must not redeem'); };
+    await assert.rejects((await caller('bootstrap', f.dependencies))(flags), conflict
+      ? /bootstrap_grant_options_invalid/ : /another organization or portal/);
+    assert.equal(f.calls.includes('private_grant'), false);
+  }
+});
+
+test('redemption failure never reflects private terminal input into an error', async () => {
+  for (const message of ['reflected fixture_private_grant', 'grant_expired']) {
+    const f = bootstrapDependencies({ ok: true });
+    const flags = bootstrapFlags(); flags.delete('grant'); flags.set('grant-prompt', true);
+    f.dependencies.redeemBootstrapGrant = async () => { throw new Error(message); };
+    // The actual function runs in a separate VM realm; the Error need not share its constructor.
+    await assert.rejects((await caller('bootstrap', f.dependencies))(flags), (error: unknown) => {
+      const text = String(error);
+      assert.equal(text.includes('fixture_private_grant'), false);
+      assert.match(text, message === 'grant_expired' ? /grant_expired/ : /bootstrap_redemption_failed/);
+      return true;
+    });
+    assert.equal(f.calls.includes('save_device'), false);
+  }
+});
 
 async function resumeFixture() {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',

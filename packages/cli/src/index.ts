@@ -57,6 +57,7 @@ import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
+import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInput.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -98,7 +99,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.132';
+const VERSION = '0.2.133';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2117,7 +2118,7 @@ export function assertBootstrapResumeAuthority(input: {
   organizationId: string;
   hqUrl: string;
 }) {
-  if (input.flags.has('grant') || input.flags.has('replace-existing-enrollment') || !input.flags.has('complete')) {
+  if (input.flags.has('grant') || input.flags.has('grant-prompt') || input.flags.has('replace-existing-enrollment') || !input.flags.has('complete')) {
     throw new Error('Bootstrap resume requires --complete and cannot accept a grant or replace an enrollment.');
   }
   if (!input.existing || input.existing.organizationId !== input.organizationId
@@ -2130,7 +2131,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
   const resuming = flags.has('resume');
-  const bootstrapToken = resuming ? null : required(flags, 'grant');
+  const grantMode = bootstrapGrantMode(flags);
+  let bootstrapToken = grantMode === 'argument' ? required(flags, 'grant') : null;
   const selectedRemote = flags.get('repository-url-base64url');
   const joinedBindingId = typeof flags.get('join-repository-binding-id') === 'string'
     ? String(flags.get('join-repository-binding-id')) : null;
@@ -2194,6 +2196,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   if (enrollmentMismatch && !flags.has('replace-existing-enrollment')) {
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
   }
+  if (grantMode === 'prompt') bootstrapToken = await readPrivateBootstrapGrant();
   let config: DeviceConfig;
   let scopes: string[] | undefined;
   let recipientApproval: { required: boolean; browserOpened: boolean } = {
@@ -2229,7 +2232,17 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
           `Confirm this exact device in the authenticated Dharma portal before ${approval.expiresAt}: ${approval.url}\n`,
         );
       },
-    });
+    }).catch((error: unknown) => {
+      // A transport/server error must never reflect private input into CLI logs.
+      let message = '';
+      try { message = error instanceof Error ? error.message : String(error); } catch { /* sanitize below */ }
+      const token = bootstrapToken!;
+      if (!message || [token, encodeURIComponent(token), JSON.stringify(token).slice(1, -1)]
+        .some((value) => message.includes(value))) {
+        throw new Error('bootstrap_redemption_failed: the enrollment request failed; private input was withheld.');
+      }
+      throw error;
+    }).finally(() => { bootstrapToken = null; });
     rebind = enrollmentMismatch && existing
       ? await archiveEnrollmentForAuthorizedRebind(existing)
       : rebind;
@@ -2300,6 +2313,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   }
   const onboardFlags = new Map(flags);
   onboardFlags.delete('grant');
+  onboardFlags.delete('grant-prompt');
   onboardFlags.set('portal-url', hqUrl);
   onboardFlags.set('organization-id', organizationId);
   onboardFlags.set('workspace', workspace);
