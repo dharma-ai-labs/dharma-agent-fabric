@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/container-relay-lifecycle/v1",
+  "title": "Private container lifecycle metadata",
+  "description": "Local process receipts; PID/UID/start-tick checks and freshness are enforced at read time. No credentials or policy contents.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "home",
+        "pid",
+        "uid",
+        "startTicks"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.container-entrypoint/v1"
+        },
+        "home": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\r\\n\\u0000]+$"
+        },
+        "pid": {
+          "const": 1
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startTicks": {
+          "type": "string",
+          "pattern": "^\\d{1,20}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "home",
+        "registrationHash",
+        "running"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.container-relay-control/v1"
+        },
+        "home": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\r\\n\\u0000]+$"
+        },
+        "registrationHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "running": {
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "home",
+        "startTicks",
+        "polledAt",
+        "lifecycle",
+        "reason",
+        "registrationHash",
+        "childPid",
+        "childStartTicks"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.container-relay-heartbeat/v1"
+        },
+        "home": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/[^\\r\\n\\u0000]+$"
+        },
+        "startTicks": {
+          "type": "string",
+          "pattern": "^\\d{1,20}$"
+        },
+        "polledAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lifecycle": {
+          "enum": [
+            "unconfigured",
+            "paused",
+            "blocked",
+            "starting",
+            "running"
+          ]
+        },
+        "reason": {
+          "enum": [
+            null,
+            "consumer_store_locked_or_unavailable",
+            "relay_runtime_upgrade_required"
+          ]
+        },
+        "registrationHash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "childPid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 2
+        },
+        "childStartTicks": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{1,20}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "lifecycle": {
+                "const": "running"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "childPid": {
+                "type": "integer"
+              },
+              "childStartTicks": {
+                "type": "string",
+                "pattern": "^\\d{1,20}$"
+              },
+              "registrationHash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "childPid": {
+                "type": "null"
+              },
+              "childStartTicks": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -4,6 +4,8 @@ import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
+import { containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
+  writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
 
 const execFileAsync = promisify(execFile);
 const UNIT_NAME = 'dharma-agent-fabric.service';
@@ -18,10 +20,11 @@ export interface RelayAutostartOptions {
   platform?: NodeJS.Platform;
   uid?: number;
   run?: Runner;
+  containerRuntime?: ContainerRuntime;
 }
 
 interface RegistrationFields {
-  backend: 'systemd-user' | 'windows-task' | 'launchd-user';
+  backend: 'systemd-user' | 'windows-task' | 'launchd-user' | 'container-entrypoint';
   launcher: string;
   workspace: string;
   version: string;
@@ -29,7 +32,8 @@ interface RegistrationFields {
 }
 
 export type RelayAutostartRegistration = RegistrationFields & ({ schema: 'dharma.relay-autostart/v1'; policy: string }
-  | { schema: 'dharma.relay-autostart/v2'; mode: 'demo-only'; policy: null });
+  | { schema: 'dharma.relay-autostart/v2'; mode: 'demo-only'; policy: null }
+  | { schema: 'dharma.relay-autostart/v3'; policy: string });
 type Registration = RelayAutostartRegistration;
 
 export type RelayAutostartState = {
@@ -37,6 +41,8 @@ export type RelayAutostartState = {
   backend: Registration['backend'] | null;
   version?: string;
   reason?: string;
+  lifecycle?: 'configured' | 'unconfigured' | 'paused' | 'blocked' | 'starting' | 'running';
+  restartCoverage?: 'container-entrypoint-only';
 };
 
 const defaultRunner: Runner = async (file, args) => {
@@ -87,7 +93,7 @@ export function macRelayLaunchAgent(launcher: string, policy: string | null, wor
 }
 
 function backendPlatform(backend: Registration['backend']): NodeJS.Platform {
-  return backend === 'systemd-user' ? 'linux' : backend === 'launchd-user' ? 'darwin' : 'win32';
+  return backend === 'systemd-user' || backend === 'container-entrypoint' ? 'linux' : backend === 'launchd-user' ? 'darwin' : 'win32';
 }
 
 function macDomain(options: RelayAutostartOptions) {
@@ -179,18 +185,22 @@ function taskName(home: string) {
   return `DharmaAgentFabric-${createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 12)}`;
 }
 
-async function readRegistration(home: string): Promise<Registration | null> {
+async function readRegistration(options: RelayAutostartOptions): Promise<Registration | null> {
+  const home = options.home;
   try {
+    if ((options.platform || process.platform) === 'linux' && await containerEntrypointAvailable(options)) {
+      return await readContainerRegistration(options);
+    }
     const value = JSON.parse(await readFile(registrationPath(home), 'utf8')) as Registration;
     if (!value || typeof value !== 'object' || Array.isArray(value)
-      || !['systemd-user', 'windows-task', 'launchd-user'].includes(value.backend)
+      || !['systemd-user', 'windows-task', 'launchd-user', 'container-entrypoint'].includes(value.backend)
       || typeof value.version !== 'string' || !VERSION.test(value.version)
       || typeof value.launcher !== 'string' || typeof value.workspace !== 'string'
       || (value.backend === 'windows-task' ? value.taskName !== taskName(home) : value.taskName !== null)) {
       throw new Error('Invalid startup receipt.');
     }
     const keys = ['schema', 'backend', 'launcher', 'policy', 'workspace', 'version', 'taskName'];
-    if (value.schema === 'dharma.relay-autostart/v1') {
+    if (value.schema === 'dharma.relay-autostart/v1' || value.schema === 'dharma.relay-autostart/v3') {
       if (typeof value.policy !== 'string') throw new Error('Invalid startup receipt.');
       safeLine(value.policy);
     } else if (value.schema === 'dharma.relay-autostart/v2') {
@@ -202,14 +212,21 @@ async function readRegistration(home: string): Promise<Registration | null> {
     }
     safeLine(value.launcher);
     safeLine(value.workspace);
+    if ((value.schema === 'dharma.relay-autostart/v3' && value.backend !== 'container-entrypoint')
+      || value.backend === 'container-entrypoint' && (value.schema !== 'dharma.relay-autostart/v3'
+      || !isAbsolute(value.launcher) || !isAbsolute(value.workspace) || value.policy !== join(value.workspace, '.dharma', 'approved-policy.json'))) {
+      throw new Error('Invalid container startup receipt.');
+    }
     return value;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (error instanceof Error && error.message.startsWith('container_startup_unavailable:')) throw error;
     throw new Error('autostart_receipt_invalid: startup ownership could not be verified.');
   }
 }
 
 async function ownsStartupFile(options: RelayAutostartOptions, registration: Registration, allowLegacy = false) {
+  if (registration.backend === 'container-entrypoint') return ownsContainerStartup(options, registration as ContainerRelayRegistration);
   const path = startupPath(options, registration.backend);
   if (registration.backend === 'launchd-user') {
     const stat = await lstat(path).catch(() => null);
@@ -245,7 +262,7 @@ function windowsTaskLookup(registration: Registration) {
 
 export async function relayAutostartStatus(options: RelayAutostartOptions): Promise<RelayAutostartState> {
   let registration;
-  try { registration = await readRegistration(options.home); }
+  try { registration = await readRegistration(options); }
   catch { return { state: 'unavailable', backend: null, reason: 'autostart_receipt_invalid' }; }
   if (!registration) return { state: 'disabled', backend: null };
   const platform = options.platform || process.platform;
@@ -258,6 +275,7 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
       reason: 'autostart_conflict' };
   }
   try {
+    if (registration.backend === 'container-entrypoint') return await containerStartupState(options, registration as ContainerRelayRegistration);
     if (registration.backend === 'launchd-user') {
       await macLoaded(options, registration);
       const disabled = (await run('/bin/launchctl', ['print-disabled', macDomain(options)])).stdout;
@@ -296,8 +314,10 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   if (!VERSION.test(options.version)) throw new Error('Autostart version must be a bounded release version.');
   const userHome = options.userHome || homedir();
   const run = options.run || defaultRunner;
-  const previous = await readRegistration(options.home);
-  const backend = platform === 'linux' ? 'systemd-user' : platform === 'darwin' ? 'launchd-user' : 'windows-task';
+  const previous = await readRegistration(options);
+  const backend = platform === 'linux'
+    ? await containerEntrypointAvailable(options) ? 'container-entrypoint' : 'systemd-user'
+    : platform === 'darwin' ? 'launchd-user' : 'windows-task';
   if (previous && previous.backend !== backend) {
     throw new Error('Existing relay autostart belongs to a different operating system.');
   }
@@ -310,12 +330,23 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   const workspace = preserve || (options.policy === null && previous?.policy) ? previous!.workspace : options.workspace;
   const registration: Registration = {
     ...(policy === null ? { schema: 'dharma.relay-autostart/v2' as const, mode: 'demo-only' as const, policy: null }
-      : { schema: 'dharma.relay-autostart/v1' as const, policy: safeLine(policy) }),
+      : { schema: backend === 'container-entrypoint' ? 'dharma.relay-autostart/v3' as const : 'dharma.relay-autostart/v1' as const,
+        policy: safeLine(policy) }),
     backend,
     launcher: safeLine(preserve ? previous!.launcher : options.launcher),
     workspace: safeLine(workspace), version: options.version,
     taskName: platform === 'win32' ? taskName(options.home) : null,
   };
+  if (backend === 'container-entrypoint') {
+    if (registration.schema !== 'dharma.relay-autostart/v3' || !isAbsolute(registration.launcher)
+      || !isAbsolute(registration.workspace) || registration.policy !== join(registration.workspace, '.dharma', 'approved-policy.json')) {
+      throw new Error('container_startup_unavailable: a canonical enrolled repository policy is required.');
+    }
+    if (previous && !await ownsStartupFile(options, previous)) throw new Error('autostart_conflict: container startup is not owned.');
+    await writeContainerRegistration(options, registration as ContainerRelayRegistration);
+    await containerStartupControl(options, registration as ContainerRelayRegistration, true);
+    return containerStartupState(options, registration as ContainerRelayRegistration);
+  }
   if (platform === 'win32' && !previous) {
     const probe = await run('powershell.exe', encodedPowerShell(
       `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName!)} -ErrorAction SilentlyContinue; `
@@ -391,7 +422,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
 }
 
 export async function disableRelayAutostart(options: RelayAutostartOptions): Promise<RelayAutostartState> {
-  const registration = await readRegistration(options.home);
+  const registration = await readRegistration(options);
   if (!registration) return { state: 'disabled', backend: null };
   const platform = options.platform || process.platform;
   if (platform !== backendPlatform(registration.backend)) {
@@ -401,7 +432,10 @@ export async function disableRelayAutostart(options: RelayAutostartOptions): Pro
     throw new Error('autostart_conflict: the startup file no longer matches its ownership receipt.');
   }
   const run = options.run || defaultRunner;
-  if (registration.backend === 'systemd-user') {
+  if (registration.backend === 'container-entrypoint') {
+    await containerStartupControl(options, registration as ContainerRelayRegistration, false);
+    await rm(join(options.home, 'relay', 'container-control.json'), { force: true });
+  } else if (registration.backend === 'systemd-user') {
     await run('systemctl', ['--user', 'disable', UNIT_NAME]);
     await rm(unitPath(options.userHome || homedir()), { force: true });
     await run('systemctl', ['--user', 'daemon-reload']);
@@ -422,13 +456,15 @@ export async function disableRelayAutostart(options: RelayAutostartOptions): Pro
 }
 
 export async function startRelayAutostart(options: RelayAutostartOptions) {
-  const registration = await readRegistration(options.home);
+  const registration = await readRegistration(options);
   const status = await relayAutostartStatus(options);
   if (!registration || status.state !== 'enabled') {
     throw new Error(`autostart_conflict: an enabled owned startup entry is required (${status.reason ?? status.state}).`);
   }
   const run = options.run || defaultRunner;
-  if (registration.backend === 'systemd-user') {
+  if (registration.backend === 'container-entrypoint') {
+    await containerStartupControl(options, registration as ContainerRelayRegistration, true);
+  } else if (registration.backend === 'systemd-user') {
     await run('systemctl', ['--user', 'start', UNIT_NAME]);
   } else if (registration.backend === 'launchd-user') {
     if (!await macLoaded(options, registration)) {
@@ -444,7 +480,7 @@ export async function startRelayAutostart(options: RelayAutostartOptions) {
 }
 
 export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions) {
-  const registration = await readRegistration(options.home);
+  const registration = await readRegistration(options);
   if (!registration || !await ownsStartupFile(options, registration)) {
     throw new Error('autostart_conflict: a verified owned startup entry is required.');
   }
@@ -463,7 +499,9 @@ export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions)
 export async function stopRelayAutostart(options: RelayAutostartOptions) {
   const registration = await inspectOwnedRelayAutostart(options);
   const run = options.run || defaultRunner;
-  if (registration.backend === 'systemd-user') {
+  if (registration.backend === 'container-entrypoint') {
+    await containerStartupControl(options, registration as ContainerRelayRegistration, false);
+  } else if (registration.backend === 'systemd-user') {
     await run('systemctl', ['--user', 'stop', UNIT_NAME]);
   } else if (registration.backend === 'launchd-user') {
     if (await macLoaded(options, registration)) await run('/bin/launchctl', ['bootout', `${macDomain(options)}/${MAC_LABEL}`]);

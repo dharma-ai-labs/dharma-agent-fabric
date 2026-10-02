@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/relay-autostart/v3",
+  "title": "Owned container relay startup registration",
+  "description": "Local credential-free configuration. Runtime separately verifies private ownership, canonical signed-policy path and live PID1. It does not assert host restart policy or authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "backend",
+    "launcher",
+    "workspace",
+    "policy",
+    "version",
+    "taskName"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.relay-autostart/v3"
+    },
+    "backend": {
+      "const": "container-entrypoint"
+    },
+    "launcher": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/[^\\r\\n\\u0000]+$"
+    },
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/[^\\r\\n\\u0000]+$"
+    },
+    "policy": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/[^\\r\\n\\u0000]+$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$"
+    },
+    "taskName": {
+      "type": "null"
+    }
+  }
+}
