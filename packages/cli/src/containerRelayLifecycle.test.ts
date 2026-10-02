@@ -324,7 +324,9 @@ test('stale heartbeat and reused or foreign child identity cannot assert live st
         registrationHash: control.registrationHash, childPid: child.pid,
         childStartTicks: kind === 'reused' ? String(BigInt(identity.startTicks) + 1n) : identity.startTicks,
       }), { mode: 0o600 });
-      assert.equal((await relayAutostartStatus(f.options)).state, 'unavailable', kind);
+      const status = await relayAutostartStatus(f.options);
+      assert.equal(status.state, 'unavailable', kind);
+      assert.equal(status.reason, 'container_startup_unavailable', kind);
     } finally { child.kill('SIGTERM'); await until(() => exited(child)); }
   }
 });

@@ -298,6 +298,7 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
   } catch (error) {
     return { state: 'unavailable', backend: registration.backend, version: registration.version,
       reason: error instanceof Error && error.message.startsWith('autostart_conflict:') ? 'autostart_conflict'
+        : registration.backend === 'container-entrypoint' ? 'container_startup_unavailable'
         : registration.backend === 'systemd-user' ? 'systemd_user_unavailable'
         : registration.backend === 'launchd-user' ? 'launchd_user_unavailable' : 'task_scheduler_unavailable' };
   }
