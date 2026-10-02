@@ -14,16 +14,17 @@ async function fixture() {
   await mkdir(join(home, 'relay'), { recursive: true, mode: 0o700 });
   await mkdir(join(workspace, '.dharma'), { recursive: true, mode: 0o700 });
   const uid = process.getuid!();
-  const init = { pid: 1, parentPid: 0, uid, startTicks: '123', argv: ['/sbin/docker-init', '--', 'docker-entrypoint.sh', 'sleep', 'infinity'] };
-  const controller = { pid: 42, parentPid: 1, uid, startTicks: '124',
+  const init = { pid: 1, parentPid: 0, processGroupId: 1, sessionId: 1, uid, startTicks: '123', argv: ['/sbin/docker-init', '--', 'docker-entrypoint.sh', 'sleep', 'infinity'] };
+  const controller = { pid: 42, parentPid: 1, processGroupId: 42, sessionId: 1, uid, startTicks: '124',
     argv: ['/usr/local/bin/node', '/fixture/cli/dist/bin.js', 'relay', 'container-entrypoint'] };
   const marker = { schema: 'dharma.container-entrypoint/v2', home, pid: controller.pid, uid,
     startTicks: controller.startTicks, initStartTicks: init.startTicks };
   await writeFile(join(home, 'relay', 'container-entrypoint.json'), JSON.stringify(marker), { mode: 0o600 });
-  let verifiedInit = true; let verifiedNode = true;
+  let verifiedInit = true; let verifiedNode = true; let mainChild = controller.pid;
   const runtime = { identity: async () => init, canonicalEntrypoint: controller.argv[1], runtimeVersion: '0.2.135',
     controllerIdentity: async (pid: number) => { assert.equal(pid, controller.pid); return controller; },
     dockerInitVerified: async () => verifiedInit,
+    dockerInitMainChild: async () => mainChild,
     controllerExecutableVerified: async () => verifiedNode,
     childIdentity: async (pid: number) => ({ ...await lifecycle.readContainerChildIdentity(pid), parentPid: controller.pid }) };
   const options = { platform: 'linux' as const, home, uid, userHome: root, workspace,
@@ -31,7 +32,8 @@ async function fixture() {
     version: '0.2.135', containerRuntime: runtime,
     run: async () => { throw new Error('must never use systemd for the owned init child'); } };
   return { root, home, init, controller, marker, runtime, options,
-    untrustInit: () => { verifiedInit = false; }, untrustNode: () => { verifiedNode = false; } };
+    untrustInit: () => { verifiedInit = false; }, untrustNode: () => { verifiedNode = false; },
+    setMainChild: (pid: number) => { mainChild = pid; } };
 }
 async function until(check: () => boolean) {
   const deadline = Date.now() + 3000;
@@ -42,6 +44,38 @@ test('canonical direct child of verified Docker init can own persistent containe
   const f = await fixture();
   assert.equal((await enableRelayAutostart(f.options)).backend, 'container-entrypoint');
   assert.equal((await relayAutostartStatus(f.options)).state, 'enabled');
+});
+
+test('adopted canonical exec child cannot replace the Docker init main startup child', linux, async () => {
+  for (const kind of ['different-main-child', 'foreign-session', 'foreign-process-group', 'missing-main-child']) {
+    const f = await fixture();
+    if (kind === 'different-main-child') f.setMainChild(7);
+    if (kind === 'missing-main-child') f.setMainChild(0);
+    if (kind === 'foreign-session') f.controller.sessionId = 99;
+    if (kind === 'foreign-process-group') f.controller.processGroupId = 99;
+    await assert.rejects(enableRelayAutostart(f.options), /container_startup_unavailable/, kind);
+  }
+});
+
+test('Docker init main-child identity is checked again before control is admitted', linux, async () => {
+  const f = await fixture(); let reads = 0;
+  f.runtime.dockerInitMainChild = async () => ++reads === 1 ? f.controller.pid : 7;
+  await assert.rejects(enableRelayAutostart(f.options), /container_startup_unavailable/);
+});
+
+test('Docker init session and controller process group cannot change during attribution', linux, async () => {
+  for (const kind of ['init-session', 'init-group', 'controller-session', 'controller-group']) {
+    const f = await fixture(); let reads = 0;
+    if (kind.startsWith('init-')) f.runtime.identity = async () => {
+      reads++;
+      return { ...f.init, ...(reads > 1 ? kind === 'init-session' ? { sessionId: 99 } : { processGroupId: 99 } : {}) };
+    };
+    else f.runtime.controllerIdentity = async () => {
+      reads++;
+      return { ...f.controller, ...(reads > 1 ? kind === 'controller-session' ? { sessionId: 99 } : { processGroupId: 99 } : {}) };
+    };
+    await assert.rejects(enableRelayAutostart(f.options), /container_startup_unavailable/, kind);
+  }
 });
 
 test('Docker init route rejects foreign parent owner argv executable boot and controller ticks', linux, async () => {

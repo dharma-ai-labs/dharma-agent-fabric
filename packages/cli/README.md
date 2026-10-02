@@ -43,8 +43,12 @@ child of Docker's root-owned, non-writable `/sbin/docker-init` executable. This
 route retains the existing official Node-image command
 `docker-entrypoint.sh sleep infinity`; an explicitly approved public entrypoint
 migration must exec the canonical Node/CLI command as that init's main child.
-The CLI checks the executable inode, parent, UID and both process start times;
-a foreground `docker exec` or a fabricated marker cannot claim startup.
+The CLI checks the executable inode, UID, both process start times and the
+kernel's first init-child identity, retaining zombies rather than promoting
+adopted processes. The controller must also retain init's session and its own
+process group. The main-child and process identities are checked again before
+control is admitted; a foreground or orphaned `docker exec` or a fabricated
+marker cannot claim startup.
 
 The image/operator must provide its own protected Secret Service, private
 session bus and durable private home. Never mount a host bus or copy another

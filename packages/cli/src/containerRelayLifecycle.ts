@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number }
+export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number; processGroupId?: number; sessionId?: number }
 export interface ContainerChildIdentity { pid: number; uid: number; parentPid: number; startTicks: string }
 // OS-boundary injection for deterministic process fixtures; no CLI/environment override.
 export interface ContainerRuntime {
@@ -16,6 +16,7 @@ export interface ContainerRuntime {
   runtimeVersion?: string;
   controllerIdentity?: (pid: number) => Promise<ContainerProcessIdentity>;
   dockerInitVerified?: () => Promise<boolean>;
+  dockerInitMainChild?: () => Promise<number>;
   controllerExecutableVerified?: (identity: ContainerProcessIdentity) => Promise<boolean>;
   currentControllerPid?: number;
 }
@@ -82,8 +83,26 @@ export async function readContainerProcessIdentity(pid: number): Promise<Contain
   if (stat.length > 8192 || command.length > 8192 || Number(stat.slice(0, stat.indexOf(' '))) !== pid) throw unavailable();
   const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
   if (fields[0] === 'Z' || fields[0] === 'X') throw unavailable();
-  return { pid, uid: owner.uid, parentPid: Number(fields[1]), startTicks: fields[19] || '',
+  return { pid, uid: owner.uid, parentPid: Number(fields[1]), processGroupId: Number(fields[2]), sessionId: Number(fields[3]), startTicks: fields[19] || '',
     argv: command.toString('utf8').split('\0').filter(Boolean) };
+}
+
+async function dockerInitMainChild() {
+  // Tini forks its main child first. Linux appends subsequently forked and
+  // adopted children to this kernel list; PPID 1 alone also admits orphans.
+  // Retain the first entry even if it is a zombie: never promote an adoptee.
+  const file = await open('/proc/1/task/1/children', constants.O_RDONLY);
+  try {
+    const bytes = Buffer.alloc(4097);
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+    if (bytesRead === 0 || bytesRead > 4096) throw unavailable();
+    const text = bytes.subarray(0, bytesRead).toString('ascii').trim();
+    if (!/^[1-9]\d*(?:\s+[1-9]\d*)*$/.test(text)) throw unavailable();
+    const children = text.split(/\s+/).map(Number);
+    if (children.length > 256 || children.some(pid => !Number.isSafeInteger(pid) || pid <= 1)
+      || new Set(children).size !== children.length) throw unavailable();
+    return children[0]!;
+  } finally { await file.close(); }
 }
 
 async function verifiedDockerInit() {
@@ -175,16 +194,23 @@ async function ownedController(options: ContainerLifecycleOptions, pid?: number)
   const controller = await (options.containerRuntime?.controllerIdentity || readContainerProcessIdentity)(
     pid ?? options.containerRuntime?.currentControllerPid ?? process.pid);
   if (controller.pid <= 1 || controller.parentPid !== 1
+    || !Number.isSafeInteger(init.sessionId) || Number(init.sessionId) <= 0
+    || controller.sessionId !== init.sessionId || controller.processGroupId !== controller.pid
+    || await (options.containerRuntime?.dockerInitMainChild || dockerInitMainChild)() !== controller.pid
     || !ownedIdentity(controller, ownUid(options), await canonicalEntrypoint(options, controller))
     || !await (options.containerRuntime?.controllerExecutableVerified || verifiedControllerExecutable)(controller)) throw unavailable();
-  const [freshInit, freshController] = await Promise.all([
+  const [freshInit, freshController, freshMainChild] = await Promise.all([
     (options.containerRuntime?.identity || readContainerPid1Identity)(),
     (options.containerRuntime?.controllerIdentity || readContainerProcessIdentity)(controller.pid),
+    (options.containerRuntime?.dockerInitMainChild || dockerInitMainChild)(),
   ]);
   if (freshInit.pid !== init.pid || freshInit.uid !== init.uid || freshInit.startTicks !== init.startTicks
     || JSON.stringify(freshInit.argv) !== JSON.stringify(init.argv)
+    || freshInit.sessionId !== init.sessionId || freshInit.processGroupId !== init.processGroupId
     || freshController.pid !== controller.pid || freshController.uid !== controller.uid
     || freshController.parentPid !== 1 || freshController.startTicks !== controller.startTicks
+    || freshMainChild !== controller.pid || freshController.sessionId !== init.sessionId
+    || freshController.processGroupId !== controller.pid
     || JSON.stringify(freshController.argv) !== JSON.stringify(controller.argv)) throw unavailable();
   return { identity: controller, initStartTicks: init.startTicks };
 }
