@@ -15,7 +15,7 @@ test('a completed bootstrap may resume with its existing organization-bound devi
 });
 
 test('resume cannot redeem another grant or replace enrollment', () => {
-  for (const [name, value] of [['grant', 'dhab_not_redeemed'], ['replace-existing-enrollment', true]] as const) {
+  for (const [name, value] of [['grant', 'dhab_not_redeemed'], ['grant-prompt', true], ['replace-existing-enrollment', true]] as const) {
     assert.throws(() => assertBootstrapResumeAuthority({
       flags: flags([name, value]), existing, organizationId, hqUrl,
     }), /cannot accept a grant or replace an enrollment/);

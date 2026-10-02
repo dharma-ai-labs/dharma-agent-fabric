@@ -6,6 +6,27 @@ discovers provider capabilities, keeps full trajectories in an encrypted local
 vault, syncs policy-qualified evidence, executes bounded signed tasks, and
 installs signed Skill releases with receipts and rollback ancestry.
 
+## Private user entry for a setup grant
+
+Use `dharma bootstrap --grant-prompt` with the portal's exact grant-free setup
+options. The recipient runs this command directly in their own interactive
+terminal, pastes only the short-lived grant at the hidden input prompt and presses
+Enter. The grant is not a command argument. Never send it to a coding agent or
+put it in environment variables, a file, shell history or a recorded terminal.
+The CLI cannot detect external terminal recording; use a private, unrecorded
+terminal under the recipient's control.
+
+Pipes, redirected output, empty/multiline input, input over 16 KiB and conflicting
+`--grant`/`--grant-prompt`/`--resume` options are rejected. Ctrl+C, Ctrl+D or Escape
+cancels entry. Terminal echo is restored on completion and handled failure,
+signal and process-exit paths. Repository, provider and enrollment preflight run
+before private entry; the same issuer, recipient, repository, expiry and device
+approval checks govern redemption. This input option confers no new authority.
+
+Existing `--grant` integrations remain compatible. New portal instructions use
+private entry instead. After enrollment, use the exact supported grant-free
+`bootstrap --resume --complete` command; do not enter or replay the spent grant.
+
 ## Recover a committed legacy bootstrap
 
 Older repositories may contain an unsigned installer marker committed for a

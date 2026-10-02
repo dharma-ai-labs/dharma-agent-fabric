@@ -13,8 +13,20 @@ test('the installed onboarding contract forbids product-code workarounds', async
   assert.match(contract, /do not bypass enrollment/i);
   assert.match(contract, /exact failed stage, non-sensitive error, and correlation ID/i);
   assert.match(contract, /supported retry, reconciliation, rollback, or browser-authorized re-enrollment/i);
-  assert.match(contract, /one retry of the unchanged command is permitted before grant expiry/i);
-  assert.match(contract, /Never retry a grant after redemption/i);
+  assert.match(contract, /retry the unchanged command once before expiry when the receipt explicitly proves non-redemption/i);
+  assert.match(contract, /After redemption, approval or another error, use only the supported cause-specific grant-free recovery; never replay the grant/i);
+});
+
+test('the installed contract separates agent instructions from recipient-only private terminal entry', async () => {
+  const contract = await readFile(contractUrl, 'utf8');
+  assert.match(contract, /short-lived grant is a separate recipient-only private field, not part of the agent prompt/i);
+  assert.match(contract, /exact generated grant-free `--grant-prompt` command directly in their own private, unrecorded interactive terminal/i);
+  assert.match(contract, /Never receive, print, save, commit, place in argv or environment, send through agent tools or transport, or record that grant/i);
+  assert.match(contract, /cannot detect an external recorder or prove the human owns a TTY/i);
+  assert.match(contract, /no supplementary manual setup command/i);
+  assert.match(contract, /Join existing[\s\S]*No GitHub permission or source checkout is needed/i);
+  assert.match(contract, /legacy Demo command contract does not establish `--grant-prompt` support/i);
+  assert.doesNotMatch(contract, /only routine human action|setup envelope contains[\s\S]*one-time grant/i);
 });
 
 test('the installed guide names the supported knowledge and peer workflow', async () => {
