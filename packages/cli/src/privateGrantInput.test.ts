@@ -126,3 +126,12 @@ test('supported grant modes preserve legacy and resume while rejecting conflict/
     assert.throws(() => bootstrapGrantMode(flags(...values)), /bootstrap_grant_options_invalid/);
   }
 });
+
+test('agent setup references need no terminal, and reject legacy authority conflicts', () => {
+  const reference = '11111111-1111-4111-8111-111111111111';
+  assert.equal(bootstrapGrantMode(new Map([['setup-reference', reference]])), 'reference');
+  for (const option of ['grant', 'grant-prompt', 'resume', 'replace-existing-enrollment']) {
+    assert.throws(() => bootstrapGrantMode(new Map<string,string|boolean>([['setup-reference', reference], [option, true]])), /bootstrap_grant_options_invalid/);
+  }
+  assert.throws(() => bootstrapGrantMode(new Map([['setup-scope-digest', 'invalid']])), /bootstrap_grant_options_invalid/);
+});

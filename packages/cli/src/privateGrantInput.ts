@@ -17,7 +17,17 @@ interface PrivateGrantTerminal {
 const MAX_GRANT_BYTES = 16_384;
 const CANCEL_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGTSTP'] as const;
 
-export function bootstrapGrantMode(flags: Map<string, string | boolean>): 'resume' | 'argument' | 'prompt' {
+export function bootstrapGrantMode(flags: Map<string, string | boolean>): 'resume' | 'argument' | 'prompt' | 'reference' {
+  if (flags.has('setup-reference')) {
+    if (flags.has('grant') || flags.has('grant-prompt') || flags.has('resume') || flags.has('replace-existing-enrollment')
+      || typeof flags.get('setup-reference') !== 'string') {
+      throw new Error('bootstrap_grant_options_invalid: --setup-reference cannot combine with grant, resume or enrollment replacement.');
+    }
+    return 'reference';
+  }
+  if (['setup-recipient-membership-id', 'setup-scope-digest', 'setup-contract-digest'].some(key => flags.has(key))) {
+    throw new Error('bootstrap_grant_options_invalid: setup context requires --setup-reference.');
+  }
   const grant = flags.get('grant');
   const prompt = flags.get('grant-prompt');
   if ((flags.has('resume') && (flags.has('grant') || flags.has('grant-prompt')))

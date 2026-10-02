@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/setup-claim-request/v1",
+  "title": "Native public-reference setup request; reference alone confers no authority",
+  "$defs": {
+    "device": {
+      "type": "object", "additionalProperties": false, "required": ["name", "platform"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+        "platform": { "enum": ["windows", "wsl", "macos", "linux"] }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "organizationId", "setupReference", "publicKeyEd25519", "credentialEncryptionPublicKey", "device"],
+      "properties": {
+        "action": { "const": "challenge" },
+        "organizationId": { "type": "string", "maxLength": 256, "pattern": "^org_[A-Za-z0-9]+$" },
+        "setupReference": { "type": "string", "format": "uuid" },
+        "publicKeyEd25519": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "credentialEncryptionPublicKey": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "device": { "$ref": "#/$defs/device" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["action", "challenge", "signature", "device"],
+      "properties": {
+        "action": { "const": "finalize" },
+        "challenge": { "$ref": "https://schemas.dharma-ai.io/setup-claim-challenge/v1" },
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" },
+        "device": { "$ref": "#/$defs/device" }
+      }
+    }
+  ]
+}
