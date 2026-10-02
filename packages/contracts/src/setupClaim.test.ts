@@ -10,6 +10,7 @@ const expected = {
   origin: 'https://www.dharma-ai.io', setupReference: '36f56631-a74e-4f35-a337-8cb8c1553762',
   organizationId: 'org_synthetic', recipientMembershipId: '514d7500-540a-46e6-8cbf-513be79c6661',
   publicKeyEd25519: publicKey, repositoryFingerprint: 'sha256:' + 'a'.repeat(64),
+  credentialEncryptionPublicKey: generateKeyPairSync('x25519').publicKey.export({ format: 'jwk' }).x!,
   mode: 'source' as const, policyRevision: 'agent-fabric-policy-v1',
   scopeDigest: 'sha256:' + 'b'.repeat(64), contractDigest: 'sha256:' + 'c'.repeat(64),
 };
@@ -35,6 +36,7 @@ test('proof cannot cross tenant, recipient, key, repository, mode, policy, contr
     origin: 'https://other.example', setupReference: '36f56631-a74e-4f35-a337-8cb8c1553763',
     organizationId: 'org_other', recipientMembershipId: '514d7500-540a-46e6-8cbf-513be79c6662',
     publicKeyEd25519: generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x!,
+    credentialEncryptionPublicKey: generateKeyPairSync('x25519').publicKey.export({ format: 'jwk' }).x!,
     repositoryFingerprint: 'sha256:' + 'd'.repeat(64), mode: 'join', policyRevision: 'other-v1',
     scopeDigest: 'sha256:' + 'e'.repeat(64), contractDigest: 'sha256:' + 'f'.repeat(64),
   })) {

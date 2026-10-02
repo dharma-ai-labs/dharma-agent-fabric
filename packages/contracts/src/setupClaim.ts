@@ -6,6 +6,7 @@ export interface SetupClaimContext {
   organizationId: string;
   recipientMembershipId: string;
   publicKeyEd25519: string;
+  credentialEncryptionPublicKey: string;
   repositoryFingerprint: string;
   mode: 'source' | 'join';
   policyRevision: string;
@@ -24,7 +25,7 @@ export interface SetupClaimChallenge extends SetupClaimContext {
 }
 
 const CONTEXT_KEYS = ['origin', 'setupReference', 'organizationId', 'recipientMembershipId',
-  'publicKeyEd25519', 'repositoryFingerprint', 'mode', 'policyRevision', 'scopeDigest', 'contractDigest'] as const;
+  'publicKeyEd25519', 'credentialEncryptionPublicKey', 'repositoryFingerprint', 'mode', 'policyRevision', 'scopeDigest', 'contractDigest'] as const;
 const KEYS = ['schema', ...CONTEXT_KEYS, 'method', 'path', 'nonce', 'issuedAt', 'expiresAt', 'authenticator'] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -53,7 +54,8 @@ export function parseSetupClaimChallenge(value: unknown, expected: SetupClaimCon
     if (url.protocol !== 'https:' || url.username || url.password || url.origin !== body.origin) invalid();
     if (!UUID.test(String(body.setupReference)) || !UUID.test(String(body.recipientMembershipId))
       || !/^org_[A-Za-z0-9]+$/.test(String(body.organizationId))
-      || !bytes(body.publicKeyEd25519, 32) || !bytes(body.nonce, 32) || !bytes(body.authenticator, 32)
+      || !bytes(body.publicKeyEd25519, 32) || !bytes(body.credentialEncryptionPublicKey, 32)
+      || !bytes(body.nonce, 32) || !bytes(body.authenticator, 32)
       || !DIGEST.test(String(body.repositoryFingerprint)) || !DIGEST.test(String(body.scopeDigest))
       || !DIGEST.test(String(body.contractDigest)) || !['source', 'join'].includes(String(body.mode))
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(String(body.policyRevision))) invalid();

@@ -4,7 +4,7 @@
   "title": "Public setup claim challenge; not enrollment authority",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "origin", "setupReference", "organizationId", "recipientMembershipId", "publicKeyEd25519", "repositoryFingerprint", "mode", "policyRevision", "scopeDigest", "contractDigest", "method", "path", "nonce", "issuedAt", "expiresAt", "authenticator"],
+  "required": ["schema", "origin", "setupReference", "organizationId", "recipientMembershipId", "publicKeyEd25519", "credentialEncryptionPublicKey", "repositoryFingerprint", "mode", "policyRevision", "scopeDigest", "contractDigest", "method", "path", "nonce", "issuedAt", "expiresAt", "authenticator"],
   "properties": {
     "schema": { "const": "dharma.setup-claim-challenge/v1" },
     "origin": { "type": "string", "maxLength": 256, "pattern": "^https://[^/]+$" },
@@ -12,6 +12,7 @@
     "organizationId": { "type": "string", "maxLength": 256, "pattern": "^org_[A-Za-z0-9]+$" },
     "recipientMembershipId": { "type": "string", "format": "uuid" },
     "publicKeyEd25519": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+    "credentialEncryptionPublicKey": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
     "repositoryFingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "mode": { "enum": ["source", "join"] },
     "policyRevision": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
