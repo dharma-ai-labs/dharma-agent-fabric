@@ -5,6 +5,51 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { secureStoreInternals } from './index.js';
 
+test('container markers use only bounded regular-file metadata, not their contents', async () => {
+  const paths: string[] = [];
+  assert.equal(await secureStoreInternals.hasContainerMarker(async path => {
+    paths.push(path);
+    return { isFile: () => true, isSymbolicLink: () => path === '/.dockerenv' };
+  }), true);
+  assert.deepEqual(paths, ['/.dockerenv', '/run/.containerenv']);
+  assert.equal(await secureStoreInternals.hasContainerMarker(async () => {
+    throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+  }), false);
+});
+
+test('denied container-marker metadata fails closed without leaking the underlying error', async () => {
+  await assert.rejects(() => secureStoreInternals.hasContainerMarker(async () => {
+    throw Object.assign(new Error('synthetic-sensitive-detail'), { code: 'EACCES' });
+  }), { message: 'Secure-store container boundary could not be determined.' });
+});
+
+test('WSL-kernel containers select Linux storage without invoking the host Windows bridge', async () => {
+  assert.equal(await secureStoreInternals.isWsl({ platform: 'linux',
+    readKernel: async () => 'Linux 6.18.33.2-microsoft-standard-WSL2',
+    containerMarker: async () => true }), false);
+});
+
+test('genuine WSL retains Windows protection even when interop may be unavailable', async () => {
+  assert.equal(await secureStoreInternals.isWsl({ platform: 'linux',
+    readKernel: async () => 'Linux 6.18.33.2-microsoft-standard-WSL2',
+    containerMarker: async () => false }), true);
+});
+
+test('ordinary Linux and Windows do not need a container boundary probe', async () => {
+  const unexpectedProbe = async () => { throw new Error('unexpected container probe'); };
+  assert.equal(await secureStoreInternals.isWsl({ platform: 'linux',
+    readKernel: async () => 'Linux 6.8.0-generic', containerMarker: unexpectedProbe }), false);
+  assert.equal(await secureStoreInternals.isWsl({ platform: 'win32',
+    readKernel: async () => { throw new Error('unexpected kernel read'); },
+    containerMarker: unexpectedProbe }), false);
+});
+
+test('uncertain WSL container boundary fails closed without selecting another store', async () => {
+  await assert.rejects(() => secureStoreInternals.isWsl({ platform: 'linux',
+    readKernel: async () => 'microsoft-standard-WSL2',
+    containerMarker: async () => { throw new Error('boundary unavailable'); } }), /boundary unavailable/);
+});
+
 test('secure-store rejects unsafe account interpolation', async () => {
   const store = secureStoreInternals.windowsStore('does-not-run');
   await assert.rejects(() => store.get('bad; account'), /Invalid secure-store account/);
