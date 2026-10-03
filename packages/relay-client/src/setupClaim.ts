@@ -144,6 +144,16 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     if (!initial.response.ok || initial.body.ok !== true
       || Object.keys(initial.body).sort().join(',') !== 'challenge,device,ok'
       || !sameDevice(initial.body.device, device)) return fail();
+    const localNow = now();
+    const issuedAt = Date.parse(String(record(initial.body.challenge).issuedAt));
+    if (issuedAt > localNow) {
+      if (issuedAt - localNow > 5_000 || issuedAt >= deadline) return fail();
+      // Validate the complete bound response before waiting. Do not adjust the
+      // clock or relax the strict issued-at/expiry checks used by every effect.
+      parseSetupClaimChallenge(initial.body.challenge, expected, issuedAt);
+      await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(issuedAt - localNow);
+      if (now() >= deadline) return fail();
+    }
     const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, now());
     const signature = sign(null, setupClaimSigningPayload(challenge), createPrivateKey({key: identity.privateJwk, format: 'jwk'})).toString('base64url');
     const request = { action: 'finalize', challenge, signature, device };
