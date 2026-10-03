@@ -100,7 +100,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.136';
+const VERSION = '0.2.137';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2154,6 +2154,10 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     }
     for (const key of ['setup-scope-digest', 'setup-contract-digest']) {
       if (!/^sha256:[a-f0-9]{64}$/.test(required(flags, key))) throw new Error('setup_claim_context_invalid');
+    }
+    const installedContract = await loadAgentFabricOnboardingContract();
+    if (required(flags, 'setup-contract-digest') !== `sha256:${installedContract.sha256}`) {
+      throw new Error('setup_claim_contract_mismatch: the portal setup must match this published client operating contract.');
     }
     if (flags.has('dry-run')) return { ok: true, stage: 'plan', setupTransport: 'public_claim_v1',
       organizationId, portalUrl: hqUrl, setupReference: required(flags, 'setup-reference'),
