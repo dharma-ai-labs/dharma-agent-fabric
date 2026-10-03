@@ -30,7 +30,7 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@dharma-ai-labs/agent-fabric-contracts": "0.1.14",
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.10",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.4"
   }
 }

@@ -18,7 +18,7 @@
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },
   "dependencies": {
-    "@dharma-ai-labs/agent-fabric-contracts": "0.1.14",
+    "@dharma-ai-labs/agent-fabric-contracts": "0.1.13",
     "@modelcontextprotocol/server": "2.1.0",
     "zod": "4.6.5"
   }
