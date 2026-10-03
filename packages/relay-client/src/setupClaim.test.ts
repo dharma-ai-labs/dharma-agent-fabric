@@ -65,7 +65,7 @@ test('wrong scope and expired challenges never finalize', async () => {
   }
 });
 
-async function fixture(change?: (payload: Record<string, unknown>) => void, pending = false) {
+async function fixture(change?: (payload: Record<string, unknown>) => void, pending = false, issuedAheadMs = 0) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-claim-synthetic-'));
   let time = Date.now(); let challenge: SetupClaimChallenge; let calls = 0; let stage = 'start';
   const secret = `dharma_org_${'s'.repeat(48)}`;
@@ -87,7 +87,7 @@ async function fixture(change?: (payload: Record<string, unknown>) => void, pend
         credentialEncryptionPublicKey: sent.credentialEncryptionPublicKey, repositoryFingerprint: scope.repositoryFingerprint,
         mode:'source', policyRevision:scope.policyRevision, scopeDigest:scope.scopeDigest, contractDigest:scope.contractDigest,
         method:'POST', path:'/api/v1/agent-fabric/bootstrap/setup-claim', nonce:Buffer.alloc(32,1).toString('base64url'),
-        authenticator:Buffer.alloc(32,2).toString('base64url'), issuedAt:new Date(time).toISOString(),
+        authenticator:Buffer.alloc(32,2).toString('base64url'), issuedAt:new Date(time+issuedAheadMs).toISOString(),
         expiresAt:new Date(time+60_000).toISOString()};
       return Response.json({ok:true,challenge,device:sent.device});
     }
@@ -119,6 +119,42 @@ async function fixture(change?: (payload: Record<string, unknown>) => void, pend
     input:{...scope,configPath:resolve(root,'device.json'),store:memory,fetcher,now:()=>time,
       sleep:async(ms:number)=>{time+=ms;}}, advance:(ms:number)=>{time+=ms;} };
 }
+test('small server clock lead waits for strict time validity before approval or finalize', async t => {
+  for (const lead of [2208, 5000]) await t.test(`lead_${lead}ms`, async () => {
+    const f = await fixture(undefined, true, lead); const waits: number[] = [];
+    try {
+      const result = await claimSetupReference({...f.input, sleep: async ms => { waits.push(ms); f.advance(ms); }});
+      assert.equal(waits[0], lead);
+      assert.equal(result.config.setupClaimReference, scope.setupReference);
+      assert.equal(f.calls, 3);
+    } finally { await rm(f.root,{recursive:true,force:true}); }
+  });
+});
+test('future challenge never weakens scope, expiry, maximum wait or a stalled local clock', async t => {
+  for (const kind of ['excessive_lead', 'deadline', 'stalled_clock', 'expiry', 'wrong_scope'] as const) {
+    await t.test(kind, async () => {
+      const f = await fixture(undefined, false, kind === 'excessive_lead' ? 5001 : 2208);
+      let waits = 0;
+      const fetcher: typeof fetch = async (url, init) => {
+        const response = await f.input.fetcher(url, init);
+        if (kind !== 'wrong_scope') return response;
+        const body = await response.json() as {challenge: Record<string, unknown>};
+        body.challenge.scopeDigest = `sha256:${'d'.repeat(64)}`;
+        return Response.json(body);
+      };
+      try {
+        await assert.rejects(claimSetupReference({...f.input, fetcher,
+          maximumWaitMs: kind === 'deadline' ? 2000 : 900_000,
+          sleep: async ms => { waits++; if (kind !== 'stalled_clock') f.advance(kind === 'expiry' ? 60_001 : ms); },
+        }), /^Error: setup_claim_failed$/);
+        assert.equal(f.calls, 1);
+        assert.equal(waits, ['stalled_clock','expiry'].includes(kind) ? 1 : 0);
+        await assert.rejects(readFile(f.input.configPath), {code:'ENOENT'});
+        assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}), null);
+      } finally { await rm(f.root,{recursive:true,force:true}); }
+    });
+  }
+});
 test('nonTTY claim signs exact approval request and stores credential without returning it', async () => {
   const f = await fixture(undefined,true); let approvals=0;
   try {
