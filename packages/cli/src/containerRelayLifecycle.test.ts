@@ -101,9 +101,9 @@ function entrypoint(): Entrypoint {
   assert.equal(typeof run, 'function', 'released container lifecycle has no owned entrypoint loop');
   return run!;
 }
-async function until(condition: () => boolean, milliseconds = 3000) {
+async function until(condition: () => boolean | Promise<boolean>, milliseconds = 3000) {
   const deadline = Date.now() + milliseconds;
-  while (!condition()) {
+  while (!await condition()) {
     if (Date.now() >= deadline) throw new Error('owned child fixture did not reach its expected state');
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -128,6 +128,13 @@ test('entrypoint starts only its owned supervisor, stops it, and reconnects afte
     await until(() => children.length === 1);
     await stopRelayAutostart(f.options);
     await until(() => exited(children[0]!));
+    // Child exit precedes the controller's next receipt. Do not interpret the
+    // prior running heartbeat as current authority to restart an exited PID.
+    await until(async () => {
+      const status = await relayAutostartStatus(f.options);
+      return status.state === 'enabled' && status.lifecycle === 'paused';
+    });
+    assert.equal(children.length, 1, 'paused controller must not relaunch on its own');
     await startRelayAutostart(f.options);
     await until(() => children.length === 2);
   } finally { clearTimeout(watchdog); controller.abort(); }

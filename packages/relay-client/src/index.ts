@@ -13,6 +13,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput } from './setupClaim.js';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
@@ -28,6 +29,9 @@ export interface DeviceConfig {
   relayUrl: string;
   enrolledAt: string;
   evidenceQuotaLedgerInitializedAt?: string;
+  /** Public dispatch metadata only; server verifies exact signed device/source authority. */
+  setupClaimReference?: string;
+  setupClaimRepositoryFingerprint?: string;
 }
 
 interface PendingRequest {

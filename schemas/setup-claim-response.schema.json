@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/setup-claim-response/v1",
+  "title": "Public setup challenge, exact recipient approval, or sealed native credential",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false, "required": ["ok", "challenge", "device"],
+      "properties": {
+        "ok": { "const": true },
+        "challenge": { "$ref": "https://schemas.dharma-ai.io/setup-claim-challenge/v1" },
+        "device": { "$ref": "https://schemas.dharma-ai.io/setup-claim-request/v1#/$defs/device" }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["ok", "status", "approval"],
+      "properties": {
+        "ok": { "const": false }, "status": { "const": "recipient_approval_required" },
+        "approval": {
+          "type": "object", "additionalProperties": false,
+          "required": ["url", "expiresAt", "fingerprint", "repositoryFingerprint"],
+          "properties": {
+            "url": { "type": "string", "maxLength": 20000, "pattern": "^https://[^/]+/portal/agent-fabric/setup-claim-approval#request=[A-Za-z0-9_-]+$" },
+            "expiresAt": { "type": "string", "format": "date-time" },
+            "fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+            "repositoryFingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+          }
+        }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false, "required": ["ok", "status", "credential"],
+      "properties": {
+        "ok": { "const": true }, "status": { "const": "approved" },
+        "credential": { "$ref": "https://schemas.dharma-ai.io/setup-claim-credential/v1" }
+      }
+    }
+  ]
+}

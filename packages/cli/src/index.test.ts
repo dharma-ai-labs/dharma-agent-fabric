@@ -1281,8 +1281,8 @@ test('repository onboarding skill records scoped API metadata without local path
   assert.match(skill, /bounded, task-related question/);
   assert.match(skill, /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   assert.doesNotMatch(skill, /--grant\s+['"]?dhab_|dhab_[A-Za-z0-9_-]+|bootstrapGrant|organizationApiToken/);
-  assert.match(skill, /recipient runs the portal's exact generated `--grant-prompt` bootstrap command/);
-  assert.match(skill, /not part of the agent prompt/);
+  assert.match(skill, /agent runs the exact generated `--setup-reference` command/);
+  assert.match(skill, /public setup reference is not a bearer credential/);
   assert.match(connection, /workspace-northstar/);
   assert.equal(connection.includes(workspace), false);
   assert.equal(/token|secret/i.test(connection), false);
@@ -2249,8 +2249,9 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
   });
   assert.equal(installed.verified, true);
   const installedSkill = await readFile(installed.skillPath, 'utf8');
-  assert.match(installedSkill, /supports connecting a new source repository and joining an existing organization repository agent/);
-  assert.match(installedSkill, /native action-time approval/);
+  assert.match(installedSkill, /source-only setup reference does not authorize a join, source expansion or a writable peer task/);
+  assert.match(installedSkill, /intended recipient approves only the matching browser device request/);
+  assert.doesNotMatch(installedSkill, /supports connecting a new source repository and joining an existing organization repository agent/);
   assert.doesNotMatch(installedSkill, /Use this skill only inside a repository containing/);
   assert.deepEqual(calls[0], {
     executable: 'hermes',
@@ -2558,7 +2559,7 @@ test('native skill persists the complete hash-pinned onboarding contract', async
   assert.ok(skill.includes(contract.markdown));
   assert.equal(marker.operatingContractSha256, contract.sha256);
   assert.doesNotMatch(contract.markdown, /--grant\s+['"]?dhab_|dhab_[A-Za-z0-9_-]+|bootstrapGrant|organizationApiToken/);
-  assert.match(contract.markdown, /private terminal grant entry nor browser device approval may be performed or impersonated by an agent/);
+  assert.match(contract.markdown, /browser device approval may not be performed or impersonated by an agent/);
 });
 
 test('Agy skill verification requires the native plugin to be discoverable by the provider', async () => {

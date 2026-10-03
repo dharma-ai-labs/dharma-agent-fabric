@@ -35,9 +35,16 @@ async function fixture() {
     untrustInit: () => { verifiedInit = false; }, untrustNode: () => { verifiedNode = false; },
     setMainChild: (pid: number) => { mainChild = pid; } };
 }
-async function until(check: () => boolean) {
+async function until(check: () => boolean | Promise<boolean>) {
   const deadline = Date.now() + 3000;
-  while (!check()) { if (Date.now() > deadline) throw new Error('fixture did not progress'); await new Promise(r => setTimeout(r, 10)); }
+  while (!await check()) { if (Date.now() > deadline) throw new Error('fixture did not progress'); await new Promise(r => setTimeout(r, 10)); }
+}
+
+async function receiptReady(path: string, matches: (receipt: Record<string, unknown>) => boolean) {
+  return until(async () => {
+    try { return matches(JSON.parse(await readFile(path, 'utf8'))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  });
 }
 
 test('canonical direct child of verified Docker init can own persistent container startup', linux, async () => {
@@ -130,7 +137,7 @@ test('different verified Docker-init boot renews only its own previous lifecycle
     containerRuntime: { ...f.runtime, currentControllerPid: f.controller.pid }, pollMs: 10,
     spawnRelay: () => { throw new Error('unconfigured controller cannot launch'); } });
   try {
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await receiptReady(join(f.home, 'relay', 'container-entrypoint.json'), marker => marker.initStartTicks === '223' && marker.startTicks === '224');
     const marker = JSON.parse(await readFile(join(f.home, 'relay', 'container-entrypoint.json'), 'utf8'));
     assert.equal(marker.initStartTicks, '223'); assert.equal(marker.startTicks, '224');
   } finally { abort.abort(); }
@@ -145,10 +152,11 @@ test('Docker init controller fences its own supervisor and remains blocked while
     consumerStoreReady: async () => ready,
     spawnRelay: () => { const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); children.push(child); return child; } } as Parameters<typeof lifecycle.runOwnedContainerEntrypoint>[0]);
   try {
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await receiptReady(join(f.home, 'relay', 'container-heartbeat.json'), heartbeat => heartbeat.lifecycle === 'blocked');
     const heartbeat = JSON.parse(await readFile(join(f.home, 'relay', 'container-heartbeat.json'), 'utf8'));
     assert.equal(heartbeat.lifecycle, 'blocked'); assert.equal(children.length, 0);
     ready = true; await until(() => children.length === 1);
+    await until(async () => (await relayAutostartStatus(f.options)).lifecycle === 'running');
     assert.equal((await relayAutostartStatus(f.options)).lifecycle, 'running');
   } finally { abort.abort(); }
   await result;

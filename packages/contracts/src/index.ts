@@ -12,6 +12,8 @@ import taskActionSchema from './task-action.schema.json' with { type: 'json' };
 import taskEnvelopeSchema from './task-envelope.schema.json' with { type: 'json' };
 
 export * from './codex-task-observation.js';
+export * from './setupClaim.js';
+export * from './setupClaimCredential.js';
 
 const require = createRequire(import.meta.url);
 const Ajv2020 = require('ajv/dist/2020').default as new (options: Record<string, unknown>) => {

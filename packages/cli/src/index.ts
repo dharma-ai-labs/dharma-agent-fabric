@@ -19,7 +19,7 @@ import {
   AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
-  loadOrganizationApiToken, redeemBootstrapGrant, saveDeviceConfig, saveDeviceEnrollmentAnchor,
+  loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
@@ -100,7 +100,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.136';
+const VERSION = '0.2.137';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -204,6 +204,7 @@ export function commandExitCode(argv: string[], value: Output): number {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 1;
   const receipt = value as Record<string, unknown>;
   if (receipt.ok !== true) return 1;
+  if (flags.has('setup-reference') && flags.has('dry-run') && receipt.stage === 'plan' && receipt.effects === false) return 0;
   return flags.has('complete') && (receipt.stage !== 'complete' || receipt.sharedRepositoryReady !== true) ? 1 : 0;
 }
 
@@ -2120,7 +2121,7 @@ export function assertBootstrapResumeAuthority(input: {
   organizationId: string;
   hqUrl: string;
 }) {
-  if (input.flags.has('grant') || input.flags.has('grant-prompt') || input.flags.has('replace-existing-enrollment') || !input.flags.has('complete')) {
+  if (input.flags.has('grant') || input.flags.has('grant-prompt') || input.flags.has('setup-reference') || input.flags.has('replace-existing-enrollment') || !input.flags.has('complete')) {
     throw new Error('Bootstrap resume requires --complete and cannot accept a grant or replace an enrollment.');
   }
   if (!input.existing || input.existing.organizationId !== input.organizationId
@@ -2140,6 +2141,29 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     ? String(flags.get('join-repository-binding-id')) : null;
   const joinedFingerprint = typeof flags.get('join-source-fingerprint') === 'string'
     ? String(flags.get('join-source-fingerprint')) : null;
+  if (grantMode === 'reference') {
+    if (!hqUrl.startsWith('https:') || !/^org_[A-Za-z0-9]+$/.test(organizationId)
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(required(flags, 'policy-revision'))) {
+      throw new Error('setup_claim_context_invalid');
+    }
+    if (joinedBindingId || joinedFingerprint || !flags.has('complete') || flags.has('no-relay-daemon')) {
+      throw new Error('setup_claim_source_required: agent setup requires source-connected --complete with normal relay startup.');
+    }
+    for (const key of ['setup-reference', 'setup-recipient-membership-id']) {
+      if (!UUID_PATTERN.test(required(flags, key))) throw new Error('setup_claim_context_invalid');
+    }
+    for (const key of ['setup-scope-digest', 'setup-contract-digest']) {
+      if (!/^sha256:[a-f0-9]{64}$/.test(required(flags, key))) throw new Error('setup_claim_context_invalid');
+    }
+    const installedContract = await loadAgentFabricOnboardingContract();
+    if (required(flags, 'setup-contract-digest') !== `sha256:${installedContract.sha256}`) {
+      throw new Error('setup_claim_contract_mismatch: the portal setup must match this published client operating contract.');
+    }
+    if (flags.has('dry-run')) return { ok: true, stage: 'plan', setupTransport: 'public_claim_v1',
+      organizationId, portalUrl: hqUrl, setupReference: required(flags, 'setup-reference'),
+      requires: ['workspace-qualified coding harness', 'protected device store', 'exact recipient browser approval', 'signed startup readiness'],
+      effects: false, grantRedeemed: false };
+  }
   if (joinedBindingId && (!UUID_PATTERN.test(joinedBindingId) || !/^sha256:[a-f0-9]{64}$/.test(joinedFingerprint || '')
     || selectedRemote || flags.has('repository-key'))) {
     throw new Error('repository_join_selection_invalid: joining requires an exact existing binding and fingerprint, without a source selection.');
@@ -2210,6 +2234,22 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   };
   if (resuming) {
     config = existing!;
+  } else if (grantMode === 'reference') {
+    const result = await claimSetupReference({ hqUrl, organizationId,
+      setupReference: required(flags, 'setup-reference'),
+      recipientMembershipId: required(flags, 'setup-recipient-membership-id'),
+      repositoryFingerprint: repositoryIdentity.fingerprint, policyRevision,
+      scopeDigest: required(flags, 'setup-scope-digest'), contractDigest: required(flags, 'setup-contract-digest'),
+      name: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
+      platform: await platform(), installationId: existing?.installationId ?? await loadOrCreateInstallationId(),
+      existingConfig: existing, configPath: configPath(),
+      onRecipientApprovalRequired: async approval => {
+        recipientApproval.required = true;
+        recipientApproval.browserOpened = flags.has('no-browser') ? false : await openVerificationUri(approval.url);
+        process.stderr.write(`Approve this exact device in the authenticated portal before ${approval.expiresAt}: ${approval.url}\n`);
+      },
+    });
+    config = result.config; scopes = result.scopes;
   } else {
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
     const devicePlatform = await platform();
@@ -2316,6 +2356,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const onboardFlags = new Map(flags);
   onboardFlags.delete('grant');
   onboardFlags.delete('grant-prompt');
+  for (const key of ['setup-reference', 'setup-recipient-membership-id', 'setup-scope-digest', 'setup-contract-digest']) onboardFlags.delete(key);
   onboardFlags.set('portal-url', hqUrl);
   onboardFlags.set('organization-id', organizationId);
   onboardFlags.set('workspace', workspace);
@@ -3683,6 +3724,7 @@ async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRec
     defaultSourceRef: item.defaultBranch,
     workspaceId: item.workspaceId,
     legacySourceFingerprint: item.repositoryIdentityVersion === 'normalized-v1' ? null : item.repositoryRemoteHash,
+    ...(!joinExistingBindingId ? setupClaimSourceRegistration(fabric.config, currentIdentity) : {}),
     ...(joinExistingBindingId ? { joinExistingBindingId } : {}),
   });
   const repositoryAgent = response.repositoryAgent && typeof response.repositoryAgent === 'object'

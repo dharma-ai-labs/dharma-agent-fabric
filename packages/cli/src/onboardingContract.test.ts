@@ -13,19 +13,21 @@ test('the installed onboarding contract forbids product-code workarounds', async
   assert.match(contract, /do not bypass enrollment/i);
   assert.match(contract, /exact failed stage, non-sensitive error, and correlation ID/i);
   assert.match(contract, /supported retry, reconciliation, rollback, or browser-authorized re-enrollment/i);
-  assert.match(contract, /retry the unchanged command once before expiry when the receipt explicitly proves non-redemption/i);
-  assert.match(contract, /After redemption, approval or another error, use only the supported cause-specific grant-free recovery; never replay the grant/i);
+  assert.match(contract, /same owned process/i);
+  assert.match(contract, /never replay an expired or spent setup/i);
 });
 
-test('the installed contract separates agent instructions from recipient-only private terminal entry', async () => {
+test('the installed contract uses one agent-run public reference and exact recipient browser approval', async () => {
   const contract = await readFile(contractUrl, 'utf8');
-  assert.match(contract, /short-lived grant is a separate recipient-only private field, not part of the agent prompt/i);
-  assert.match(contract, /exact generated grant-free `--grant-prompt` command directly in their own private, unrecorded interactive terminal/i);
-  assert.match(contract, /Never receive, print, save, commit, place in argv or environment, send through agent tools or transport, or record that grant/i);
-  assert.match(contract, /cannot detect an external recorder or prove the human owns a TTY/i);
+  assert.match(contract, /public setup reference is not a bearer credential/i);
+  assert.match(contract, /actual authenticated coding-agent conversation/i);
+  assert.match(contract, /agent runs the exact generated `--setup-reference` command/i);
+  assert.match(contract, /credentials move only from the trusted HTTPS endpoint into the native protected store/i);
+  assert.match(contract, /never request a human terminal command, grant paste or keyring troubleshooting/i);
   assert.match(contract, /no supplementary manual setup command/i);
   assert.match(contract, /Join existing[\s\S]*No GitHub permission or source checkout is needed/i);
-  assert.match(contract, /legacy Demo command contract does not establish `--grant-prompt` support/i);
+  assert.match(contract, /legacy Demo command contract does not establish setup-reference support/i);
+  assert.doesNotMatch(contract, /recipient runs.*`--grant-prompt`|personally runs.*`--grant-prompt`|private terminal grant entry/i);
   assert.doesNotMatch(contract, /only routine human action|setup envelope contains[\s\S]*one-time grant/i);
 });
 
