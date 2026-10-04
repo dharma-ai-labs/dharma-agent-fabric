@@ -55,6 +55,18 @@ deny device and Codex private homes and the private bus, and reject runtime code
 inside the checkout or protected roots. Approved local write roots do not carry
 over into read-only peer turns.
 
+Bounded named-session questions and answers use current repository source
+authority independently of automatic-learning consent. In local-analysis mode,
+the enrolled owner rechecks the exact workspace/repository source policy before
+each disclosure; current whole-repository approval is required for the existing
+whole-repository read-only peer contract. Subtree-only approval, unavailable or
+expired authority, metadata-only mode, excluded paths and secret-bearing text
+remain denied. This does not enable native-history ingestion, accept a learning
+observation, change roles or expand tool permissions. The task ID is a local
+correlation, not execution authority; signed target/session, expiry, ownership
+and budget checks still apply. Actual read containment and customer journeys
+must be qualified separately from these policy tests.
+
 ## Owned Linux container lifecycle
 
 An unprivileged Linux container may use `relay container-entrypoint` as its

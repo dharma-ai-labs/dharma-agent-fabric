@@ -52,6 +52,7 @@ import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSele
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
@@ -102,7 +103,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.141';
+const VERSION = '0.2.142';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4044,13 +4045,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       },
       openTransport: async () => transport!, channelTransport,
       verifier: { resolvePublicKey: trust.resolvePublicKey, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
-      authorizeContent: async content => {
-        const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
-        return current.evidence.automaticDisclosure?.mode === 'customer_authorized_content'
-          && !containsDisallowedLocalPath(content)
-          && canonicalize(redactValue(content, { classes: new Set<string>(), redactedValues: 0,
-            excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) === canonicalize(content);
-      } });
+      authorizeContent: createNamedPeerContentAuthorization({ scope: repositoryRoleScope(item),
+        loadCurrentPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
+        loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) });
   } finally {
     try { if (transport) await transport.close(); }
     finally { vault.close(); await releaseLock(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
