@@ -50,6 +50,15 @@ export async function reconcileProviderSessionReply(input: {
     return { state: 'reply_pending' as const, questionId: completion.questionId, taskId: completion.taskId,
       completionHash: pending.completionHash, reasonCode };
   }
+  if (observed.state === 'expired') {
+    const dispositionHash = await input.vault.quarantineExpiredProviderSessionReply(input.bindingId, input.identity,
+      completion.questionId, pending.completionHash, {
+        state: 'expired', taskId: completion.taskId, correlationId: observed.correlationId,
+      });
+    return { state: 'reply_quarantined' as const, questionId: completion.questionId, taskId: completion.taskId,
+      completionHash: pending.completionHash, dispositionHash, reasonCode: 'question_expired' as const,
+      delivered: false as const };
+  }
   if (observed.state !== 'answered' || observed.answer !== completion.answer || !observed.replyReceiptHash) {
     return { state: 'reply_pending' as const, questionId: completion.questionId, taskId: completion.taskId,
       completionHash: pending.completionHash,

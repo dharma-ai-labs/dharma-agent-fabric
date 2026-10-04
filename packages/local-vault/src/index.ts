@@ -208,6 +208,14 @@ export class LocalVault {
         acknowledged_at text,
         primary key (binding_id, question_id)
       );
+      create table if not exists provider_session_reply_dispositions (
+        binding_id text not null,
+        question_id text not null,
+        completion_hash text not null references blobs(content_id),
+        disposition_hash text not null references blobs(content_id),
+        primary key (binding_id, question_id),
+        foreign key (binding_id, question_id) references provider_session_replies(binding_id, question_id)
+      );
       create table if not exists provider_session_task_exports (
         binding_id text not null references provider_session_bindings(binding_id),
         work_key text not null,
@@ -384,10 +392,52 @@ export class LocalVault {
     Array<{ questionId: string; completionHash: string }> {
     if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
     const rows = this.#database.prepare(`
-      select question_id as questionId, blob_content_id as completionHash from provider_session_replies
-      where binding_id = ? and acknowledged_at is null order by created_at, question_id limit 100
+      select r.question_id as questionId, r.blob_content_id as completionHash from provider_session_replies r
+      where r.binding_id = ? and r.acknowledged_at is null
+        and not exists (select 1 from provider_session_reply_dispositions d
+          where d.binding_id = r.binding_id and d.question_id = r.question_id)
+      order by r.created_at, r.question_id limit 100
     `).all(bindingId) as Array<{ questionId: string; completionHash: string }>;
     return rows.map(row => ({ questionId: row.questionId, completionHash: row.completionHash }));
+  }
+
+  async quarantineExpiredProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, completionHash: string, observation: { state: 'expired'; taskId: string; correlationId: string }): Promise<string> {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
+    if (!uuid.test(questionId) || !/^sha256:[a-f0-9]{64}$(?![\s\S])/.test(completionHash)
+      || !observation || Object.keys(observation).sort().join(',') !== 'correlationId,state,taskId'
+      || observation.state !== 'expired' || !uuid.test(observation.taskId) || !uuid.test(observation.correlationId)) {
+      throw new Error('provider_session_reply_disposition_invalid');
+    }
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select blob_content_id, acknowledged_at from provider_session_replies where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { blob_content_id: string; acknowledged_at: string | null } | undefined;
+    if (!row || row.blob_content_id !== completionHash || row.acknowledged_at !== null) throw new Error('provider_session_reply_conflict');
+    const existing = this.#database.prepare(`
+      select completion_hash, disposition_hash from provider_session_reply_dispositions where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { completion_hash: string; disposition_hash: string } | undefined;
+    if (existing) {
+      if (existing.completion_hash !== completionHash) throw new Error('provider_session_reply_conflict');
+      return existing.disposition_hash;
+    }
+    // Expiry is not delivery. Keep the answer and an encrypted, independently scoped disposition.
+    const dispositionHash = await this.putBlob(Buffer.from(JSON.stringify({
+      schema: 'dharma.provider-session-expired-reply/v1', ...identity, bindingId, questionId,
+      completionHash, ...observation, observedAt: new Date().toISOString(), delivered: false,
+    })), 'provider-session-expired-reply');
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    this.#database.prepare(`
+      insert into provider_session_reply_dispositions(binding_id, question_id, completion_hash, disposition_hash)
+      select binding_id, question_id, blob_content_id, ? from provider_session_replies
+      where binding_id = ? and question_id = ? and blob_content_id = ? and acknowledged_at is null
+      on conflict(binding_id, question_id) do nothing
+    `).run(dispositionHash, bindingId, questionId, completionHash);
+    const persisted = this.#database.prepare(`
+      select completion_hash, disposition_hash from provider_session_reply_dispositions where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId) as { completion_hash: string; disposition_hash: string } | undefined;
+    if (!persisted || persisted.completion_hash !== completionHash) throw new Error('provider_session_reply_conflict');
+    return persisted.disposition_hash;
   }
 
   acknowledgeProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
@@ -397,6 +447,10 @@ export class LocalVault {
       select blob_content_id from provider_session_replies where binding_id = ? and question_id = ?
     `).get(bindingId, questionId) as { blob_content_id: string } | undefined;
     if (!row || row.blob_content_id !== completionHash) throw new Error('provider_session_reply_conflict');
+    const disposition = this.#database.prepare(`
+      select 1 from provider_session_reply_dispositions where binding_id = ? and question_id = ?
+    `).get(bindingId, questionId);
+    if (disposition) throw new Error('provider_session_reply_quarantined');
     this.#database.prepare(`
       update provider_session_replies set acknowledged_at = coalesce(acknowledged_at, ?)
       where binding_id = ? and question_id = ? and blob_content_id = ?

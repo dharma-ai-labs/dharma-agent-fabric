@@ -235,14 +235,27 @@ test('reopened inbox reconciles retained answers without executing or reserving 
         budget: { reserve: async () => { reserves += 1; return true; } }, openTransport: async () => remote.transport });
       try {
         const result = await inbox.runNext();
-        const remainsPending = ['conflicting', 'expired', 'lost_reply', 'denied_policy'].includes(remoteState);
-        assert.equal(result.state, remainsPending ? 'reply_pending' : 'reply_reconciled');
+        const remainsPending = ['conflicting', 'lost_reply', 'denied_policy'].includes(remoteState);
+        assert.equal(result.state, remoteState === 'expired' ? 'reply_quarantined' : remainsPending ? 'reply_pending' : 'reply_reconciled');
         assert.equal(replies, ['accepted', 'lost_reply'].includes(remoteState) ? 1 : 0);
         assert.equal(reads, remoteState === 'accepted' ? 2 : 1);
         assert.equal(reserves, 0); assert.equal(remote.calls.includes('turn/start'), false);
         assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length,
           remainsPending ? 1 : 0);
         assert.deepEqual(await f.vault.getBlob(hash), Buffer.from(canonicalize(completion)));
+        if (remoteState === 'expired') {
+          assert.equal(remote.isClosed(), false);
+          assert.equal(await reconcileProviderSessionReply({ vault: f.vault, bindingId: f.binding.bindingId,
+            identity: f.identity, channel: {
+              read: async () => { throw new Error('expired reply must not be retried'); },
+              reply: async () => { throw new Error('expired reply must not be published'); },
+            } }), null);
+          await inbox.close();
+          f.vault.close();
+          f.vault = await LocalVault.open({ root: f.root, masterKey: f.masterKey });
+          assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 0);
+          assert.deepEqual(await f.vault.getBlob(hash), Buffer.from(canonicalize(completion)));
+        }
       } finally { await inbox.close(); f.vault.close(); }
     });
   }
