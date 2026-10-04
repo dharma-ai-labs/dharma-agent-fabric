@@ -222,6 +222,7 @@ test('peer tools are fenced to the active local turn and removed before another 
   const f = fixture(), original = f.transport.request;
   let registered: CodexToolHandler | undefined, retained: CodexToolHandler | undefined;
   let invoked = 0, removed = 0;
+  const admission = { signal: new AbortController().signal };
   const observations: CodexToolResult[] = [];
   f.transport.onToolCall = handler => {
     registered = handler; retained = handler;
@@ -233,7 +234,9 @@ test('peer tools are fenced to the active local turn and removed before another 
       const call = { threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1', tool: 'dharma_peer_ask', arguments: {} };
       observations.push(await registered!({ ...call, threadId: 'foreign' }));
       observations.push(await registered!({ ...call, turnId: 'prior-turn' }));
-      observations.push(await registered!(call));
+      const expired = new AbortController(); expired.abort();
+      observations.push(await registered!({ ...call, callId: 'expired-call' }, { signal: expired.signal }));
+      observations.push(await registered!(call, admission));
       observations.push(await registered!(call));
       f.exclusiveLease.assertHeld = async () => false;
       observations.push(await registered!({ ...call, callId: 'call-2' }));
@@ -243,10 +246,11 @@ test('peer tools are fenced to the active local turn and removed before another 
     })());
     return { turn: { id: 'turn-1' } };
   };
-  await runCodexLocalWork({ ...f, toolHandler: async () => {
+  await runCodexLocalWork({ ...f, toolHandler: async (_params, context) => {
+    assert.equal(context, admission);
     invoked++; return { success: true, contentItems: [{ type: 'inputText', text: 'queued, not answered' }] };
   } });
-  assert.deepEqual(observations.map(value => value.success), [false, false, true, false, false]);
+  assert.deepEqual(observations.map(value => value.success), [false, false, false, true, false, false]);
   assert.equal(invoked, 1); assert.equal(removed, 1); assert.equal(registered, undefined);
   assert.equal((await retained!({ threadId: 'thread-1', turnId: 'turn-1', callId: 'late-call' })).success, false);
   assert.equal(invoked, 1);

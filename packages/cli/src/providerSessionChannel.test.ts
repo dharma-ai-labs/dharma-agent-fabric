@@ -31,6 +31,7 @@ function fixture() {
   let held = true, time = now, responseOverride: unknown, permitted = true;
   const calls: Array<{ route: string; body: Record<string, unknown> }> = [];
   let afterSend: (() => void) | undefined;
+  let duringContent: (() => void) | undefined;
   const transport = { async signedPost(route: string, input: unknown) {
     const body = input as Record<string, unknown>;
     calls.push({ route, body }); afterSend?.();
@@ -50,11 +51,62 @@ function fixture() {
   } };
   const channel = createProviderSessionChannel({ transport, scope, mode: 'bridge_owned', expectedRevision: 0,
     assertOwner: async () => held, now: () => time,
-    verifier: { resolvePublicKey: () => publicKey }, authorizeContent: async () => permitted });
+    verifier: { resolvePublicKey: () => publicKey }, authorizeContent: async () => { duringContent?.(); return permitted; } });
   return { channel, calls, setHeld: (value: boolean) => { held = value; },
     setTime: (value: Date) => { time = value; }, setResponse: (value: unknown) => { responseOverride = value; },
-    onSend: (fn: () => void) => { afterSend = fn; }, setPermitted: (value: boolean) => { permitted = value; } };
+    onSend: (fn: () => void) => { afterSend = fn; }, onContent: (fn: () => void) => { duringContent = fn; },
+    setPermitted: (value: boolean) => { permitted = value; } };
 }
+
+test('cancelled ask/read admission produces no signed request', async () => {
+  const f = fixture(), admission = new AbortController(); admission.abort();
+  await assert.rejects(f.channel.ask({ targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+    question: 'Which catalog applies?', maximumProviderCostCents: 25 }, { signal: admission.signal }), /provider_session_channel_cancelled/);
+  await assert.rejects(f.channel.read(uuid(10), uuid(11), uuid(20), { signal: admission.signal }), /provider_session_channel_cancelled/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('cancellation during content authorization prevents later question admission', async () => {
+  const f = fixture(), admission = new AbortController(); await f.channel.attach();
+  f.onContent(() => admission.abort());
+  await assert.rejects(f.channel.ask({ targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+    question: 'Which catalog applies?', maximumProviderCostCents: 25 }, { signal: admission.signal }), /provider_session_channel_cancelled/);
+  assert.equal(f.calls.length, 1);
+});
+
+test('in-flight cancelled delivery is uncertain and closes the channel without replay', async () => {
+  const f = fixture(), admission = new AbortController(); await f.channel.attach();
+  f.onSend(() => admission.abort());
+  const question = { targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+    question: 'Which catalog applies?', maximumProviderCostCents: 25 };
+  await assert.rejects(f.channel.ask(question, { signal: admission.signal }), /provider_session_channel_uncertain/);
+  await assert.rejects(f.channel.ask(question), /provider_session_channel_closed/);
+  assert.equal(f.calls.filter(v => v.body.action === 'ask').length, 1);
+});
+
+test('a cancelled request waiting behind the serial channel cannot dispatch later', async () => {
+  const f = fixture(), admission = new AbortController(); await f.channel.attach();
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  f.onSend(() => entered());
+  f.setResponse(async (body: Record<string, unknown>) => {
+    await blocked;
+    return { ok: true, organizationId: scope.organizationId, correlationId: uuid(90), registration: {
+      bindingId: scope.bindingId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
+      repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId, deviceId: scope.deviceId,
+      provider: 'codex', mode: 'bridge_owned', revision: Number(body.expectedRevision) + 1,
+      state: 'attached', leaseUntil: '2026-09-26T05:01:00.000Z', replay: false,
+    } };
+  });
+  const heartbeat = f.channel.heartbeat(); await started;
+  const queued = f.channel.ask({ targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+    question: 'Which catalog applies?', maximumProviderCostCents: 25 }, { signal: admission.signal });
+  admission.abort(); release();
+  await heartbeat;
+  await assert.rejects(queued, /provider_session_channel_cancelled/);
+  assert.equal(f.calls.filter(v => v.body.action === 'ask').length, 0);
+});
 
 test('revoked disclosure denies incoming questions before acceptance or provider dispatch', async () => {
   const f = fixture(); await f.channel.attach(); f.setPermitted(false);
