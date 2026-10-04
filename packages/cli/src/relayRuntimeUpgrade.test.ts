@@ -60,6 +60,41 @@ test('upgrade installs both launchers and startup then verifies the actual recei
   assert.deepEqual(f.calls, ['stopped', 'stopped', 'configure:0.2.118', 'start', 'verify:0.2.118']);
 });
 
+test('successive upgrades retain a completed journal across verified pinned Node directory changes', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture();
+  const prior = (version: string) => ({ ...contents(version), shell: `# prior pinned Node\n${contents(version).shell}` });
+  await writeFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), prior('0.2.116').shell);
+  await writeFile(join(f.input.workspace, '.dharma', 'bin', 'dharma.cmd'), prior('0.2.116').windows);
+  const seen: string[] = [];
+  const deps = { ...f.deps, verifyPriorLaunchers: async (version: string, value: ReturnType<typeof contents>) => {
+    seen.push(version);
+    return value.shell === prior(version).shell && value.windows === prior(version).windows;
+  } };
+  assert.equal((await upgradeRelayRuntime(f.input, deps)).state, 'completed');
+  assert.equal((await upgradeRelayRuntime({ ...f.input, version: '0.2.119' }, deps)).state, 'completed');
+  assert.deepEqual(seen, ['0.2.116', '0.2.116']);
+  assert.match(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), /@0\.2\.119/);
+});
+
+test('unverified historical launchers leave the journal and current installation unchanged', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture();
+  await upgradeRelayRuntime(f.input, f.deps);
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  const journal = JSON.parse(await readFile(path, 'utf8'));
+  journal.previous.shell += '# unexpected command\n';
+  const { createHash } = await import('node:crypto');
+  journal.previousHash = `sha256:${createHash('sha256').update(JSON.stringify(journal.previous)).digest('hex')}`;
+  await writeFile(path, JSON.stringify(journal));
+  const before = await readFile(path, 'utf8');
+  const current = await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8');
+  const deps = { ...f.deps, verifyPriorLaunchers: async () => false };
+  await assert.rejects(upgradeRelayRuntime({ ...f.input, version: '0.2.119' }, deps), /journal_invalid/);
+  assert.equal(await readFile(path, 'utf8'), before);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), current);
+});
+
 test('busy runtime blocks before any launcher or startup mutation', async () => {
   const { upgradeRelayRuntime } = await import(modulePath);
   const f = await fixture();
