@@ -13,6 +13,12 @@ export type BoundRepositorySource = RepositorySourceScope & {
   repositoryAgentId: string;
 };
 
+export function repositorySourcePollInvalidatesWatcher(record: { state: string; operationId?: string | null },
+  receipt: { state: string; operationId: string }): boolean {
+  return receipt.state === 'blocked'
+    && (record.state !== 'blocked' || record.operationId !== receipt.operationId);
+}
+
 export function advanceRepositorySourceBaseline(record: {
   localBaselineSnapshotHash?: string | null;
   publishedLocalSnapshotHash?: string | null;
