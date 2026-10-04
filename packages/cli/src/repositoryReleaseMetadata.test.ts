@@ -135,6 +135,60 @@ function inventory(input: Fixture) {
   });
 }
 
+function approvedReportFixture(path = `${ROOT}knowledge/reports/source/output/repair.md`, role = 'knowledge') {
+  const input = fixture();
+  const report = file(path, '# Verified synthetic repair\n\nExact approved report bytes; not a normative definition.\n');
+  input.files.push(report);
+  editManifest(input, value => {
+    const { contentBase64: _content, ...entry } = report;
+    value.files.push({ ...entry, role });
+    value.files.sort((a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  });
+  return input;
+}
+
+test('canonical release metadata admits an inventoried exact approved report body without promoting authority', async () => {
+  const input = approvedReportFixture();
+  const result = await validateRepositoryReleaseMetadata(input);
+  assert.equal(result.stage, 'repository_release_metadata_observed');
+  assert.equal(result.signatureVerified, false);
+  assert.equal(result.activationVerified, false);
+  assert.equal(result.projectionVerified, false);
+  assert.deepEqual(result.catalog.concepts, []);
+  assert.ok((result.manifest.files as Array<{ path: string; role: string }>).some(
+    entry => entry.path === `${ROOT}knowledge/reports/source/output/repair.md` && entry.role === 'knowledge'));
+});
+
+for (const [name, path, role] of [
+  ['outside report namespace', `${ROOT}knowledge/arbitrary.md`, 'knowledge'],
+  ['report role mismatch', `${ROOT}knowledge/reports/source/output/repair.md`, 'skill'],
+  ['secret report path', `${ROOT}knowledge/reports/source/output/.env.local`, 'knowledge'],
+  ['report traversal', `${ROOT}knowledge/reports/source/../outside.md`, 'knowledge'],
+] as const) {
+  test(`canonical release metadata rejects ${name}`, async () => {
+    await assert.rejects(validateRepositoryReleaseMetadata(approvedReportFixture(path, role)), /complete scoped contract/);
+  });
+}
+
+test('canonical release metadata still rejects changed approved report bytes and hashes', async () => {
+  const input = approvedReportFixture();
+  const report = input.files.at(-1)!;
+  report.contentBase64 = Buffer.from('# Different content\n').toString('base64');
+  await assert.rejects(validateRepositoryReleaseMetadata(input), /complete scoped contract/);
+});
+
+test('canonical release metadata includes approved reports in its aggregate source byte bound', async () => {
+  const input = fixture();
+  const reports = Array.from({ length: 17 }, (_, index) => file(
+    `${ROOT}knowledge/reports/source/output/report-${String(index).padStart(2, '0')}.txt`, 'x'.repeat(250000)));
+  input.files.push(...reports);
+  editManifest(input, value => {
+    value.files.push(...reports.map(({ contentBase64: _content, ...entry }) => ({ ...entry, role: 'knowledge' })));
+    value.files.sort((a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  });
+  await assert.rejects(validateRepositoryReleaseMetadata(input), /complete scoped contract/);
+});
+
 const rejected: Array<[string, (input: Fixture) => void]> = [
   ['foreign organization', input => { input.scope.organizationId = 'org_foreign'; }],
   ['foreign repository agent', input => { input.scope.repositoryAgentId = '67f61652-a5eb-46e4-930c-9478cd4a9c31'; }],

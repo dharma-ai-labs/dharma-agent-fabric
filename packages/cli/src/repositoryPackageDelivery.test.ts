@@ -228,6 +228,47 @@ test('signed package delivery returns the complete five-file metadata package an
   assert.deepEqual(Object.keys(result).sort(), ['assertCurrent', 'bundle', 'envelope', 'files', 'index']);
 });
 
+function signedApprovedReportFixture(role = 'knowledge') {
+  const input = fixture();
+  const report = file(`${ROOT}knowledge/reports/source/output/repair.md`, '# Approved synthetic report\nExact report bytes.\n');
+  input.files.push(report);
+  const manifest = readDocument(input, MANIFEST);
+  const { contentBase64: _content, ...entry } = report;
+  const inventory = manifest.files as Array<{ path: string; role: string }>;
+  inventory.push({ ...entry, role });
+  inventory.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  replaceDocument(input, MANIFEST, manifest);
+  repackage(input);
+  return { input, report };
+}
+
+test('signed package delivery verifies and retains an exact approved report body', async () => {
+  const { input, report } = signedApprovedReportFixture();
+  const { request } = harness(input);
+  const result = await receiveRepositoryPackageDelivery(request);
+  assert.deepEqual(result.files.find(entry => entry.path === report.path), report);
+  assert.deepEqual(result.bundle, input.bundle);
+  assert.equal(result.files.length, 6);
+  assert.doesNotThrow(result.assertCurrent);
+});
+
+test('signed package delivery rejects a correctly signed report role mismatch', async () => {
+  const { input } = signedApprovedReportFixture('skill');
+  await assert.rejects(receiveRepositoryPackageDelivery(harness(input).request), /complete scoped contract/);
+});
+
+test('signed package delivery rejects changed report chunks despite valid signed metadata', async () => {
+  const { input, report } = signedApprovedReportFixture();
+  const { request } = harness(input);
+  const index = input.plan.index.files.findIndex(entry => entry.path === report.path);
+  const original = request.fetchChunk;
+  request.fetchChunk = async (fileIndex, chunkIndex) => {
+    const chunk = await original(fileIndex, chunkIndex) as Record<string, unknown>;
+    return fileIndex === index ? { ...chunk, contentBase64: Buffer.from('# Tampered report\n').toString('base64') } : chunk;
+  };
+  await assert.rejects(receiveRepositoryPackageDelivery(request));
+});
+
 test('signed package preparation retains verified provenance independently of mutable transport objects', async () => {
   const input = fixture();
   const { request } = harness(input);
