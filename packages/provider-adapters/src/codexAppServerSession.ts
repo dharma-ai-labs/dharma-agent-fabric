@@ -20,7 +20,7 @@ export interface CodexAppServerTransport {
 }
 
 export type CodexToolResult = { success: boolean; contentItems: Array<{ type: 'inputText'; text: string }> };
-export type CodexToolHandler = (params: Record<string, unknown>) => Promise<CodexToolResult>;
+export type CodexToolHandler = (params: Record<string, unknown>, context?: { signal: AbortSignal }) => Promise<CodexToolResult>;
 
 export interface CodexBridgeBinding extends SessionBindingScope {
   owner: string;
@@ -289,15 +289,15 @@ async function runScopedTurn(input: {
   let activeTurnId: string | null = null;
   const calls = new Set<string>();
   const removeTools = input.permissions === 'dharma_work' && input.toolHandler && transport.onToolCall
-    ? transport.onToolCall(async params => {
-      if (!activeTurnId || params.threadId !== binding.threadId || params.turnId !== activeTurnId
+    ? transport.onToolCall(async (params, context) => {
+      if (context?.signal.aborted || !activeTurnId || params.threadId !== binding.threadId || params.turnId !== activeTurnId
         || typeof params.callId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(params.callId)
-        || calls.has(params.callId) || calls.size >= 8 || !await input.exclusiveLease.assertHeld()) {
+        || calls.has(params.callId) || calls.size >= 8 || !await input.exclusiveLease.assertHeld() || context?.signal.aborted) {
         return { success: false, contentItems: [{ type: 'inputText', text: 'codex_session_tool_not_authorized' }] };
       }
       calls.add(params.callId);
-      const result = await input.toolHandler!(params);
-      return activeTurnId === params.turnId && await input.exclusiveLease.assertHeld()
+      const result = await input.toolHandler!(params, context);
+      return !context?.signal.aborted && activeTurnId === params.turnId && await input.exclusiveLease.assertHeld() && !context?.signal.aborted
         ? result : { success: false, contentItems: [{ type: 'inputText', text: 'codex_session_tool_not_authorized' }] };
     }) : undefined;
   const usageByTurn = new Map<string, CodexProviderUsage | null>();

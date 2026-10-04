@@ -32,6 +32,11 @@ lines.on('line', line => {
       global.pendingPing = message.id;
       return;
     }
+    if (mode === 'tool-deferred') {
+      process.stdout.write(JSON.stringify({ id: message.id, result: { dispatched: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ id: 'call-1', method: 'item/tool/call', params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'dharma_peer_ask', arguments: {} } }) + '\\n');
+      return;
+    }
     if (mode === 'error') {
       process.stdout.write(JSON.stringify({ id: message.id, error: { code: 403, message: 'private data' } }) + '\\n');
       return;
@@ -41,16 +46,21 @@ lines.on('line', line => {
     process.stdout.write(notification.slice(12));
     process.stdout.write(JSON.stringify({ id: message.id, result: { pong: message.params.value } }) + '\\n');
   } else if (message.id === 'call-1' && message.result) {
+    if (mode === 'tool-deferred') {
+      process.stdout.write(JSON.stringify({ method: 'tool/completed', params: message.result }) + '\\n');
+      return;
+    }
     process.stdout.write(JSON.stringify({ id: global.pendingPing, result: message.result }) + '\\n');
   }
 });
 `;
 
-function open(mode: string, options: { maximumFrameBytes?: number; requestTimeoutMs?: number; experimentalApi?: boolean } = {}) {
+function open(mode: string, options: { maximumFrameBytes?: number; requestTimeoutMs?: number; toolCallTimeoutMs?: number; experimentalApi?: boolean } = {}) {
   return openCodexAppServerTransport({
     command: process.execPath, argv: ['-e', fakeServer, mode], cwd: process.cwd(),
     requestTimeoutMs: options.requestTimeoutMs ?? 1_000,
     maximumFrameBytes: options.maximumFrameBytes,
+    toolCallTimeoutMs: options.toolCallTimeoutMs,
     ...{ experimentalApi: options.experimentalApi },
   });
 }
@@ -68,6 +78,63 @@ setInterval(()=>{},1000);
   await transport.close();
   assert.ok(Date.now() - started < 4000);
   await assert.rejects(transport.request('ping', {}), /codex_app_server_unavailable/);
+});
+
+test('a bounded tool callback has a separate deadline from completed RPC requests', async () => {
+  const transport = await open('tool-deferred', { requestTimeoutMs: 1000, toolCallTimeoutMs: 2500 });
+  try {
+    const completion = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('callback completion missing')), 3500);
+      transport.onNotification((event: any) => {
+        if (event.method === 'tool/completed') { clearTimeout(timer); resolve(event.params); }
+      });
+    });
+    transport.onToolCall(async () => {
+      await new Promise(resolve => setTimeout(resolve, 1300));
+      return { success: true, contentItems: [{ type: 'inputText', text: 'bounded queued receipt' }] };
+    });
+    assert.deepEqual(await transport.request('ping', {}), { dispatched: true });
+    assert.deepEqual(await completion, { success: true,
+      contentItems: [{ type: 'inputText', text: 'bounded queued receipt' }] });
+  } finally { await transport.close(); }
+});
+
+test('tool expiry cancels its admission context and never returns a late result', async () => {
+  const transport = await open('tool-deferred', { requestTimeoutMs: 1000, toolCallTimeoutMs: 30 });
+  let cancelled = false, lateResults = 0;
+  try {
+    transport.onNotification((event: any) => { if (event.method === 'tool/completed') lateResults++; });
+    transport.onToolCall(async (_params, context) => {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      cancelled = context?.signal.aborted === true;
+      return { success: true, contentItems: [{ type: 'inputText', text: 'late result' }] };
+    });
+    assert.deepEqual(await transport.request('ping', {}), { dispatched: true });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(cancelled, true);
+    assert.equal(lateResults, 0);
+    await assert.rejects(transport.request('ping', {}), /codex_app_server_unavailable/);
+  } finally { await transport.close(); }
+});
+
+test('invalid callback deadlines fail before launching a provider', async () => {
+  for (const toolCallTimeoutMs of [0, -1, 1.5, 60001]) {
+    await assert.rejects(open('normal', { toolCallTimeoutMs }), /codex_app_server_launch_invalid/);
+  }
+});
+
+test('normal transport close cancels an active tool context', async () => {
+  const transport = await open('tool-deferred');
+  let signal: AbortSignal | undefined;
+  transport.onToolCall(async (_params, context) => {
+    signal = context?.signal;
+    return new Promise(() => {});
+  });
+  await transport.request('ping', {});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(signal);
+  await transport.close();
+  assert.equal(signal.aborted, true);
 });
 
 test('stdio transport initializes, parses fragmented notifications, and matches responses', async () => {

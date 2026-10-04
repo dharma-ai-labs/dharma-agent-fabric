@@ -102,13 +102,20 @@ export function createProviderSessionChannel(input: {
       throw new Error('provider_session_channel_unavailable');
     }
   }
-  async function post(route: string, body: Record<string, unknown>, field: 'registration' | 'result') {
+  function admitted(context?: { signal: AbortSignal }) {
+    if (context?.signal.aborted) throw new Error('provider_session_channel_cancelled');
+  }
+  async function post(route: string, body: Record<string, unknown>, field: 'registration' | 'result', context?: { signal: AbortSignal }) {
     fact(Buffer.byteLength(JSON.stringify(body), 'utf8') <= 3500, 'input');
+    admitted(context);
     await owner();
+    admitted(context);
     let response: unknown;
     try { response = await input.transport.signedPost(route, body); }
     catch { closed = true; throw new Error('provider_session_channel_uncertain'); }
+    if (context?.signal.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
     await owner();
+    if (context?.signal.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
     try {
       safeWire(response);
       const envelope = record(response, ['ok', 'organizationId', field, 'correlationId'], 'response');
@@ -158,9 +165,11 @@ export function createProviderSessionChannel(input: {
       && typeof result.replay === 'boolean', 'response');
     return { ...result, correlationId } as Acknowledgement;
   }
-  async function question(action: string, additional: Record<string, unknown> = {}) {
+  async function question(action: string, additional: Record<string, unknown> = {}, context?: { signal: AbortSignal }) {
+    admitted(context);
     await owner(true);
-    const result = await post('/agent-fabric/provider-session-questions', { ...base, action, ...additional }, 'result');
+    admitted(context);
+    const result = await post('/agent-fabric/provider-session-questions', { ...base, action, ...additional }, 'result', context);
     await owner(true); return result;
   }
   async function content(value: string, kind: 'question' | 'answer') {
@@ -193,14 +202,16 @@ export function createProviderSessionChannel(input: {
       }
       return offers;
     }),
-    ask: (request: { targetBindingId: string; taskId: string; category: string; question: string; maximumProviderCostCents: number }) => operation(async () => {
+    ask: (request: { targetBindingId: string; taskId: string; category: string; question: string; maximumProviderCostCents: number }, context?: { signal: AbortSignal }) => operation(async () => {
+      admitted(context);
       const value = record(request, ['targetBindingId', 'taskId', 'category', 'question', 'maximumProviderCostCents'], 'input');
       fact(identifier(value.targetBindingId) && identifier(value.taskId) && value.targetBindingId !== scope.bindingId
         && typeof value.category === 'string' && value.category.length <= 64 && CATEGORY.test(value.category)
         && Number.isInteger(value.maximumProviderCostCents) && value.maximumProviderCostCents >= 0
         && value.maximumProviderCostCents <= scope.maximumProviderCostCents, 'input');
       await content(text(value.question, 'input'), 'question');
-      return acknowledgement(await question('ask', value), { taskId: request.taskId, targetBindingId: request.targetBindingId, state: 'queued' });
+      admitted(context);
+      return acknowledgement(await question('ask', value, context), { taskId: request.taskId, targetBindingId: request.targetBindingId, state: 'queued' });
     }),
     accept: (questionId: string, taskId: string) => operation(async () => {
       fact(identifier(questionId) && identifier(taskId), 'input');
@@ -216,9 +227,10 @@ export function createProviderSessionChannel(input: {
       return acknowledgement(await question('reply', payload), { questionId: request.questionId, taskId: String(taskId),
         targetBindingId: scope.bindingId, state: request.outcome });
     }),
-    read: (questionId: string, taskId: string, targetBindingId: string) => operation(async () => {
+    read: (questionId: string, taskId: string, targetBindingId: string, context?: { signal: AbortSignal }) => operation(async () => {
+      admitted(context);
       fact([questionId, taskId, targetBindingId].every(identifier), 'input');
-      const value = record(await question('read', { questionId }), ['questionId', 'taskId', 'targetBindingId',
+      const value = record(await question('read', { questionId }, context), ['questionId', 'taskId', 'targetBindingId',
         'state', 'answer', 'failureCode', 'replyReceiptHash'], 'response');
       fact(value.questionId === questionId && value.taskId === taskId && value.targetBindingId === targetBindingId
         && ['preparing', 'queued', 'accepted', 'answered', 'failed', 'expired', 'unavailable'].includes(value.state), 'response');

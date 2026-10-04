@@ -76,7 +76,7 @@ test('uncertain delivery is not replayed or described as success', async () => {
 });
 
 test('only fixed nonsecret channel reasons accompany delivery uncertainty', async () => {
-  for (const reason of ['input', 'response', 'closed', 'owner_lost', 'unavailable', 'uncertain']) {
+  for (const reason of ['input', 'response', 'closed', 'owner_lost', 'unavailable', 'uncertain', 'cancelled']) {
     const f = fixture();
     f.input.channel = () => ({ ask: async args => { f.calls.push(args); throw new Error(`provider_session_channel_${reason}`); },
       read: async () => { throw new Error('unused'); } });
@@ -86,4 +86,36 @@ test('only fixed nonsecret channel reasons accompany delivery uncertainty', asyn
       code: 'codex_peer_tool_delivery_unconfirmed', reasonCode: `provider_session_channel_${reason}` });
     assert.equal(f.calls.length, 1);
   }
+});
+
+test('expired tool admission cannot pass delayed authorization and dispatch a peer request', async () => {
+  const f = fixture(), admission = new AbortController();
+  f.input.authorize = async () => { admission.abort(); return true; };
+  const response = await createCodexPeerToolHandler(f.input)(ask, { signal: admission.signal });
+  assert.equal(response.success, false);
+  assert.equal(f.calls.length, 0);
+});
+
+test('peer tools propagate the same cancellation context without changing signed arguments', async () => {
+  const f = fixture(), admission = new AbortController(), contexts: unknown[] = [];
+  const original = f.input.channel;
+  f.input.channel = () => ({
+    ask: async (args, context) => { contexts.push(context); return original().ask(args); },
+    read: async (question, task, target, context) => { contexts.push(context); return original().read(question, task, target); },
+  });
+  const handler = createCodexPeerToolHandler(f.input), context = { signal: admission.signal };
+  assert.equal((await handler(ask, context)).success, true);
+  assert.equal((await handler(read, context)).success, true);
+  assert.deepEqual(contexts, [context, context]);
+  assert.deepEqual(f.calls[0], { ...ask.arguments, maximumProviderCostCents: 25 });
+});
+
+test('a reply completed after admission expires remains uncertain, never a successful answer', async () => {
+  const f = fixture(), admission = new AbortController();
+  const original = f.input.channel;
+  f.input.channel = () => ({ ...original(), read: async (...args) => {
+    const response = await original().read(...args); admission.abort(); return response;
+  } });
+  assert.equal((await createCodexPeerToolHandler(f.input)(read, { signal: admission.signal })).success, false);
+  assert.equal(f.calls.length, 1);
 });

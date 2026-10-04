@@ -104,7 +104,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.145';
+const VERSION = '0.2.146';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3874,7 +3874,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
     const filesystem = await namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots });
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
-      environment, experimentalApi: true,
+      environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
       argv: ['-c', 'default_permissions="dharma_bridge"',
         '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
         '-c', 'permissions.dharma_bridge.network={enabled=false}',

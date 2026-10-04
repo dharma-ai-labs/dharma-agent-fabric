@@ -20,15 +20,18 @@ export async function openCodexAppServerTransport(input: {
   cwd: string;
   environment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  toolCallTimeoutMs?: number;
   maximumFrameBytes?: number;
   experimentalApi?: boolean;
 }): Promise<CodexStdioTransport> {
   const timeoutMs = input.requestTimeoutMs ?? 15_000;
+  const toolCallTimeoutMs = input.toolCallTimeoutMs ?? 30_000;
   const maximumFrameBytes = input.maximumFrameBytes ?? 5_000_000;
   if (!isAbsolute(input.cwd) || !input.command || !Array.isArray(input.argv)
     || input.argv.some(arg => typeof arg !== 'string')
     || (input.experimentalApi !== undefined && typeof input.experimentalApi !== 'boolean')
     || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000
+    || !Number.isInteger(toolCallTimeoutMs) || toolCallTimeoutMs < 1 || toolCallTimeoutMs > 60_000
     || !Number.isInteger(maximumFrameBytes) || maximumFrameBytes < 1_024 || maximumFrameBytes > 5_000_000) {
     throw new Error('codex_app_server_launch_invalid');
   }
@@ -49,6 +52,7 @@ export async function openCodexAppServerTransport(input: {
   const listeners = new Set<(event: unknown) => void>();
   let toolHandler: CodexToolHandler | undefined;
   let handlingTool = false;
+  let activeTool: AbortController | undefined;
   const serverIds = new Set<string>();
   let nextId = 1;
   let buffer = Buffer.alloc(0);
@@ -62,6 +66,7 @@ export async function openCodexAppServerTransport(input: {
   function fail(reason: string) {
     if (stopped) return;
     stopped = true;
+    activeTool?.abort();
     for (const entry of pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(new Error(reason));
@@ -101,13 +106,24 @@ export async function openCodexAppServerTransport(input: {
       }
       serverIds.add(key); handlingTool = true;
       const handler = toolHandler;
+      const admission = new AbortController();
+      activeTool = admission;
       let timer: NodeJS.Timeout | undefined;
+      let rejectCancelled: (() => void) | undefined;
+      const cancelled = new Promise<never>((_, reject) => {
+        rejectCancelled = () => reject(new Error('cancelled'));
+      });
+      const cancel = () => rejectCancelled!();
+      admission.signal.addEventListener('abort', cancel, { once: true });
       const unavailable = { success: false, contentItems: [{ type: 'inputText' as const, text: 'codex_session_tool_unavailable' }] };
       void Promise.race([
-        Promise.resolve().then(() => handler(value.params as Record<string, unknown>)).catch(() => unavailable),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), Math.min(timeoutMs, 30000)); }),
+        cancelled,
+        Promise.resolve().then(() => handler(value.params as Record<string, unknown>, { signal: admission.signal })).catch(() => unavailable),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => {
+          admission.abort(); reject(new Error('timeout'));
+        }, toolCallTimeoutMs); }),
       ]).then(result => {
-        if (stopped) return;
+        if (stopped || admission.signal.aborted) return;
         if (typeof result?.success !== 'boolean' || !Array.isArray(result.contentItems)
           || Object.keys(result).sort().join(',') !== 'contentItems,success'
           || result.contentItems.length !== 1 || result.contentItems[0]?.type !== 'inputText'
@@ -117,7 +133,9 @@ export async function openCodexAppServerTransport(input: {
         }
         send({ id, result });
       }).catch(() => fail('codex_app_server_tool_unconfirmed')).finally(() => {
+        admission.signal.removeEventListener('abort', cancel);
         if (timer) clearTimeout(timer); handlingTool = false;
+        if (activeTool === admission) activeTool = undefined;
       });
       return;
     }
@@ -202,6 +220,7 @@ export async function openCodexAppServerTransport(input: {
     async close() {
       if (!stopped) {
         stopped = true;
+        activeTool?.abort();
         for (const entry of pending.values()) {
           clearTimeout(entry.timer);
           entry.reject(new Error('codex_app_server_closed'));
