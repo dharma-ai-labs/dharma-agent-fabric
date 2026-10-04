@@ -6,7 +6,18 @@ discovers provider capabilities, keeps full trajectories in an encrypted local
 vault, syncs policy-qualified evidence, executes bounded signed tasks, and
 installs signed Skill releases with receipts and rollback ancestry.
 
-## Private user entry for a setup grant
+## One prompt in the actual coding-agent session
+
+Use the production portal's recipient-bound public setup-reference prompt in
+the intended authenticated coding-agent conversation. The agent runs setup;
+the intended recipient approves only the matching device in the browser.
+No supplementary human terminal command, grant paste or keyring troubleshooting
+is part of this flow. A public setup reference is not a bearer credential.
+Missing prerequisites must stop with a typed result rather than weaken storage,
+copy authentication or switch to a legacy grant. See
+`AGENT_FABRIC_ONBOARDING.md` for readiness, scoped recovery and team operation.
+
+## Legacy private user entry for a setup grant
 
 Use `dharma bootstrap --grant-prompt` with the portal's exact grant-free setup
 options. The recipient runs this command directly in their own interactive
@@ -23,9 +34,26 @@ signal and process-exit paths. Repository, provider and enrollment preflight run
 before private entry; the same issuer, recipient, repository, expiry and device
 approval checks govern redemption. This input option confers no new authority.
 
-Existing `--grant` integrations remain compatible. New portal instructions use
-private entry instead. After enrollment, use the exact supported grant-free
+Existing `--grant` integrations remain compatible. Neither private input nor
+`--grant` is a fallback for the public setup-reference journey. After enrollment,
+use the exact supported grant-free
 `bootstrap --resume --complete` command; do not enter or replay the spent grant.
+
+## Named Codex protected-session transport
+
+Named Linux sessions retain the existing canonical Unix-path D-Bus address and
+runtime directory needed by the official protected store. Already-configured
+loopback HTTP proxy settings may reach the existing bounded public forwarder;
+remote or credential-bearing proxy URLs are rejected. This does not create or
+unlock a store, copy authentication, permit another account or enable tool
+network access. Model keys, passwords and arbitrary Node preloads are not
+forwarded. Missing login remains a typed blocked stage. The Linux transport
+owns a separate process group and closes only its own launcher and descendants;
+Windows and macOS retain their existing direct-child shutdown behavior.
+Named Linux tool profiles expose the exact public Codex installation read-only,
+deny device and Codex private homes and the private bus, and reject runtime code
+inside the checkout or protected roots. Approved local write roots do not carry
+over into read-only peer turns.
 
 ## Owned Linux container lifecycle
 

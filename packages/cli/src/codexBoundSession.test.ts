@@ -43,7 +43,8 @@ function signedQuestion(binding: LocalProviderSessionBinding, now: Date, questio
   return { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
 }
 
-function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTurn?: boolean; closeFails?: boolean } = {}) {
+function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTurn?: boolean; closeFails?: boolean;
+  filesystemRules?: Record<string, string> } = {}) {
   const calls: string[] = [];
   const listeners = new Set<(event: unknown) => void>();
   let closed = false;
@@ -60,7 +61,7 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
       if (method === 'permissionProfile/list') return { data: [{ id: 'dharma_bridge', allowed: true }] };
       if (method === 'config/read') return { config: { permissions: { dharma_bridge: {
         extends: null, workspace_roots: null,
-        filesystem: { ':minimal': 'read', ':workspace_roots': { '.': 'read' } },
+        filesystem: { ':minimal': 'read', ...options.filesystemRules, ':workspace_roots': { '.': 'read' } },
         network: { enabled: false },
       } } } };
       if (method === 'thread/read') return { thread: { id: binding.sessionId,
@@ -129,6 +130,29 @@ test('unqualified native host cannot open or advertise a bridge-owned provider',
   });
 
 describe('qualified Linux retained Codex consumer', { skip: process.platform !== 'linux' }, () => {
+test('retained owner passes trusted prepared rules through without accepting an altered denial', async () => {
+  const expected = { '/opt/public-codex': 'read', '/private/codex': 'deny' } as const;
+  for (const altered of [false, true]) {
+    const f = await fixture();
+    const remote = fakeTransport(f.binding, { filesystemRules: altered
+      ? { ...expected, '/private/codex': 'read' } : expected });
+    let reserved = false;
+    const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId,
+      openTransport: async () => remote.transport, additionalFilesystemRules: expected,
+      budget: { reserve: async () => { reserved = true; return true; } } });
+    try {
+      const result = owner.runQuestion({ question: signedQuestion(f.binding, f.now), now: f.now });
+      if (altered) {
+        await assert.rejects(result, /codex_session_profile_unavailable/);
+        assert.equal(reserved, false);
+        assert.equal(remote.calls.includes('turn/start'), false);
+      } else {
+        assert.equal((await result).providerThreadId, f.binding.sessionId);
+        assert.equal(reserved, true);
+      }
+    } finally { await owner.close(); f.vault.close(); }
+  }
+});
 test('retained provider and owner use the renewed deadline without replacing the conversation', async () => {
   const f = await fixture(), remote = fakeTransport(f.binding);
   const owner = await openCodexBoundSession({ ...f, bindingId: f.binding.bindingId, openTransport: async () => remote.transport });

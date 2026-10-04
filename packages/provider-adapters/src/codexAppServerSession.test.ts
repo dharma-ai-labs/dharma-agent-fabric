@@ -42,7 +42,8 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
   silentTurn?: boolean; profileDenied?: boolean; expandedProfile?: boolean; unknownProfileKey?: boolean;
   unknownNetworkKey?: boolean; activeAfterResume?: boolean; wrongWorkspace?: boolean;
   loadedEmpty?: boolean; unknownAfterResume?: boolean; wireDefaults?: boolean;
-  socketExpansion?: boolean; oversizedAnswer?: boolean } = {}) {
+  socketExpansion?: boolean; oversizedAnswer?: boolean;
+  filesystemRules?: Record<string, string> } = {}) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const listeners = new Set<(event: unknown) => void>();
   const seen = new Set<string>();
@@ -56,7 +57,7 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
         extends: null, workspace_roots: null,
         ...(options.wireDefaults ? { description: null } : {}),
         ...(options.unknownProfileKey ? { unrestricted: true } : {}),
-        filesystem: { glob_scan_max_depth: null, ':minimal': 'read', ':workspace_roots': {
+        filesystem: { glob_scan_max_depth: null, ':minimal': 'read', ...options.filesystemRules, ':workspace_roots': {
           '.': 'read', ...(options.expandedProfile ? { '..': 'read' } : {}),
         } },
         network: { enabled: false, domains: null, unix_sockets: null,
@@ -115,6 +116,38 @@ test('unqualified native host rejects before provider, reservation or replay cla
   });
 
 describe('qualified Linux sandbox bridge protocol', { skip: process.platform !== 'linux' }, () => {
+test('bridge requires exactly the trusted runtime reads and private-home denials', async () => {
+  const expected = { [resolve('/opt/codex')]: 'read', [resolve('/private/codex')]: 'deny' } as const;
+  const f = fixture({ filesystemRules: expected });
+  await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(), verifier: f.verifier,
+    exclusiveLease, budget, now, additionalFilesystemRules: expected });
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  for (const rules of [
+    { [resolve('/opt/codex')]: 'read' },
+    { ...expected, [resolve('/private/codex')]: 'read' },
+    { ...expected, [resolve('/unexpected')]: 'read' },
+    { ...expected, [resolve('/opt/codex')]: 'write' },
+  ]) {
+    const denied = fixture({ filesystemRules: rules });
+    let reserved = false, consumed = false;
+    await assert.rejects(runCodexBridgeQuestion({ transport: denied.transport, binding, question: question(),
+      verifier: { ...denied.verifier, consume: async () => { consumed = true; return true; } },
+      exclusiveLease, budget: { reserve: async () => { reserved = true; return true; } }, now,
+      additionalFilesystemRules: expected }), /codex_session_profile_unavailable/);
+    assert.equal(reserved, false); assert.equal(consumed, false);
+    assert.equal(denied.calls.some(call => call.method === 'thread/read' || call.method === 'turn/start'), false);
+  }
+  const legacy = fixture({ filesystemRules: expected });
+  await assert.rejects(runCodexBridgeQuestion({ transport: legacy.transport, binding, question: question(),
+    verifier: legacy.verifier, exclusiveLease, budget, now }), /codex_session_profile_unavailable/);
+  for (const malformed of [{ relative: 'read' }, { '/opt/../unexpected': 'read' }, { '/opt/codex': 'write' }]) {
+    const invalid = fixture();
+    await assert.rejects(runCodexBridgeQuestion({ transport: invalid.transport, binding, question: question(),
+      verifier: invalid.verifier, exclusiveLease, budget, now,
+      additionalFilesystemRules: malformed as unknown as Record<string, 'read' | 'deny'> }), /codex_session_profile_unavailable/);
+    assert.equal(invalid.calls.length, 0);
+  }
+});
 test('incoming read-only questions cannot register inherited local peer tools', async () => {
   const f = fixture();
   let registered = false, invoked = false;

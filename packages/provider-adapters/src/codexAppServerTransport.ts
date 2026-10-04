@@ -35,7 +35,15 @@ export async function openCodexAppServerTransport(input: {
   const child = spawn(input.command, input.argv, {
     cwd: input.cwd, env: input.environment ?? process.env,
     shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+    detached: process.platform === 'linux',
   });
+  function stopOwnedTree(signal: NodeJS.Signals) {
+    if (!child.pid) return;
+    if (process.platform !== 'linux') { child.kill(signal); return; }
+    // The detached launch establishes a group owned only by this transport.
+    try { process.kill(-child.pid, signal); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+  }
   child.stderr.resume();
   const pending = new Map<number, PendingRequest>();
   const listeners = new Set<(event: unknown) => void>();
@@ -59,7 +67,7 @@ export async function openCodexAppServerTransport(input: {
       entry.reject(new Error(reason));
     }
     pending.clear();
-    child.kill();
+    stopOwnedTree('SIGTERM');
   }
 
   function send(message: Record<string, unknown>) {
@@ -202,13 +210,14 @@ export async function openCodexAppServerTransport(input: {
       }
       child.stdin.end();
       if (closed) return;
+      stopOwnedTree('SIGTERM');
       let timer: NodeJS.Timeout | undefined;
       const graceful = await Promise.race([
         processClosed.then(() => true),
         new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2_000); }),
       ]);
       if (timer) clearTimeout(timer);
-      if (!graceful) child.kill('SIGKILL');
+      if (!graceful) stopOwnedTree('SIGKILL');
       timer = undefined;
       const finished = await Promise.race([
         processClosed.then(() => true),

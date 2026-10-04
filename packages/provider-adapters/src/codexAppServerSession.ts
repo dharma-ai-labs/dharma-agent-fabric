@@ -49,7 +49,13 @@ function scopedThread(value: unknown, threadId: string) {
 }
 
 async function assertRestrictedProfile(transport: CodexAppServerTransport, workspaceRoot: string,
-  name: 'dharma_bridge' | 'dharma_work' = 'dharma_bridge', writeRoots: string[] = []) {
+  name: 'dharma_bridge' | 'dharma_work' = 'dharma_bridge', writeRoots: string[] = [],
+  additionalFilesystemRules: Readonly<Record<string, 'read' | 'deny'>> = {}) {
+  // Only trusted runtime preparation supplies these exact public-code/private-home rules.
+  for (const [path, access] of Object.entries(additionalFilesystemRules)) {
+    if (!isAbsolute(path) || resolve(path) !== path || /[\u0000-\u001f\u007f]/.test(path)
+      || (access !== 'read' && access !== 'deny')) throw new Error('codex_session_profile_unavailable');
+  }
   const expectedRoots: Record<string, string> = { '.': 'read' };
   for (const root of writeRoots) {
     if (!/^(?:\.|[a-zA-Z0-9_-]+)$/.test(root)) throw new Error('codex_session_profile_unavailable');
@@ -73,7 +79,9 @@ async function assertRestrictedProfile(transport: CodexAppServerTransport, works
     || (profile.description != null && (typeof profile.description !== 'string' || profile.description.length > 1000))
     || profile.extends != null || profile.workspace_roots != null
     || filesystem[':minimal'] !== 'read'
-    || Object.keys(filesystem).some(key => !['glob_scan_max_depth', ':minimal', ':workspace_roots'].includes(key))
+    || Object.keys(filesystem).some(key => !['glob_scan_max_depth', ':minimal', ':workspace_roots'].includes(key)
+      && !Object.hasOwn(additionalFilesystemRules, key))
+    || Object.entries(additionalFilesystemRules).some(([key, access]) => filesystem[key] !== access)
     || Object.keys(roots).length !== Object.keys(expectedRoots).length
     || Object.entries(expectedRoots).some(([key, access]) => roots[key] !== access)
     || network.enabled !== false
@@ -146,6 +154,7 @@ export async function runCodexBridgeQuestion(input: {
   verifier: SessionQuestionVerifier;
   exclusiveLease: CodexSessionExclusiveLease;
   budget: CodexSessionBudget;
+  additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   now?: Date;
   timeoutMs?: number;
 }) {
@@ -167,7 +176,7 @@ export async function runCodexBridgeQuestion(input: {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
     throw new Error('codex_session_timeout_invalid');
   }
-  await assertRestrictedProfile(transport, binding.workspaceRoot);
+  await assertRestrictedProfile(transport, binding.workspaceRoot, 'dharma_bridge', [], input.additionalFilesystemRules);
   const read = scopedThread(await transport.request('thread/read', {
     threadId: binding.threadId, includeTurns: false,
   }), binding.threadId);
@@ -207,6 +216,7 @@ export async function runCodexLocalWork(input: {
   prompt: string;
   maximumProviderCostCents: number;
   writeRoots: string[];
+  additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   toolHandler?: CodexToolHandler;
   timeoutMs?: number;
   onTurnEvidence?: CodexTurnEvidenceSink;
@@ -228,7 +238,7 @@ export async function runCodexLocalWork(input: {
   if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
   if (!Array.isArray(input.writeRoots) || !input.writeRoots.length) throw new Error('codex_session_work_invalid');
   if (input.toolHandler && !transport.onToolCall) throw new Error('codex_session_tool_handler_unavailable');
-  await assertRestrictedProfile(transport, binding.workspaceRoot, 'dharma_work', input.writeRoots);
+  await assertRestrictedProfile(transport, binding.workspaceRoot, 'dharma_work', input.writeRoots, input.additionalFilesystemRules);
   const read = scopedThread(await transport.request('thread/read', {
     threadId: binding.threadId, includeTurns: false,
   }), binding.threadId);

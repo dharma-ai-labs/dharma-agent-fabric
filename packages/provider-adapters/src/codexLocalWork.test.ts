@@ -3,7 +3,7 @@ import test from 'node:test';
 import { resolve } from 'node:path';
 import { runCodexLocalWork, type CodexAppServerTransport, type CodexToolHandler, type CodexToolResult, type CodexLocalWorkCapture } from './codexAppServerSession.js';
 
-function fixture(expanded = false, usage: unknown = null) {
+function fixture(expanded = false, usage: unknown = null, filesystemRules: Record<string, string> = {}) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const listeners = new Set<(value: unknown) => void>();
   const workspaceRoot = resolve('/tmp/dharma-local-work');
@@ -13,7 +13,7 @@ function fixture(expanded = false, usage: unknown = null) {
       calls.push({ method, params });
       if (method === 'permissionProfile/list') return { data: [{ id: 'dharma_work', allowed: true }] };
       if (method === 'config/read') return { config: { permissions: { dharma_work: {
-        filesystem: { ':minimal': 'read', ':workspace_roots': { '.': 'write', ...(expanded ? { '..': 'write' } : {}) } },
+        filesystem: { ':minimal': 'read', ...filesystemRules, ':workspace_roots': { '.': 'write', ...(expanded ? { '..': 'write' } : {}) } },
         network: { enabled: false },
       } } } };
       if (method === 'thread/read') return { thread: { id: 'thread-1', cwd: workspaceRoot, status: { type: 'idle' } } };
@@ -49,6 +49,20 @@ test('local coding work selects its bounded profile on the retained thread', { s
   assert.equal(turn.params.threadId, 'thread-1');
   assert.equal(turn.params.permissions, 'dharma_work');
   assert.equal(turn.params.approvalPolicy, 'never');
+});
+
+test('local work verifies exact prepared rules before reserving or starting', { skip: process.platform !== 'linux' }, async () => {
+  const expected = { '/opt/codex': 'read', '/private/device': 'deny' } as const;
+  await runCodexLocalWork({ ...fixture(false, null, expected), additionalFilesystemRules: expected });
+  for (const rules of [{ '/opt/codex': 'read' }, { ...expected, '/private/device': 'read' },
+    { ...expected, '/unexpected': 'write' }]) {
+    const f = fixture(false, null, rules);
+    let reserved = false;
+    f.budget.reserve = async () => { reserved = true; return true; };
+    await assert.rejects(runCodexLocalWork({ ...f, additionalFilesystemRules: expected }), /profile_unavailable/);
+    assert.equal(reserved, false);
+    assert.equal(f.calls.some(call => call.method === 'thread/read' || call.method === 'turn/start'), false);
+  }
 });
 
 test('local work delivers turn-scoped native evidence only to the private sink', { skip: process.platform !== 'linux' }, async () => {

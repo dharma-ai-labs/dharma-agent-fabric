@@ -12,6 +12,7 @@ interface CodexBoundSessionInput {
   verifier: SessionQuestionVerifier;
   budget: CodexSessionBudget;
   localWriteRoots?: string[];
+  additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   localToolHandler?: CodexToolHandler;
 }
 
@@ -66,7 +67,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
       try {
         const result = await runCodexLocalWork({ ...request, transport, binding: currentBinding(),
           exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [],
-          toolHandler: input.localToolHandler });
+          toolHandler: input.localToolHandler, additionalFilesystemRules: input.additionalFilesystemRules });
         if (closing) throw new Error('codex_session_closed');
         return result;
       } catch (error) {
@@ -91,6 +92,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
           transport, binding: codexBinding, question: request.question,
           verifier: input.verifier, exclusiveLease: lease, budget: input.budget,
           now: request.now, timeoutMs: request.timeoutMs,
+          additionalFilesystemRules: input.additionalFilesystemRules,
         });
         if (closing) throw new Error('codex_session_closed');
         return result;

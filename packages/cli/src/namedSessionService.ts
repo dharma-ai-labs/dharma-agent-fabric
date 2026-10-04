@@ -104,6 +104,7 @@ export async function runNamedSessionService(input: {
   verifier: SessionQuestionVerifier;
   authorizeContent: Parameters<typeof openCodexInboxSession>[0]['authorizeContent'];
   localWriteRoots: string[];
+  additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   authorizeLocalWork(): Promise<boolean>;
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
