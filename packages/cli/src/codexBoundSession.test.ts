@@ -43,7 +43,7 @@ function signedQuestion(binding: LocalProviderSessionBinding, now: Date, questio
   return { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
 }
 
-function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTurn?: boolean; closeFails?: boolean;
+function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTurn?: boolean; closeFails?: boolean; answer?: string;
   filesystemRules?: Record<string, string> } = {}) {
   const calls: string[] = [];
   const listeners = new Set<(event: unknown) => void>();
@@ -73,7 +73,7 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
           for (const listener of listeners) listener({ method: 'turn/completed', params: {
             threadId: binding.sessionId, turn: { id: 'turn-1',
               status: options.failedTurn ? 'failed' : 'completed',
-              items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Catalog generation 13.' }],
+              items: [{ type: 'agentMessage', phase: 'final_answer', text: options.answer ?? 'Catalog generation 13.' }],
             },
           } });
         });
@@ -315,6 +315,75 @@ test('signed inbox dispatch retains the selected thread and publishes answers wi
   } finally { await inbox.close(); f.vault.close(); }
   assert.equal(remote.isClosed(), true);
   assert.equal(detaches, 0);
+});
+
+test('oversized completed peer answer publishes only a validation failure and retains encrypted evidence', async t => {
+  for (const scenario of ['accepted_failure', 'lost_failure_ack', 'server_denied_failure', 'revoked_before_failure'] as const) {
+    await t.test(scenario, async () => {
+      const f = await fixture(), answer = 'x'.repeat(2013), remote = fakeTransport(f.binding, { answer });
+      const question = signedQuestion(f.binding, f.now), actions: string[] = [], sent: Record<string, unknown>[] = [];
+      let reserves = 0, stagedAnswers = 0;
+      const stageReply = f.vault.stageProviderSessionReply.bind(f.vault);
+      f.vault.stageProviderSessionReply = async (...args) => {
+        stagedAnswers += 1;
+        return stageReply(...args);
+      };
+      if (scenario === 'revoked_before_failure') {
+        const putBlob = f.vault.putBlob.bind(f.vault);
+        f.vault.putBlob = async (bytes, purpose) => {
+          const hash = await putBlob(bytes, purpose);
+          if (purpose === 'provider-session-rejected-completion') {
+            f.vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+          }
+          return hash;
+        };
+      }
+      const transport = { async signedPost(route: string, input: unknown) {
+        const body = input as Record<string, unknown>; actions.push(String(body.action));
+        if (route.endsWith('provider-sessions')) return { ok: true, organizationId: f.binding.organizationId,
+          correlationId: ids.threadId, registration: { bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId,
+            endpointId: f.binding.endpointId, repositoryBindingId: f.binding.repositoryBindingId,
+            membershipId: f.binding.membershipId, deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+            revision: Number(body.expectedRevision) + 1, state: 'attached',
+            leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+        if (body.action === 'inbox') return { ok: true, organizationId: f.binding.organizationId,
+          correlationId: ids.threadId, result: { offers: [question] } };
+        if (body.action === 'reply') {
+          sent.push(body);
+          assert.equal(remote.isClosed(), false, 'failure must use the still-held real owner');
+          assert.equal(body.outcome, 'failed'); assert.equal(body.failureCode, 'validation_failed');
+          assert.equal(body.answer, ''); assert.equal(JSON.stringify(body).includes(answer), false);
+          if (scenario === 'lost_failure_ack') throw new Error('synthetic-unconfirmed-failure');
+          if (scenario === 'server_denied_failure') throw new Error('synthetic-denied-authority');
+        }
+        return { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId,
+          result: { questionId: question.questionId, taskId: question.taskId, targetBindingId: f.binding.bindingId,
+            state: body.action === 'accept' ? 'accepted' : body.outcome, replay: false } };
+      } };
+      const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+        channelTransport: transport, authorizeContent: async () => true,
+        budget: { reserve: async () => { reserves += 1; return true; } }, openTransport: async () => remote.transport });
+      try {
+        const result = await inbox.runNext();
+        assert.equal(result.state, scenario === 'accepted_failure' ? 'failed' : 'failure_reply_pending');
+        assert.ok('rejectedCompletionHash' in result && typeof result.rejectedCompletionHash === 'string');
+        const retained = JSON.parse((await f.vault.getBlob(result.rejectedCompletionHash)).toString());
+        assert.equal(retained.questionId, question.questionId); assert.equal(retained.taskId, question.taskId);
+        assert.equal(retained.bindingId, f.binding.bindingId); assert.equal(retained.result.answer, answer);
+        assert.equal(retained.code, 'codex_session_answer_too_large');
+        assert.equal(stagedAnswers, 0, 'rejected content cannot enter the answer retry queue');
+        if (scenario === 'revoked_before_failure') {
+          assert.throws(() => f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity),
+            /provider_session_binding_unavailable/);
+        } else assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 0);
+        assert.equal(reserves, 1); assert.equal(sent.length, scenario === 'revoked_before_failure' ? 0 : 1);
+        assert.equal(remote.calls.filter(method => method === 'turn/start').length, 1);
+        assert.equal(remote.isClosed(), true);
+        await assert.rejects(inbox.runNext(), /codex_inbox_session_unavailable/);
+        assert.equal(actions.includes('detach'), false);
+      } finally { await inbox.close(); f.vault.close(); }
+    });
+  }
 });
 
 test('completion recovery rejects corrupted contracts and foreign scope before requesting or executing work', async t => {

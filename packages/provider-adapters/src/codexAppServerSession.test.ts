@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { resolve } from 'node:path';
 import test, { describe } from 'node:test';
 import { signCanonicalObject, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
-import { runCodexBridgeQuestion, type CodexAppServerTransport } from './codexAppServerSession.js';
+import { CodexSessionAnswerTooLargeError, runCodexBridgeQuestion, type CodexAppServerTransport } from './codexAppServerSession.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const scope: SessionBindingScope = {
@@ -42,7 +42,7 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
   silentTurn?: boolean; profileDenied?: boolean; expandedProfile?: boolean; unknownProfileKey?: boolean;
   unknownNetworkKey?: boolean; activeAfterResume?: boolean; wrongWorkspace?: boolean;
   loadedEmpty?: boolean; unknownAfterResume?: boolean; wireDefaults?: boolean;
-  socketExpansion?: boolean; oversizedAnswer?: boolean;
+  socketExpansion?: boolean; oversizedAnswer?: boolean; answer?: string;
   streamedFinal?: boolean; streamedForeignThread?: boolean; streamedForeignTurn?: boolean;
   streamedCommentary?: boolean; streamedConflict?: boolean;
   filesystemRules?: Record<string, string> } = {}) {
@@ -85,7 +85,7 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
           const params = { threadId: options.streamedForeignThread ? 'foreign-thread' : threadId,
             turnId: options.streamedForeignTurn ? 'foreign-turn' : 'turn-1',
             item: { id: 'answer-1', type: 'agentMessage', phase: options.streamedCommentary ? 'commentary' : 'final_answer',
-              text: options.oversizedAnswer ? 'x'.repeat(2001) : 'Use signed catalog generation 13.' } };
+              text: options.answer ?? (options.oversizedAnswer ? 'x'.repeat(2001) : 'Use signed catalog generation 13.') } };
           emit({ method: 'item/completed', params });
           if (options.streamedConflict) emit({ method: 'item/completed',
             params: { ...params, item: { ...params.item, text: 'Conflicting answer' } } });
@@ -93,7 +93,7 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
         if (!options.silentTurn) queueMicrotask(() => emit({ method: 'turn/completed', params: { threadId,
           turn: { id: 'turn-1', status: options.failTurn ? 'failed' : 'completed',
             items: options.emptyAnswer ? [] : [{ type: 'agentMessage', phase: 'final_answer',
-              text: options.oversizedAnswer ? 'x'.repeat(2001) : 'Use signed catalog generation 13.' }] } } }));
+              text: options.answer ?? (options.oversizedAnswer ? 'x'.repeat(2001) : 'Use signed catalog generation 13.') }] } } }));
         return { turn: { id: 'turn-1', status: 'inProgress' } };
       }
       if (method === 'turn/interrupt') return {};
@@ -237,7 +237,21 @@ test('thin completion rejects foreign, nonfinal, failed, conflicting and oversiz
 test('bridge rejects an answer larger than the existing signed messaging contract', async () => {
   const f = fixture({ oversizedAnswer: true });
   await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
-    verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1000 }), /codex_session_answer_too_large/);
+    verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1000 }), error => {
+    assert.ok(error instanceof CodexSessionAnswerTooLargeError);
+    assert.equal(error.result.answer, 'x'.repeat(2001));
+    assert.equal(JSON.stringify(error).includes(error.result.answer), false);
+    assert.equal(String(error).includes(error.result.answer), false);
+    return true;
+  });
+});
+
+test('bridge accepts the exact 2000-character boundary without truncation', async () => {
+  const answer = 'x'.repeat(2000), f = fixture({ answer });
+  const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1000 });
+  assert.equal(result.answer, answer);
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
 });
 
 test('bridge rejects a missing exclusive lease before touching the provider', async () => {

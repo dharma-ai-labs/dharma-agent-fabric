@@ -1,4 +1,5 @@
 import { canonicalize, type SessionBindingScope, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
+import { CodexSessionAnswerTooLargeError } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { openCodexBoundSession } from './codexBoundSession.js';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
@@ -98,6 +99,28 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
         let result: Awaited<ReturnType<typeof owner.runQuestion>>;
         try { result = await owner.runQuestion({ question: offer }); }
         catch (error) {
+          if (error instanceof CodexSessionAnswerTooLargeError) {
+            // Rejected content stays encrypted locally, outside the answered-reply queue.
+            const rejectedCompletionHash = await input.vault.putBlob(Buffer.from(canonicalize({
+              schema: 'dharma.provider-session-rejected-completion/v1',
+              organizationId: scope.organizationId, repositoryBindingId: scope.repositoryBindingId,
+              membershipId: scope.membershipId, deviceId: scope.deviceId,
+              workspaceId: scope.workspaceId, endpointId: scope.endpointId, bindingId: scope.bindingId,
+              questionId: offer.questionId, taskId: offer.taskId, code: error.message, result: error.result,
+            }), 'utf8'), 'provider-session-rejected-completion');
+            try {
+              const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
+                outcome: 'failed', answer: '', failureCode: 'validation_failed' });
+              const shutdown = await close();
+              return { ...receipt, rejectedCompletionHash, providerShutdownConfirmed: shutdown.providerClosed };
+            } catch {
+              let providerShutdownConfirmed = false;
+              try { providerShutdownConfirmed = (await close()).providerClosed; }
+              catch { /* Retain the fence if termination is unconfirmed. */ }
+              return { state: 'failure_reply_pending' as const, questionId: offer.questionId,
+                taskId: offer.taskId, rejectedCompletionHash, providerShutdownConfirmed };
+            }
+          }
           if (error instanceof Error && error.message === 'codex_session_budget_unavailable') {
             return { state: 'budget_denied' as const, questionId: offer.questionId, taskId: offer.taskId };
           }

@@ -147,6 +147,15 @@ function providerUsage(value: unknown): CodexProviderUsage | null {
   } catch { return null; }
 }
 
+export class CodexSessionAnswerTooLargeError extends Error {
+  readonly result!: Awaited<ReturnType<typeof runScopedTurn>>;
+  constructor(result: Awaited<ReturnType<typeof runScopedTurn>>) {
+    super('codex_session_answer_too_large');
+    this.name = 'CodexSessionAnswerTooLargeError';
+    Object.defineProperty(this, 'result', { value: result, enumerable: false });
+  }
+}
+
 export async function runCodexBridgeQuestion(input: {
   transport: CodexAppServerTransport;
   binding: CodexBridgeBinding;
@@ -202,7 +211,7 @@ export async function runCodexBridgeQuestion(input: {
 
   const result = await runScopedTurn({ ...input, timeoutMs, permissions: 'dharma_bridge',
     prompt: `Repository question (${question.category}; task ${question.taskId}): ${question.question}\nAnswer only from authorized repository material in at most 2000 characters. Do not modify files, use network access, or request broader permissions.` });
-  if (result.answer.length > 2000) throw new Error('codex_session_answer_too_large');
+  if (result.answer.length > 2000) throw new CodexSessionAnswerTooLargeError(result);
   return { questionId: question.questionId, taskId: question.taskId,
     bindingId: binding.bindingId, targetEndpointId: binding.endpointId, ...result };
 }
