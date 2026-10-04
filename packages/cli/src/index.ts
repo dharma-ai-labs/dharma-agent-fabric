@@ -3963,7 +3963,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         workspaceId, repositoryBindingId: item.repositoryBindingId!, repositoryAgentId: item.repositoryAgentId!, sourceAuthorization });
     };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
-      localWriteRoots: writeRoots,
+        localWriteRoots: writeRoots, additionalFilesystemRules: filesystem.additionalFilesystemRules,
       syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),

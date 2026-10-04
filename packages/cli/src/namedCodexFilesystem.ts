@@ -10,7 +10,8 @@ function contains(parent: string, child: string): boolean {
 // Sandbox children need the installed public provider code, never its private home.
 export async function namedCodexFilesystem(input: {
   environment: NodeJS.ProcessEnv; workspace: string; privateRoots: string[]; writeRoots: string[];
-}): Promise<{ peer: string; work: string; runtimeRoots: string[] }> {
+}): Promise<{ peer: string; work: string; runtimeRoots: string[];
+  additionalFilesystemRules: Readonly<Record<string, 'read' | 'deny'>> }> {
   const denied = input.privateRoots.map(root => resolve(root));
   const runtimeRoots: string[] = [];
   if (process.platform === 'linux') {
@@ -57,13 +58,15 @@ export async function namedCodexFilesystem(input: {
       throw new Error('named_session_provider_runtime_scope_invalid');
     }
   }
-  const shared: Record<string, string> = { ':minimal': 'read' };
-  for (const root of runtimeRoots) shared[root] = 'read';
-  for (const root of denied) shared[root] = 'deny';
+  const additionalFilesystemRules: Record<string, 'read' | 'deny'> = {};
+  for (const root of runtimeRoots) additionalFilesystemRules[root] = 'read';
+  for (const root of denied) additionalFilesystemRules[root] = 'deny';
+  const shared: Record<string, string> = { ':minimal': 'read', ...additionalFilesystemRules };
   const roots = { '.': 'read', ...Object.fromEntries(input.writeRoots.map(root => [root, 'write'])) };
   const table = (entries: Record<string, string>) => `{${Object.entries(entries)
     .map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(',')}}`;
   const profile = (workspaceRoots: Record<string, string>) => `{${Object.entries(shared)
     .map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(',')},":workspace_roots"=${table(workspaceRoots)}}`;
-  return { peer: profile({ '.': 'read' }), work: profile(roots), runtimeRoots };
+  return { peer: profile({ '.': 'read' }), work: profile(roots), runtimeRoots,
+    additionalFilesystemRules: Object.freeze(additionalFilesystemRules) };
 }

@@ -26,6 +26,9 @@ test('named filesystem exposes only public provider packages and denies existing
     const result = await namedCodexFilesystem({ environment: { PATH: f.bin }, workspace: join(f.root, 'checkout'),
       privateRoots: [join(f.root, 'device'), join(f.root, 'codex'), '/run/ef/current'], writeRoots: ['src', 'tests'] });
     assert.deepEqual(result.runtimeRoots, [f.code, f.native]);
+    assert.deepEqual(result.additionalFilesystemRules, { [f.code]: 'read', [f.native]: 'read',
+      [join(f.root, 'device')]: 'deny', [join(f.root, 'codex')]: 'deny', '/run/ef/current': 'deny' });
+    assert.equal(Object.isFrozen(result.additionalFilesystemRules), true);
     assert.ok(result.peer.includes(`${JSON.stringify(f.code)}="read"`));
     assert.ok(result.peer.includes(`${JSON.stringify(join(f.root, 'device'))}="deny"`));
     assert.ok(result.peer.includes('"/run/ef/current"="deny"'));
