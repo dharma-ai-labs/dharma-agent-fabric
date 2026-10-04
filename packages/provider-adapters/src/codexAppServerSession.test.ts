@@ -43,6 +43,8 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
   unknownNetworkKey?: boolean; activeAfterResume?: boolean; wrongWorkspace?: boolean;
   loadedEmpty?: boolean; unknownAfterResume?: boolean; wireDefaults?: boolean;
   socketExpansion?: boolean; oversizedAnswer?: boolean;
+  streamedFinal?: boolean; streamedForeignThread?: boolean; streamedForeignTurn?: boolean;
+  streamedCommentary?: boolean; streamedConflict?: boolean;
   filesystemRules?: Record<string, string> } = {}) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const listeners = new Set<(event: unknown) => void>();
@@ -79,6 +81,15 @@ function fixture(options: { active?: boolean; wrongResume?: boolean; failTurn?: 
         emit({ method: 'turn/completed', params: { threadId: 'foreign-thread',
           turn: { id: 'foreign-turn', status: 'completed', items: [{ type: 'agentMessage',
             phase: 'final_answer', text: 'Wrong recipient' }] } } });
+        if (options.streamedFinal) {
+          const params = { threadId: options.streamedForeignThread ? 'foreign-thread' : threadId,
+            turnId: options.streamedForeignTurn ? 'foreign-turn' : 'turn-1',
+            item: { id: 'answer-1', type: 'agentMessage', phase: options.streamedCommentary ? 'commentary' : 'final_answer',
+              text: options.oversizedAnswer ? 'x'.repeat(2001) : 'Use signed catalog generation 13.' } };
+          emit({ method: 'item/completed', params });
+          if (options.streamedConflict) emit({ method: 'item/completed',
+            params: { ...params, item: { ...params.item, text: 'Conflicting answer' } } });
+        }
         if (!options.silentTurn) queueMicrotask(() => emit({ method: 'turn/completed', params: { threadId,
           turn: { id: 'turn-1', status: options.failTurn ? 'failed' : 'completed',
             items: options.emptyAnswer ? [] : [{ type: 'agentMessage', phase: 'final_answer',
@@ -201,6 +212,25 @@ test('bridge does not manufacture an answer for failed or empty turns', async ()
     const f = fixture(options);
     await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
       verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1_000 }));
+  }
+});
+
+test('thin completion accepts only the exact live completed final item without replay', async () => {
+  const f = fixture({ streamedFinal: true, emptyAnswer: true });
+  const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+    verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1000 });
+  assert.equal(result.answer, 'Use signed catalog generation 13.');
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'thread/read').length, 1);
+});
+
+test('thin completion rejects foreign, nonfinal, failed, conflicting and oversized evidence', async () => {
+  for (const options of [{ streamedForeignThread: true }, { streamedForeignTurn: true },
+    { streamedCommentary: true }, { failTurn: true }, { streamedConflict: true }, { oversizedAnswer: true }]) {
+    const f = fixture({ ...options, streamedFinal: true, emptyAnswer: true });
+    await assert.rejects(runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
+      verifier: f.verifier, exclusiveLease, budget, now, timeoutMs: 1000 }));
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
   }
 });
 
