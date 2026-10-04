@@ -47,8 +47,13 @@ loopback HTTP proxy settings may reach the existing bounded public forwarder;
 remote or credential-bearing proxy URLs are rejected. This does not create or
 unlock a store, copy authentication, permit another account or enable tool
 network access. Model keys, passwords and arbitrary Node preloads are not
-forwarded. Missing login remains a typed blocked stage. The POSIX transport
-owns a separate process group and closes only its own launcher and descendants.
+forwarded. Missing login remains a typed blocked stage. The Linux transport
+owns a separate process group and closes only its own launcher and descendants;
+Windows and macOS retain their existing direct-child shutdown behavior.
+Named Linux tool profiles expose the exact public Codex installation read-only,
+deny device and Codex private homes and the private bus, and reject runtime code
+inside the checkout or protected roots. Approved local write roots do not carry
+over into read-only peer turns.
 
 ## Owned Linux container lifecycle
 
