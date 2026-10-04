@@ -42,7 +42,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
-import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, recoverWindowsRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
@@ -1699,12 +1699,18 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
   });
   if (!selected) throw new Error('relay_upgrade_workspace_unregistered');
   const home = dharmaHome();
-  const startup = await inspectOwnedRelayAutostart({ home });
   const expectedLauncher = resolve(workspace, '.dharma', 'bin', process.platform === 'win32' ? 'dharma.cmd' : 'dharma');
-  if (startup.workspace !== workspace || startup.launcher !== expectedLauncher
-    || startup.policy !== resolve(workspace, '.dharma', 'approved-policy.json')) {
-    throw new Error('relay_upgrade_workspace_conflict');
-  }
+  const assertNoActivationWork = async () => {
+    const activationLocks = resolve(home, 'registry', 'skill-activation-locks');
+    const locks = await readdir(activationLocks).catch(error => {
+      if (error.code === 'ENOENT') return []; throw error;
+    });
+    for (const lock of locks) {
+      if (lock.endsWith('.lock') && await pidProcessState(resolve(activationLocks, lock)) !== 'stopped') {
+        throw new Error('relay_upgrade_work_in_progress: recovery must wait for a safe task boundary.');
+      }
+    }
+  };
   const assertStopped = async () => {
     if (await relaySupervisorProcessState(home) !== 'stopped' || await relayProcessState(home) !== 'stopped') {
       throw new Error('relay_upgrade_runtime_busy: finish current work, then stop the owned relay before upgrading.');
@@ -1720,6 +1726,26 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     }
   };
   return withRelayStartupMutation(async () => {
+    if (process.platform === 'win32' && flags.has('rollback')) {
+      await assertStopped();
+      await assertNoActivationWork();
+      const recovery = await recoverWindowsRelayAutostart({ home, workspace, launcher: expectedLauncher,
+        policy: resolve(workspace, '.dharma', 'approved-policy.json'), dryRun: !flags.has('apply') });
+      if (recovery.state !== 'not_required') {
+        // Recover startup atomically first; a runtime journal, if present, is rolled back next.
+        const hasRuntimeJournal = recovery.state === 'planned' ? false : await lstat(resolve(home, 'relay', 'runtime-upgrade.json'))
+          .then(() => true).catch(error => { if (error.code === 'ENOENT') return false; throw error; });
+        if (recovery.state === 'planned' || !hasRuntimeJournal) {
+          return { ok: recovery.state === 'planned', stage: 'windows_startup_recovery', ...recovery,
+            enrollmentChanged: false, runtimeObservation: 'not_performed' };
+        }
+      }
+    }
+    const startup = await inspectOwnedRelayAutostart({ home });
+    if (startup.workspace !== workspace || startup.launcher !== expectedLauncher
+      || startup.policy !== resolve(workspace, '.dharma', 'approved-policy.json')) {
+      throw new Error('relay_upgrade_workspace_conflict');
+    }
     const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
       dryRun: !flags.has('apply'), rollback: flags.has('rollback') }, {
@@ -1732,19 +1758,11 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       launcherContents: version => stableRepositoryLauncherContents(version,
         { platform: process.platform, nodeDirectory: dirname(process.execPath) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
-      configureStartup: version => enableRelayAutostart({ home, workspace,
-        launcher: startup.launcher, policy: startup.policy, version }),
+      configureStartup: (version, windowsVisibility) => enableRelayAutostart({ home, workspace,
+        launcher: startup.launcher, policy: startup.policy, version, windowsVisibility }),
       start: () => startRelayAutostart({ home }),
       stop: async () => {
-        const activationLocks = resolve(home, 'registry', 'skill-activation-locks');
-        const locks = await readdir(activationLocks).catch(error => {
-          if (error.code === 'ENOENT') return []; throw error;
-        });
-        for (const lock of locks) {
-          if (lock.endsWith('.lock') && await pidProcessState(resolve(activationLocks, lock)) !== 'stopped') {
-            throw new Error('relay_upgrade_work_in_progress: recovery must wait for a safe task boundary.');
-          }
-        }
+        await assertNoActivationWork();
         const binding = await readFile(resolve(home, 'relay', 'supervisor-workspace.json'), 'utf8')
           .then(value => JSON.parse(value)).catch(() => null);
         if (await relaySupervisorProcessState(home) !== 'stopped'
@@ -1829,7 +1847,7 @@ async function startRelayDaemon(policyPath: string) {
       await startRelayAutostart({ home: dharmaHome() });
     } else {
       const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-        cwd: dirname(dirname(policyPath)), detached: true, stdio: 'ignore', env: process.env,
+        cwd: dirname(dirname(policyPath)), detached: true, stdio: 'ignore', env: process.env, windowsHide: true,
       });
       child.unref();
     }
@@ -1950,6 +1968,7 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
         cwd: dirname(dirname(policyPath)),
         stdio: 'ignore',
+        windowsHide: true,
         env: process.env,
       }),
     }) : Promise.resolve({ restarts: 0 });

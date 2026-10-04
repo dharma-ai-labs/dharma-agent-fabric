@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
 import test from 'node:test';
@@ -239,11 +239,16 @@ test('startup status never calls a missing OS registration healthy', async () =>
 
 test('a second standard repository preserves the verified user startup anchor on Linux and Windows', async () => {
   for (const platform of ['linux', 'win32'] as const) {
-    const root = await mkdtemp(join(tmpdir(), 'dharma-startup-anchor-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-startup-anchor-')));
     const calls: string[] = [];
+    let registered = false;
     const run = async (file: string, args: string[]) => {
       const text = file === 'powershell.exe' ? Buffer.from(args.at(-1)!, 'base64').toString('utf16le') : args.join(' ');
       calls.push(text);
+      if (text.includes('Register-ScheduledTask')) registered = true;
+      if (text.includes('ConvertTo-Json')) return { stdout: JSON.stringify(registered
+        ? { state: 'enabled', visibility: 'hidden', running: false }
+        : { state: 'absent', visibility: null, running: false }) };
       return { stdout: text.includes("'exists'") ? 'absent\n' : 'enabled\n' };
     };
     const options = { platform, home: join(root, 'dharma'), userHome: root,
@@ -276,11 +281,16 @@ test('a second standard repository preserves the verified user startup anchor on
 });
 
 test('Windows task registration uses the enrolled user without an embedded password', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-autostart-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-windows-autostart-')));
   const calls: string[] = [];
+  let registered = false;
   const run = async (_file: string, args: string[]) => {
     const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
     calls.push(decoded);
+    if (decoded.includes('Register-ScheduledTask')) registered = true;
+    if (decoded.includes('ConvertTo-Json')) return { stdout: JSON.stringify(registered
+      ? { state: 'enabled', visibility: 'hidden', running: false }
+      : { state: 'absent', visibility: null, running: false }) };
     return { stdout: decoded.includes("'exists'") ? 'absent\n'
       : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
   };
@@ -367,13 +377,18 @@ test('Linux Demo-only enable, repeat and disable use one owned versioned registr
 });
 
 test('Windows Demo-only registration reuses the same task and verifies its script', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-demo-task-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-demo-task-')));
   const calls: string[] = [];
+  let registered = false;
   const options = { platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
     workspace: 'C:\\Demo Repo', launcher: 'C:\\Demo Repo\\dharma.cmd', policy: null, version: '0.2.103',
     run: async (_file: string, args: string[]) => {
       const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
       calls.push(decoded);
+      if (decoded.includes('Register-ScheduledTask')) registered = true;
+      if (decoded.includes('ConvertTo-Json')) return { stdout: JSON.stringify(registered
+        ? { state: 'enabled', visibility: 'hidden', running: false }
+        : { state: 'absent', visibility: null, running: false }) };
       return { stdout: decoded.includes("'exists'") ? 'absent\n'
         : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
     } };
@@ -470,13 +485,18 @@ test('start invokes the single owned service and refuses a modified startup file
 });
 
 test('Windows owned operations guard the exact action, arguments, workspace and current user', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-start-task-owned-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-start-task-owned-')));
   const commands: string[] = [];
+  let registered = false;
   const options = { platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
     workspace: 'C:\\Demo Repo', launcher: 'C:\\Demo Repo\\dharma.cmd', policy: null, version: '0.2.103',
     run: async (_file: string, args: string[]) => {
       const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
       commands.push(decoded);
+      if (decoded.includes('Register-ScheduledTask')) registered = true;
+      if (decoded.includes('ConvertTo-Json')) return { stdout: JSON.stringify(registered
+        ? { state: 'enabled', visibility: 'hidden', running: false }
+        : { state: 'absent', visibility: null, running: false }) };
       return { stdout: decoded.includes("'exists'") ? 'absent\n'
         : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
     } };

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import type { RelayUpgradeDependencies } from './relayRuntimeUpgrade.js';
 
 const modulePath = './relayRuntimeUpgrade.js';
 const contents = (version: string) => ({ shell: `#!/bin/sh\nexec npm exec --yes -- @dharma-ai-labs/agent-fabric@${version} "$@"\n`,
@@ -96,6 +97,31 @@ test('rollback failure is explicit and cannot report a healthy old receiver', as
   const result = await upgradeRelayRuntime(f.input, f.deps);
   assert.equal(result.state, 'rollback_failed');
   assert.equal(result.ok, false);
+});
+
+test('runtime rollback restores exact Windows visibility for legacy and hidden startup anchors', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  for (const visibility of ['legacy', 'hidden'] as const) {
+    const f = await fixture();
+    const configured: (string | undefined)[] = [];
+    const deps: RelayUpgradeDependencies = { ...f.deps,
+      inspectStartup: async () => ({ version: '0.2.116', workspace: f.input.workspace, windowsVisibility: visibility }),
+      configureStartup: async (_version, mode) => { configured.push(mode); },
+      verify: async (version) => { if (version === f.input.version) throw new Error('synthetic failed receiver'); } };
+    assert.equal((await upgradeRelayRuntime(f.input, deps)).state, 'rolled_back');
+    assert.deepEqual(configured, [undefined, visibility]);
+    assert.equal(JSON.parse(await readFile(join(f.input.home, 'relay', 'runtime-upgrade.json'), 'utf8')).previousWindowsVisibility, visibility);
+  }
+});
+
+test('pre-visibility runtime journals restore legacy arguments for old CLI compatibility', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture();
+  await upgradeRelayRuntime(f.input, f.deps);
+  let restored: string | undefined;
+  const deps: RelayUpgradeDependencies = { ...f.deps, configureStartup: async (_version, visibility) => { restored = visibility; } };
+  assert.equal((await upgradeRelayRuntime({ ...f.input, rollback: true }, deps)).state, 'rolled_back');
+  assert.equal(restored, 'legacy');
 });
 
 test('another workspace startup cannot be redirected by upgrade', async () => {

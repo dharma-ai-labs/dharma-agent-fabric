@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -43,10 +43,12 @@ export type RelayAutostartState = {
   reason?: string;
   lifecycle?: 'configured' | 'unconfigured' | 'paused' | 'blocked' | 'starting' | 'running';
   restartCoverage?: 'container-entrypoint-only';
+  windowsVisibility?: 'legacy' | 'hidden';
+  migrationRequired?: boolean;
 };
 
 const defaultRunner: Runner = async (file, args) => {
-  const { stdout } = await execFileAsync(file, args, { timeout: 15_000, maxBuffer: 64 * 1024 });
+  const { stdout } = await execFileAsync(file, args, { timeout: 15_000, maxBuffer: 64 * 1024, windowsHide: true });
   return { stdout };
 };
 
@@ -191,6 +193,13 @@ async function readRegistration(options: RelayAutostartOptions): Promise<Registr
     if ((options.platform || process.platform) === 'linux' && await containerEntrypointAvailable(options)) {
       return await readContainerRegistration(options);
     }
+    if ((options.platform || process.platform) === 'win32') {
+      const path = registrationPath(home);
+      const stat = await lstat(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384 || await realpath(path) !== path) {
+        throw new Error('Invalid startup receipt.');
+      }
+    }
     const value = JSON.parse(await readFile(registrationPath(home), 'utf8')) as Registration;
     if (!value || typeof value !== 'object' || Array.isArray(value)
       || !['systemd-user', 'windows-task', 'launchd-user', 'container-entrypoint'].includes(value.backend)
@@ -228,6 +237,10 @@ async function readRegistration(options: RelayAutostartOptions): Promise<Registr
 async function ownsStartupFile(options: RelayAutostartOptions, registration: Registration, allowLegacy = false) {
   if (registration.backend === 'container-entrypoint') return ownsContainerStartup(options, registration as ContainerRelayRegistration);
   const path = startupPath(options, registration.backend);
+  if (registration.backend === 'windows-task') {
+    const stat = await lstat(path).catch(() => null);
+    if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > 16384 || await realpath(path) !== path) return false;
+  }
   if (registration.backend === 'launchd-user') {
     const stat = await lstat(path).catch(() => null);
     if (!stat?.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0) return false;
@@ -239,6 +252,12 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
       registration.workspace, options.home, true));
 }
 
+export function windowsRelayTaskArguments(home: string, visibility: 'legacy' | 'hidden' = 'hidden') {
+  const path = safeLine(scriptPath(home));
+  if (path.includes('"')) throw new Error('Autostart script path cannot contain a double quote.');
+  return `-NoProfile -NonInteractive${visibility === 'hidden' ? ' -WindowStyle Hidden' : ''} -File "${path}"`;
+}
+
 function windowsTaskGuard(registration: Registration, home: string) {
   return `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); `
     + `$principalMatches = $false; try { `
@@ -248,19 +267,255 @@ function windowsTaskGuard(registration: Registration, home: string) {
     + `$principalMatches = $principals.Count -eq 1 -and $principals[0].UserId -eq $identity.User.Value `
     + `} catch { $principalMatches = $false }; `
     + `$actions = @($task.Actions); `
-    + `if ($null -eq $task -or $actions.Count -ne 1 `
+    + `if ($null -eq $task -or $task.TaskPath -cne '\\' -or $actions.Count -ne 1 `
     + `-or $actions[0].Execute -cne 'powershell.exe' `
-    + `-or $actions[0].Arguments -cne ${psLiteral(`-NoProfile -NonInteractive -File "${scriptPath(home)}"`)} `
+    + `-or ($actions[0].Arguments -cne ${psLiteral(windowsRelayTaskArguments(home, 'legacy'))} `
+    + `-and $actions[0].Arguments -cne ${psLiteral(windowsRelayTaskArguments(home))}) `
     + `-or $actions[0].WorkingDirectory -cne ${psLiteral(registration.workspace)} `
+    + `-or $task.Principal.RunLevel -ne 'Limited' -or $task.Principal.LogonType -ne 'Interactive' `
     + `-or -not $principalMatches) `
     + `{ throw 'autostart_conflict' }; `;
 }
 
 function windowsTaskLookup(registration: Registration) {
-  return `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')} -ErrorAction SilentlyContinue; `;
+  return `$task = $null; try { $task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')} -ErrorAction Stop } `
+    + `catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw 'autostart_task_lookup_failed' } }; `;
+}
+
+type WindowsVisibility = 'legacy' | 'hidden';
+type WindowsTaskState = { state: 'enabled' | 'disabled' | 'absent'; visibility: WindowsVisibility | null; running: boolean };
+
+async function inspectWindowsTask(options: RelayAutostartOptions, registration: Registration): Promise<WindowsTaskState> {
+  const { stdout } = await (options.run || defaultRunner)('powershell.exe', encodedPowerShell(
+    windowsTaskLookup(registration)
+    + `if ($null -eq $task) { @{ state='absent'; visibility=$null; running=$false } | ConvertTo-Json -Compress; exit 0 }; `
+    + windowsTaskGuard(registration, options.home)
+    + `$visibility = if ($task.Actions[0].Arguments -ceq ${psLiteral(windowsRelayTaskArguments(options.home))}) { 'hidden' } else { 'legacy' }; `
+    + `$state = if ($task.State -eq 'Disabled') { 'disabled' } else { 'enabled' }; `
+    + `@{ state=$state; visibility=$visibility; running=($task.State -eq 'Running') } | ConvertTo-Json -Compress`));
+  let value: WindowsTaskState;
+  try { value = JSON.parse(stdout); } catch { throw new Error('autostart_task_readback_invalid'); }
+  if (!value || Object.keys(value).length !== 3 || !['enabled', 'disabled', 'absent'].includes(value.state)
+    || typeof value.running !== 'boolean' || (value.state === 'absent'
+      ? value.visibility !== null || value.running : !['legacy', 'hidden'].includes(String(value.visibility)))) {
+    throw new Error('autostart_task_readback_invalid');
+  }
+  return value;
+}
+
+async function pauseWindowsTask(options: RelayAutostartOptions, registration: Registration, previous: Registration | null = null) {
+  await (options.run || defaultRunner)('powershell.exe', encodedPowerShell(
+    windowsReplacementGuard(registration, options.home, previous)
+    + `if ($null -ne $task) { Disable-ScheduledTask -TaskName ${psLiteral(registration.taskName!)} -ErrorAction Stop | Out-Null }`));
+}
+
+function windowsReplacementGuard(registration: Registration, home: string, previous: Registration | null,
+  expectAbsent = false) {
+  return windowsTaskLookup(registration)
+    + (expectAbsent ? `if ($null -ne $task) { throw 'autostart_conflict' }; `
+      : `if ($null -ne $task) { try { ${windowsTaskGuard(registration, home)} } catch { `
+        + (previous ? windowsTaskGuard(previous, home) : `throw 'autostart_conflict'; `)
+        + `}; if ($task.State -eq 'Running') { throw 'autostart_runtime_busy' } }; `);
+}
+
+function windowsRegistrationCommand(registration: Registration, home: string, visibility: WindowsVisibility,
+  previous: Registration | null, expectAbsent = false) {
+  return windowsReplacementGuard(registration, home, previous, expectAbsent)
+    + `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; `
+    + `$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    + `-Argument ${psLiteral(windowsRelayTaskArguments(home, visibility))} `
+    + `-WorkingDirectory ${psLiteral(registration.workspace)}; `
+    + `$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity; `
+    + `$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited; `
+    + `$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    + `-RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1); `
+    + `Register-ScheduledTask -TaskName ${psLiteral(registration.taskName!)} -Action $action `
+    + `-Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null`;
+}
+
+type WindowsJournal = { schema: 'dharma.windows-startup-transaction/v1'; state: 'prepared' | 'completed' | 'rolled_back';
+  home: string; previous: Registration | null; previousReceipt: string | null; next: Registration;
+  previousTask: WindowsTaskState; visibility: WindowsVisibility };
+const windowsJournalPath = (home: string) => join(home, 'relay', 'windows-startup-transaction.json');
+
+async function assertNoWindowsRecovery(options: RelayAutostartOptions) {
+  if ((await readWindowsJournal(options))?.state === 'prepared') {
+    throw new Error('autostart_recovery_required: use the stopped-runtime upgrade rollback.');
+  }
+}
+
+async function atomicStartupFile(path: string, contents: string) {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, contents, { mode: 0o600, flag: 'wx' });
+  try { await rename(temporary, path); } finally { await rm(temporary, { force: true }); }
+}
+
+function validWindowsReceipt(value: unknown, home: string): value is Registration {
+  const registration = value as Registration;
+  if (!registration || typeof registration !== 'object' || Array.isArray(registration)
+    || registration.backend !== 'windows-task' || registration.taskName !== taskName(home)
+    || !VERSION.test(registration.version) || typeof registration.launcher !== 'string'
+    || typeof registration.workspace !== 'string') return false;
+  const keys = ['schema', 'backend', 'launcher', 'policy', 'workspace', 'version', 'taskName'];
+  if (registration.schema === 'dharma.relay-autostart/v1') {
+    if (typeof registration.policy !== 'string') return false;
+  } else if (registration.schema === 'dharma.relay-autostart/v2') {
+    if (registration.policy !== null || registration.mode !== 'demo-only') return false;
+    keys.push('mode');
+  } else return false;
+  try { for (const path of [registration.launcher, registration.workspace, ...(registration.policy === null ? [] : [registration.policy])]) safeLine(path); }
+  catch { return false; }
+  return Object.keys(registration).length === keys.length && keys.every(key => Object.hasOwn(registration, key));
+}
+
+async function readWindowsJournal(options: RelayAutostartOptions): Promise<WindowsJournal | null> {
+  const path = windowsJournalPath(options.home);
+  const stat = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+  if (!stat) return null;
+  try {
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 65536 || await realpath(path) !== path) throw new Error();
+    const value = JSON.parse(await readFile(path, 'utf8')) as WindowsJournal;
+    const keys = ['schema', 'state', 'home', 'previous', 'previousReceipt', 'next', 'previousTask', 'visibility'];
+    if (!value || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))
+      || value.schema !== 'dharma.windows-startup-transaction/v1' || value.home !== options.home
+      || !['prepared', 'completed', 'rolled_back'].includes(value.state)
+      || !['legacy', 'hidden'].includes(value.visibility) || !validWindowsReceipt(value.next, options.home)
+      || (value.previous !== null && !validWindowsReceipt(value.previous, options.home))
+      || (value.previous === null ? value.previousReceipt !== null || value.previousTask.state !== 'absent'
+        : typeof value.previousReceipt !== 'string' || value.previousReceipt.length > 16384
+          || JSON.stringify(JSON.parse(value.previousReceipt)) !== JSON.stringify(value.previous))
+      || !value.previousTask || Object.keys(value.previousTask).length !== 3
+      || !['enabled', 'disabled', 'absent'].includes(value.previousTask.state)
+      || value.previousTask.running !== false || (value.previousTask.state === 'absent'
+        ? value.previousTask.visibility !== null : !['legacy', 'hidden'].includes(String(value.previousTask.visibility)))) throw new Error();
+    return value;
+  } catch { throw new Error('autostart_transaction_invalid'); }
+}
+
+async function checkWindowsStartupFiles(options: RelayAutostartOptions, create = true) {
+  if (create) await mkdir(join(options.home, 'relay'), { recursive: true, mode: 0o700 });
+  if (await realpath(join(options.home, 'relay')) !== join(options.home, 'relay')) throw new Error('autostart_conflict');
+  for (const path of [registrationPath(options.home), scriptPath(options.home)]) {
+    const stat = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384 || await realpath(path) !== path)) throw new Error('autostart_conflict');
+  }
+}
+
+async function inspectWindowsRecovery(options: RelayAutostartOptions, journal: WindowsJournal) {
+  await checkWindowsStartupFiles(options, false);
+  const receipt = await readFile(registrationPath(options.home), 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+  const script = await readFile(scriptPath(options.home), 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+  const nextReceipt = `${JSON.stringify(journal.next, null, 2)}\n`;
+  if (![journal.previousReceipt, nextReceipt].includes(receipt)
+    || ![journal.previous ? startupContents(options, journal.previous) : null, startupContents(options, journal.next)].includes(script)) {
+    throw new Error('autostart_conflict');
+  }
+  // The task may be old or new after a lost scheduler acknowledgement, but never foreign.
+  let actual: WindowsTaskState;
+  try { actual = await inspectWindowsTask(options, journal.next); }
+  catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('autostart_conflict') || !journal.previous) throw error;
+    actual = await inspectWindowsTask(options, journal.previous);
+  }
+  if (actual.running) throw new Error('autostart_runtime_busy');
+  return actual;
+}
+
+async function restoreWindowsStartup(options: RelayAutostartOptions, journal: WindowsJournal) {
+  const actual = await inspectWindowsRecovery(options, journal);
+  const run = options.run || defaultRunner;
+  if (actual.state !== 'absent') {
+    await pauseWindowsTask(options, journal.next, journal.previous);
+  }
+  // Keep the logon trigger disabled while restoring the compatible local pair.
+  if (journal.previous) {
+    await atomicStartupFile(scriptPath(options.home), startupContents(options, journal.previous));
+    await atomicStartupFile(registrationPath(options.home), journal.previousReceipt!);
+  }
+  if (journal.previous && journal.previousTask.state !== 'absent') {
+    await run('powershell.exe', encodedPowerShell(windowsRegistrationCommand(journal.previous,
+      options.home, journal.previousTask.visibility!, journal.next)));
+    if (journal.previousTask.state === 'disabled') await run('powershell.exe', encodedPowerShell(
+      windowsTaskLookup(journal.previous) + windowsTaskGuard(journal.previous, options.home)
+      + `Disable-ScheduledTask -TaskName ${psLiteral(journal.previous.taskName!)} -ErrorAction Stop | Out-Null`));
+    const restored = await inspectWindowsTask(options, journal.previous);
+    if (restored.visibility !== journal.previousTask.visibility || restored.state !== journal.previousTask.state || restored.running) {
+      throw new Error('autostart_restore_unverified');
+    }
+  } else if (actual.state !== 'absent') {
+    await run('powershell.exe', encodedPowerShell(windowsTaskLookup(journal.next) + windowsTaskGuard(journal.next, options.home)
+      + `Unregister-ScheduledTask -TaskName ${psLiteral(journal.next.taskName!)} -Confirm:$false -ErrorAction Stop`));
+    if ((await inspectWindowsTask(options, journal.next)).state !== 'absent') throw new Error('autostart_restore_unverified');
+  }
+  if (!journal.previous) {
+    await rm(scriptPath(options.home), { force: true });
+    await rm(registrationPath(options.home), { force: true });
+  }
+  await atomicStartupFile(windowsJournalPath(options.home), `${JSON.stringify({ ...journal, state: 'rolled_back' }, null, 2)}\n`);
+}
+
+export async function recoverWindowsRelayAutostart(options: RelayAutostartOptions & {
+  dryRun?: boolean; workspace: string; launcher: string; policy: string | null;
+}) {
+  if ((options.platform || process.platform) !== 'win32') return { state: 'not_required' as const };
+  const journal = await readWindowsJournal(options);
+  if (!journal || journal.state !== 'prepared') return { state: 'not_required' as const };
+  if (journal.next.workspace !== options.workspace || (journal.previous && journal.previous.workspace !== options.workspace)) {
+    throw new Error('autostart_recovery_workspace_conflict');
+  }
+  if ([journal.next, ...(journal.previous ? [journal.previous] : [])]
+    .some(receipt => receipt.launcher !== options.launcher || receipt.policy !== options.policy)) {
+    throw new Error('autostart_recovery_scope_conflict');
+  }
+  if (options.dryRun) {
+    await inspectWindowsRecovery(options, journal);
+    return { state: 'planned' as const, reason: 'autostart_recovery_required' };
+  }
+  await restoreWindowsStartup(options, journal);
+  return { state: 'rolled_back' as const };
+}
+
+async function configureWindowsStartup(options: RelayAutostartOptions, registration: Registration,
+  previous: Registration | null, visibility: WindowsVisibility) {
+  const pending = await readWindowsJournal(options);
+  if (pending?.state === 'prepared') throw new Error('autostart_recovery_required: use the stopped-runtime upgrade rollback.');
+  await checkWindowsStartupFiles(options);
+  const actual = await inspectWindowsTask(options, previous || registration);
+  if (!previous && actual.state !== 'absent') throw new Error('autostart_conflict');
+  if (previous && JSON.stringify(previous) === JSON.stringify(registration) && actual.state === 'enabled'
+    && actual.visibility === visibility) return;
+  if (actual.running) throw new Error('autostart_runtime_busy: stop the owned relay before migrating startup.');
+  const journal: WindowsJournal = { schema: 'dharma.windows-startup-transaction/v1', home: options.home,
+    state: 'prepared', previous, next: registration, previousTask: actual, visibility,
+    previousReceipt: previous ? await readFile(registrationPath(options.home), 'utf8') : null };
+  await atomicStartupFile(windowsJournalPath(options.home), `${JSON.stringify(journal, null, 2)}\n`);
+  try {
+    if (actual.state !== 'absent') await pauseWindowsTask(options, previous || registration);
+    await atomicStartupFile(scriptPath(options.home), startupContents(options, registration));
+    await atomicStartupFile(registrationPath(options.home), `${JSON.stringify(registration, null, 2)}\n`);
+    // Recheck the old action immediately before replacement, after local writes.
+    const checked = await inspectWindowsTask(options, previous || registration);
+    const expected = actual.state === 'absent' ? actual : { ...actual, state: 'disabled' };
+    if (JSON.stringify(checked) !== JSON.stringify(expected)) throw new Error('autostart_conflict');
+    await (options.run || defaultRunner)('powershell.exe', encodedPowerShell(
+      windowsRegistrationCommand(registration, options.home, visibility, previous, actual.state === 'absent')));
+    const observed = await inspectWindowsTask(options, registration);
+    if (observed.state !== 'enabled' || observed.visibility !== visibility || observed.running) throw new Error('autostart_registration_unverified');
+    await atomicStartupFile(windowsJournalPath(options.home), `${JSON.stringify({ ...journal, state: 'completed' }, null, 2)}\n`);
+  } catch {
+    try { await restoreWindowsStartup(options, journal); }
+    catch { throw new Error('autostart_recovery_required: startup rollback is unverified; preserve the transaction.'); }
+    throw new Error('autostart_registration_failed: previous startup restored.');
+  }
 }
 
 export async function relayAutostartStatus(options: RelayAutostartOptions): Promise<RelayAutostartState> {
+  if ((options.platform || process.platform) === 'win32') {
+    try { await assertNoWindowsRecovery(options); }
+    catch (error) { return { state: 'unavailable', backend: 'windows-task',
+      reason: error instanceof Error && error.message.startsWith('autostart_recovery_required')
+        ? 'autostart_recovery_required' : 'autostart_journal_invalid' }; }
+  }
   let registration;
   try { registration = await readRegistration(options); }
   catch { return { state: 'unavailable', backend: null, reason: 'autostart_receipt_invalid' }; }
@@ -283,21 +538,19 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
       return { state: match?.[1] === 'false' ? 'enabled' : 'disabled',
         backend: registration.backend, version: registration.version };
     }
-    const result = registration.backend === 'systemd-user'
-      ? await run('systemctl', ['--user', 'is-enabled', UNIT_NAME])
-      : await run('powershell.exe', encodedPowerShell(
-        windowsTaskLookup(registration)
-        + `if ($null -eq $task) { 'disabled'; exit 0 }; `
-        + `try { ${windowsTaskGuard(registration, options.home)} } catch { 'conflict'; exit 0 }; `
-        + `if ($task.State -ne 'Disabled') { 'enabled' } else { 'disabled' }`,
-      ));
-    if (result.stdout.trim() === 'conflict') return { state: 'unavailable', backend: registration.backend,
-      version: registration.version, reason: 'autostart_conflict' };
+    if (registration.backend === 'windows-task') {
+      const observed = await inspectWindowsTask(options, registration);
+      return { state: observed.state === 'absent' ? 'disabled' : observed.state,
+        backend: registration.backend, version: registration.version,
+        ...(observed.visibility ? { windowsVisibility: observed.visibility,
+          migrationRequired: observed.visibility === 'legacy' } : {}) };
+    }
+    const result = await run('systemctl', ['--user', 'is-enabled', UNIT_NAME]);
     return { state: result.stdout.trim() === 'enabled' ? 'enabled' : 'disabled',
       backend: registration.backend, version: registration.version };
   } catch (error) {
     return { state: 'unavailable', backend: registration.backend, version: registration.version,
-      reason: error instanceof Error && error.message.startsWith('autostart_conflict:') ? 'autostart_conflict'
+      reason: error instanceof Error && error.message.includes('autostart_conflict') ? 'autostart_conflict'
         : registration.backend === 'container-entrypoint' ? 'container_startup_unavailable'
         : registration.backend === 'systemd-user' ? 'systemd_user_unavailable'
         : registration.backend === 'launchd-user' ? 'launchd_user_unavailable' : 'task_scheduler_unavailable' };
@@ -307,12 +560,14 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
 export async function enableRelayAutostart(options: RelayAutostartOptions & {
   workspace: string; launcher: string; policy: string | null; version: string;
   preserveStandardAnchor?: boolean;
+  windowsVisibility?: WindowsVisibility;
 }): Promise<RelayAutostartState> {
   const platform = options.platform || process.platform;
   if (platform !== 'linux' && platform !== 'win32' && platform !== 'darwin') {
     throw new Error(`Relay autostart is unsupported on ${platform}.`);
   }
   if (!VERSION.test(options.version)) throw new Error('Autostart version must be a bounded release version.');
+  if (platform === 'win32') await assertNoWindowsRecovery(options);
   const userHome = options.userHome || homedir();
   const run = options.run || defaultRunner;
   const previous = await readRegistration(options);
@@ -350,7 +605,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   }
   if (platform === 'win32' && !previous) {
     const probe = await run('powershell.exe', encodedPowerShell(
-      `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName!)} -ErrorAction SilentlyContinue; `
+      windowsTaskLookup(registration)
       + `if ($null -ne $task) { 'exists' } else { 'absent' }`,
     ));
     if (probe.stdout.trim() !== 'absent') {
@@ -387,6 +642,12 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     const status = await relayAutostartStatus(options);
     if (status.state === 'enabled') return status;
   }
+  if (platform === 'win32') {
+    await configureWindowsStartup(options, registration, previous, options.windowsVisibility ?? 'hidden');
+    const status = await relayAutostartStatus(options);
+    if (status.state !== 'enabled') throw new Error('autostart_registration_unverified');
+    return status;
+  }
   if (platform === 'darwin') {
     const loaded = await macLoaded(options, previous || registration);
     if (loaded && !previous) throw new Error('autostart_conflict: LaunchAgent exists without an ownership receipt.');
@@ -403,19 +664,6 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     await run('/usr/bin/plutil', ['-lint', destination]);
     await run('/bin/launchctl', ['enable', `${macDomain(options)}/${MAC_LABEL}`]);
     await run('/bin/launchctl', ['bootstrap', macDomain(options), destination]);
-  } else {
-    const script = scriptPath(options.home);
-    const command = `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; `
-      + `$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-      + `-Argument ${psLiteral(`-NoProfile -NonInteractive -File "${script}"`)} `
-      + `-WorkingDirectory ${psLiteral(registration.workspace)}; `
-      + `$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity; `
-      + `$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited; `
-      + `$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
-      + `-RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1); `
-      + `Register-ScheduledTask -TaskName ${psLiteral(registration.taskName!)} -Action $action `
-      + `-Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null`;
-    await run('powershell.exe', encodedPowerShell(command));
   }
   const status = await relayAutostartStatus(options);
   if (status.state !== 'enabled') throw new Error(`Relay autostart registration was not verified (${status.state}).`);
@@ -423,6 +671,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
 }
 
 export async function disableRelayAutostart(options: RelayAutostartOptions): Promise<RelayAutostartState> {
+  if ((options.platform || process.platform) === 'win32') await assertNoWindowsRecovery(options);
   const registration = await readRegistration(options);
   if (!registration) return { state: 'disabled', backend: null };
   const platform = options.platform || process.platform;
@@ -481,6 +730,7 @@ export async function startRelayAutostart(options: RelayAutostartOptions) {
 }
 
 export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions) {
+  if ((options.platform || process.platform) === 'win32') await assertNoWindowsRecovery(options);
   const registration = await readRegistration(options);
   if (!registration || !await ownsStartupFile(options, registration)) {
     throw new Error('autostart_conflict: a verified owned startup entry is required.');
@@ -490,8 +740,9 @@ export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions)
     throw new Error('autostart_conflict: startup registration belongs to another operating system.');
   }
   if (registration.backend === 'windows-task') {
-    await (options.run || defaultRunner)('powershell.exe', encodedPowerShell(
-      windowsTaskLookup(registration) + windowsTaskGuard(registration, options.home)));
+    const observed = await inspectWindowsTask(options, registration);
+    if (!observed.visibility) throw new Error('autostart_conflict: owned startup task is absent.');
+    return { ...registration, windowsVisibility: observed.visibility };
   }
   if (registration.backend === 'launchd-user') await macLoaded(options, registration);
   return registration;
