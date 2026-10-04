@@ -45,10 +45,13 @@ function safeWire(value: unknown, depth = 0, seen = new Set<object>(), budget = 
   try { for (const descriptor of Object.values(descriptors)) safeWire(descriptor.value, depth + 1, seen, budget); }
   finally { seen.delete(value); }
 }
-function text(value: unknown, kind: 'input' | 'response', multiline = false) {
-  fact(typeof value === 'string' && value.length <= 2000 && value.trim().length > 0
+export function providerSessionTextIsSafe(value: unknown, multiline = false): value is string {
+  return typeof value === 'string' && value.length <= 2000 && value.trim().length > 0
     && !(multiline ? REPLY_CONTROL : CONTROL).test(value) && !SECRET.test(value)
-    && (multiline || value.trim() === value), kind);
+    && (multiline || value.trim() === value);
+}
+function text(value: unknown, kind: 'input' | 'response', multiline = false) {
+  fact(providerSessionTextIsSafe(value, multiline), kind);
   return value;
 }
 
