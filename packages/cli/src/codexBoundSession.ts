@@ -1,6 +1,6 @@
 import { inspectSessionQuestionForBinding, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler, type CodexTurnEvidenceSink } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { CodexSessionAnswerTooLargeError, runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler, type CodexTurnEvidenceSink } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 interface CodexBoundSessionInput {
@@ -97,9 +97,10 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
         if (closing) throw new Error('codex_session_closed');
         return result;
       } catch (error) {
-        // Both failures happen before turn/start; retain an empty thread for retry.
+        // Retain a completed rejected turn only until the inbox records its failure.
         const reason = error instanceof Error ? error.message : '';
-        if (!['codex_session_budget_unavailable', 'replayed'].includes(reason)) {
+        if (!(error instanceof CodexSessionAnswerTooLargeError)
+          && !['codex_session_budget_unavailable', 'replayed'].includes(reason)) {
           try { await close(); }
           catch { /* Keep the fence and disable dispatch until shutdown is confirmed. */ }
         }
