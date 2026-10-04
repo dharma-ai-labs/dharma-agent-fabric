@@ -55,7 +55,7 @@ function open(mode: string, options: { maximumFrameBytes?: number; requestTimeou
   });
 }
 
-test('closing an owned POSIX launcher also stops its native descendant with inherited pipes', { skip: process.platform === 'win32' }, async () => {
+test('closing an owned Linux launcher also stops its native descendant with inherited pipes', { skip: process.platform !== 'linux' }, async () => {
   const native = `${fakeServer}\nsetInterval(() => {}, 1000);`;
   const launcher = `
 const {spawn}=require('node:child_process');

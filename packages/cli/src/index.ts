@@ -98,6 +98,7 @@ import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-ad
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
+import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
@@ -3886,13 +3887,17 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const writeRoots = policy.tasks.writePaths.filter(path => /^[a-zA-Z0-9_-]+\/\*\*$/.test(path))
       .map(path => path.slice(0, -3));
     if (!writeRoots.length) throw new Error('named_session_workspace_write_not_authorized');
-    const workRoots = ['"."="read"', ...writeRoots.map(root => `${JSON.stringify(root)}="write"`)].join(',');
+    const environment = namedCodexEnvironment(process.env);
+    const privateRoots = [dharmaHome(), resolve(environment.CODEX_HOME || resolve(homedir(), '.codex'))];
+    if (environment.XDG_RUNTIME_DIR) privateRoots.push(environment.XDG_RUNTIME_DIR);
+    if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
+    const filesystem = await namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots });
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
-      environment: namedCodexEnvironment(process.env), experimentalApi: true,
+      environment, experimentalApi: true,
       argv: ['-c', 'default_permissions="dharma_bridge"',
-        '-c', 'permissions.dharma_bridge.filesystem={":minimal"="read",":workspace_roots"={"."="read"}}',
+        '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
         '-c', 'permissions.dharma_bridge.network={enabled=false}',
-        '-c', `permissions.dharma_work.filesystem={":minimal"="read",":workspace_roots"={${workRoots}}}`,
+        '-c', `permissions.dharma_work.filesystem=${filesystem.work}`,
         '-c', 'permissions.dharma_work.network={enabled=false}', 'app-server'] });
     const account = await transport.request('account/read', { refreshToken: false }) as { account?: unknown };
     if (!account.account) throw new Error('named_session_provider_authentication_required');

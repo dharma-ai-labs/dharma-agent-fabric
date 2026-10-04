@@ -35,11 +35,11 @@ export async function openCodexAppServerTransport(input: {
   const child = spawn(input.command, input.argv, {
     cwd: input.cwd, env: input.environment ?? process.env,
     shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
-    detached: process.platform !== 'win32',
+    detached: process.platform === 'linux',
   });
   function stopOwnedTree(signal: NodeJS.Signals) {
     if (!child.pid) return;
-    if (process.platform === 'win32') { child.kill(signal); return; }
+    if (process.platform !== 'linux') { child.kill(signal); return; }
     // The detached launch establishes a group owned only by this transport.
     try { process.kill(-child.pid, signal); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
