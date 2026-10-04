@@ -47,6 +47,31 @@ test('dot-prefixed descendants are not mistaken for parent traversal', { skip: p
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
+test('parent denials cover nested OS sockets regardless of order without weakening sibling isolation', { skip: process.platform !== 'linux' }, async () => {
+  const f = await fixture();
+  try {
+    for (const privateRoots of [
+      ['/run/user/1000', '/run/user/1000/bus', '/run/user/1000', '/run/user/10001'],
+      ['/run/ef/current/bus', '/run/ef/current', '/run/ef/current/keyring/control', '/run/ef/current-sibling'],
+    ]) {
+      const result = await namedCodexFilesystem({ environment: { PATH: f.bin }, workspace: join(f.root, 'checkout'),
+        privateRoots, writeRoots: ['src'] });
+      const parents = privateRoots[0]!.startsWith('/run/user/')
+        ? ['/run/user/1000', '/run/user/10001'] : ['/run/ef/current', '/run/ef/current-sibling'];
+      assert.deepEqual(result.additionalFilesystemRules, {
+        [f.code]: 'read', [f.native]: 'read', ...Object.fromEntries(parents.map(root => [root, 'deny'])),
+      });
+      for (const root of parents) {
+        assert.ok(result.peer.includes(`${JSON.stringify(root)}="deny"`));
+        assert.ok(result.work.includes(`${JSON.stringify(root)}="deny"`));
+      }
+      assert.ok(!result.peer.includes('/bus"'));
+      assert.ok(!result.work.includes('/keyring/control"'));
+      assert.ok(!result.peer.includes('="write"'));
+    }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
 test('provider runtime cannot overlap the checkout or a protected credential root', { skip: process.platform !== 'linux' }, async () => {
   const f = await fixture();
   try {

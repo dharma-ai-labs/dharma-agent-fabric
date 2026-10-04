@@ -12,7 +12,10 @@ export async function namedCodexFilesystem(input: {
   environment: NodeJS.ProcessEnv; workspace: string; privateRoots: string[]; writeRoots: string[];
 }): Promise<{ peer: string; work: string; runtimeRoots: string[];
   additionalFilesystemRules: Readonly<Record<string, 'read' | 'deny'>> }> {
-  const denied = input.privateRoots.map(root => resolve(root));
+  // A child denial is already covered by its parent. Materializing both can
+  // require creating a socket placeholder under a read-only denied directory.
+  const privateRoots = [...new Set(input.privateRoots.map(root => resolve(root)))];
+  const denied = privateRoots.filter(root => !privateRoots.some(parent => parent !== root && contains(parent, root)));
   const runtimeRoots: string[] = [];
   if (process.platform === 'linux') {
     let executable: string | undefined;
