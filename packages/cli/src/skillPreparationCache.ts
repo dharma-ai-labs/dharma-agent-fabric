@@ -270,7 +270,7 @@ export async function takeSkillPreparationCache(input: SkillPreparationCacheExpe
       'https://schemas.dharma-ai.io/skill-preparation-pointer/v1', pointer);
     if (!valid.ok || pointer.workspaceId !== input.workspaceId || pointer.provider !== input.provider
       || !ATTEMPT.test(pointer.sourceDirectory as string)) throw new Error('Invalid preparation cache pointer scope.');
-    for (const key of ['organizationId', 'deviceId', 'repositoryAgentId', 'repositoryBindingId', 'policyHash'] as const) {
+    for (const key of ['organizationId', 'deviceId', 'repositoryAgentId', 'repositoryBindingId'] as const) {
       if (pointer[key] !== input[key]) throw new Error('Preparation cache pointer current scope mismatch.');
     }
     const sourceRoot = resolve(scopeRoot, pointer.sourceDirectory as string);
@@ -288,6 +288,9 @@ export async function takeSkillPreparationCache(input: SkillPreparationCacheExpe
       throw new Error('Preparation cache bundle mismatch.');
     }
     input.assertCurrent(); await pointerFile.assertStable(); await metadataFile.assertStable();
+    // Renewed policy invalidates this optimization, not the identity or integrity
+    // checks above. The caller must prepare afresh under current authority.
+    if (pointer.policyHash !== input.policyHash) return null;
     consumingPath = resolve(scopeRoot, `.CONSUMING-${pointer.cacheId}.json`);
     const pointerIdentity = await pointerFile.file.stat();
     const pointerBytes = Buffer.from(pointerFile.rawBytes);
