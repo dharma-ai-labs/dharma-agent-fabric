@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
-async function fixture() {
+async function fixture(packageDirectory = 'node_modules') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-native-runtime-')));
-  const bin = join(root, 'bin'), code = join(root, 'node_modules/@openai/codex');
-  const native = join(root, `node_modules/@openai/codex-linux-${process.arch}`);
+  const bin = join(root, 'bin'), code = join(root, packageDirectory, '@openai/codex');
+  const native = join(root, packageDirectory, `@openai/codex-linux-${process.arch}`);
   await mkdir(bin, { recursive: true });
   await mkdir(join(code, 'bin'), { recursive: true });
   await mkdir(native, { recursive: true });
@@ -33,6 +33,14 @@ test('named filesystem exposes only public provider packages and denies existing
     assert.ok(!result.peer.includes('="write"'));
     assert.ok(result.work.includes('":workspace_roots"={"."="read","src"="write","tests"="write"}'));
     assert.ok(!result.peer.includes(`${JSON.stringify(f.root)}="read"`));
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('dot-prefixed descendants are not mistaken for parent traversal', { skip: process.platform !== 'linux' }, async () => {
+  const f = await fixture('..runtime');
+  try {
+    await assert.rejects(namedCodexFilesystem({ environment: { PATH: f.bin }, workspace: f.root,
+      privateRoots: [], writeRoots: [] }), /named_session_provider_runtime_scope_invalid/);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 

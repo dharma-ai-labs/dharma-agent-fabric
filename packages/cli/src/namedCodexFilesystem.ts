@@ -1,10 +1,10 @@
 import { constants } from 'node:fs';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 function contains(parent: string, child: string): boolean {
   const path = relative(parent, child);
-  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 }
 
 // Sandbox children need the installed public provider code, never its private home.
