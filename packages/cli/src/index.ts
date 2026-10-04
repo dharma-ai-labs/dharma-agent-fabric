@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -103,7 +104,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.143';
+const VERSION = '0.2.144';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1652,29 +1653,7 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 
 export function stableRepositoryLauncherContents(version = VERSION,
   runtime?: { platform: NodeJS.Platform; nodeDirectory: string }) {
-  if (!/^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version)) {
-    throw new Error('Managed launcher version is invalid.');
-  }
-  let shellEnvironment = '';
-  let windowsEnvironment = '';
-  if (runtime) {
-    const directory = runtime.nodeDirectory;
-    if (!directory || directory.length > 4096 || /[\r\n\0]/.test(directory)
-      || !(runtime.platform === 'win32' ? win32 : posix).isAbsolute(directory)) {
-      throw new Error('Managed launcher runtime directory is invalid.');
-    }
-    if (runtime.platform === 'win32') {
-      if (directory.includes('"')) throw new Error('Managed launcher runtime directory is invalid.');
-      windowsEnvironment = `setlocal DisableDelayedExpansion\r\nset "PATH=${directory.replace(/%/g, '%%')};%PATH%"\r\n`;
-    } else {
-      shellEnvironment = `export PATH='${directory.replace(/'/g, "'\\''") }':"$PATH"\n`;
-    }
-  }
-  const invocation = `npm exec --yes -- @dharma-ai-labs/agent-fabric@${version}`;
-  return {
-    shell: `#!/bin/sh\n${shellEnvironment}exec ${invocation} "$@"\n`,
-    windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n`,
-  };
+  return repositoryLauncherContents(version, runtime);
 }
 
 async function installStableRepositoryLauncher(workspace: string) {
@@ -1733,6 +1712,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       launcherContents: version => stableRepositoryLauncherContents(version,
         { platform: process.platform, nodeDirectory: dirname(process.execPath) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
+      verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
       configureStartup: version => enableRelayAutostart({ home, workspace,
         launcher: startup.launcher, policy: startup.policy, version }),
       start: () => startRelayAutostart({ home }),

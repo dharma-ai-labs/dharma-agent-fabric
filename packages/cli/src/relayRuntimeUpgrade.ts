@@ -9,6 +9,7 @@ type Input = { home: string; workspace: string; version: string; organizationId:
 export type RelayUpgradeDependencies = {
   launcherContents(version: string): Launchers;
   legacyLauncherContents?(version: string): Launchers;
+  verifyPriorLaunchers?(version: string, contents: Launchers): Promise<boolean>;
   assertStopped(): Promise<void>;
   inspectStartup(): Promise<{ version: string; workspace: string }>;
   configureStartup(version: string): Promise<unknown>;
@@ -46,12 +47,13 @@ async function installLaunchers(workspace: string, contents: Launchers) {
   await atomic(join(workspace, '.dharma', 'bin', 'dharma.cmd'), contents.windows, 0o600);
 }
 
-function expectedPrevious(journal: Journal, deps: RelayUpgradeDependencies) {
+async function expectedPrevious(journal: Journal, deps: RelayUpgradeDependencies) {
   return same(journal.previous, deps.launcherContents(journal.previousVersion))
-    || Boolean(deps.legacyLauncherContents && same(journal.previous, deps.legacyLauncherContents(journal.previousVersion)));
+    || Boolean(deps.legacyLauncherContents && same(journal.previous, deps.legacyLauncherContents(journal.previousVersion)))
+    || Boolean(deps.verifyPriorLaunchers && await deps.verifyPriorLaunchers(journal.previousVersion, journal.previous));
 }
 
-function validateJournal(value: unknown, input: Input, deps: RelayUpgradeDependencies): asserts value is Journal {
+async function validateJournal(value: unknown, input: Input, deps: RelayUpgradeDependencies) {
   const journal = value as Journal;
   const keys = ['schema', 'upgradeId', 'organizationId', 'deviceId', 'workspaceId', 'workspace',
     'previousVersion', 'version', 'startedAt', 'updatedAt', 'state', 'previous', 'previousHash'];
@@ -60,12 +62,14 @@ function validateJournal(value: unknown, input: Input, deps: RelayUpgradeDepende
     || journal.schema !== 'dharma.local-relay-upgrade/v1'
     || journal.organizationId !== input.organizationId || journal.deviceId !== input.deviceId
     || journal.workspaceId !== input.workspaceId || journal.workspace !== input.workspace
-    || journal.version !== input.version || !VERSION.test(journal.previousVersion)
+    || typeof journal.version !== 'string' || !VERSION.test(journal.version) || journal.version !== input.version
+    || typeof journal.previousVersion !== 'string' || !VERSION.test(journal.previousVersion)
     || typeof journal.upgradeId !== 'string' || !/^[0-9a-f-]{36}$/.test(journal.upgradeId)
     || !Number.isFinite(Date.parse(journal.startedAt)) || !Number.isFinite(Date.parse(journal.updatedAt))
     || !['prepared', 'installed', 'completed', 'rolled_back', 'rollback_failed'].includes(journal.state)
     || !journal.previous || Object.keys(journal.previous).length !== 2
-    || !expectedPrevious(journal, deps) || journal.previousHash !== hash(journal.previous)) {
+    || typeof journal.previous.shell !== 'string' || typeof journal.previous.windows !== 'string'
+    || journal.previousHash !== hash(journal.previous) || !await expectedPrevious(journal, deps)) {
     fail('journal_invalid');
   }
 }
@@ -90,10 +94,10 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
     // A different release may replace a completed journal, but cannot take over unfinished recovery.
     const old = saved as Journal;
     if (!input.rollback && ['completed', 'rolled_back'].includes(old.state)) {
-      validateJournal(old, { ...input, version: old.version }, deps);
+      await validateJournal(old, { ...input, version: old.version }, deps);
       saved = undefined;
     }
-    else validateJournal(saved, input, deps);
+    else await validateJournal(saved, input, deps);
   }
   if (saved && !input.rollback) fail('recovery_required');
   if (input.rollback && !saved) fail('rollback_unavailable');
@@ -122,7 +126,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       workspace: input.workspace, previousVersion: startup.version, version: input.version,
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), state: 'prepared',
       previous, previousHash: hash(previous) };
-    if (!expectedPrevious(journal, deps)) fail('launcher_conflict');
+    if (!await expectedPrevious(journal, deps)) fail('launcher_conflict');
   }
   const receipt = (state: State | 'planned') => ({ ok: state === 'completed' || state === 'planned',
     schema: journal.schema, upgradeId: journal.upgradeId, organizationId: input.organizationId,
