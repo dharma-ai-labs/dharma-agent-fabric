@@ -205,11 +205,14 @@ export async function validateRepositoryReleaseMetadata(input: {
     const expectedRole = file.path === PROMPT ? 'onboarding_prompt' : file.path === CATALOG ? 'knowledge'
       : file.path === `${ROOT}SKILL.md` ? 'skill' : null;
     requireFact(expectedRole ? file.role === expectedRole
-      : file.path.startsWith(`${ROOT}skills/source/`) && ['skill', 'dependency'].includes(file.role as string));
+      : file.path.startsWith(`${ROOT}skills/source/`) && ['skill', 'dependency'].includes(file.role as string)
+        || file.path.startsWith(`${ROOT}knowledge/reports/source/`) && file.role === 'knowledge');
     inventoried.add(file.path);
   }
   requireFact([...files.keys()].every(path => path === MANIFEST || inventoried.has(path)));
-  const copies = [...files.entries()].filter(([path]) => path.startsWith(`${ROOT}skills/source/`));
+  // Approved report bodies share the bounded source-content allowance, not catalog authority.
+  const copies = [...files.entries()].filter(([path]) => path.startsWith(`${ROOT}skills/source/`)
+    || path.startsWith(`${ROOT}knowledge/reports/source/`));
   requireFact(copies.reduce((sum, [, file]) => sum + file.sizeBytes, 0) <= 4194304);
   const skills = manifest.sourceSkills as unknown[];
   const skillPaths = new Set<string>();
