@@ -72,7 +72,7 @@ test('actual upgrade caller requires matching enrollment workspace and owned sta
   const f = await fixture();
   f.startup.workspace = '/fixtures/other';
   await assert.rejects(f.run()(f.flags), /workspace_conflict/);
-  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.calls, ['lock']);
 });
 
 test('actual upgrade caller rechecks startup authority after obtaining the mutation lock', async () => {
@@ -112,4 +112,45 @@ test('actual upgrade caller rejects an old receiver even when the invoked CLI is
     await hooks.verify('0.2.118', new Date(Date.now() - 1000).toISOString());
   };
   await assert.rejects(f.run()(f.flags), /receiver_unconfirmed/);
+});
+
+test('actual Windows rollback recovery requires stopped runtime and matching registered source before mutation', async () => {
+  for (const busy of [false, true]) {
+    const f = await fixture();
+    f.deps.process = { platform: 'win32', execPath: 'C:\\Node\\node.exe' };
+    f.deps.recoverWindowsRelayAutostart = async (input: { launcher: string; policy: string; dryRun: boolean }) => {
+      f.calls.push('recover');
+      assert.equal(input.launcher, resolve('/fixtures/repository', '.dharma', 'bin', 'dharma.cmd'));
+      assert.equal(input.policy, f.startup.policy);
+      assert.equal(input.dryRun, true);
+      return { state: 'planned', reason: 'autostart_recovery_required' };
+    };
+    f.flags.set('rollback', true);
+    if (busy) {
+      f.deps.relayProcessState = async () => 'running';
+      await assert.rejects(f.run()(f.flags), /runtime_busy/);
+      assert.deepEqual(f.calls, ['lock']);
+    } else {
+      const result = await f.run()(f.flags) as { stage: string; state: string; runtimeObservation: string };
+      assert.equal(result.stage, 'windows_startup_recovery');
+      assert.equal(result.state, 'planned');
+      assert.equal(result.runtimeObservation, 'not_performed');
+      assert.deepEqual(f.calls, ['lock', 'recover']);
+    }
+  }
+});
+
+test('actual Windows recovery-only apply reports rollback without pretending to restart a receiver', async () => {
+  const f = await fixture();
+  f.deps.process = { platform: 'win32', execPath: 'C:\\Node\\node.exe' };
+  f.deps.recoverWindowsRelayAutostart = async (input: { dryRun: boolean }) => {
+    assert.equal(input.dryRun, false); f.calls.push('recover'); return { state: 'rolled_back' };
+  };
+  f.deps.lstat = async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); };
+  f.flags.set('rollback', true); f.flags.set('apply', true);
+  const result = await f.run()(f.flags) as { ok: boolean; state: string; runtimeObservation: string };
+  assert.equal(result.ok, false);
+  assert.equal(result.state, 'rolled_back');
+  assert.equal(result.runtimeObservation, 'not_performed');
+  assert.deepEqual(f.calls, ['lock', 'recover']);
 });

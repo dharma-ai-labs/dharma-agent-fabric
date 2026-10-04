@@ -10,15 +10,16 @@ export type RelayUpgradeDependencies = {
   launcherContents(version: string): Launchers;
   legacyLauncherContents?(version: string): Launchers;
   assertStopped(): Promise<void>;
-  inspectStartup(): Promise<{ version: string; workspace: string }>;
-  configureStartup(version: string): Promise<unknown>;
+  inspectStartup(): Promise<{ version: string; workspace: string; windowsVisibility?: 'legacy' | 'hidden' }>;
+  configureStartup(version: string, windowsVisibility?: 'legacy' | 'hidden'): Promise<unknown>;
   start(): Promise<unknown>;
   stop(): Promise<unknown>;
   verify(version: string, since: string): Promise<void>;
 };
 type Journal = { schema: 'dharma.local-relay-upgrade/v1'; upgradeId: string; organizationId: string;
   deviceId: string; workspaceId: string; workspace: string; previousVersion: string; version: string;
-  startedAt: string; updatedAt: string; state: State; previous: Launchers; previousHash: string };
+  startedAt: string; updatedAt: string; state: State; previous: Launchers; previousHash: string;
+  previousWindowsVisibility?: 'legacy' | 'hidden' };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 const hash = (value: Launchers) => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 const same = (left: Launchers, right: Launchers) => left.shell === right.shell && left.windows === right.windows;
@@ -55,9 +56,11 @@ function validateJournal(value: unknown, input: Input, deps: RelayUpgradeDepende
   const journal = value as Journal;
   const keys = ['schema', 'upgradeId', 'organizationId', 'deviceId', 'workspaceId', 'workspace',
     'previousVersion', 'version', 'startedAt', 'updatedAt', 'state', 'previous', 'previousHash'];
+  if (journal && Object.hasOwn(journal, 'previousWindowsVisibility')) keys.push('previousWindowsVisibility');
   if (!journal || typeof journal !== 'object' || Array.isArray(journal)
     || Object.keys(journal).length !== keys.length || Object.keys(journal).some(key => !keys.includes(key))
     || journal.schema !== 'dharma.local-relay-upgrade/v1'
+    || (journal.previousWindowsVisibility !== undefined && !['legacy', 'hidden'].includes(journal.previousWindowsVisibility))
     || journal.organizationId !== input.organizationId || journal.deviceId !== input.deviceId
     || journal.workspaceId !== input.workspaceId || journal.workspace !== input.workspace
     || journal.version !== input.version || !VERSION.test(journal.previousVersion)
@@ -121,7 +124,8 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       organizationId: input.organizationId, deviceId: input.deviceId, workspaceId: input.workspaceId,
       workspace: input.workspace, previousVersion: startup.version, version: input.version,
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), state: 'prepared',
-      previous, previousHash: hash(previous) };
+      previous, previousHash: hash(previous),
+      ...(startup.windowsVisibility ? { previousWindowsVisibility: startup.windowsVisibility } : {}) };
     if (!expectedPrevious(journal, deps)) fail('launcher_conflict');
   }
   const receipt = (state: State | 'planned') => ({ ok: state === 'completed' || state === 'planned',
@@ -149,7 +153,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       if (![journal.previous.shell, next.shell].includes(actual.shell)
         || ![journal.previous.windows, next.windows].includes(actual.windows)) fail('launcher_conflict');
       await installLaunchers(input.workspace, journal.previous);
-      await deps.configureStartup(journal.previousVersion);
+      await deps.configureStartup(journal.previousVersion, journal.previousWindowsVisibility ?? 'legacy');
       const since = new Date().toISOString();
       await deps.start(); await deps.verify(journal.previousVersion, since);
       await save('rolled_back');

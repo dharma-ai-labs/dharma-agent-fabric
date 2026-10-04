@@ -55,6 +55,37 @@ deny device and Codex private homes and the private bus, and reject runtime code
 inside the checkout or protected roots. Approved local write roots do not carry
 over into read-only peer turns.
 
+## Owned Windows hidden startup and recovery
+
+Windows logon registration uses `powershell.exe -NoProfile -NonInteractive
+-WindowStyle Hidden -File` and limited interactive-user execution. Background
+control and relay child processes use hidden Windows launches. Startup status
+reports `windowsVisibility: legacy|hidden` and `migrationRequired`; these are
+configuration observations, not relay-health or sign-in proof.
+
+An exact owned legacy action remains valid for status, stop and disable. At a
+safe stopped-runtime boundary, use the approved published CLI with the same
+device home and registered anchor checkout: inspect
+`dharma relay upgrade --workspace . --dry-run`, then use `--apply` instead of
+`--dry-run`. This migrates the existing task rather than creating a second
+startup entry. Do not edit Task Scheduler manually or replay enrollment.
+
+The Windows migration journals its prior task visibility/enabled state and
+local script/receipt. It disables the owned trigger while replacing local
+files, verifies replacement readback, and restores the compatible old pair on
+failure. An interrupted transaction reports `autostart_recovery_required` and
+blocks startup mutations; status does not silently adopt it. With all owned
+work stopped, inspect `dharma relay upgrade --workspace . --rollback --dry-run`
+and apply that recovery with `--apply`. A startup-only rollback does not restart
+the receiver and reports `runtimeObservation: not_performed`; inspect status
+and perform the supported grant-free resume after recovery. A runtime rollback
+also restores the previous visibility so legacy CLIs retain their exact guard.
+
+Foreign, modified, elevated, wrong-user or unreceipted tasks are refused.
+No SYSTEM principal, password, execution-policy bypass, credential replacement
+or policy change is used. Real Windows sign-in, window visibility, lifecycle
+and signed relay-health observations remain necessary for native acceptance.
+
 ## Owned Linux container lifecycle
 
 An unprivileged Linux container may use `relay container-entrypoint` as its
