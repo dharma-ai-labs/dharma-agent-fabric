@@ -6,6 +6,7 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import { relayRuntimeObservationReady } from './relayRuntimeUpgrade.js';
+import { verifyRecordedRepositoryLaunchers } from './repositoryLaunchers.js';
 
 async function fixture() {
   const workspace = '/fixtures/repository', calls: string[] = [];
@@ -30,7 +31,7 @@ async function fixture() {
     stopRelayAutostart: async () => { calls.push('os_stop'); },
     relayStop: async () => { calls.push('relay_stop'); return { ok: true }; },
     validateContract: async () => ({ ok: true }),
-    fileURLToPath, URL, relayRuntimeObservationReady,
+    fileURLToPath, URL, relayRuntimeObservationReady, verifyRecordedRepositoryLaunchers,
     setTimeout: (callback: () => void) => { callback(); return 0; },
     readFile: async (path: string) => {
       const name = basename(path);
@@ -66,6 +67,16 @@ test('actual upgrade caller blocks running relay and named service before mutati
     await assert.rejects(f.run()(f.flags), new RegExp(`relay_upgrade_${kind === 'relay' ? 'runtime' : 'session'}_busy`));
     assert.deepEqual(f.calls, ['lock']);
   }
+});
+
+test('actual upgrade caller binds the reviewed recorded-runtime verifier without bypassing identity checks', async () => {
+  const f = await fixture();
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: { verifyPriorLaunchers: unknown }) => {
+    assert.equal(hooks.verifyPriorLaunchers, verifyRecordedRepositoryLaunchers);
+    return { state: 'planned' };
+  };
+  await f.run()(f.flags);
+  assert.deepEqual(f.calls, ['lock']);
 });
 
 test('actual upgrade caller requires matching enrollment workspace and owned startup', async () => {
