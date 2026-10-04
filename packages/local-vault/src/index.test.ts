@@ -391,6 +391,60 @@ test('provider session binding is encrypted, scoped, immutable, and revocable', 
   reopened.close();
 });
 
+test('expired reply quarantine survives restart without acknowledging or deleting encrypted evidence', async () => {
+  const f = await taskExportFixture();
+  let vault = f.vault;
+  const questionId = '40000000-0000-4000-8000-000000000010';
+  const observation = { state: 'expired' as const, taskId: '40000000-0000-4000-8000-000000000011',
+    correlationId: '40000000-0000-4000-8000-000000000012' };
+  const answer = Buffer.from('private-undelivered-expired-answer');
+  try {
+    const completionHash = await vault.stageProviderSessionReply(f.binding.bindingId, f.identity, questionId, answer);
+    for (const field of ['organizationId', 'repositoryBindingId', 'workspaceId', 'endpointId', 'membershipId', 'deviceId'] as const) {
+      await assert.rejects(vault.quarantineExpiredProviderSessionReply(f.binding.bindingId,
+        { ...f.identity, [field]: field === 'organizationId' ? 'org_foreign' : '40000000-0000-4000-8000-000000000099' },
+        questionId, completionHash, observation), /scope_mismatch/);
+    }
+    await assert.rejects(vault.quarantineExpiredProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, sha256('wrong-completion'), observation), /reply_conflict/);
+    await assert.rejects(vault.quarantineExpiredProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, completionHash, { ...observation, correlationId: observation.correlationId + '\n' }), /disposition_invalid/);
+    await assert.rejects(vault.quarantineExpiredProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, completionHash, { ...observation, state: 'unavailable' } as unknown as typeof observation), /disposition_invalid/);
+    const dispositionHash = await vault.quarantineExpiredProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, completionHash, observation);
+    assert.equal(await vault.quarantineExpiredProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, completionHash, observation), dispositionHash);
+    const disposition = JSON.parse((await vault.getBlob(dispositionHash)).toString());
+    assert.equal(disposition.schema, 'dharma.provider-session-expired-reply/v1');
+    assert.equal(disposition.state, 'expired'); assert.equal(disposition.delivered, false);
+    assert.equal(disposition.completionHash, completionHash); assert.equal(disposition.taskId, observation.taskId);
+    assert.equal(disposition.deviceId, f.identity.deviceId); assert.equal(disposition.correlationId, observation.correlationId);
+    assert.deepEqual(vault.listProviderSessionReplies(f.binding.bindingId, f.identity), []);
+    assert.throws(() => vault.acknowledgeProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, completionHash), /reply_quarantined/);
+    vault.close();
+    vault = await LocalVault.open({ root: f.root, masterKey: f.key });
+    assert.deepEqual(vault.listProviderSessionReplies(f.binding.bindingId, f.identity), []);
+    assert.deepEqual(await vault.getBlob(completionHash), answer);
+    assert.equal(await vault.stageProviderSessionReply(f.binding.bindingId, f.identity, questionId, answer), completionHash);
+    assert.deepEqual(vault.listProviderSessionReplies(f.binding.bindingId, f.identity), []);
+    const siblingId = '40000000-0000-4000-8000-000000000020';
+    const siblingHash = await vault.stageProviderSessionReply(f.binding.bindingId, f.identity,
+      siblingId, Buffer.from('another still-pending result'));
+    assert.deepEqual(vault.listProviderSessionReplies(f.binding.bindingId, f.identity), [{ questionId: siblingId, completionHash: siblingHash }]);
+    const db = new DatabaseSync(join(f.root, 'vault.sqlite'), { readOnly: true });
+    try {
+      const row = db.prepare('select acknowledged_at from provider_session_replies where binding_id = ? and question_id = ?')
+        .get(f.binding.bindingId, questionId) as { acknowledged_at: string | null };
+      assert.equal(row.acknowledged_at, null);
+    } finally { db.close(); }
+    vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+    await assert.rejects(vault.quarantineExpiredProviderSessionReply(f.binding.bindingId, f.identity,
+      questionId, completionHash, observation), /binding_unavailable/);
+  } finally { vault.close(); }
+});
+
 test('pending session replies survive reopening, retain evidence, and reject foreign or changed records', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-session-reply-'));
   const key = randomBytes(32);

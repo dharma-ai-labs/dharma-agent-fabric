@@ -509,5 +509,12 @@ not native-wire replay, a publication, an independent grade or an admitted
 learning observation. This local preparation does not upload it. Server retention,
 device authentication, current authority and dedicated admission remain required.
 
+If an authoritative scoped question read reports expiry, named-session recovery
+retains the encrypted answer and an encrypted expiry disposition without
+acknowledging delivery. That result is removed from the active retry queue and
+cannot be published or executed again by recovery. Missing, conflicting,
+unconfirmed or policy-denied receipts remain pending; they do not establish
+expiry or successful delivery.
+
 Licensed under MIT. Do not report security vulnerabilities in a public issue;
 use the private security-reporting channel in the GitHub repository.
