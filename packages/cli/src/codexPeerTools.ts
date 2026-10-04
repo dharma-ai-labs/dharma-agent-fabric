@@ -49,8 +49,12 @@ export function createCodexPeerToolHandler(input: {
       const answer = (receipt as Record<string, unknown>).answer;
       if (typeof answer === 'string' && !await input.authorizeContent(answer)) return deny('codex_peer_tool_content_blocked');
       return result(true, receipt);
-    } catch {
+    } catch (error) {
       // A timeout may have queued a question; never invent success or silently resend it.
+      const reason = error instanceof Error ? error.message : '';
+      if (/^provider_session_channel_(input|response|closed|owner_lost|unavailable|uncertain)$/.test(reason)) {
+        return result(false, { code: 'codex_peer_tool_delivery_unconfirmed', reasonCode: reason });
+      }
       return deny('codex_peer_tool_delivery_unconfirmed');
     }
   };

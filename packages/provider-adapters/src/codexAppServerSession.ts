@@ -292,6 +292,8 @@ async function runScopedTurn(input: {
         ? result : { success: false, contentItems: [{ type: 'inputText', text: 'codex_session_tool_not_authorized' }] };
     }) : undefined;
   const usageByTurn = new Map<string, CodexProviderUsage | null>();
+  const finalItemsByTurn = new Map<string, Map<string, Record<string, unknown>>>();
+  const conflictingFinalTurns = new Set<string>();
   const arrivals: unknown[] = [];
   let resolveArrival: ((value: unknown) => void) | null = null;
   const unsubscribe = transport.onNotification(event => {
@@ -299,6 +301,27 @@ async function runScopedTurn(input: {
     try {
       const notification = object(event), params = object(notification.params);
       if (params.threadId !== binding.threadId) return;
+      if (notification.method === 'item/completed' && typeof params.turnId === 'string') {
+        const item = object(params.item);
+        if (item.type === 'agentMessage' && item.phase === 'final_answer'
+          && typeof item.id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.id)) {
+          let items = finalItemsByTurn.get(params.turnId);
+          if (!items && finalItemsByTurn.size < 32) {
+            items = new Map(); finalItemsByTurn.set(params.turnId, items);
+          }
+          if (items) {
+            if (typeof item.text !== 'string' || !item.text.trim() || item.text.length > 8000
+              || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(item.text)) {
+              conflictingFinalTurns.add(params.turnId); return;
+            }
+            const previous = items.get(item.id);
+            if (previous && previous.text !== item.text) conflictingFinalTurns.add(params.turnId);
+            else if (items.size < 16) items.set(item.id, item);
+            else conflictingFinalTurns.add(params.turnId);
+          }
+        }
+        return;
+      }
       if (notification.method === 'thread/tokenUsage/updated') {
         if (typeof params.turnId === 'string' && usageByTurn.size < 32) {
           usageByTurn.set(params.turnId, providerUsage(params.tokenUsage));
@@ -342,7 +365,11 @@ async function runScopedTurn(input: {
       const turn = completedTurn(event, binding.threadId, turnId);
       if (!turn) continue;
       if (!await input.exclusiveLease.assertHeld()) throw new Error('codex_session_lease_unavailable');
-      const answer = finalAnswer(turn);
+      if (conflictingFinalTurns.has(turnId)) throw new Error('codex_session_answer_missing_or_invalid');
+      // Codex may omit items from the terminal event; use only completed live items from this exact turn.
+      const completed = Array.isArray(turn.items) && turn.items.length === 0
+        ? { ...turn, items: [...(finalItemsByTurn.get(turnId)?.values() ?? [])] } : turn;
+      const answer = finalAnswer(completed);
       return {
         answer, answerHash: `sha256:${createHash('sha256').update(answer).digest('hex')}`,
         providerThreadId: binding.threadId, providerTurnId: turnId, elapsedMs: Date.now() - startedAt,

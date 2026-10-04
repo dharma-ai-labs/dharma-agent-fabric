@@ -74,3 +74,16 @@ test('uncertain delivery is not replayed or described as success', async () => {
   assert.equal(f.calls.length, 1);
   assert.equal(JSON.stringify(result).includes('private provider body'), false);
 });
+
+test('only fixed nonsecret channel reasons accompany delivery uncertainty', async () => {
+  for (const reason of ['input', 'response', 'closed', 'owner_lost', 'unavailable', 'uncertain']) {
+    const f = fixture();
+    f.input.channel = () => ({ ask: async args => { f.calls.push(args); throw new Error(`provider_session_channel_${reason}`); },
+      read: async () => { throw new Error('unused'); } });
+    const response = await createCodexPeerToolHandler(f.input)(ask);
+    assert.equal(response.success, false);
+    assert.deepEqual(JSON.parse(response.contentItems[0]!.text), {
+      code: 'codex_peer_tool_delivery_unconfirmed', reasonCode: `provider_session_channel_${reason}` });
+    assert.equal(f.calls.length, 1);
+  }
+});
