@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,7 +11,7 @@ import { enableRelayAutostart, relayAutostartStatus, inspectOwnedRelayAutostart,
   windowsRelayTaskArguments } from './relayAutostart.js';
 
 async function fixture(policy: string | null = "C:\\A's Repo\\.dharma\\approved-policy.json") {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-hidden-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-windows-hidden-')));
   const commands: string[] = [];
   let task: { arguments: string; enabled: boolean; running: boolean } | null = null;
   let failRegistration = false;
