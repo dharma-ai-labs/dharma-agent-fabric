@@ -54,7 +54,7 @@ import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
-import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
+import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
@@ -104,7 +104,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.146';
+const VERSION = '0.2.147';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -7081,13 +7081,14 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
               throw new Error('Repository candidate status changed identity while polling.');
             }
             const baseline = advanceRepositorySourceBaseline(canonicalWorkspace.repositoryPackage, current);
+            const invalidateSourceWatcher = repositorySourcePollInvalidatesWatcher(canonicalWorkspace.repositoryPackage, current);
             canonicalWorkspace = { ...canonicalWorkspace, repositoryPackage: { ...canonicalWorkspace.repositoryPackage,
               state: current.state, candidateId: current.candidateId, operationId: current.operationId,
               snapshotHash: current.snapshotHash, releaseId: current.releaseId,
               ...baseline,
               generation: current.state === 'published' ? Math.max(1, canonicalWorkspace.repositoryPackage.generation) : canonicalWorkspace.repositoryPackage.generation } };
             publishedLocalSnapshotHash = baseline.publishedLocalSnapshotHash;
-            if (current.state === 'blocked') repositorySourceWatcher.invalidate();
+            if (invalidateSourceWatcher) repositorySourceWatcher.invalidate();
             await saveWorkspaceRecord(canonicalWorkspace);
           }
         } catch { repositorySourceFailures += 1; }

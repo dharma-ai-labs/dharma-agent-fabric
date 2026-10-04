@@ -8,7 +8,7 @@ import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepositoryPackageSnapshot,
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, RepositorySourceWatcher,
+import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
@@ -165,6 +165,37 @@ test('published and blocked receipts advance only the matching pending local sou
     localBaselineSnapshotHash: A, publishedLocalSnapshotHash: A,
     pendingLocalSnapshotHash: null, pendingLocalOperationId: null,
   });
+});
+
+test('repeated blocked polls do not starve a later changed source debounce', () => {
+  const watcher = new RepositorySourceWatcher();
+  const record = { state: 'processing', operationId: A };
+  const receipt = { state: 'blocked', operationId: A };
+  assert.equal(repositorySourcePollInvalidatesWatcher(record, receipt), true);
+  if (repositorySourcePollInvalidatesWatcher(record, receipt)) watcher.invalidate();
+  record.state = 'blocked';
+  assert.equal(watcher.observe(B, 0), 'debouncing');
+  for (const now of [3000, 6000, 9000, 12000, 15000]) {
+    if (repositorySourcePollInvalidatesWatcher(record, receipt)) watcher.invalidate();
+    assert.equal(watcher.observe(B, now), now < 15000 ? 'debouncing' : 'stable');
+  }
+  watcher.complete(B);
+  assert.equal(watcher.observe(B, 18000), 'unchanged');
+});
+
+test('terminal source polling invalidates once per newly blocked operation only', () => {
+  assert.equal(repositorySourcePollInvalidatesWatcher({ state: 'blocked', operationId: A },
+    { state: 'blocked', operationId: A }), false);
+  assert.equal(repositorySourcePollInvalidatesWatcher({ state: 'blocked', operationId: A },
+    { state: 'blocked', operationId: B }), true);
+  for (const state of ['accepted', 'processing', 'published']) {
+    assert.equal(repositorySourcePollInvalidatesWatcher({ state, operationId: A },
+      { state: 'blocked', operationId: A }), true);
+  }
+  for (const state of ['accepted', 'processing', 'published']) {
+    assert.equal(repositorySourcePollInvalidatesWatcher({ state: 'blocked', operationId: A },
+      { state, operationId: A }), false);
+  }
 });
 test('relay recovers the verified latest same-workspace source baseline before watching deletions', async t => {
   const f = await fixture(t);
