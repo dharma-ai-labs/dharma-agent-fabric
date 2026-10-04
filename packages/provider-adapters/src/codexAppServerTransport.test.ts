@@ -55,6 +55,21 @@ function open(mode: string, options: { maximumFrameBytes?: number; requestTimeou
   });
 }
 
+test('closing an owned POSIX launcher also stops its native descendant with inherited pipes', { skip: process.platform === 'win32' }, async () => {
+  const native = `${fakeServer}\nsetInterval(() => {}, 1000);`;
+  const launcher = `
+const {spawn}=require('node:child_process');
+const child=spawn(process.execPath,['-e',${JSON.stringify(native)},'normal'],{stdio:['inherit','inherit','inherit']});
+setInterval(()=>{},1000);
+`;
+  const transport = await openCodexAppServerTransport({ command: process.execPath,
+    argv: ['-e', launcher], cwd: process.cwd(), requestTimeoutMs: 1000 });
+  const started = Date.now();
+  await transport.close();
+  assert.ok(Date.now() - started < 4000);
+  await assert.rejects(transport.request('ping', {}), /codex_app_server_unavailable/);
+});
+
 test('stdio transport initializes, parses fragmented notifications, and matches responses', async () => {
   const transport = await open('normal');
   try {
