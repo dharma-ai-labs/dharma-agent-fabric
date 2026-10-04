@@ -89,6 +89,164 @@ test('safe-boundary cache take validates scope and transfers a preparation only 
   } finally { await rm(f.home, { recursive: true, force: true }); }
 });
 
+test('a valid stale-policy cache is a non-consuming miss, not activation authority', async () => {
+  const f = await fixture();
+  try {
+    await (await publisher())({ ...f, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {}, onCommitted: () => {} });
+    const pointerPath = join(f.scopeRoot, 'CURRENT.json');
+    const pointerBytes = await readFile(pointerPath);
+    let authorityChecks = 0;
+    const result = await (await taker())({ home: f.home, workspaceId: WORKSPACE, provider: 'codex',
+      ...f.expected, policyHash: sha256('renewed-fixture-policy'), assertCurrent: () => { authorityChecks++; } });
+    assert.equal(result, null);
+    assert.ok(authorityChecks >= 2, 'current authority must be rechecked before returning a miss');
+    assert.deepEqual(await readFile(pointerPath), pointerBytes);
+    assert.equal(await readFile(join(f.sourceRoot, 'PREPARED.json'), 'utf8'), f.recordBytes);
+    assert.ok(!(await readdir(f.scopeRoot)).some(name => name.startsWith('.CONSUMING-')));
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('stale policy cannot hide a foreign cache identity', async () => {
+  const f = await fixture();
+  try {
+    await (await publisher())({ ...f, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {}, onCommitted: () => {} });
+    const pointerPath = join(f.scopeRoot, 'CURRENT.json');
+    const pointerBytes = await readFile(pointerPath);
+    for (const [key, value] of Object.entries({ organizationId: 'org_foreign',
+      deviceId: '66666666-6666-4666-8666-666666666666',
+      repositoryAgentId: '77777777-7777-4777-8777-777777777777',
+      repositoryBindingId: '88888888-8888-4888-8888-888888888888' })) {
+      await assert.rejects((await taker())({ home: f.home, workspaceId: WORKSPACE, provider: 'codex',
+        ...f.expected, [key]: value, policyHash: sha256('renewed-fixture-policy'), assertCurrent: () => {} }), /current scope mismatch/);
+      assert.deepEqual(await readFile(pointerPath), pointerBytes);
+    }
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('stale policy cannot hide tampered cache metadata', async () => {
+  const f = await fixture();
+  try {
+    await (await publisher())({ ...f, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {}, onCommitted: () => {} });
+    const pointerPath = join(f.scopeRoot, 'CURRENT.json');
+    const pointerBytes = await readFile(pointerPath);
+    await writeFile(join(f.sourceRoot, 'PREPARED.json'), canonicalize({ ...f.record, rolloutId: 'tampered' }) + '\n');
+    await assert.rejects((await taker())({ home: f.home, workspaceId: WORKSPACE, provider: 'codex',
+      ...f.expected, policyHash: sha256('renewed-fixture-policy'), assertCurrent: () => {} }), /metadata hash mismatch/);
+    assert.deepEqual(await readFile(pointerPath), pointerBytes);
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('revocation or cancellation during stale-policy validation cannot become a miss', async () => {
+  const f = await fixture();
+  try {
+    await (await publisher())({ ...f, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {}, onCommitted: () => {} });
+    const pointerPath = join(f.scopeRoot, 'CURRENT.json');
+    const pointerBytes = await readFile(pointerPath);
+    for (const reason of ['revoked', 'expired', 'cancelled']) {
+      let checks = 0;
+      await assert.rejects((await taker())({ home: f.home, workspaceId: WORKSPACE, provider: 'codex',
+        ...f.expected, policyHash: sha256('renewed-fixture-policy'),
+        assertCurrent: () => { if (++checks === 2) throw new Error(`fixture ${reason}`); } }), new RegExp(reason));
+      assert.equal(checks, 2);
+      assert.deepEqual(await readFile(pointerPath), pointerBytes);
+    }
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+// Execute the emitted cache reader and safe-boundary callback, with synthetic
+// authorization and delivery. This is an offline caller test, not live receipt proof.
+async function runPolicyRefreshActivation(f: Awaited<ReturnType<typeof fixture>>, options: {
+  denyFresh?: boolean; foreignDevice?: boolean; tamperMetadata?: boolean;
+}, diagnostic: (message: string) => void) {
+  await (await publisher())({ ...f, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {}, onCommitted: () => {} });
+  if (options.tamperMetadata) await writeFile(join(f.sourceRoot, 'PREPARED.json'), f.recordBytes + ' ');
+  const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  diagnostic(`synthetic policy-refresh caller source=${sha256(await readFile(new URL('../src/index.ts', import.meta.url)))} emitted=${sha256(source)}`);
+  const ast = ts.createSourceFile('index.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const functions = ast.statements.filter(ts.isFunctionDeclaration);
+  const readers = functions.filter(node => node.name?.text === 'takeCachedSkillUpdate');
+  const workers = functions.filter(node => node.name?.text === 'relayWorkspaceLoop');
+  assert.equal(readers.length, 1); assert.equal(workers.length, 1);
+  const callbacks: ts.ArrowFunction[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === 'withSkillPreparationTransaction') {
+      const callback = node.arguments[1];
+      if (callback && ts.isArrowFunction(callback) && callback.body.getText(ast).includes('const cached = await takeCachedSkillUpdate(')) {
+        callbacks.push(callback);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(workers[0]!);
+  assert.equal(callbacks.length, 1, 'unique production activation callback is required');
+  let currentChecks = 0; let freshCalls = 0; let activations = 0;
+  const policy = { fixture: 'renewed-signed-policy' };
+  const config = { organizationId: f.expected.organizationId,
+    deviceId: options.foreignDevice ? '99999999-9999-4999-8999-999999999999' : f.expected.deviceId,
+    serverPublicKeyEd25519: 'synthetic-not-used-to-activate-cache' };
+  const workspace = { workspaceId: WORKSPACE, repositoryAgentId: f.expected.repositoryAgentId,
+    repositoryBindingId: f.expected.repositoryBindingId, path: f.home };
+  const fabric = Object.freeze({ fixture: true });
+  const fresh = Object.freeze({ fixture: 'fresh-authorized-preparation', policy, config, workspace, fabric });
+  try {
+    await new Script(`${readers[0]!.getText(ast)}\n(${callbacks[0]!.getText(ast)})();`).runInNewContext({
+      Map, Error, canonicalize, sha256, canonicalWorkspace: workspace,
+      provider: 'codex', policyPath: join(f.home, 'approved-policy.json'), fabric,
+      skillPreparationsCompleted: 0, skillActivationsCompleted: 0,
+      loadSkillSynchronizationPolicy: async () => ({ workspace, policy, config }),
+      takeSkillPreparationCache: await taker(), dharmaHome: () => f.home,
+      verifyServerAuthorizedPolicy: () => { currentChecks++; },
+      prepareSkillUpdate: async (input: Record<string, unknown>) => {
+        freshCalls++;
+        assert.equal(input.automatic, true); assert.equal(input.fabric, fabric);
+        assert.equal(input.workspaceId, WORKSPACE); assert.equal(input.provider, 'codex');
+        if (options.denyFresh) throw new Error('fixture fresh preparation denied');
+        return fresh;
+      },
+      activatePreparedSkillUpdate: async (input: { prepared: unknown }) => {
+        assert.equal(input.prepared, fresh, 'stale cache must never become the activated preparation');
+        activations++;
+      },
+      createPublicKey: () => { throw new Error('unexpected stale cache signature path'); },
+      rm: () => { throw new Error('unexpected stale cache cleanup'); },
+    });
+    return { currentChecks, freshCalls, activations, error: null };
+  } catch (error) {
+    return { currentChecks, freshCalls, activations, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+test('actual relay activation prepares fresh under renewed policy after a valid cache miss', async t => {
+  const f = await fixture();
+  try {
+    const result = await runPolicyRefreshActivation(f, {}, message => t.diagnostic(message));
+    assert.equal(result.error, null); assert.ok(result.currentChecks >= 2);
+    assert.equal(result.freshCalls, 1); assert.equal(result.activations, 1);
+    await readFile(join(f.scopeRoot, 'CURRENT.json'));
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('actual relay activation preserves fresh-preparation denial after a stale cache miss', async t => {
+  const f = await fixture();
+  try {
+    const result = await runPolicyRefreshActivation(f, { denyFresh: true }, message => t.diagnostic(message));
+    assert.match(result.error ?? '', /fresh preparation denied/);
+    assert.equal(result.freshCalls, 1); assert.equal(result.activations, 0);
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('actual relay activation never falls back after identity or integrity rejection', async t => {
+  for (const options of [{ foreignDevice: true }, { tamperMetadata: true }]) {
+    const f = await fixture();
+    try {
+      const result = await runPolicyRefreshActivation(f, options, message => t.diagnostic(message));
+      assert.match(result.error ?? '', /current scope mismatch|metadata hash mismatch/);
+      assert.equal(result.freshCalls, 0); assert.equal(result.activations, 0);
+    } finally { await rm(f.home, { recursive: true, force: true }); }
+  }
+});
+
 test('stop before pointer commit leaves no committed cache', async () => {
   const f = await fixture(); let committed = false;
   try {
