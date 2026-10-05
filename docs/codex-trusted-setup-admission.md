@@ -33,6 +33,20 @@ The following are deliberately not supplied by this module:
 The executor, host qualification and readiness callbacks in the offline tests
 remain synthetic stubs. They do not establish those components on either client.
 
+The official `claimSetupReference` client now accepts an optional owning-host
+`hostScope` (cancellation signal and live boolean authority check). It checks
+that authority before/after protected-store access, requests, signing, browser
+notification and commit, and makes its default polling sleeps and fetch/body
+reads cancellable. A false/throwing check withdraws this operation permanently.
+Only its random preflight probe is cleaned up after cancellation; identity and
+partially installed credentials are preserved for supported same-key recovery.
+Already-admitted effects are not claimed to be rolled back or forcibly stopped.
+This is wired inside the real claim implementation, not a replacement claim
+protocol. Legacy callers remain compatible without this optional host input.
+There is no CLI flag/model argument for it. A full official bootstrap host must
+still supply the admitted scope and guard the later repository/session/startup
+effects; that controller integration remains absent.
+
 ## Local Journal Backend
 
 `createCodexSetupVaultJournal` adapts the public `LocalVault` setup-operation API.

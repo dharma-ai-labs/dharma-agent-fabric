@@ -1,4 +1,5 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {
   parseSetupClaimChallenge, setupClaimSigningPayload, openSetupClaimCredential, canonicalize,
   verifyInitialServerSigningKeyset, verifyServerSigningKeysetUpdate,
@@ -32,6 +33,9 @@ export interface ClaimSetupReferenceInput {
   existingConfig?: DeviceConfig | null; store?: SecureSecretStore; fetcher?: typeof fetch;
   now?: () => number; sleep?: (ms: number) => Promise<void>; maximumWaitMs?: number; pollIntervalMs?: number;
   onRecipientApprovalRequired?: (approval: BootstrapRecipientApproval) => Promise<void> | void;
+  /** Owning host only; never derived from model arguments or cached approval.
+   * Absence preserves the existing CLI claim path. Cancellation is cooperative. */
+  hostScope?: {signal: AbortSignal; current(): Promise<boolean>};
   /** Local phase observation only: no vendor exception, response body, or retry authority. */
   onFailureDiagnostic?: (diagnostic: Readonly<SetupClaimFailureDiagnostic>) => void;
 }
@@ -49,17 +53,21 @@ function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail();
   return value as Record<string, unknown>;
 }
-async function boundedJson(response: Response): Promise<Record<string, unknown>> {
+async function boundedJson(response: Response, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (Number(response.headers.get('content-length')) > 65_536 || !response.body) return fail();
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+  const cancel = () => {void reader.cancel().catch(() => undefined);};
+  signal?.addEventListener('abort', cancel, {once: true});
   try {
+    if (signal?.aborted) {cancel(); return fail();}
     while (true) {
       const next = await reader.read(); if (next.done) break;
       size += next.value.byteLength; if (size > 65_536) { await reader.cancel(); return fail(); }
       chunks.push(next.value);
     }
+    if (signal?.aborted) return fail();
     return record(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-  } finally { reader.releaseLock(); }
+  } finally { signal?.removeEventListener('abort', cancel); reader.releaseLock(); }
 }
 function sameDevice(value: unknown, expected: {name: string; platform: string}): boolean {
   const device = record(value);
@@ -117,14 +125,43 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     const maximumWaitMs = input.maximumWaitMs ?? 900_000;
     if (!Number.isFinite(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 900_000) return fail();
     const deadline = now() + maximumWaitMs;
+    const hostScope = input.hostScope;
+    if (hostScope !== undefined && (!hostScope || !(hostScope.signal instanceof AbortSignal)
+      || typeof hostScope.current !== 'function')) return fail();
+    const withdrawn = new AbortController();
+    const scopeSignal = hostScope ? AbortSignal.any([hostScope.signal, withdrawn.signal]) : undefined;
+    const current = hostScope?.current.bind(hostScope);
+    const assertScope = async () => {
+      try {
+        if (scopeSignal?.aborted || current && await current() !== true || scopeSignal?.aborted) return fail();
+      } catch {withdrawn.abort(); return fail();}
+    };
+    const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+      await assertScope(); const result = await operation(); await assertScope(); return result;
+    };
+    const sleep = async (ms: number) => {
+      await guarded(() => input.sleep ? input.sleep(ms) : delay(ms, undefined, {signal: scopeSignal}));
+    };
     phase = 'store_preflight';
-    const store = input.store ?? await createSystemSecureStore();
+    const rawStore = await guarded(async () => input.store ?? await createSystemSecureStore());
+    const store: SecureSecretStore = hostScope ? {
+      backend: rawStore.backend,
+      get: account => guarded(() => rawStore.get(account)),
+      getFresh: account => guarded(() => (rawStore.getFresh ?? rawStore.get).call(rawStore, account)),
+      put: (account, value) => guarded(() => rawStore.put(account, value)),
+      delete: account => guarded(() => rawStore.delete(account)),
+    } : rawStore;
     const probeAccount = `setup-claim-preflight-${randomBytes(16).toString('hex')}`;
     const probeValue = randomBytes(32).toString('base64url');
     try {
       await store.put(probeAccount, probeValue);
       if (await (store.getFresh ?? store.get).call(store, probeAccount) !== probeValue) return fail();
-    } finally { await store.delete(probeAccount); }
+    } finally {
+      // Only clean our random probe after cancellation; never delete identity
+      // or partially installed credentials to pretend protected-store rollback.
+      await rawStore.delete(probeAccount);
+    }
+    await assertScope();
     // Existing protected identity access fails before challenge/approval/effects.
     phase = 'identity';
     const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId: input.organizationId,
@@ -143,13 +180,19 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     const device = { name: input.name, platform: input.platform };
     const fetcher = input.fetcher ?? fetch;
     const send = async (body: unknown) => {
+      await assertScope();
       const remaining = deadline - now(); if (remaining <= 0) return fail();
+      const timeout = AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining)));
+      const requestSignal = scopeSignal ? AbortSignal.any([scopeSignal, timeout]) : timeout;
       const response = await fetcher(`${hqUrl}${PATH}`, { method: 'POST', redirect: 'error',
         headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining))) });
+        signal: requestSignal });
+      await assertScope();
       if (response.redirected || (response.url && response.url !== `${hqUrl}${PATH}`)
         || response.status >= 300 && ![409,429].includes(response.status)) return fail();
-      return { response, body: await boundedJson(response) };
+      const parsed = await boundedJson(response, requestSignal);
+      await assertScope();
+      return { response, body: parsed };
     };
     phase = 'challenge';
     const initial = await send({ action: 'challenge', organizationId: input.organizationId,
@@ -165,12 +208,14 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       // Validate the complete bound response before waiting. Do not adjust the
       // clock or relax the strict issued-at/expiry checks used by every effect.
       parseSetupClaimChallenge(initial.body.challenge, expected, issuedAt);
-      await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(issuedAt - localNow);
+      await sleep(issuedAt - localNow);
       if (now() >= deadline) return fail();
     }
     const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, now());
     phase = 'signing';
+    await assertScope();
     const signature = sign(null, setupClaimSigningPayload(challenge), createPrivateKey({key: identity.privateJwk, format: 'jwk'})).toString('base64url');
+    await assertScope();
     const request = { action: 'finalize', challenge, signature, device };
     let pending: BootstrapRecipientApproval | null = null;
     while (true) {
@@ -180,7 +225,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       parseSetupClaimChallenge(challenge, expected, now());
       if (result.response.status === 429) {
         const wait = quotaRetryDelay(result.response, result.body, now(), Math.min(deadline, Date.parse(challenge.expiresAt)));
-        await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(wait);
+        await sleep(wait);
         continue;
       }
       if (result.response.status === 409 && result.body.ok === false
@@ -188,17 +233,18 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         phase = 'recipient_approval';
         if (Object.keys(result.body).sort().join(',') !== 'approval,ok,status') return fail();
         const current = parseSetupClaimRecipientApproval(result.body.approval, challenge, signature, device, now());
-        if (!pending) { pending = current; await input.onRecipientApprovalRequired?.(current); }
+        if (!pending) { pending = current; await guarded(async () => {await input.onRecipientApprovalRequired?.(current);}); }
         else if (JSON.stringify(pending) !== JSON.stringify(current)) return fail();
         const remaining = Math.min(deadline, Date.parse(challenge.expiresAt)) - now();
         if (remaining <= 0) return fail();
-        await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(
+        await sleep(
           Math.min(Math.max(input.pollIntervalMs ?? 3_000, 250), 10_000, remaining));
         continue;
       }
       if (!result.response.ok || result.body.ok !== true || result.body.status !== 'approved'
         || Object.keys(result.body).sort().join(',') !== 'credential,ok,status') return fail();
       phase = 'credential_validation';
+      await assertScope();
       const enrolled = record(JSON.parse(openSetupClaimCredential(challenge, result.body.credential, encryption.privateKey)));
       for (const key of ['organizationId', 'setupReference', 'recipientMembershipId', 'publicKeyEd25519',
         'repositoryFingerprint', 'scopeDigest', 'contractDigest'] as const) if (enrolled[key] !== challenge[key]) return fail();
@@ -230,8 +276,10 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       // The protected store and public config file are not a single transaction:
       // interruption preserves partial protected writes for same-key recovery.
       const assertCommit = async () => {
+        await assertScope();
         if (now() >= deadline) return fail();
         parseSetupClaimChallenge(challenge, expected, now());
+        await assertScope();
         const current = await (store.getFresh ?? store.get).call(store, identity.account);
         if (!current || canonicalize(JSON.parse(current)) !== canonicalize(identity.privateJwk)) return fail();
         if (now() >= deadline) return fail();
