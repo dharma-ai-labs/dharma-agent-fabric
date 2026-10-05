@@ -103,6 +103,9 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+// Trusted runtime composition only; these exports do not enable effectful setup.
+export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
