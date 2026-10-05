@@ -1,8 +1,26 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import {currentBootstrapHostScope, type BootstrapHostScope} from './bootstrapHostScope.js';
 
 type Row = Record<string, unknown>;
+
+function step<T>(scope: BootstrapHostScope | undefined, operation: () => Promise<T>): Promise<T> {
+  return scope ? scope.step(operation) : operation();
+}
+
+async function failure(scope: BootstrapHostScope | undefined, error: unknown, code: string): Promise<never> {
+  if (!scope) throw error;
+  await scope.assert();
+  const safe = error instanceof Error && [
+    'registry_recovery_registry_file_unsafe', 'registry_recovery_nonempty_registry_invalid',
+    'registry_recovery_backup_directory_unsafe', 'registry_recovery_registry_changed',
+    'registry_recovery_existing_rows_invalid', 'registry_recovery_foreign_organization',
+    'registry_recovery_existing_rows_ambiguous', 'registry_recovery_existing_row_conflict',
+    'registry_recovery_write_unconfirmed', 'registry_recovery_cleanup_unconfirmed',
+  ].includes(error.message) ? error.message : code;
+  throw new Error(safe);
+}
 
 function object(value: unknown): Row | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Row : null;
@@ -114,29 +132,36 @@ export function appendRecoveredWorkspace<T extends {
 }
 
 export async function inspectRegistryRecoveryFile<T>(path: string) {
+  const scope = currentBootstrapHostScope();
   let bytes: Buffer | null = null;
   try {
-    const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
-      throw new Error('registry_recovery_registry_file_unsafe');
+    try {
+      const metadata = await step(scope, () => lstat(path));
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+        throw new Error('registry_recovery_registry_file_unsafe');
+      }
+      bytes = await step(scope, () => readFile(path));
+    } catch (error) {
+      await scope?.assert();
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    bytes = await readFile(path);
+    let records: T[] = [];
+    if (bytes && bytes.length > 0) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(bytes.toString('utf8')); }
+      catch { throw new Error('registry_recovery_nonempty_registry_invalid'); }
+      if (!Array.isArray(parsed)) throw new Error('registry_recovery_nonempty_registry_invalid');
+      records = parsed as T[];
+    }
+    await scope?.assert();
+    return {
+      kind: bytes === null ? 'absent' as const : bytes.length === 0 ? 'corrupt_zero' as const : 'valid' as const,
+      bytes, records,
+      hash: bytes === null ? null : `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return failure(scope, error, 'registry_recovery_read_failed');
   }
-  let records: T[] = [];
-  if (bytes && bytes.length > 0) {
-    let parsed: unknown;
-    try { parsed = JSON.parse(bytes.toString('utf8')); }
-    catch { throw new Error('registry_recovery_nonempty_registry_invalid'); }
-    if (!Array.isArray(parsed)) throw new Error('registry_recovery_nonempty_registry_invalid');
-    records = parsed as T[];
-  }
-  return {
-    kind: bytes === null ? 'absent' as const : bytes.length === 0 ? 'corrupt_zero' as const : 'valid' as const,
-    bytes, records,
-    hash: bytes === null ? null : `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
-  };
 }
 
 export async function backupRegistryRecoveryFile(input: {
@@ -144,15 +169,38 @@ export async function backupRegistryRecoveryFile(input: {
   path: string;
   expectedBytes: Buffer | null;
 }) {
-  if (input.expectedBytes === null) return null;
-  const directory = resolve(input.home, 'registry', 'recovery-backups');
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  if (!(await lstat(directory)).isDirectory()) throw new Error('registry_recovery_backup_directory_unsafe');
-  const backup = resolve(directory, `workspaces-${Date.now()}-${randomUUID()}.bin`);
-  await writeFile(backup, input.expectedBytes, { flag: 'wx', mode: 0o600 });
-  const current = await readFile(input.path);
-  if (!current.equals(input.expectedBytes)) throw new Error('registry_recovery_registry_changed');
-  return backup;
+  const scope = currentBootstrapHostScope();
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const home = input.home, path = input.path;
+    const expected = input.expectedBytes === null ? null : Buffer.from(input.expectedBytes);
+    await scope?.assert();
+    if (expected === null) return null;
+    const directory = resolve(home, 'registry', 'recovery-backups');
+    await step(scope, () => mkdir(directory, { recursive: true, mode: 0o700 }));
+    const metadata = await step(scope, () => lstat(directory));
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error('registry_recovery_backup_directory_unsafe');
+    }
+    const backup = resolve(directory, `workspaces-${Date.now()}-${randomUUID()}.bin`);
+    await step(scope, async () => {handle = await open(backup, 'wx', 0o600);});
+    await step(scope, () => handle!.writeFile(expected));
+    await step(scope, () => handle!.sync());
+    const current = await step(scope, () => readFile(path));
+    if (!current.equals(expected)) throw new Error('registry_recovery_registry_changed');
+    await scope?.assert();
+    return backup;
+  } catch (error) {
+    return await failure(scope, error, 'registry_recovery_backup_failed');
+  } finally {
+    // A created backup is evidence, including when installation is interrupted.
+    if (handle) {
+      try {await handle.close();} catch (error) {
+        if (scope) throw new Error('registry_recovery_backup_close_unconfirmed');
+        throw error;
+      }
+    }
+  }
 }
 
 export async function applyRegistryRecoveryFile<T extends {
@@ -164,34 +212,76 @@ export async function applyRegistryRecoveryFile<T extends {
   expectedHash: string | null;
   entry: T;
 }) {
-  const current = await inspectRegistryRecoveryFile<T>(input.path);
-  if (current.kind !== input.expectedKind || current.hash !== input.expectedHash) {
-    throw new Error('registry_recovery_registry_changed');
-  }
-  const final = appendRecoveredWorkspace(current.records, input.entry);
-  if (final.alreadyPresent) return { state: 'already_present' as const, backup: null,
-    previousHash: current.hash, restoredCount: final.records.length };
-  const backup = await backupRegistryRecoveryFile({ home: input.home, path: input.path,
-    expectedBytes: current.bytes });
-  const temporary = `${input.path}.${process.pid}.${randomUUID()}.tmp`;
-  await mkdir(dirname(input.path), { recursive: true, mode: 0o700 });
+  const scope = currentBootstrapHostScope();
   try {
-    await writeFile(temporary, `${JSON.stringify(final.records, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    const beforeReplace = await inspectRegistryRecoveryFile<T>(input.path);
-    if (beforeReplace.kind !== current.kind || beforeReplace.hash !== current.hash) {
+    const snapshot = structuredClone(input);
+    await scope?.assert();
+    const current = await step(scope, () => inspectRegistryRecoveryFile<T>(snapshot.path));
+    if (current.kind !== snapshot.expectedKind || current.hash !== snapshot.expectedHash) {
       throw new Error('registry_recovery_registry_changed');
     }
-    await rename(temporary, input.path);
-  } finally {
-    await unlink(temporary).catch(error => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    });
+    const final = appendRecoveredWorkspace(current.records, snapshot.entry);
+    if (final.alreadyPresent) {
+      await scope?.assert();
+      return {state: 'already_present' as const, backup: null,
+        previousHash: current.hash, restoredCount: final.records.length};
+    }
+    const serialized = Buffer.from(`${JSON.stringify(final.records, null, 2)}\n`);
+    const backup = await step(scope, () => backupRegistryRecoveryFile({home: snapshot.home, path: snapshot.path,
+      expectedBytes: current.bytes}));
+    const temporary = `${snapshot.path}.${process.pid}.${randomUUID()}.tmp`;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let owned: {dev: bigint; ino: bigint} | undefined;
+    let renamed = false;
+    await step(scope, () => mkdir(dirname(snapshot.path), {recursive: true, mode: 0o700}));
+    try {
+      await step(scope, async () => {
+        handle = await open(temporary, 'wx', 0o600);
+        const metadata = await handle.stat({bigint: true});
+        owned = {dev: metadata.dev, ino: metadata.ino};
+      });
+      await step(scope, () => handle!.writeFile(serialized));
+      await step(scope, () => handle!.sync());
+      await step(scope, async () => {await handle!.close(); handle = undefined;});
+      const beforeReplace = await step(scope, () => inspectRegistryRecoveryFile<T>(snapshot.path));
+      if (beforeReplace.kind !== current.kind || beforeReplace.hash !== current.hash) {
+        throw new Error('registry_recovery_registry_changed');
+      }
+      const metadata = await step(scope, () => lstat(temporary, {bigint: true}));
+      if (!owned || metadata.dev !== owned.dev || metadata.ino !== owned.ino
+        || !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n) {
+        throw new Error('registry_recovery_cleanup_unconfirmed');
+      }
+      await step(scope, async () => {await rename(temporary, snapshot.path); renamed = true;});
+    } finally {
+      let cleanupFailed = false;
+      if (handle) {
+        try {await handle.close();} catch {cleanupFailed = true;}
+      }
+      // Cooperatively clean only this exclusive-open inode, even after withdrawal.
+      if (!renamed && owned) {
+        try {
+          const metadata = await lstat(temporary, {bigint: true});
+          if (metadata.dev !== owned.dev || metadata.ino !== owned.ino
+            || !metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n) cleanupFailed = true;
+          else await unlink(temporary);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cleanupFailed = true;
+        }
+      } else if (!renamed && handle && !owned) cleanupFailed = true;
+      if (cleanupFailed) throw new Error('registry_recovery_cleanup_unconfirmed');
+    }
+    const confirmed = await step(scope, () => inspectRegistryRecoveryFile<T>(snapshot.path));
+    if (confirmed.kind !== 'valid' || !confirmed.bytes?.equals(serialized)) {
+      throw new Error('registry_recovery_write_unconfirmed');
+    }
+    await scope?.assert();
+    return {state: 'recovered' as const, backup, previousHash: current.hash,
+      restoredCount: confirmed.records.length};
+  } catch (error) {
+    // Preserve an ownership/close failure even if the owning scope also closed.
+    if (error instanceof Error && ['registry_recovery_cleanup_unconfirmed',
+      'registry_recovery_backup_close_unconfirmed'].includes(error.message)) throw error;
+    return failure(scope, error, 'registry_recovery_write_failed');
   }
-  const confirmed = await inspectRegistryRecoveryFile<T>(input.path);
-  if (confirmed.kind !== 'valid' || confirmed.records.length !== final.records.length
-    || !confirmed.records.some(row => row.workspaceId === input.entry.workspaceId && row.path === input.entry.path)) {
-    throw new Error('registry_recovery_write_unconfirmed');
-  }
-  return { state: 'recovered' as const, backup, previousHash: current.hash,
-    restoredCount: confirmed.records.length };
 }
