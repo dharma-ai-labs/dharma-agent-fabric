@@ -84,18 +84,30 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
   return {intent, flags, scope};
 }
 
-const hostContext = new AsyncLocalStorage<BootstrapHostScope>();
+const hostContext = new AsyncLocalStorage<Readonly<{scope: BootstrapHostScope; workspace: string; fingerprint: string}>>();
 
 /** Closed descendants retain the closed scope, never a legacy unscoped fallback. */
 export function currentBootstrapHostScope(): BootstrapHostScope | undefined {
-  return hostContext.getStore();
+  return hostContext.getStore()?.scope;
+}
+
+export async function assertBootstrapHostSource(workspace: string, fingerprint: string): Promise<void> {
+  const owning = hostContext.getStore();
+  if (!owning) return;
+  await owning.scope.assert();
+  if (workspace !== owning.workspace || fingerprint !== owning.fingerprint) {
+    owning.scope.close();
+    throw new Error('codex_setup_host_source_mismatch');
+  }
 }
 
 export async function runCodexBootstrapHost<T>(input: CodexBootstrapHostInput,
   operation: (prepared: ReturnType<typeof prepareCodexBootstrapHost>) => Promise<T>): Promise<T> {
   if (hostContext.getStore()) throw new Error('codex_setup_host_context_conflict');
   const prepared = prepareCodexBootstrapHost(input);
+  const owning = Object.freeze({scope: prepared.scope, workspace: String(prepared.flags.get('workspace')),
+    fingerprint: prepared.intent.repositoryFingerprint});
   try {
-    return await hostContext.run(prepared.scope, () => prepared.scope.step(() => operation(prepared)));
+    return await hostContext.run(owning, () => prepared.scope.step(() => operation(prepared)));
   } finally {prepared.scope.close();}
 }

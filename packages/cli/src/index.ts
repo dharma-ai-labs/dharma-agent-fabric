@@ -102,7 +102,7 @@ import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionL
 import { startNamedCodexThread } from './namedCodexThread.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
-import {currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
@@ -2140,7 +2140,7 @@ export function assertBootstrapResumeAuthority(input: {
 export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): Promise<Output> {
   try {return await runCodexBootstrapHost(input, prepared => bootstrap(prepared.flags, prepared.scope));}
   catch (error) {
-    const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable', 'codex_setup_host_context_conflict']);
+    const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable', 'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch']);
     let code = 'codex_setup_host_operation_failed';
     try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
     throw new Error(code);
@@ -2232,6 +2232,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
     );
   const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+  await assertBootstrapHostSource(workspace, repositoryIdentity.fingerprint);
   const provider = requestedProvider === 'auto'
     ? await detectBootstrapProvider(joinedBindingId ? String(flags.get('workspace') || '.') : workspace)
     : requestedProvider;

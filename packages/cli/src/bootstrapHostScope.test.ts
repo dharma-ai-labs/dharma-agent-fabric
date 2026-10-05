@@ -230,3 +230,42 @@ test('the public host entry withholds active vendor diagnostics and closes scope
   assert.ok(calls > 1); assert.equal(input.signal.aborted, false);
   assert.ok(Date.now() >= actual);
 });
+
+function sourceCheck() {
+  const check = (host as unknown as {assertBootstrapHostSource?: (workspace: string, fingerprint: string) => Promise<void>}).assertBootstrapHostSource;
+  assert.equal(typeof check, 'function', 'host source binding is not enforced before enrollment');
+  return check!;
+}
+
+test('owning setup refuses another checkout or fingerprint before enrollment', async () => {
+  const api = contextApi(), check = sourceCheck(), input = await fixture();
+  await assert.rejects(api.runCodexBootstrapHost(input, async () => {
+    await assert.rejects(check(resolve('foreign-synthetic-checkout'), input.intent.repositoryFingerprint),
+      {message: 'codex_setup_host_source_mismatch'});
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  await assert.rejects(api.runCodexBootstrapHost(input, async () => {
+    await assert.rejects(check(input.workspace, `sha256:${'b'.repeat(64)}`), {message: 'codex_setup_host_source_mismatch'});
+  }), {message: 'codex_setup_host_scope_unavailable'});
+});
+
+test('owning setup accepts only its snapshotted source even if mutable flags change', async () => {
+  const api = contextApi(), check = sourceCheck(), input = await fixture();
+  await assert.rejects(api.runCodexBootstrapHost(input, async prepared => {
+    const original = input.workspace;
+    prepared.flags.set('workspace', resolve('foreign-synthetic-checkout'));
+    input.workspace = resolve('another-synthetic-checkout');
+    input.intent.repositoryFingerprint = `sha256:${'b'.repeat(64)}`;
+    await check(original, prepared.intent.repositoryFingerprint);
+    await assert.rejects(check(input.workspace, input.intent.repositoryFingerprint), {message: 'codex_setup_host_source_mismatch'});
+  }), {message: 'codex_setup_host_scope_unavailable'});
+});
+
+test('source mismatch permanently withdraws subsequent protected operations', async () => {
+  const api = contextApi(), check = sourceCheck(), input = await fixture();
+  let effects = 0;
+  await assert.rejects(api.runCodexBootstrapHost(input, async prepared => {
+    await assert.rejects(check(input.workspace, `sha256:${'b'.repeat(64)}`), {message: 'codex_setup_host_source_mismatch'});
+    await assert.rejects(prepared.scope.step(async () => {effects++;}), {message: 'codex_setup_host_scope_unavailable'});
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(effects, 0);
+});
