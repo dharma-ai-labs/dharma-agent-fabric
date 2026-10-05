@@ -684,10 +684,18 @@ export class FileActionExecutionJournal {
   }
 
   async selfTest(scope?: ActionJournalSelfTestScope): Promise<void> {
-    const signal = scope?.signal, qualify = scope?.current.bind(scope);
+    let signal: AbortSignal | undefined, qualify: (() => Promise<boolean>) | undefined;
+    if (scope !== undefined) {
+      try {
+        if (!scope || typeof scope !== 'object') throw new Error();
+        const suppliedSignal = scope.signal, current = scope.current;
+        if (!(suppliedSignal instanceof AbortSignal) || typeof current !== 'function') throw new Error();
+        signal = suppliedSignal; qualify = () => Reflect.apply(current, scope, []);
+      } catch {throw new Error('journal_self_test_scope_unavailable');}
+    }
     let withdrawn = false;
     const assertCurrent = async () => {
-      if (!scope) return;
+      if (scope === undefined) return;
       let current = false;
       if (!withdrawn && signal instanceof AbortSignal && !signal.aborted) {
         try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
@@ -699,7 +707,7 @@ export class FileActionExecutionJournal {
       try {const result = await operation(); await assertCurrent(); return result;}
       catch (error) {
         await assertCurrent();
-        if (scope) throw new Error('journal_self_test_failed');
+        if (scope !== undefined) throw new Error('journal_self_test_failed');
         throw error;
       }
     };
@@ -713,7 +721,7 @@ export class FileActionExecutionJournal {
       if (!value || value.schema !== 'dharma.action-execution-journal-self-test/v1') throw new Error('Journal self-test readback failed.');
     } catch (error) {
       await assertCurrent();
-      if (scope) throw new Error('journal_self_test_failed');
+      if (scope !== undefined) throw new Error('journal_self_test_failed');
       throw error;
     } finally { await effect(() => rm(path, { force: true })); }
   }

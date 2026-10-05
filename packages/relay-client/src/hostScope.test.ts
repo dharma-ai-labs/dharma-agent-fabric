@@ -7,11 +7,37 @@ import test from 'node:test';
 import {createServer} from 'node:http';
 import {createHash, createPublicKey, verify} from 'node:crypto';
 import {AgentFabricClient, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor,
-  type DeviceConfig, type SecureSecretStore} from './index.js';
+  loadOrganizationApiToken, type DeviceConfig, type SecureSecretStore} from './index.js';
+import {HostOperationFence} from './hostOperationScope.js';
 
 type Scope = {signal: AbortSignal; current(): Promise<boolean>};
 type Open = Parameters<typeof AgentFabricClient.open>[0] & {hostScope: Scope};
 const unavailable = {message: 'relay_host_scope_unavailable'};
+
+test('malformed supplied protected-store scopes never select legacy behavior', async () => {
+  const calls: string[] = [];
+  const store: SecureSecretStore = {backend: 'linux-secret-service',
+    async get() {calls.push('get'); return null;}, async put() {calls.push('put');}, async delete() {calls.push('delete');}};
+  const throwing = (field: string) => Object.defineProperty({}, field, {get() {throw new Error('private-accessor-canary');}});
+  for (const scope of [null, false, 0, '', {}, throwing('signal'),
+    Object.defineProperty({signal: new AbortController().signal}, 'current', {get() {throw new Error('private-accessor-canary');}})]) {
+    await assert.rejects(loadOrganizationApiToken({hqUrl: 'https://hq.example', organizationId: 'org_demo', store,
+      hostScope: scope as unknown as Scope}), unavailable);
+    assert.deepEqual(calls, []);
+  }
+  await loadOrganizationApiToken({hqUrl: 'https://hq.example', organizationId: 'org_demo', store});
+  assert.deepEqual(calls, ['get']);
+});
+
+test('host fence captures qualification fields once without using a supplied bind method', async () => {
+  let signals = 0, callbacks = 0, checks = 0;
+  const signal = new AbortController().signal;
+  const current = async () => {checks++; return true;};
+  Object.defineProperty(current, 'bind', {get() {throw new Error('private-bind-canary');}});
+  const scope = {get signal() {signals++; return signal;}, get current() {callbacks++; return current;}};
+  const fence = new HostOperationFence(scope); await fence.assert(); await fence.assert();
+  assert.equal(signals, 1); assert.equal(callbacks, 1); assert.equal(checks, 2);
+});
 async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-host-scope-'));
   t.after(() => rm(root, {recursive: true, force: true}));

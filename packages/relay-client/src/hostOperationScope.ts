@@ -13,9 +13,11 @@ export class HostOperationFence {
   readonly #stores = new WeakMap<SecureSecretStore, SecureSecretStore>();
   constructor(scope: HostOperationScope) {
     try {
-      if (!(scope?.signal instanceof AbortSignal) || typeof scope.current !== 'function') throw new Error();
-      this.signal = AbortSignal.any([scope.signal, this.#withdrawn.signal]);
-      this.#current = scope.current.bind(scope);
+      if (!scope || typeof scope !== 'object') throw new Error();
+      const signal = scope.signal, current = scope.current;
+      if (!(signal instanceof AbortSignal) || typeof current !== 'function') throw new Error();
+      this.signal = AbortSignal.any([signal, this.#withdrawn.signal]);
+      this.#current = () => Reflect.apply(current, scope, []);
     } catch {throw new Error('relay_host_scope_unavailable');}
   }
   withdraw() {this.#withdrawn.abort();}

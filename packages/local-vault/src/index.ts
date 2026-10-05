@@ -1369,10 +1369,18 @@ export interface VaultOperationScope {
 export type VaultKeyOperationScope = VaultOperationScope;
 
 function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: string) {
-  const signal = scope?.signal, qualify = scope?.current.bind(scope);
+  let signal: AbortSignal | undefined, qualify: (() => Promise<boolean>) | undefined;
+  if (scope !== undefined) {
+    try {
+      if (!scope || typeof scope !== 'object') throw new Error();
+      const suppliedSignal = scope.signal, current = scope.current;
+      if (!(suppliedSignal instanceof AbortSignal) || typeof current !== 'function') throw new Error();
+      signal = suppliedSignal; qualify = () => Reflect.apply(current, scope, []);
+    } catch {throw new Error(`${prefix}_scope_unavailable`);}
+  }
   let withdrawn = false;
   const assertCurrent = async () => {
-    if (!scope) return;
+    if (scope === undefined) return;
     let current = false;
     if (!withdrawn && signal instanceof AbortSignal && !signal.aborted) {
       try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
@@ -1384,7 +1392,7 @@ function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: 
     try {const result = await operation(); await assertCurrent(); return result;}
     catch (error) {
       await assertCurrent();
-      if (scope) {
+      if (scope !== undefined) {
         const safe = new Set(['setup_operation_invalid', 'setup_operation_conflict', 'setup_operation_integrity_failed',
           'setup_operation_transaction_active', 'setup_operation_durability_unqualified']);
         if (prefix === 'vault_setup_journal' && error instanceof Error && safe.has(error.message)) throw new Error(error.message);
@@ -1400,7 +1408,7 @@ function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: 
 export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore, scope?: VaultKeyOperationScope): Promise<Buffer> {
   const fence = createVaultEffectFence(scope, 'vault_key'), step = fence.step;
   await fence.assert();
-  if (!scope && process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
+  if (scope === undefined && process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
   const secureStore = await step(async () => store ?? await createSystemSecureStore());
   const account = 'vault-master-key-v1';
   const current = await step(() => secureStore.get(account));

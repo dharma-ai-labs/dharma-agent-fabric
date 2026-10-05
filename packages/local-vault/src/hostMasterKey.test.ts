@@ -16,6 +16,32 @@ function fixture(value: string | null = Buffer.alloc(32, 1).toString('base64')) 
   return {store, scope, calls, abort, allow(next: boolean) {allowed = next;}, after(fn: () => void) {after = fn;}};
 }
 
+test('malformed supplied vault-key scopes are sanitized before store or environment fallback', async () => {
+  const previousAllow = process.env.DHARMA_ALLOW_ENV_KEY, previousKey = process.env.DHARMA_VAULT_KEY;
+  try {
+    process.env.DHARMA_ALLOW_ENV_KEY = '1'; process.env.DHARMA_VAULT_KEY = Buffer.alloc(32, 2).toString('base64');
+    const f = fixture();
+    const throwingSignal = Object.defineProperty({}, 'signal', {get() {throw new Error('private-accessor-canary');}});
+    const throwingCurrent = Object.defineProperty({signal: f.scope.signal}, 'current', {get() {throw new Error('private-accessor-canary');}});
+    for (const scope of [null, false, 0, '', {}, throwingSignal, throwingCurrent]) {
+      await assert.rejects(load(f.store, scope as unknown as Scope), {message: 'vault_key_scope_unavailable'});
+      assert.deepEqual(f.calls, []);
+    }
+  } finally {
+    if (previousAllow === undefined) delete process.env.DHARMA_ALLOW_ENV_KEY; else process.env.DHARMA_ALLOW_ENV_KEY = previousAllow;
+    if (previousKey === undefined) delete process.env.DHARMA_VAULT_KEY; else process.env.DHARMA_VAULT_KEY = previousKey;
+  }
+});
+
+test('vault-key fence snapshots scope fields without trusting function bind properties', async () => {
+  const f = fixture(); let signals = 0, callbacks = 0;
+  const current = async () => true;
+  Object.defineProperty(current, 'bind', {get() {throw new Error('private-bind-canary');}});
+  const scope = {get signal() {signals++; return f.scope.signal;}, get current() {callbacks++; return current;}};
+  assert.deepEqual(await load(f.store, scope), Buffer.alloc(32, 1));
+  assert.equal(signals, 1); assert.equal(callbacks, 1); assert.deepEqual(f.calls, ['get']);
+});
+
 test('scoped vault key refuses cancellation or revocation before touching protected storage', async () => {
   for (const cancelled of [false, true]) {
     const f = fixture(); if (cancelled) f.abort.abort(); else f.allow(false);

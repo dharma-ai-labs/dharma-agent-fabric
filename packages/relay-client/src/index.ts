@@ -202,7 +202,7 @@ function organizationApiTokenAccountFor(hqUrl: string, organizationId: string, i
 }
 
 async function protectedStore(store: SecureSecretStore | undefined, scope?: HostOperationScope): Promise<SecureSecretStore> {
-  if (!scope) return store ?? await createSystemSecureStore();
+  if (scope === undefined) return store ?? await createSystemSecureStore();
   const fence = new HostOperationFence(scope);
   const raw = await fence.step(async () => store ?? await createSystemSecureStore());
   return fence.store(raw);
