@@ -21,6 +21,7 @@ export interface RelayAutostartOptions {
   uid?: number;
   run?: Runner;
   containerRuntime?: ContainerRuntime;
+  pinnedControllerRollback?: boolean;
 }
 
 interface RegistrationFields {

@@ -10,18 +10,18 @@ const modulePath = './relayRuntimeUpgrade.js';
 const contents = (version: string) => ({ shell: `#!/bin/sh\nexec npm exec --yes -- @dharma-ai-labs/agent-fabric@${version} "$@"\n`,
   windows: `@echo off\r\nnpm exec --yes -- @dharma-ai-labs/agent-fabric@${version} %*\r\n` });
 
-async function fixture() {
+async function fixture(initialVersion = '0.2.116', targetVersion = '0.2.118') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-runtime-upgrade-')));
   const home = join(root, 'profile'), workspace = join(root, 'repo');
   await mkdir(join(workspace, '.dharma', 'bin'), { recursive: true });
   await mkdir(join(home, 'relay'), { recursive: true });
-  const old = contents('0.2.116');
+  const old = contents(initialVersion);
   await writeFile(join(workspace, '.dharma', 'bin', 'dharma'), old.shell);
   await writeFile(join(workspace, '.dharma', 'bin', 'dharma.cmd'), old.windows);
   const identity = { organizationId: 'org_synthetic', deviceId: '11111111-1111-4111-8111-111111111111',
     workspaceId: '22222222-2222-4222-8222-222222222222' };
   const calls: string[] = [];
-  let version = '0.2.116';
+  let version = initialVersion;
   const deps = {
     launcherContents: contents,
     assertStopped: async () => { calls.push('stopped'); },
@@ -31,8 +31,51 @@ async function fixture() {
     stop: async () => { calls.push('stop'); },
     verify: async (next: string, _since: string) => { calls.push(`verify:${next}`); },
   };
-  return { input: { home, workspace, version: '0.2.118', ...identity }, deps, calls, old };
+  return { input: { home, workspace, version: targetVersion, ...identity }, deps, calls, old };
 }
+
+test('a newer recovery manager rolls back an explicitly admitted interrupted journal without relabelling its version', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture('0.2.149', '0.2.151');
+  await upgradeRelayRuntime(f.input, f.deps);
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  const journal = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(path, JSON.stringify({ ...journal, state: 'installed' }));
+  const deps = { ...f.deps, recoverableJournal: (version: string, previous: string) =>
+    version === '0.2.151' && previous === '0.2.149' };
+  const result = await upgradeRelayRuntime({ ...f.input, version: '0.2.152', rollback: true }, deps);
+  assert.equal(result.state, 'rolled_back');
+  assert.equal(result.version, '0.2.151');
+  assert.equal(result.previousVersion, '0.2.149');
+  assert.equal(result.enrollmentChanged, false);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), f.old.shell);
+  const validation = await validateContract(join(import.meta.dirname, 'schemas'),
+    'https://schemas.dharma-ai.io/local-relay-upgrade/v1', result);
+  assert.equal(validation.ok, true);
+});
+
+test('cross-version recovery admission cannot authorize an upgrade, unknown pair, foreign scope or altered prior launcher', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  for (const mode of ['upgrade', 'unknown', 'foreign', 'tampered', 'unapproved']) {
+    const f = await fixture('0.2.149', '0.2.151');
+    await upgradeRelayRuntime(f.input, f.deps);
+    const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+    const journal = JSON.parse(await readFile(path, 'utf8'));
+    journal.state = 'installed';
+    if (mode === 'unknown') journal.version = '0.2.150';
+    if (mode === 'foreign') journal.organizationId = 'org_foreign';
+    if (mode === 'tampered') journal.previous.shell += '# unexpected command\n';
+    await writeFile(path, JSON.stringify(journal));
+    const before = await readFile(path, 'utf8');
+    const launcher = await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8');
+    const deps = { ...f.deps, recoverableJournal: (version: string, previous: string) =>
+      mode !== 'unapproved' && version === '0.2.151' && previous === '0.2.149' };
+    await assert.rejects(upgradeRelayRuntime({ ...f.input, version: '0.2.152', rollback: mode !== 'upgrade' }, deps),
+      /journal_invalid/);
+    assert.equal(await readFile(path, 'utf8'), before);
+    assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), launcher);
+  }
+});
 
 test('published command boundary identifies missing enrollment rather than an unknown command', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-upgrade-empty-'));

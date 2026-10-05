@@ -5,6 +5,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } f
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { pinnedRollbackControllerMatches } from './containerRelayRecovery.js';
 
 export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number; processGroupId?: number; sessionId?: number }
 export interface ContainerChildIdentity { pid: number; uid: number; parentPid: number; startTicks: string }
@@ -20,7 +21,11 @@ export interface ContainerRuntime {
   controllerExecutableVerified?: (identity: ContainerProcessIdentity) => Promise<boolean>;
   currentControllerPid?: number;
 }
-export interface ContainerLifecycleOptions { home: string; uid?: number; containerRuntime?: ContainerRuntime }
+export interface ContainerLifecycleOptions {
+  home: string; uid?: number; containerRuntime?: ContainerRuntime;
+  /** Internal official rollback path only; never a CLI/environment override. */
+  pinnedControllerRollback?: boolean;
+}
 export interface ContainerRelayRegistration {
   schema: 'dharma.relay-autostart/v3'; backend: 'container-entrypoint'; launcher: string;
   workspace: string; policy: string; version: string; taskName: null;
@@ -130,11 +135,12 @@ async function verifiedControllerExecutable(identity: ContainerProcessIdentity) 
   } catch { return false; }
 }
 
-async function publicRuntimeBytes(path: string, limit: number, executingCaller = false) {
+async function publicRuntimeBytes(path: string, limit: number, executingCaller = false, requireRoot = false) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || !executingCaller && (stat.mode & 0o022) !== 0 || stat.size > limit) throw unavailable();
+    if (!stat.isFile() || !executingCaller && (stat.mode & 0o022) !== 0 || stat.size > limit
+      || requireRoot && stat.uid !== 0) throw unavailable();
     const bytes = await file.readFile();
     if (bytes.length > limit) throw unavailable();
     return bytes;
@@ -143,14 +149,28 @@ async function publicRuntimeBytes(path: string, limit: number, executingCaller =
 
 async function canonicalEntrypoint(options: ContainerLifecycleOptions, identity: ContainerProcessIdentity) {
   if (options.containerRuntime?.canonicalEntrypoint) return options.containerRuntime.canonicalEntrypoint;
+  return verifyContainerControllerRuntime(identity.argv[1],
+    fileURLToPath(new URL('./bin.js', import.meta.url)), options.pinnedControllerRollback === true);
+}
+
+export async function verifyContainerControllerRuntime(candidate: string | undefined, caller: string, rollback = false) {
   try {
-    const current = await realpath(fileURLToPath(new URL('./bin.js', import.meta.url)));
-    const candidate = identity.argv[1];
+    const current = await realpath(caller);
     if (!candidate || !isAbsolute(candidate) || candidate.length > 4096 || /[\r\n\0]/.test(candidate)
       || await realpath(candidate) !== candidate || !candidate.endsWith('/dist/bin.js')) throw unavailable();
     const manifest = JSON.parse((await publicRuntimeBytes(join(dirname(dirname(candidate)), 'package.json'), 65_536)).toString('utf8')) as { name?: unknown; version?: unknown };
     const own = JSON.parse((await publicRuntimeBytes(join(dirname(dirname(current)), 'package.json'), 65_536, true)).toString('utf8')) as { name?: unknown; version?: unknown };
-    if (manifest.name !== '@dharma-ai-labs/agent-fabric' || manifest.name !== own.name || manifest.version !== own.version) throw unavailable();
+    if (manifest.name !== '@dharma-ai-labs/agent-fabric' || manifest.name !== own.name) throw unavailable();
+    if (rollback && manifest.version !== own.version) {
+      await publicRuntimeBytes(join(dirname(dirname(candidate)), 'package.json'), 65_536, false, true);
+      const hashes: Record<string, string> = {};
+      for (const name of ['bin.js', 'index.js', 'containerRelayLifecycle.js']) {
+        hashes[name] = createHash('sha256').update(await publicRuntimeBytes(join(dirname(candidate), name),
+          2_097_152, false, true)).digest('hex');
+      }
+      if (pinnedRollbackControllerMatches(manifest.version, hashes)) return candidate;
+    }
+    if (manifest.version !== own.version) throw unavailable();
     // Image and npm execution prefixes can differ. Verify the entrypoint and
     // bootstrap/lifecycle executable bytes, not an arbitrary path alias.
     for (const name of ['bin.js', 'index.js', 'containerRelayLifecycle.js']) {
