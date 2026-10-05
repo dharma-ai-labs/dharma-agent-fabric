@@ -66,4 +66,4 @@ Neither fixture proves real Codex dynamic-tool emission, protected-store access,
 bootstrap completion, restart recovery or the one-prompt customer journey.
 
 No package publication, production change or native activation is authorized by
-these test results. DIA-1220 remains NOT READY; the October 5 deadline was missed.
+these test results. The proposed host route remains unqualified.
