@@ -97,10 +97,22 @@ test('actual upgrade caller rechecks startup authority after obtaining the mutat
 
 test('actual rollback caller never stops a receiver while work holds an activation lease', async () => {
   const f = await fixture();
-  f.deps.readdir = async () => ['lease.lock'];
+  f.flags.set('rollback', true);
+  f.deps.readdir = async (path: string) => path.endsWith('skill-activation-locks') ? ['lease.lock'] : [];
   f.deps.pidProcessState = async () => 'running';
   f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: { stop(): Promise<void> }) => hooks.stop();
   await assert.rejects(f.run()(f.flags), /work_in_progress/);
+  assert.deepEqual(f.calls, ['lock']);
+});
+
+test('actual rollback caller rejects a running named session before either owned stop control', async () => {
+  const f = await fixture();
+  f.flags.set('rollback', true);
+  f.deps.readdir = async (path: string) => path.endsWith('sessions')
+    ? [{ name: 'reviewer', isDirectory: () => true }] : [];
+  f.deps.pidProcessState = async () => 'running';
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: { stop(): Promise<void> }) => hooks.stop();
+  await assert.rejects(f.run()(f.flags), /session_busy/);
   assert.deepEqual(f.calls, ['lock']);
 });
 
