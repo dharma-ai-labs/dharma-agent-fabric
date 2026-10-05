@@ -26,7 +26,7 @@ interface Input extends Binding {
   /** Trusted host response budget, not the operation or approval deadline. */
   responseWaitMs?: number;
   current(): Promise<Binding & {mode: 'setup' | 'work' | 'peer'}>;
-  /** Must independently qualify the normal owning host, package and source scope. */
+  /** Independently qualify the owning host/package and still-applicable signed scope. */
   qualifyHost(intent: Readonly<CodexSetupIntent>, signal: AbortSignal): Promise<boolean>;
   journal: CodexSetupJournal;
   /** Host owns all child handles and must check current scope at every protected
@@ -102,10 +102,12 @@ export function createCodexSetupAdmission(input: Input) {
     return !signal.aborted && !closed.signal.aborted && now() >= issued && now() < expires
       && current.mode === 'setup' && Object.entries(binding).every(([key, item]) => current[key as keyof Binding] === item);
   };
+  const qualified = async (signal: AbortSignal) => await authorized(signal)
+    && await input.qualifyHost(intent, signal) && await authorized(signal);
   const expose = async (value: unknown, signal: AbortSignal): Promise<CodexToolResult> => {
     const result = disposition(value);
-    if (!result || result.state !== 'completed' || !await authorized(signal)
-      || !await input.verifyReadiness(result.readinessReceiptId, intent) || !await authorized(signal)) {
+    if (!result || result.state !== 'completed' || !await qualified(signal)
+      || !await input.verifyReadiness(result.readinessReceiptId, intent) || !await qualified(signal)) {
       return deny('codex_setup_execution_unconfirmed');
     }
     return {success: true, contentItems: [{type: 'inputText', text: JSON.stringify({
@@ -126,7 +128,7 @@ export function createCodexSetupAdmission(input: Input) {
     calls.add(params.callId);
     const signal = AbortSignal.any([context.signal, operationScope]);
     const run = async (): Promise<CodexToolResult> => {try {
-      if (!await authorized(signal) || !await input.qualifyHost(intent, signal) || !await authorized(signal)) {
+      if (!await qualified(signal)) {
         return deny('codex_setup_not_authorized');
       }
       if (pending) return deny('codex_setup_in_progress');
@@ -137,7 +139,7 @@ export function createCodexSetupAdmission(input: Input) {
         if (claim.state === 'running') return deny('codex_setup_in_progress');
         if (claim.state === 'terminal') return await expose(claim.result, signal);
         if (typeof claim.leaseId !== 'string' || !uuid.test(claim.leaseId)
-          || !await input.qualifyHost(intent, signal) || !await authorized(signal)) {
+          || !await qualified(signal)) {
           return deny('codex_setup_not_authorized');
         }
         // Keep the operation fenced until the executor actually settles. Abort
@@ -145,7 +147,7 @@ export function createCodexSetupAdmission(input: Input) {
         const executionSignal = signal;
         if (!await authorized(executionSignal)) return deny('codex_setup_not_authorized');
         let result: PublicDisposition = {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
-        const current = async () => {try {return await authorized(executionSignal);} catch {return false;}};
+        const current = async () => {try {return await qualified(executionSignal);} catch {return false;}};
         try {result = disposition(await input.execute(intent, executionSignal, current)) ?? result;} catch { /* Never reflect runtime errors. */ }
         await input.journal.finish(claim.leaseId, digest, result);
         return await expose(result, executionSignal);

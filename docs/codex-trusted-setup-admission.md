@@ -72,7 +72,9 @@ The host must close the gate on transport/turn closure, interruption or scope
 change and await `settled` before releasing operation resources. The executor
 receives the cancellation signal and a live current-scope check; it must check
 both at every protected effect and retain its actual child handles until they
-stop. A returned callback is not release of execution ownership. The component
+stop. That guard requalifies still-applicable host/package/source authority, not
+just connection identity. Readiness disclosure requalifies authority before and
+after independent verification. A returned callback is not release of execution ownership. The component
 creates no child and cannot enforce a supplied executor's lifecycle by itself.
 This owning-controller/executor integration is not implemented or qualified.
 Do not extend transport deadlines, detach a credential-bearing child or treat

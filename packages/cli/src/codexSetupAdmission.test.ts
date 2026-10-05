@@ -207,7 +207,7 @@ test('setup callback returns bounded status while its owned operation remains fe
   } finally {if (timeout) clearTimeout(timeout); release(); await first; owner.close();}
 });
 
-for (const change of ['close', 'abort', 'peer', 'expiry'] as const) {
+for (const change of ['close', 'abort', 'peer', 'expiry', 'policy'] as const) {
   test(`bounded setup retains ownership but denies protected effects after ${change}`, async () => {
     const f = fixture(); let release!: () => void; let effects = 0; let executionSignal: AbortSignal | undefined;
     const finish = new Promise<void>(done => {release = done;});
@@ -225,6 +225,7 @@ for (const change of ['close', 'abort', 'peer', 'expiry'] as const) {
       if (change === 'abort') f.signal.abort();
       if (change === 'peer') f.mode('peer');
       if (change === 'expiry') f.time(Date.parse(intent.expiresAt));
+      if (change === 'policy') f.qualify(false);
       if (change === 'close' || change === 'abort') assert.equal(executionSignal.aborted, true);
       let settled = false;
       const observed = owner.settled.then(() => {settled = true;});
@@ -311,4 +312,13 @@ test('missing or foreign cancellation contexts fail closed without throwing or c
     assert.equal(JSON.stringify(result).includes('private-context-canary'), false);
     assert.equal(f.claims, 0); assert.equal(f.calls, 0); owner.close(); await owner.settled;
   }
+});
+
+test('policy revoked during independent readiness verification cannot disclose completion', async () => {
+  const f = fixture();
+  const owner = createCodexSetupAdmission({...f.input, verifyReadiness: async () => {f.qualify(false); return true;}});
+  const result = await owner.handler(f.params, {signal: f.signal.signal});
+  assert.equal(result.success, false);
+  assert.equal(JSON.stringify(result).includes('readinessReceiptId'), false);
+  owner.close(); await owner.settled;
 });
