@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import test from 'node:test';
+import ts from 'typescript';
 import * as cli from './index.js';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
 import * as host from './bootstrapHostScope.js';
 import {AgentFabricClient} from '@dharma-ai-labs/agent-fabric-relay-client';
+import {loadOrCreateVaultMasterKey} from '@dharma-ai-labs/agent-fabric-local-vault';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -24,6 +27,38 @@ async function invoke(input: unknown): Promise<any> {
   assert.equal(typeof entry, 'function', 'official host-facing bootstrap entry is absent');
   return entry!(input);
 }
+
+test('vault key access carries the closed owning context without opening a store', async () => {
+  let reads = 0, outcome: PromiseSettledResult<Buffer>[] = [];
+  const store = {backend: 'linux-secret-service' as const,
+    async get() {reads++; return Buffer.alloc(32).toString('base64');},
+    async put() {throw new Error('unexpected write');}, async delete() {throw new Error('unexpected delete');}};
+  await assert.rejects(host.runCodexBootstrapHost(await fixture(), async prepared => {
+    prepared.scope.close();
+    outcome = await Promise.allSettled([loadOrCreateVaultMasterKey(store, host.currentBootstrapHostScope())]);
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(outcome[0]?.status, 'rejected');
+  if (outcome[0]?.status === 'rejected') assert.equal(outcome[0].reason.message, 'vault_key_scope_unavailable');
+  assert.equal(reads, 0);
+});
+
+test('every CLI vault-key caller explicitly forwards the owning host scope', async () => {
+  const text = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let callers = 0;
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === 'loadOrCreateVaultMasterKey') {
+      callers++; assert.equal(node.arguments.length, 2);
+      const store = node.arguments[0], scope = node.arguments[1];
+      assert.ok(store && ts.isIdentifier(store) && store.text === 'undefined');
+      assert.ok(scope && ts.isCallExpression(scope) && ts.isIdentifier(scope.expression)
+        && scope.expression.text === 'currentBootstrapHostScope' && scope.arguments.length === 0);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source); assert.equal(callers, 11);
+});
 
 test('official host entry refuses cancelled scope before selecting a checkout or protected store', async () => {
   const input = await fixture(); const aborted = new AbortController(); aborted.abort('private-abort-canary');

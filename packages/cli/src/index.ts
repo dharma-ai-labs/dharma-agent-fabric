@@ -3133,7 +3133,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
+    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -3908,7 +3908,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
+  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()) });
   const controller = new AbortController(), stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
@@ -4879,7 +4879,7 @@ async function evidenceSync(flags: Map<string, string | boolean>): Promise<Outpu
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
+    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
   });
   try {
     const storedCapsule = await vault.getCapsule<Record<string, unknown>>(trajectoryId, revision);
@@ -4972,7 +4972,7 @@ async function processEvidenceRequest(
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
+    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -5217,7 +5217,7 @@ async function syncSignedTaskTrajectory(input: {
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
+    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(input.policy),
   });
   try {
@@ -5331,7 +5331,7 @@ async function stageSignedTaskTrajectoryRecovery(
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
+    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -5362,7 +5362,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
     const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
     const vault = await LocalVault.open({
       root: resolve(dharmaHome(), 'vault'),
-      masterKey: await loadOrCreateVaultMasterKey(),
+      masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
       rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     let recovery: SignedTaskTrajectoryRecovery | null;
@@ -5405,7 +5405,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
     if (recoveredTaskPolicyWasSuperseded(capsule, recoveryPolicy)) {
       const supersededVault = await LocalVault.open({
         root: resolve(dharmaHome(), 'vault'),
-        masterKey: await loadOrCreateVaultMasterKey(),
+        masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
         rawLocalDays: rawLocalRetentionDays(vaultPolicy),
       });
       try {
@@ -5436,7 +5436,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
       await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
       const acknowledgedVault = await LocalVault.open({
         root: resolve(dharmaHome(), 'vault'),
-        masterKey: await loadOrCreateVaultMasterKey(),
+        masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
         rawLocalDays: rawLocalRetentionDays(vaultPolicy),
       });
       try { await acknowledgedVault.clearTaskCompletionRecovery(completion.taskId); }
@@ -5465,7 +5465,7 @@ async function finalizeRecoveredSignedTaskTrajectories(
     await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
     const cleanupVault = await LocalVault.open({
       root: resolve(dharmaHome(), 'vault'),
-      masterKey: await loadOrCreateVaultMasterKey(),
+      masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
       rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     try { await cleanupVault.clearTaskCompletionRecovery(completion.taskId); }
@@ -6984,7 +6984,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const vault = await LocalVault.open({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
+    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   if (signal.aborted) vault.close();

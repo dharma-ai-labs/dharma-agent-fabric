@@ -1312,19 +1312,45 @@ export function loadExplicitTestKey(env: NodeJS.ProcessEnv): Buffer {
   return key;
 }
 
-export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore): Promise<Buffer> {
-  if (process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
-  const secureStore = store ?? await createSystemSecureStore();
+export interface VaultKeyOperationScope {
+  signal: AbortSignal;
+  current(): Promise<boolean>;
+}
+
+/** Cooperative effect admission, not proof that an OS adapter child has stopped. */
+export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore, scope?: VaultKeyOperationScope): Promise<Buffer> {
+  const signal = scope?.signal, qualify = scope?.current.bind(scope);
+  let withdrawn = false;
+  const assertCurrent = async () => {
+    if (!scope) return;
+    let current = false;
+    if (!withdrawn && signal instanceof AbortSignal && !signal.aborted) {
+      try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
+    }
+    if (!current || signal?.aborted) {withdrawn = true; throw new Error('vault_key_scope_unavailable');}
+  };
+  const step = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await assertCurrent();
+    try {const result = await operation(); await assertCurrent(); return result;}
+    catch (error) {
+      await assertCurrent();
+      if (scope) throw new Error('vault_key_storage_unavailable');
+      throw error;
+    }
+  };
+  await assertCurrent();
+  if (!scope && process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
+  const secureStore = await step(async () => store ?? await createSystemSecureStore());
   const account = 'vault-master-key-v1';
-  const current = await secureStore.get(account);
+  const current = await step(() => secureStore.get(account));
   if (current) {
     const key = Buffer.from(current, 'base64');
     if (key.length !== 32) throw new Error('Stored vault master key is corrupt.');
     return key;
   }
   const key = randomBytes(32);
-  await secureStore.put(account, key.toString('base64'));
-  const confirmed = await secureStore.get(account);
+  await step(() => secureStore.put(account, key.toString('base64')));
+  const confirmed = await step(() => secureStore.get(account));
   if (confirmed !== key.toString('base64')) throw new Error('Secure store did not confirm the vault key write.');
   return key;
 }

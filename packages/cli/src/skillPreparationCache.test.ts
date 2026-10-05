@@ -14,6 +14,7 @@ import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 type PublishInput = { home: string; workspaceId: string; provider: 'codex'; sourceRoot: string;
@@ -343,8 +344,12 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },
+    currentBootstrapHostScope,
     loadVaultModule: async () => ({ LocalVault: { open: async () => ({ close: () => { vaultCloses++; } }) },
-      loadOrCreateVaultMasterKey: async () => Buffer.alloc(32) }),
+      loadOrCreateVaultMasterKey: async (_store: unknown, scope: unknown) => {
+        assert.equal(scope, undefined, 'ordinary relay does not acquire host setup authority');
+        return Buffer.alloc(32);
+      } }),
     rawLocalRetentionDays: () => 1,
     providerAdapters: [{ providerId: 'codex', capability: async () => ({ skillInstall: 'available' }) }],
     isLocalProviderId: (provider: string) => provider === 'codex', prepareProvidersIndependently,
