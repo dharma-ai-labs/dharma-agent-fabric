@@ -1049,89 +1049,102 @@ export async function materializeWorkspacePolicy(input: {
   dryRun?: boolean;
   secureStore?: SecureSecretStore;
 }) {
-  const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
+  const scope = currentBootstrapHostScope();
+  const step = <T>(effect: () => Promise<T>): Promise<T> => scope ? scope.step(effect) : effect();
+  const exists = (path: string) => step(() => scope ? pathExistsOrThrow(path) : pathExists(path));
   try {
-    const packageJson = JSON.parse(await readFile(resolve(input.workspace, 'package.json'), 'utf8')) as {
-      scripts?: Record<string, unknown>;
+    if (scope) input = {...input, serverPolicyAuthorization: structuredClone(input.serverPolicyAuthorization)};
+    await scope?.assert();
+    const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
+    try {
+      const packageJson = JSON.parse(await step(() => readFile(resolve(input.workspace, 'package.json'), 'utf8'))) as {
+        scripts?: Record<string, unknown>;
+      };
+      const scripts = packageJson.scripts || {};
+      for (const [script, commandId, timeoutSeconds] of [
+        ['test', 'repo.test', 1_200],
+        ['lint', 'repo.lint', 600],
+        ['typecheck', 'repo.typecheck', 600],
+        ['type-check', 'repo.typecheck', 600],
+        ['build', 'repo.build', 1_200],
+      ] as const) {
+        if (typeof scripts[script] === 'string' && !allowedCommands[commandId]) {
+          allowedCommands[commandId] = { argv: ['npm', 'run', script], timeoutSeconds };
+        }
+      }
+    } catch { await scope?.assert(); }
+
+    const writePaths: string[] = [];
+    for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
+      if (await exists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
+    }
+    let policy: OrganizationPolicy = {
+      schema: 'dharma.organization-policy/v2',
+      organizationId: input.organizationId,
+      revision: input.revision,
+      evidence: {
+        defaultMode: 'deep',
+        automaticDisclosure: { mode: 'local_analysis' },
+        registeredWorkspaceOnly: true,
+        excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
+        maximumCapsuleBytes: 1_000_000,
+        maximumDailyUploadBytes: 50_000_000,
+        maximumExpansionBytes: 65_536,
+        pseudonymizeIdentity: true,
+      },
+      tasks: {
+        defaultNetwork: 'deny',
+        defaultGit: 'task_branch',
+        allowedCommands,
+        writePaths,
+        requireLocalConfirmationFor: ['network.allowlisted_domains', 'git.push', 'merge', 'deploy'],
+      },
+      skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
+      retention: { rawLocalDays: 30, capsuleServerDays: 90 },
+      budgets: { dailyAnalysisCents: 1_000 },
     };
-    const scripts = packageJson.scripts || {};
-    for (const [script, commandId, timeoutSeconds] of [
-      ['test', 'repo.test', 1_200],
-      ['lint', 'repo.lint', 600],
-      ['typecheck', 'repo.typecheck', 600],
-      ['type-check', 'repo.typecheck', 600],
-      ['build', 'repo.build', 1_200],
-    ] as const) {
-      if (typeof scripts[script] === 'string' && !allowedCommands[commandId]) {
-        allowedCommands[commandId] = { argv: ['npm', 'run', script], timeoutSeconds };
+    const existingPath = resolve(input.workspace, '.dharma', 'approved-policy.json');
+    if (await exists(existingPath)) {
+      const existing = await step(() => loadOrganizationPolicy(existingPath));
+      if (existing.organizationId === input.organizationId) policy = existing;
+    }
+    if (input.serverPolicyAuthorization !== undefined && input.serverPolicyAuthorization !== null) {
+      const workspaceId = input.workspaceId;
+      if (!input.serverPublicKeyEd25519 || !workspaceId) {
+        throw new Error('Server policy authorization requires the enrolled server key and workspace ID.');
+      }
+      policy = applyServerEvidencePolicy(
+        policy,
+        input.serverPolicyAuthorization,
+        input.serverPublicKeyEd25519,
+        input.organizationId,
+        workspaceId,
+      );
+      if (!input.dryRun) {
+        await step(() => applyWorkspaceAuthorizationAtomically({
+          workspaceId,
+          authorization: policy.serverAuthorization!,
+          policyPath: existingPath,
+          policy,
+          secureStore: input.secureStore,
+        }));
+      } else {
+        await step(() => assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!, false));
       }
     }
-  } catch {}
-
-  const writePaths: string[] = [];
-  for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
-    if (await pathExists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
-  }
-  let policy: OrganizationPolicy = {
-    schema: 'dharma.organization-policy/v2',
-    organizationId: input.organizationId,
-    revision: input.revision,
-    evidence: {
-      defaultMode: 'deep',
-      automaticDisclosure: { mode: 'local_analysis' },
-      registeredWorkspaceOnly: true,
-      excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
-      maximumCapsuleBytes: 1_000_000,
-      maximumDailyUploadBytes: 50_000_000,
-      maximumExpansionBytes: 65_536,
-      pseudonymizeIdentity: true,
-    },
-    tasks: {
-      defaultNetwork: 'deny',
-      defaultGit: 'task_branch',
-      allowedCommands,
-      writePaths,
-      requireLocalConfirmationFor: ['network.allowlisted_domains', 'git.push', 'merge', 'deploy'],
-    },
-    skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
-    retention: { rawLocalDays: 30, capsuleServerDays: 90 },
-    budgets: { dailyAnalysisCents: 1_000 },
-  };
-  const existingPath = resolve(input.workspace, '.dharma', 'approved-policy.json');
-  if (await pathExists(existingPath)) {
-    const existing = await loadOrganizationPolicy(existingPath);
-    if (existing.organizationId === input.organizationId) policy = existing;
-  }
-  if (input.serverPolicyAuthorization !== undefined && input.serverPolicyAuthorization !== null) {
-    if (!input.serverPublicKeyEd25519 || !input.workspaceId) {
-      throw new Error('Server policy authorization requires the enrolled server key and workspace ID.');
+    assertPolicy(policy);
+    const relativePath = '.dharma/approved-policy.json';
+    if (!input.dryRun && !policy.serverAuthorization) {
+      await step(() => mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 }));
+      await step(() => writeJsonAtomic(resolve(input.workspace, relativePath), policy));
     }
-    policy = applyServerEvidencePolicy(
-      policy,
-      input.serverPolicyAuthorization,
-      input.serverPublicKeyEd25519,
-      input.organizationId,
-      input.workspaceId,
-    );
-    if (!input.dryRun) {
-      await applyWorkspaceAuthorizationAtomically({
-        workspaceId: input.workspaceId,
-        authorization: policy.serverAuthorization!,
-        policyPath: existingPath,
-        policy,
-        secureStore: input.secureStore,
-      });
-    } else {
-      await assertWorkspaceAuthorizationCurrent(input.workspaceId, policy.serverAuthorization!, false);
-    }
+    await scope?.assert();
+    return { relativePath, policy, applied: !input.dryRun };
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('workspace_policy_materialization_failed');
   }
-  assertPolicy(policy);
-  const relativePath = '.dharma/approved-policy.json';
-  if (!input.dryRun && !policy.serverAuthorization) {
-    await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
-    await writeJsonAtomic(resolve(input.workspace, relativePath), policy);
-  }
-  return { relativePath, policy, applied: !input.dryRun };
 }
 
 function workspaceAuthorizationStatePath(workspaceId: string) {
@@ -1193,32 +1206,48 @@ async function assertWorkspaceAuthorizationCurrent(
   authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
   requireExisting = true,
 ) {
-  const statePath = workspaceAuthorizationStatePath(workspaceId);
-  type AuthorizationState = { issuedAt: string; signature: string };
-  let previous: AuthorizationState | null = null;
+  const scope = currentBootstrapHostScope();
+  const step = <T>(effect: () => Promise<T>): Promise<T> => scope ? scope.step(effect) : effect();
   try {
-    const parsed: unknown = JSON.parse(await readFile(statePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-      || typeof (parsed as AuthorizationState).issuedAt !== 'string'
-      || !Number.isFinite(Date.parse((parsed as AuthorizationState).issuedAt))
-      || typeof (parsed as AuthorizationState).signature !== 'string'
-      || !(parsed as AuthorizationState).signature) {
-      throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+    if (scope) authorization = structuredClone(authorization);
+    await scope?.assert();
+    const statePath = workspaceAuthorizationStatePath(workspaceId);
+    type AuthorizationState = { issuedAt: string; signature: string };
+    let previous: AuthorizationState | null = null;
+    try {
+      const parsed: unknown = JSON.parse(await step(() => readFile(statePath, 'utf8')));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || typeof (parsed as AuthorizationState).issuedAt !== 'string'
+        || !Number.isFinite(Date.parse((parsed as AuthorizationState).issuedAt))
+        || typeof (parsed as AuthorizationState).signature !== 'string'
+        || !(parsed as AuthorizationState).signature) {
+        throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+      }
+      previous = parsed as AuthorizationState;
     }
-    previous = parsed as AuthorizationState;
-  }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
-    throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
-  }
-  if (previous) {
-    const incomingTime = Date.parse(authorization.issuedAt);
-    const previousTime = Date.parse(previous.issuedAt);
-    if (!Number.isFinite(previousTime)
-      || incomingTime < previousTime
-      || (incomingTime === previousTime && authorization.signature !== previous.signature)) {
-      throw new Error('Server workspace policy authorization is older than the last accepted authorization.');
+    catch (error) {
+      await scope?.assert();
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
+      throw new Error(scope ? 'workspace_authorization_replay_state_invalid'
+        : 'Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
     }
+    if (previous) {
+      const incomingTime = Date.parse(authorization.issuedAt);
+      const previousTime = Date.parse(previous.issuedAt);
+      if (!Number.isFinite(previousTime)
+        || incomingTime < previousTime
+        || (incomingTime === previousTime && authorization.signature !== previous.signature)) {
+        throw new Error(scope ? 'workspace_authorization_replay_superseded'
+          : 'Server workspace policy authorization is older than the last accepted authorization.');
+      }
+    }
+    await scope?.assert();
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    if (error instanceof Error && ['workspace_authorization_replay_state_invalid',
+      'workspace_authorization_replay_superseded'].includes(error.message)) throw error;
+    throw new Error('workspace_authorization_replay_failed');
   }
 }
 
@@ -1229,36 +1258,48 @@ async function applyWorkspaceAuthorizationAtomically(input: {
   policy: OrganizationPolicy;
   secureStore?: SecureSecretStore;
 }) {
-  const statePath = workspaceAuthorizationStatePath(input.workspaceId);
-  await withFileLock(`${statePath}.lock`, async () => {
-    await assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false);
-    let previous: { contentLedgerInitialized?: boolean } | null = null;
-    try { previous = JSON.parse(await readFile(statePath, 'utf8')) as { contentLedgerInitialized?: boolean }; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+  const scope = currentBootstrapHostScope();
+  const step = <T>(effect: () => Promise<T>): Promise<T> => scope ? scope.step(effect) : effect();
+  try {
+    if (scope) input = {...input, authorization: structuredClone(input.authorization), policy: structuredClone(input.policy)};
+    await scope?.assert();
+    const statePath = workspaceAuthorizationStatePath(input.workspaceId);
+    await step(() => withFileLock(`${statePath}.lock`, async () => {
+      await step(() => assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false));
+      let previous: { contentLedgerInitialized?: boolean } | null = null;
+      try { previous = JSON.parse(await step(() => readFile(statePath, 'utf8'))) as { contentLedgerInitialized?: boolean }; }
+      catch (error) {
+        await scope?.assert();
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+        }
       }
-    }
-    const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
-    const ledgerExists = await pathExists(evidenceUploadLedgerPath());
-    if (contentAuthorized && ledgerExists) {
-      const current = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as unknown;
-      const ledger = evidenceLedgerForPolicyActivation(current, new Date().toISOString().slice(0, 10));
-      if (JSON.stringify(current) !== JSON.stringify(ledger)) {
-        await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+      const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
+      const ledgerExists = await step(() => scope ? pathExistsOrThrow(evidenceUploadLedgerPath()) : pathExists(evidenceUploadLedgerPath()));
+      if (contentAuthorized && ledgerExists) {
+        const current = JSON.parse(await step(() => readFile(evidenceUploadLedgerPath(), 'utf8'))) as unknown;
+        const ledger = evidenceLedgerForPolicyActivation(current, new Date().toISOString().slice(0, 10));
+        if (JSON.stringify(current) !== JSON.stringify(ledger)) {
+          await step(() => writeJsonAtomic(evidenceUploadLedgerPath(), ledger));
+        }
       }
-    }
-    if (contentAuthorized && !ledgerExists) {
-      const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
-      await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
-    }
-    await writeJsonAtomic(statePath, {
-      issuedAt: input.authorization.issuedAt,
-      signature: input.authorization.signature,
-      contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
-    });
-    await writeJsonAtomic(input.policyPath, input.policy);
-  });
+      if (contentAuthorized && !ledgerExists) {
+        const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
+        await step(() => writeJsonAtomic(evidenceUploadLedgerPath(), ledger));
+      }
+      await step(() => writeJsonAtomic(statePath, {
+        issuedAt: input.authorization.issuedAt,
+        signature: input.authorization.signature,
+        contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
+      }));
+      await step(() => writeJsonAtomic(input.policyPath, input.policy));
+    }));
+    await scope?.assert();
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('workspace_policy_activation_failed');
+  }
 }
 
 export function applyServerEvidencePolicy(
