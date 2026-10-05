@@ -3,6 +3,8 @@ import {resolve} from 'node:path';
 import test from 'node:test';
 import * as cli from './index.js';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
+import * as host from './bootstrapHostScope.js';
+import {AgentFabricClient} from '@dharma-ai-labs/agent-fabric-relay-client';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -112,4 +114,119 @@ test('expiry during qualification withdraws scope even if the clock subsequently
   assert.equal(await scope.current(), false);
   assert.equal(calls, 1);
   assert.equal(scope.signal.aborted, true);
+});
+
+function contextApi() {
+  const api = host as unknown as {
+    runCodexBootstrapHost: (input: Awaited<ReturnType<typeof fixture>>, operation: (prepared: ReturnType<typeof prepareCodexBootstrapHost>) => Promise<unknown>) => Promise<unknown>;
+    currentBootstrapHostScope: () => ReturnType<typeof prepareCodexBootstrapHost>['scope'] | undefined;
+  };
+  assert.equal(typeof api.runCodexBootstrapHost, 'function', 'owning operation has no lifetime-scoped continuation');
+  assert.equal(typeof api.currentBootstrapHostScope, 'function');
+  return api;
+}
+
+test('settling the owning operation withdraws its scope without changing the external host signal', async () => {
+  const api = contextApi(); const input = await fixture();
+  let saved: ReturnType<typeof prepareCodexBootstrapHost>['scope'] | undefined;
+  const result = await api.runCodexBootstrapHost(input, async prepared => {
+    saved = prepared.scope;
+    assert.equal(api.currentBootstrapHostScope(), saved);
+    assert.equal(await saved.current(), true);
+    return 'public-result';
+  });
+  assert.equal(result, 'public-result');
+  assert.equal(input.signal.aborted, false);
+  assert.equal(saved!.signal.aborted, true);
+  assert.equal(await saved!.current(), false);
+  assert.equal(api.currentBootstrapHostScope(), undefined);
+});
+
+test('failed owning operation closes authority and does not contaminate the following operation', async () => {
+  const api = contextApi(); let saved: ReturnType<typeof prepareCodexBootstrapHost>['scope'] | undefined;
+  await assert.rejects(api.runCodexBootstrapHost(await fixture(), async prepared => {
+    saved = prepared.scope; throw new Error('synthetic-operation-failed');
+  }), {message: 'synthetic-operation-failed'});
+  assert.equal(saved!.signal.aborted, true);
+  await api.runCodexBootstrapHost(await fixture(), async prepared => {
+    assert.notEqual(prepared.scope, saved);
+    assert.equal(await prepared.scope.current(), true);
+  });
+});
+
+test('concurrent owning operations retain separate async scopes', async () => {
+  const api = contextApi(); const seen = new Set<unknown>();
+  await Promise.all([1, 2].map(async () => api.runCodexBootstrapHost(await fixture(), async prepared => {
+    seen.add(prepared.scope);
+    await new Promise<void>(done => setImmediate(done));
+    assert.equal(api.currentBootstrapHostScope(), prepared.scope);
+    assert.equal(await prepared.scope.current(), true);
+  })));
+  assert.equal(seen.size, 2);
+});
+
+test('detached continuation retains a closed scope rather than silently becoming unscoped', async () => {
+  const api = contextApi(); let release!: () => void;
+  const ready = new Promise<void>(done => {release = done;});
+  let late!: Promise<void>; let effects = 0;
+  await api.runCodexBootstrapHost(await fixture(), async prepared => {
+    late = (async () => {
+      await ready;
+      const scope = api.currentBootstrapHostScope();
+      assert.equal(scope, prepared.scope);
+      await assert.rejects(scope!.step(async () => {effects++;}), {message: 'codex_setup_host_scope_unavailable'});
+    })();
+  });
+  release(); await late; assert.equal(effects, 0);
+});
+
+test('nested setup cannot substitute a fresh authority into an existing owning operation', async () => {
+  const api = contextApi(); let effects = 0;
+  await api.runCodexBootstrapHost(await fixture(), async () => {
+    await assert.rejects(api.runCodexBootstrapHost(await fixture(), async () => {effects++;}),
+      {message: 'codex_setup_host_context_conflict'});
+  });
+  assert.equal(effects, 0);
+});
+
+test('scope methods cannot be replaced to transfer setup authority', async () => {
+  const prepared = prepareCodexBootstrapHost(await fixture());
+  assert.equal(Object.isFrozen(prepared.scope), true);
+  assert.throws(() => {prepared.scope.current = async () => true;}, TypeError);
+});
+
+test('step requalifies on vendor failure before disclosing its diagnostic', async () => {
+  let valid = true;
+  const scope = prepareCodexBootstrapHost({...await fixture(), current: async () => valid}).scope;
+  await assert.rejects(scope.step(async () => {valid = false; throw new Error('private-vendor-canary');}),
+    {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(scope.signal.aborted, true);
+});
+
+test('the real default relay probe passes the owning scope instead of opening an unscoped client', async t => {
+  const api = contextApi(); const input = await fixture();
+  const config = {organizationId: input.intent.organizationId, deviceId: id(8)};
+  let observed: unknown;
+  t.mock.method(AgentFabricClient, 'open', async (options: Parameters<typeof AgentFabricClient.open>[0]) => {
+    observed = options.hostScope;
+    return {config, async openSession() {return {ok: true};}};
+  });
+  await api.runCodexBootstrapHost(input, async prepared => {
+    const result = await cli.probeRelayConnection();
+    assert.equal(observed, prepared.scope);
+    assert.equal(result.deviceId, config.deviceId);
+  });
+  assert.equal((observed as AbortSignal & {signal: AbortSignal}).signal.aborted, true);
+});
+
+test('the public host entry withholds active vendor diagnostics and closes scope on failure', async t => {
+  const input = await fixture();
+  const actual = Date.now(); let calls = 0;
+  // Force a safe contract precondition to fail after host validation. No native
+  // effects are allowed by the planning branch.
+  input.intent.contractDigest = `sha256:${'b'.repeat(64)}`;
+  input.current = async () => {calls++; return true;};
+  await assert.rejects(invoke(input), {message: 'codex_setup_host_operation_failed'});
+  assert.ok(calls > 1); assert.equal(input.signal.aborted, false);
+  assert.ok(Date.now() >= actual);
 });

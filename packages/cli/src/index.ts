@@ -102,7 +102,7 @@ import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionL
 import { startNamedCodexThread } from './namedCodexThread.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
-import {prepareCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
@@ -1447,7 +1447,8 @@ async function gitValue(workspace: string, argv: string[]) {
 }
 
 async function client() {
-  const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath() });
+  const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope() });
   await instance.openSession(VERSION);
   return instance;
 }
@@ -1458,6 +1459,7 @@ export async function probeRelayConnection(
   openClient: () => Promise<RelayProbeClient> = async () => AgentFabricClient.open({
     configPath: configPath(),
     statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(),
   }),
 ) {
   const instance = await openClient();
@@ -2133,9 +2135,13 @@ export function assertBootstrapResumeAuthority(input: {
 /** Planning-only trusted host entry. Effectful admission remains unavailable
  * until the full continuation and native owner lifecycle are qualified. */
 export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): Promise<Output> {
-  const prepared = prepareCodexBootstrapHost(input);
-  await prepared.scope.assert();
-  return bootstrap(prepared.flags, prepared.scope);
+  try {return await runCodexBootstrapHost(input, prepared => bootstrap(prepared.flags, prepared.scope));}
+  catch (error) {
+    const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable', 'codex_setup_host_context_conflict']);
+    let code = 'codex_setup_host_operation_failed';
+    try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
+    throw new Error(code);
+  }
 }
 
 async function bootstrap(flags: Map<string, string | boolean>, hostScope?: BootstrapHostScope): Promise<Output> {
@@ -2257,12 +2263,14 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       name: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
       platform: await platform(), installationId: existing?.installationId ?? await loadOrCreateInstallationId(),
       existingConfig: existing, configPath: configPath(),
+      hostScope,
       onFailureDiagnostic: diagnostic => {
         process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
       },
       onRecipientApprovalRequired: async approval => {
         recipientApproval.required = true;
-        recipientApproval.browserOpened = flags.has('no-browser') ? false : await openVerificationUri(approval.url);
+        recipientApproval.browserOpened = flags.has('no-browser') ? false : await step(() => openVerificationUri(approval.url));
+        await hostScope?.assert();
         process.stderr.write(`Approve this exact device in the authenticated portal before ${approval.expiresAt}: ${approval.url}\n`);
       },
     });
@@ -3594,7 +3602,8 @@ export async function receiptAwareProviderCapabilities(
   let reason = 'device_not_enrolled';
   let trustedKeyVersions: string[] = [];
   try {
-    const config = await recoverDeviceEnrollmentConsistency({ configPath: configPath(), now });
+    const config = await recoverDeviceEnrollmentConsistency({ configPath: configPath(), now,
+      hostScope: currentBootstrapHostScope() });
     await loadDeviceEnrollmentAnchor({ config });
     const keyset = config.serverSigningKeyset;
     if (!keyset) throw new Error('trusted_server_signing_keyset_unavailable');
@@ -3891,7 +3900,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
   try {
-    const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json') });
+    const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json'),
+      hostScope: currentBootstrapHostScope() });
     if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
       || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
     const trust = createNamedSessionTrust({ configPath: configPath(), identity: fabric.config });
@@ -4280,8 +4290,11 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
-  try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
-  catch { return null; }
+  const scope = currentBootstrapHostScope();
+  try {
+    const bytes = scope ? await scope.step(() => readFile(configPath(), 'utf8')) : await readFile(configPath(), 'utf8');
+    return JSON.parse(bytes) as DeviceConfig;
+  } catch {await scope?.assert(); return null;}
 }
 
 async function activeSkillAuthorization(

@@ -1,4 +1,5 @@
 import {isAbsolute, resolve} from 'node:path';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import type {CodexSetupIntent} from './codexSetupAdmission.js';
 
 export interface CodexBootstrapHostInput {
@@ -13,6 +14,7 @@ export interface BootstrapHostScope {
   signal: AbortSignal;
   current(): Promise<boolean>;
   assert(): Promise<void>;
+  close(): void;
   step<T>(operation: () => Promise<T>): Promise<T>;
 }
 
@@ -67,9 +69,11 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
     async step(operation) {
       await scope.assert();
       try {const result = await operation(); await scope.assert(); return result;}
-      catch (error) {if (signal.aborted) throw new Error('codex_setup_host_scope_unavailable'); throw error;}
+      catch (error) {await scope.assert(); throw error;}
     },
+    close() {withdrawn.abort();},
   };
+  Object.freeze(scope);
   const flags = new Map<string, string | boolean>([
     ['portal-url', intent.origin], ['organization-id', intent.organizationId], ['workspace', outer.workspace],
     ['provider', 'codex'], ['complete', true], ['setup-reference', intent.setupReference],
@@ -78,4 +82,20 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
   ]);
   if (outer.dryRun === true) flags.set('dry-run', true);
   return {intent, flags, scope};
+}
+
+const hostContext = new AsyncLocalStorage<BootstrapHostScope>();
+
+/** Closed descendants retain the closed scope, never a legacy unscoped fallback. */
+export function currentBootstrapHostScope(): BootstrapHostScope | undefined {
+  return hostContext.getStore();
+}
+
+export async function runCodexBootstrapHost<T>(input: CodexBootstrapHostInput,
+  operation: (prepared: ReturnType<typeof prepareCodexBootstrapHost>) => Promise<T>): Promise<T> {
+  if (hostContext.getStore()) throw new Error('codex_setup_host_context_conflict');
+  const prepared = prepareCodexBootstrapHost(input);
+  try {
+    return await hostContext.run(prepared.scope, () => prepared.scope.step(() => operation(prepared)));
+  } finally {prepared.scope.close();}
 }
