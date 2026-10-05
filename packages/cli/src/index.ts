@@ -252,39 +252,49 @@ function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evi
 function evidenceRequestReceiptPath(requestId: string) { return resolve(dharmaHome(), 'relay', 'evidence-requests', `${requestId}.json`); }
 
 export async function loadOrCreateInstallationId(path = installationIdentityPath()): Promise<string> {
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
   const readExisting = async (): Promise<string> => {
-    const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    const value = JSON.parse(await step(() => readFile(path, 'utf8'))) as Record<string, unknown>;
     if (value.schema !== 'dharma.installation-identity/v1'
       || typeof value.installationId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.installationId)) {
       throw new Error('Installation identity is invalid. Preserve the file and re-enroll this installation.');
     }
+    await scope?.assert();
     return value.installationId;
   };
   try {
-    return await readExisting();
+    try {
+      return await readExisting();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await step(() => mkdir(dirname(path), { recursive: true, mode: 0o700 }));
+    const installationId = randomUUID();
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      // Capture ownership before the post-acquisition fence can refuse continuation.
+      await step(async () => {handle = await open(path, 'wx', 0o600);});
+      await step(() => handle!.writeFile(`${JSON.stringify({
+        schema: 'dharma.installation-identity/v1',
+        installationId,
+        createdAt: new Date().toISOString(),
+      }, null, 2)}\n`));
+      await step(() => handle!.sync());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      return await readExisting();
+    } finally {
+      await handle?.close();
+    }
+    await scope?.assert();
+    return installationId;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('codex_setup_host_installation_failed');
   }
-
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const installationId = randomUUID();
-  let handle;
-  try {
-    handle = await open(path, 'wx', 0o600);
-    await handle.writeFile(`${JSON.stringify({
-      schema: 'dharma.installation-identity/v1',
-      installationId,
-      createdAt: new Date().toISOString(),
-    }, null, 2)}\n`);
-    await handle.sync();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    return await readExisting();
-  } finally {
-    await handle?.close();
-  }
-  return installationId;
 }
 
 type EvidenceUploadLedger = {
