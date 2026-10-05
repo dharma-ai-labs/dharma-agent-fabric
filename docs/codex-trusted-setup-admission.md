@@ -56,6 +56,14 @@ reviewed reconciliation contract; a new context must not bypass the digest fence
 
 ## Interruption And Reconciliation
 
+The published transport callback defaults to 30 seconds and permits at most
+60 seconds; recipient approval may remain pending for up to 15 minutes. This
+awaiting admission component must not be wired to a long bootstrap and treated
+as qualified. Integration requires a reviewed bounded start/status/result
+contract with a separately owned operation lifecycle, or a separately reviewed
+public callback lifetime contract. Neither is implemented here. Do not increase
+the callback timeout or detach a credential-bearing child to bypass this gap.
+
 Admission is serialized. A duplicate operation returns the durable terminal
 disposition rather than executing again, but only after current authority and
 independent readiness verification. Repeated native call IDs are denied.
