@@ -47,3 +47,41 @@ for (const lostJournalAck of [false, true]) test(`admission reconciles reopened 
     await rm(root, {recursive: true, force: true});
   }
 });
+
+test('capture rollback cannot turn an unconfirmed setup completion into a replayable operation', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-setup-admission-db-'));
+  const key = randomBytes(32); let vault = await LocalVault.open({root, masterKey: key});
+  let capture: Promise<void> | undefined; let executions = 0;
+  const signal = new AbortController().signal;
+  const common = {intent, ...binding, now: () => Date.parse('2026-10-05T18:01:00.000Z'),
+    current: async () => ({...binding, mode: 'setup' as const}), qualifyHost: async () => true,
+    verifyReadiness: async () => true,
+    execute: async () => {
+      executions++;
+      capture = assert.rejects(vault.commitCapture({
+        raw: {plaintext: Buffer.from('synthetic capture rollback'), kind: 'fixture', expectedContentId: hash},
+        capsule: {plaintext: Buffer.from('{}'), trajectoryId: id(7), revision: 1, capsuleHash: hash},
+        session: {sessionId: id(8), provider: 'codex', workspaceId: id(9), sourceLocator: '/synthetic',
+          status: 'fixture', observedAt: '2026-10-05T18:00:00.000Z'},
+      }), /^Error: Raw evidence content hash changed before vault commit\.$/);
+      return {state: 'completed', readinessReceiptId: id(6)};
+    }};
+  const owner = createCodexSetupAdmission({...common, journal: createCodexSetupVaultJournal(vault)});
+  let reopened: ReturnType<typeof createCodexSetupAdmission> | undefined;
+  try {
+    const result = await owner.handler(request, {signal});
+    assert.equal(result.success, false);
+    assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_execution_unconfirmed');
+    assert.equal(JSON.stringify(result).includes('readinessReceiptId'), false);
+    await capture; owner.close(); await owner.settled;
+    vault.close(); vault = await LocalVault.open({root, masterKey: key});
+    reopened = createCodexSetupAdmission({...common, journal: createCodexSetupVaultJournal(vault)});
+    const retry = await reopened.handler({...request, callId: 'after_capture_rollback'}, {signal});
+    assert.equal(JSON.parse(retry.contentItems[0]!.text).code, 'codex_setup_in_progress');
+    assert.equal(executions, 1);
+  } finally {
+    owner.close(); reopened?.close(); await capture; await owner.settled; await reopened?.settled; vault.close();
+    if (!resolve(root).startsWith(`${resolve(tmpdir())}${sep}fabric-setup-admission-db-`)) throw new Error('fixture_cleanup_scope_invalid');
+    await rm(root, {recursive: true, force: true});
+  }
+});

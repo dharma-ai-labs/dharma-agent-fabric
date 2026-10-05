@@ -149,3 +149,46 @@ test('journal rejects non-durable SQLite settings before acquiring or completing
     assert.equal(f.vault.claimCodexSetupOperation('90000000-1111-4111-8111-111111111111', digest).state, 'acquired');
   } finally {t.mock.restoreAll(); f.vault.close(); await f.cleanup();}
 });
+
+function rejectedCapture(vault: LocalVault) {
+  return assert.rejects(vault.commitCapture({
+    raw: {plaintext: Buffer.from('synthetic capture with deliberate hash mismatch'), kind: 'fixture', expectedContentId: digest},
+    capsule: {plaintext: Buffer.from('{}'), trajectoryId: receipt, revision: 1, capsuleHash: digest},
+    session: {sessionId: receipt, provider: 'codex', workspaceId: operation,
+      sourceLocator: '/synthetic', status: 'fixture', observedAt: '2026-10-05T18:00:00.000Z'},
+  }), /^Error: Raw evidence content hash changed before vault commit\.$/);
+}
+
+test('journal denies claim inside a public capture transaction and admits it durably after rollback', async () => {
+  const f = await fixture(); let vault = f.vault; let capture: Promise<void> | undefined;
+  try {
+    capture = rejectedCapture(vault);
+    assert.throws(() => vault.claimCodexSetupOperation(operation, digest), /^Error: setup_operation_transaction_active$/);
+    await capture;
+    const claim = vault.claimCodexSetupOperation(operation, digest);
+    if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
+    vault.close(); vault = await LocalVault.open({root: f.root, masterKey: f.key});
+    assert.deepEqual(vault.claimCodexSetupOperation(operation, digest), {state: 'running', intentDigest: digest});
+    vault.finishCodexSetupOperation(claim.leaseId, digest, {state: 'completed', readinessReceiptId: receipt});
+    vault.close(); vault = await LocalVault.open({root: f.root, masterKey: f.key});
+    assert.equal(vault.claimCodexSetupOperation(operation, digest).state, 'terminal');
+  } finally {await capture; vault.close(); await f.cleanup();}
+});
+
+test('journal denies finish inside a public capture transaction without losing its original fence', async () => {
+  const f = await fixture(); let vault = f.vault; let capture: Promise<void> | undefined;
+  try {
+    const claim = vault.claimCodexSetupOperation(operation, digest);
+    if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
+    capture = rejectedCapture(vault);
+    assert.throws(() => vault.finishCodexSetupOperation(claim.leaseId, digest,
+      {state: 'completed', readinessReceiptId: receipt}), /^Error: setup_operation_transaction_active$/);
+    await capture;
+    vault.close(); vault = await LocalVault.open({root: f.root, masterKey: f.key});
+    assert.deepEqual(vault.claimCodexSetupOperation(operation, digest), {state: 'running', intentDigest: digest});
+    const result = {state: 'completed' as const, readinessReceiptId: receipt};
+    vault.finishCodexSetupOperation(claim.leaseId, digest, result);
+    vault.close(); vault = await LocalVault.open({root: f.root, masterKey: f.key});
+    assert.deepEqual(vault.claimCodexSetupOperation(operation, digest), {state: 'terminal', intentDigest: digest, result});
+  } finally {await capture; vault.close(); await f.cleanup();}
+});

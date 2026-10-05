@@ -44,7 +44,10 @@ completed by a retry.
 
 Terminal dispositions are encrypted with the already-supplied vault key and
 authenticated against the operation and digest. The raw lease is not persisted.
-Journal writes require SQLite FULL or EXTRA synchronization. This component
+Journal writes require SQLite FULL or EXTRA synchronization and no ambient
+transaction on that vault connection. A capture transaction cannot acknowledge
+a journal fence or terminal result and later roll it back. The journal refuses
+the overlap; it never commits or rolls back the capture's transaction. This component
 does not obtain a key, unlock a store, create an enrolled device, or select a
 vault path. Integration must use the existing, approved protected-vault boundary.
 No production database migration is part of this local table addition.
@@ -57,12 +60,23 @@ reviewed reconciliation contract; a new context must not bypass the digest fence
 ## Interruption And Reconciliation
 
 The published transport callback defaults to 30 seconds and permits at most
-60 seconds; recipient approval may remain pending for up to 15 minutes. This
-awaiting admission component must not be wired to a long bootstrap and treated
-as qualified. Integration requires a reviewed bounded start/status/result
-contract with a separately owned operation lifecycle, or a separately reviewed
-public callback lifetime contract. Neither is implemented here. Do not increase
-the callback timeout or detach a credential-bearing child to bypass this gap.
+60 seconds; recipient approval may remain pending for up to 15 minutes. The
+candidate now separates callback response from operation settlement. Its trusted
+host response budget defaults to 250 milliseconds and is bounded at 5 seconds;
+the model cannot choose it. A pending callback returns only an in-progress code,
+not an approval, readiness receipt or claim of child termination. The operation
+and journal fence remain owned until actual settlement. Status requests are
+limited to 16 distinct native call IDs and require the original admitted binding.
+
+The host must close the gate on transport/turn closure, interruption or scope
+change and await `settled` before releasing operation resources. The executor
+receives the cancellation signal and a live current-scope check; it must check
+both at every protected effect and retain its actual child handles until they
+stop. A returned callback is not release of execution ownership. The component
+creates no child and cannot enforce a supplied executor's lifecycle by itself.
+This owning-controller/executor integration is not implemented or qualified.
+Do not extend transport deadlines, detach a credential-bearing child or treat
+the component fixture as permission for native setup.
 
 Admission is serialized. A duplicate operation returns the durable terminal
 disposition rather than executing again, but only after current authority and
@@ -88,7 +102,10 @@ replay, changed payload, concurrency, journal failure and lost authority.
 
 The separate published-transport fixture used mock server frames and a synthetic
 sentinel. It established host callback wiring and representative containment only.
-Neither fixture proves real Codex dynamic-tool emission, protected-store access,
+The bounded-status integration uses the public stdio adapter and an encrypted
+fixture journal with a synthetic Node server. It proves status/result wiring and
+normal owning-close behavior, not genuine Codex tool emission or a native worker.
+No fixture proves real Codex dynamic-tool emission, protected-store access,
 bootstrap completion, restart recovery or the one-prompt customer journey.
 
 No package publication, production change or native activation is authorized by

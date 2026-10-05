@@ -550,6 +550,9 @@ export class LocalVault {
   }
 
   #assertSetupJournalDurability(): void {
+    const transaction = this.#database.isTransaction;
+    if (transaction !== false) throw new Error(transaction === true
+      ? 'setup_operation_transaction_active' : 'setup_operation_durability_unqualified');
     const row = this.#database.prepare('pragma synchronous').get() as {synchronous: number};
     if (!row || !Number.isInteger(row.synchronous) || row.synchronous < 2 || row.synchronous > 3) {
       throw new Error('setup_operation_durability_unqualified');

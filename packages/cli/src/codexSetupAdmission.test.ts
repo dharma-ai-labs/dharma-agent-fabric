@@ -178,3 +178,137 @@ test('an unbound journal claim cannot admit execution or disclose readiness', as
   const result = await createCodexSetupAdmission(f.input).handler(f.params, {signal: f.signal.signal});
   assert.equal(result.success, false); assert.equal(f.calls, 0);
 });
+
+test('setup callback returns bounded status while its owned operation remains fenced', async () => {
+  const f = fixture(); let release!: () => void; let executions = 0;
+  const completion = new Promise<void>(done => {release = done;});
+  const input = {...f.input, responseWaitMs: 10, execute: async () => {
+    executions++; await completion; return {state: 'completed', readinessReceiptId: id(7)};
+  }};
+  const owner = createCodexSetupAdmission(input as Parameters<typeof createCodexSetupAdmission>[0]);
+  const first = owner.handler(f.params, {signal: f.signal.signal});
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const result = await Promise.race([first, new Promise<'missed_callback_boundary'>(done => {
+      timeout = setTimeout(() => done('missed_callback_boundary'), 250);
+    })]);
+    assert.notEqual(result, 'missed_callback_boundary');
+    if (result === 'missed_callback_boundary') throw new Error('fixture_response_missing');
+    assert.equal(result.success, false);
+    assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_in_progress');
+    assert.equal(owner.pending, true); assert.equal(executions, 1);
+    const status = await owner.handler({...f.params, callId: 'poll_pending'}, {signal: f.signal.signal});
+    assert.equal(JSON.parse(status.contentItems[0]!.text).code, 'codex_setup_in_progress');
+    assert.equal(executions, 1);
+    release(); await (owner as typeof owner & {settled: Promise<void>}).settled;
+    assert.equal(owner.pending, false);
+    assert.equal((await owner.handler({...f.params, callId: 'poll_completed'}, {signal: f.signal.signal})).success, true);
+    assert.equal(executions, 1);
+  } finally {if (timeout) clearTimeout(timeout); release(); await first; owner.close();}
+});
+
+for (const change of ['close', 'abort', 'peer', 'expiry'] as const) {
+  test(`bounded setup retains ownership but denies protected effects after ${change}`, async () => {
+    const f = fixture(); let release!: () => void; let effects = 0; let executionSignal: AbortSignal | undefined;
+    const finish = new Promise<void>(done => {release = done;});
+    const owner = createCodexSetupAdmission({...f.input, responseWaitMs: 10,
+      execute: async (_intent, signal, current) => {
+        executionSignal = signal; await finish;
+        if (!await current()) return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+        effects++; return {state: 'completed', readinessReceiptId: id(7)};
+      }});
+    try {
+      const result = await owner.handler(f.params, {signal: f.signal.signal});
+      assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_in_progress');
+      assert.equal(owner.pending, true); assert.ok(executionSignal);
+      if (change === 'close') owner.close();
+      if (change === 'abort') f.signal.abort();
+      if (change === 'peer') f.mode('peer');
+      if (change === 'expiry') f.time(Date.parse(intent.expiresAt));
+      if (change === 'close' || change === 'abort') assert.equal(executionSignal.aborted, true);
+      let settled = false;
+      const observed = owner.settled.then(() => {settled = true;});
+      await new Promise(done => setTimeout(done, 20));
+      assert.equal(settled, false, 'a cancellation signal must not claim execution settlement');
+      assert.equal(owner.pending, true); assert.equal(effects, 0);
+      release(); await observed;
+      assert.equal(owner.pending, false); assert.equal(effects, 0);
+      const after = await owner.handler({...f.params, callId: 'after_change'}, {signal: f.signal.signal});
+      assert.equal(after.success, false);
+      assert.equal(JSON.stringify(after).includes('readinessReceiptId'), false);
+    } finally {owner.close(); release(); await owner.settled;}
+  });
+}
+
+test('slow host qualification returns bounded status and cannot admit execution after close', async () => {
+  const f = fixture(); let release!: () => void;
+  const qualified = new Promise<boolean>(done => {release = () => done(true);});
+  const owner = createCodexSetupAdmission({...f.input, responseWaitMs: 10, qualifyHost: async () => qualified});
+  try {
+    const result = await owner.handler(f.params, {signal: f.signal.signal});
+    assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_in_progress');
+    assert.equal(owner.pending, true); assert.equal(f.claims, 0); assert.equal(f.calls, 0);
+    owner.close(); release(); await owner.settled;
+    assert.equal(f.claims, 0); assert.equal(f.calls, 0); assert.equal(owner.pending, false);
+  } finally {owner.close(); release(); await owner.settled;}
+});
+
+test('bounded status withholds readiness while independent verification is pending', async () => {
+  const f = fixture(); let release!: () => void;
+  const verified = new Promise<boolean>(done => {release = () => done(true);});
+  let checks = 0;
+  const owner = createCodexSetupAdmission({...f.input, responseWaitMs: 10,
+    verifyReadiness: async () => {checks++; return verified;}});
+  try {
+    const result = await owner.handler(f.params, {signal: f.signal.signal});
+    assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_in_progress');
+    assert.equal(JSON.stringify(result).includes('readinessReceiptId'), false);
+    assert.equal(f.calls, 1); assert.equal(checks, 1); assert.equal(owner.pending, true);
+    release(); await owner.settled;
+    assert.equal((await owner.handler({...f.params, callId: 'verified_status'}, {signal: f.signal.signal})).success, true);
+    assert.equal(f.calls, 1); assert.equal(checks, 2);
+  } finally {owner.close(); release(); await owner.settled;}
+});
+
+test('host response budget is bounded and cannot be selected by model arguments', async () => {
+  for (const responseWaitMs of [0, -1, 0.5, 5001, Number.NaN]) {
+    const f = fixture();
+    assert.throws(() => createCodexSetupAdmission({...f.input, responseWaitMs}), /^Error: codex_setup_intent_invalid$/);
+    assert.equal(f.calls, 0); assert.equal(f.claims, 0);
+  }
+  const f = fixture(); const owner = createCodexSetupAdmission(f.input);
+  assert.equal((await owner.handler({...f.params, arguments: {...f.params.arguments, responseWaitMs: 5000}},
+    {signal: f.signal.signal})).success, false);
+  assert.equal(f.calls, 0); assert.equal(f.claims, 0); owner.close();
+});
+
+test('setup boundary refuses getters, symbols and hidden fields without invoking accessors', async () => {
+  let getters = 0;
+  const f = fixture(); const owner = createCodexSetupAdmission(f.input);
+  const args = {get operationId() {getters++; return id(1);}, setupReference: id(2)};
+  assert.equal((await owner.handler({...f.params, arguments: args}, {signal: f.signal.signal})).success, false);
+  const request = {...f.params, get arguments() {getters++; return f.params.arguments;}};
+  assert.equal((await owner.handler(request, {signal: f.signal.signal})).success, false);
+  assert.equal(f.claims, 0); assert.equal(f.calls, 0); owner.close();
+  for (const result of [
+    {get state() {getters++; return 'completed';}, readinessReceiptId: id(7)},
+    {state: 'completed', readinessReceiptId: id(7), [Symbol('private')]: 'private-canary'},
+    Object.defineProperty({state: 'completed', readinessReceiptId: id(7)}, 'private', {value: 'private-canary'}),
+  ]) {
+    const g = fixture(); const gate = createCodexSetupAdmission({...g.input, execute: async () => result});
+    const response = await gate.handler(g.params, {signal: g.signal.signal});
+    assert.equal(response.success, false); assert.equal(JSON.stringify(response).includes('private-canary'), false);
+    gate.close(); await gate.settled;
+  }
+  assert.equal(getters, 0);
+});
+
+test('missing or foreign cancellation contexts fail closed without throwing or claiming a lease', async () => {
+  for (const context of [{}, {signal: 'private-context-canary'}]) {
+    const f = fixture(); const owner = createCodexSetupAdmission(f.input);
+    const result = await owner.handler(f.params, context as never);
+    assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_not_authorized');
+    assert.equal(JSON.stringify(result).includes('private-context-canary'), false);
+    assert.equal(f.claims, 0); assert.equal(f.calls, 0); owner.close(); await owner.settled;
+  }
+});

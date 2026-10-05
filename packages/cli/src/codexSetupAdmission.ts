@@ -23,23 +23,30 @@ type Binding = {connectionId: string; threadId: string; turnId: string; hostCont
 interface Input extends Binding {
   intent: CodexSetupIntent;
   now?: () => number;
+  /** Trusted host response budget, not the operation or approval deadline. */
+  responseWaitMs?: number;
   current(): Promise<Binding & {mode: 'setup' | 'work' | 'peer'}>;
   /** Must independently qualify the normal owning host, package and source scope. */
   qualifyHost(intent: Readonly<CodexSetupIntent>, signal: AbortSignal): Promise<boolean>;
   journal: CodexSetupJournal;
-  /** Host selects all executable/home/store/source details; no model commands. */
-  execute(intent: Readonly<CodexSetupIntent>, signal: AbortSignal): Promise<unknown>;
+  /** Host owns all child handles and must check current scope at every protected
+   * effect. Settlement means its owned execution has actually stopped. */
+  execute(intent: Readonly<CodexSetupIntent>, signal: AbortSignal, current: () => Promise<boolean>): Promise<unknown>;
   verifyReadiness(receiptId: string, intent: Readonly<CodexSetupIntent>): Promise<boolean>;
 }
 
 export const CODEX_SETUP_TOOL = {type: 'function', name: 'dharma_setup_reference',
-  description: 'Request the single host-admitted recipient-bound setup operation. Browser device approval remains required. No shell or broader permissions are granted.',
+  description: 'Request or check the single host-admitted recipient-bound setup operation. In-progress is not readiness. Browser device approval remains required. No shell or broader permissions are granted.',
   inputSchema: {type: 'object', additionalProperties: false,
     properties: {operationId: {type: 'string', format: 'uuid'}, setupReference: {type: 'string', format: 'uuid'}},
     required: ['operationId', 'setupReference']}};
 
 function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(descriptors).some(key => typeof key !== 'string'
+    || !Object.hasOwn(descriptors[key]!, 'value'))) return null;
+  return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
 }
 function exact(value: Record<string, unknown>, keys: string[]) {
   return Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key));
@@ -59,11 +66,13 @@ function disposition(value: unknown): PublicDisposition | null {
  * sessions and supplies neither a bootstrap executor nor a journal backend. */
 export function createCodexSetupAdmission(input: Input) {
   const now = input.now ?? Date.now;
+  const responseWaitMs = input.responseWaitMs ?? 250;
   const invalid = (): never => {throw new Error('codex_setup_intent_invalid');};
   const value = record(input.intent); if (!value) return invalid();
   const keys = ['schema', 'operationId', 'setupReference', 'organizationId', 'recipientMembershipId', 'origin',
     'repositoryFingerprint', 'policyRevision', 'scopeDigest', 'contractDigest', 'hostContextId', 'issuedAt', 'expiresAt'];
-  if (!exact(value, keys) || Object.values(value).some(item => typeof item !== 'string')) return invalid();
+  if (!exact(value, keys) || Object.values(value).some(item => typeof item !== 'string')
+    || !Number.isInteger(responseWaitMs) || responseWaitMs < 1 || responseWaitMs > 5000) return invalid();
   const intent = Object.freeze({...input.intent});
   let origin: URL; try {origin = new URL(intent.origin);} catch {return invalid();}
   const issued = Date.parse(intent.issuedAt), expires = Date.parse(intent.expiresAt);
@@ -83,6 +92,8 @@ export function createCodexSetupAdmission(input: Input) {
     || new Date(issued).toISOString() !== intent.issuedAt || new Date(expires).toISOString() !== intent.expiresAt) return invalid();
   const digest = `sha256:${createHash('sha256').update(canonicalize({intent, binding})).digest('hex')}`;
   const closed = new AbortController(); const calls = new Set<string>(); let pending = false;
+  const operationScope = AbortSignal.any([closed.signal, AbortSignal.timeout(Math.max(1, expires - now()))]);
+  const callbacks = new Set<Promise<CodexToolResult>>();
   const deny = (code: string): CodexToolResult => ({success: false,
     contentItems: [{type: 'inputText', text: JSON.stringify({code})}]});
   const authorized = async (signal: AbortSignal) => {
@@ -100,22 +111,24 @@ export function createCodexSetupAdmission(input: Input) {
     return {success: true, contentItems: [{type: 'inputText', text: JSON.stringify({
       operationId: intent.operationId, state: result.state, readinessReceiptId: result.readinessReceiptId})}]};
   };
-  const handler: CodexToolHandler = async (params, context) => {
+  const handler: CodexToolHandler = async (rawParams, context) => {
+    const params = record(rawParams); if (!params) return deny('codex_setup_not_authorized');
     const args = record(params.arguments);
     if (Object.keys(params).some(key => !['threadId', 'turnId', 'callId', 'namespace', 'tool', 'arguments'].includes(key))
       || params.tool !== 'dharma_setup_reference' || params.namespace != null
       || params.threadId !== binding.threadId || params.turnId !== binding.turnId
       || typeof params.callId !== 'string' || !nativeId.test(params.callId) || calls.has(params.callId)
       || calls.size >= 16 || !args || !exact(args, ['operationId', 'setupReference'])
-      || args.operationId !== intent.operationId || args.setupReference !== intent.setupReference || !context) {
+      || args.operationId !== intent.operationId || args.setupReference !== intent.setupReference
+      || !context || !(context.signal instanceof AbortSignal)) {
       return deny('codex_setup_not_authorized');
     }
-    const signal = AbortSignal.any([context.signal, closed.signal]);
-    try {
+    calls.add(params.callId);
+    const signal = AbortSignal.any([context.signal, operationScope]);
+    const run = async (): Promise<CodexToolResult> => {try {
       if (!await authorized(signal) || !await input.qualifyHost(intent, signal) || !await authorized(signal)) {
         return deny('codex_setup_not_authorized');
       }
-      calls.add(params.callId);
       if (pending) return deny('codex_setup_in_progress');
       pending = true;
       try {
@@ -129,14 +142,25 @@ export function createCodexSetupAdmission(input: Input) {
         }
         // Keep the operation fenced until the executor actually settles. Abort
         // is cooperative: never declare child termination or replay on timeout.
-        const executionSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, expires - now()))]);
+        const executionSignal = signal;
         if (!await authorized(executionSignal)) return deny('codex_setup_not_authorized');
         let result: PublicDisposition = {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
-        try {result = disposition(await input.execute(intent, executionSignal)) ?? result;} catch { /* Never reflect runtime errors. */ }
+        const current = async () => {try {return await authorized(executionSignal);} catch {return false;}};
+        try {result = disposition(await input.execute(intent, executionSignal, current)) ?? result;} catch { /* Never reflect runtime errors. */ }
         await input.journal.finish(claim.leaseId, digest, result);
         return await expose(result, executionSignal);
       } finally {pending = false;}
-    } catch {return deny('codex_setup_execution_unconfirmed');}
+    } catch {return deny('codex_setup_execution_unconfirmed');}};
+    const owned = run(); callbacks.add(owned);
+    void owned.then(() => callbacks.delete(owned), () => callbacks.delete(owned));
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([owned, new Promise<CodexToolResult>(resolve => {
+        timer = setTimeout(() => resolve(deny(signal.aborted || closed.signal.aborted
+          ? 'codex_setup_not_authorized' : 'codex_setup_in_progress')), responseWaitMs);
+      })]);
+    } finally {if (timer) clearTimeout(timer);}
   };
-  return {handler, close: () => closed.abort(), get pending() {return pending;}, intentDigest: digest};
+  return {handler, close: () => closed.abort(), get pending() {return pending || callbacks.size > 0;},
+    get settled() {return Promise.allSettled([...callbacks]).then(() => undefined);}, intentDigest: digest};
 }
