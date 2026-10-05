@@ -178,3 +178,29 @@ test('native filesystem PID lock serializes concurrent contenders and removes it
     assert.deepEqual(await fs.readdir(f.root), []);
   } finally { await f.cleanup(); }
 });
+
+test('Windows owner inspection denial retries only after recovery directory disappearance', async () => {
+  const f = await fixture();
+  try {
+    await fs.mkdir(f.recovery);
+    await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
+    let inspected = false;
+    const lock = await acquire({
+      process: { platform: 'win32', pid: process.pid, kill: process.kill.bind(process) },
+      rename: windowsRename(f.recovery),
+      readFile: async (path: string, encoding: 'utf8') => {
+        if (path === resolve(f.recovery, 'owner') && !inspected) {
+          inspected = true;
+          await fs.rm(f.recovery, { recursive: true });
+          await fs.unlink(f.lock);
+          throw permissionError();
+        }
+        return fs.readFile(path, encoding);
+      },
+    });
+    const release = await lock(f.lock, 500, 'lock timeout');
+    assert.equal(inspected, true);
+    await release();
+    assert.deepEqual(await fs.readdir(f.root), []);
+  } finally { await f.cleanup(); }
+});
