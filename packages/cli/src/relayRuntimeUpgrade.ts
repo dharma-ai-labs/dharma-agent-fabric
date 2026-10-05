@@ -7,6 +7,7 @@ type State = 'prepared' | 'installed' | 'completed' | 'rolled_back' | 'rollback_
 type Input = { home: string; workspace: string; version: string; organizationId: string;
   deviceId: string; workspaceId: string; dryRun?: boolean; rollback?: boolean };
 export type RelayUpgradeDependencies = {
+  recoverableJournal?(version: string, previousVersion: string): boolean;
   launcherContents(version: string): Launchers;
   legacyLauncherContents?(version: string): Launchers;
   verifyPriorLaunchers?(version: string, contents: Launchers): Promise<boolean>;
@@ -62,7 +63,9 @@ async function validateJournal(value: unknown, input: Input, deps: RelayUpgradeD
     || journal.schema !== 'dharma.local-relay-upgrade/v1'
     || journal.organizationId !== input.organizationId || journal.deviceId !== input.deviceId
     || journal.workspaceId !== input.workspaceId || journal.workspace !== input.workspace
-    || typeof journal.version !== 'string' || !VERSION.test(journal.version) || journal.version !== input.version
+    || typeof journal.version !== 'string' || !VERSION.test(journal.version)
+    || journal.version !== input.version && !(input.rollback === true
+      && deps.recoverableJournal?.(journal.version, journal.previousVersion) === true)
     || typeof journal.previousVersion !== 'string' || !VERSION.test(journal.previousVersion)
     || typeof journal.upgradeId !== 'string' || !/^[0-9a-f-]{36}$/.test(journal.upgradeId)
     || !Number.isFinite(Date.parse(journal.startedAt)) || !Number.isFinite(Date.parse(journal.updatedAt))
@@ -131,7 +134,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
   const receipt = (state: State | 'planned') => ({ ok: state === 'completed' || state === 'planned',
     schema: journal.schema, upgradeId: journal.upgradeId, organizationId: input.organizationId,
     deviceId: input.deviceId, workspaceId: input.workspaceId, previousVersion: journal.previousVersion,
-    version: input.version, state, createdAt: new Date().toISOString(), previousLauncherHash: journal.previousHash,
+    version: journal.version, state, createdAt: new Date().toISOString(), previousLauncherHash: journal.previousHash,
     enrollmentChanged: false, skillsChanged: false,
     runtimeObservation: state === 'planned' ? 'not_performed' as const
       : state === 'rollback_failed' ? 'unconfirmed' as const : 'local_process_and_poll' as const,

@@ -49,6 +49,7 @@ import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
+import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
@@ -1686,7 +1687,8 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
   });
   if (!selected) throw new Error('relay_upgrade_workspace_unregistered');
   const home = dharmaHome();
-  const startup = await inspectOwnedRelayAutostart({ home });
+  const startupOptions = { home, pinnedControllerRollback: flags.has('rollback') };
+  const startup = await inspectOwnedRelayAutostart(startupOptions);
   const expectedLauncher = resolve(workspace, '.dharma', 'bin', process.platform === 'win32' ? 'dharma.cmd' : 'dharma');
   if (startup.workspace !== workspace || startup.launcher !== expectedLauncher
     || startup.policy !== resolve(workspace, '.dharma', 'approved-policy.json')) {
@@ -1710,8 +1712,10 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
       dryRun: !flags.has('apply'), rollback: flags.has('rollback') }, {
-      assertStopped, inspectStartup: async () => {
-        const current = await inspectOwnedRelayAutostart({ home });
+      assertStopped,
+      recoverableJournal: startup.backend === 'container-entrypoint' ? recoverableContainerJournal : undefined,
+      inspectStartup: async () => {
+        const current = await inspectOwnedRelayAutostart(startupOptions);
         if (current.launcher !== expectedLauncher || current.policy !== startup.policy
           || current.workspace !== workspace) throw new Error('relay_upgrade_workspace_conflict');
         return current;
@@ -1720,9 +1724,9 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         { platform: process.platform, nodeDirectory: dirname(process.execPath) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
       verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
-      configureStartup: version => enableRelayAutostart({ home, workspace,
+      configureStartup: version => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version }),
-      start: () => startRelayAutostart({ home }),
+      start: () => startRelayAutostart(startupOptions),
       stop: async () => {
         const activationLocks = resolve(home, 'registry', 'skill-activation-locks');
         const locks = await readdir(activationLocks).catch(error => {
@@ -1737,7 +1741,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
           .then(value => JSON.parse(value)).catch(() => null);
         if (await relaySupervisorProcessState(home) !== 'stopped'
           && binding?.workspaceId !== selected.workspaceId) throw new Error('relay_upgrade_process_unverified');
-        await stopRelayAutostart({ home });
+        await stopRelayAutostart(startupOptions);
         const stopped = await relayStop() as Record<string, unknown>;
         if (stopped.ok !== true) throw new Error('relay_upgrade_stop_unconfirmed');
       },
