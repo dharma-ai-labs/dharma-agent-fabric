@@ -102,8 +102,10 @@ import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionL
 import { startNamedCodexThread } from './namedCodexThread.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
+import {prepareCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
+export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
 const VERSION = '0.2.153';
 const USAGE = CLI_USAGE;
@@ -2128,7 +2130,17 @@ export function assertBootstrapResumeAuthority(input: {
   }
 }
 
-async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> {
+/** Planning-only trusted host entry. Effectful admission remains unavailable
+ * until the full continuation and native owner lifecycle are qualified. */
+export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): Promise<Output> {
+  const prepared = prepareCodexBootstrapHost(input);
+  await prepared.scope.assert();
+  return bootstrap(prepared.flags, prepared.scope);
+}
+
+async function bootstrap(flags: Map<string, string | boolean>, hostScope?: BootstrapHostScope): Promise<Output> {
+  const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
+  await hostScope?.assert();
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
   const resuming = flags.has('resume');
@@ -2153,10 +2165,14 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     for (const key of ['setup-scope-digest', 'setup-contract-digest']) {
       if (!/^sha256:[a-f0-9]{64}$/.test(required(flags, key))) throw new Error('setup_claim_context_invalid');
     }
-    const installedContract = await loadAgentFabricOnboardingContract();
+    const installedContract = await step(() => loadAgentFabricOnboardingContract());
     if (required(flags, 'setup-contract-digest') !== `sha256:${installedContract.sha256}`) {
       throw new Error('setup_claim_contract_mismatch: the portal setup must match this published client operating contract.');
     }
+    // Claim cancellation alone does not guard onboarding's later filesystem,
+    // startup, relay and session effects. Never consume authority on that basis.
+    if (hostScope && !flags.has('dry-run')) return {ok: false, stage: 'host_setup_unavailable',
+      code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};
     if (flags.has('dry-run')) return { ok: true, stage: 'plan', setupTransport: 'public_claim_v1',
       organizationId, portalUrl: hqUrl, setupReference: required(flags, 'setup-reference'),
       requires: ['workspace-qualified coding harness', 'protected device store', 'exact recipient browser approval', 'signed startup readiness'],
