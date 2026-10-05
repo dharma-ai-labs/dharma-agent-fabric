@@ -8,6 +8,7 @@ import { openCodexInboxSession } from './codexInboxSession.js';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { NamedSessionEvidenceReceipt } from './namedSessionEvidence.js';
+import { composeNamedSessionRepositoryPrompt } from './namedSessionPackageGate.js';
 
 export interface NamedSessionRegistration {
   schema: 'dharma.named-session/v1';
@@ -109,7 +110,7 @@ export async function runNamedSessionService(input: {
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
   syncTaskExports?(): Promise<import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult>;
-  withActivationBoundary<T>(operation: () => Promise<T>, work?: { workId: string }): Promise<T>;
+  withActivationBoundary<T>(operation: (repositoryContext?: string) => Promise<T>, work?: { workId: string }): Promise<T>;
   signal: AbortSignal;
 }) {
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
@@ -202,8 +203,11 @@ export async function runNamedSessionService(input: {
               budget.beginWork(request.workId, intent);
               let nativeEvidence: Record<string, unknown> | null = null;
               try {
-                const result = await input.withActivationBoundary(() => owner!.runWork({ workId: request.workId as string,
-                  prompt: request.prompt as string, maximumProviderCostCents: registration.maximumTurnCostCents,
+                const result = await input.withActivationBoundary(async repositoryContext => {
+                  const prompt = composeNamedSessionRepositoryPrompt(request.prompt as string, repositoryContext);
+                  if (!await input.authorizeLocalWork()) throw new Error('named_session_workspace_write_not_authorized');
+                  return owner!.runWork({ workId: request.workId as string,
+                  prompt, maximumProviderCostCents: registration.maximumTurnCostCents,
                   onTurnEvidence: async capture => {
                     const valid = await validateContract(join(import.meta.dirname, 'schemas'),
                       codexWorkCaptureSchemaId(capture), capture);
@@ -238,7 +242,7 @@ export async function runNamedSessionService(input: {
                       }
                       nativeEvidence.synchronization = synchronization;
                     }
-                  } }), { workId: request.workId });
+                  } }); }, { workId: request.workId });
                 const receipt = { ...result, intentHash: intent, nativeEvidence };
                 const blob = await input.vault.putBlob(Buffer.from(JSON.stringify(receipt)), 'named-session-work');
                 budget.finishWork(request.workId, 'completed', blob);

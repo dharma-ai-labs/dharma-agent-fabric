@@ -94,7 +94,7 @@ import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
-import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
+import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -104,7 +104,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.149';
+const VERSION = '0.2.150';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3952,7 +3952,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
-        const packageContent = await readNamedSessionPackageContent(skill, await repositorySharedReady(item));
+        const sharedReady = await repositorySharedReady(item);
+        const packageContent = await readNamedSessionPackageContent(skill, sharedReady);
         const bundleId = packageContent.bundleId;
         taskState = null;
         taskStateFailure = 'source_state_unavailable';
@@ -3989,7 +3990,13 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
             catch { /* Source capture failure must not replay or rewrite a coding task. */ }
           }
         }
-        try { return await operation(); }
+        try {
+          const context = work ? await readNamedSessionRepositoryContext({ installation: skill,
+            sharedRepositoryReady: sharedReady, scope: repositoryRoleScope(item),
+            loadAuthority: async () => ({ policy: await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
+              source: await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) }) : undefined;
+          return await operation(context);
+        }
         finally { taskState = null; }
       }),
       retainRepositoryState: async capture => {
