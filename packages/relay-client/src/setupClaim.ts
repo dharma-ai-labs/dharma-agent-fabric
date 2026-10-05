@@ -17,6 +17,14 @@ const SCOPES = ['agents:read', 'agents:run', 'evals:read', 'evals:run', 'traces:
 const fail = (): never => { throw new Error('setup_claim_failed'); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
+  | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
+export interface SetupClaimFailureDiagnostic {
+  schema: 'dharma.setup-claim-failure/v1';
+  code: 'setup_claim_failed';
+  phase: SetupClaimFailurePhase;
+}
+
 export interface ClaimSetupReferenceInput {
   hqUrl: string; organizationId: string; setupReference: string; recipientMembershipId: string;
   repositoryFingerprint: string; policyRevision: string; scopeDigest: string; contractDigest: string;
@@ -24,6 +32,8 @@ export interface ClaimSetupReferenceInput {
   existingConfig?: DeviceConfig | null; store?: SecureSecretStore; fetcher?: typeof fetch;
   now?: () => number; sleep?: (ms: number) => Promise<void>; maximumWaitMs?: number; pollIntervalMs?: number;
   onRecipientApprovalRequired?: (approval: BootstrapRecipientApproval) => Promise<void> | void;
+  /** Local phase observation only: no vendor exception, response body, or retry authority. */
+  onFailureDiagnostic?: (diagnostic: Readonly<SetupClaimFailureDiagnostic>) => void;
 }
 
 /** Never apply one repository's public claim reference to a legacy sibling.
@@ -94,6 +104,7 @@ export function parseSetupClaimRecipientApproval(value: unknown, challenge: Setu
 /** Non-TTY native enrollment. Credential plaintext never leaves this method;
  * only the existing protected store receives it. Network errors are never reflected. */
 export async function claimSetupReference(input: ClaimSetupReferenceInput): Promise<{config: DeviceConfig; scopes: string[]}> {
+  let phase: SetupClaimFailurePhase = 'input_validation';
   try {
     const hqUrl = normalizeHqUrl(input.hqUrl);
     if (!hqUrl.startsWith('https:') || input.name.trim().length < 2 || input.name.length > 120
@@ -106,6 +117,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     const maximumWaitMs = input.maximumWaitMs ?? 900_000;
     if (!Number.isFinite(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 900_000) return fail();
     const deadline = now() + maximumWaitMs;
+    phase = 'store_preflight';
     const store = input.store ?? await createSystemSecureStore();
     const probeAccount = `setup-claim-preflight-${randomBytes(16).toString('hex')}`;
     const probeValue = randomBytes(32).toString('base64url');
@@ -114,6 +126,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       if (await (store.getFresh ?? store.get).call(store, probeAccount) !== probeValue) return fail();
     } finally { await store.delete(probeAccount); }
     // Existing protected identity access fails before challenge/approval/effects.
+    phase = 'identity';
     const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId: input.organizationId,
       installationId: input.installationId, store });
     const existing = input.existingConfig;
@@ -138,6 +151,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         || response.status >= 300 && ![409,429].includes(response.status)) return fail();
       return { response, body: await boundedJson(response) };
     };
+    phase = 'challenge';
     const initial = await send({ action: 'challenge', organizationId: input.organizationId,
       setupReference: input.setupReference, publicKeyEd25519: identity.publicKeyEd25519,
       credentialEncryptionPublicKey: expected.credentialEncryptionPublicKey, device });
@@ -155,10 +169,12 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       if (now() >= deadline) return fail();
     }
     const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, now());
+    phase = 'signing';
     const signature = sign(null, setupClaimSigningPayload(challenge), createPrivateKey({key: identity.privateJwk, format: 'jwk'})).toString('base64url');
     const request = { action: 'finalize', challenge, signature, device };
     let pending: BootstrapRecipientApproval | null = null;
     while (true) {
+      phase = 'finalize';
       parseSetupClaimChallenge(challenge, expected, now());
       const result = await send(request);
       parseSetupClaimChallenge(challenge, expected, now());
@@ -169,6 +185,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       }
       if (result.response.status === 409 && result.body.ok === false
         && result.body.status === 'recipient_approval_required') {
+        phase = 'recipient_approval';
         if (Object.keys(result.body).sort().join(',') !== 'approval,ok,status') return fail();
         const current = parseSetupClaimRecipientApproval(result.body.approval, challenge, signature, device, now());
         if (!pending) { pending = current; await input.onRecipientApprovalRequired?.(current); }
@@ -181,6 +198,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       }
       if (!result.response.ok || result.body.ok !== true || result.body.status !== 'approved'
         || Object.keys(result.body).sort().join(',') !== 'credential,ok,status') return fail();
+      phase = 'credential_validation';
       const enrolled = record(JSON.parse(openSetupClaimCredential(challenge, result.body.credential, encryption.privateKey)));
       for (const key of ['organizationId', 'setupReference', 'recipientMembershipId', 'publicKeyEd25519',
         'repositoryFingerprint', 'scopeDigest', 'contractDigest'] as const) if (enrolled[key] !== challenge[key]) return fail();
@@ -219,6 +237,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         if (now() >= deadline) return fail();
         parseSetupClaimChallenge(challenge, expected, now());
       };
+      phase = 'credential_commit';
       await assertCommit();
       await saveOrganizationApiToken({ hqUrl, organizationId: input.organizationId,
         installationId: input.installationId, token: approved.organizationApiToken, store });
@@ -229,5 +248,13 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       await assertCommit();
       return { config, scopes: [...SCOPES] };
     }
-  } catch { return fail(); }
+  } catch {
+    // Observers cannot replace the original sanitized failure or authorize retries.
+    try {
+      void Promise.resolve(input.onFailureDiagnostic?.(Object.freeze({
+        schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase,
+      }))).catch(() => undefined);
+    } catch { /* Ignore local diagnostic observer failures. */ }
+    return fail();
+  }
 }

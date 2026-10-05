@@ -13,7 +13,8 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
-export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput } from './setupClaim.js';
+export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
+  type SetupClaimFailurePhase, type SetupClaimFailureDiagnostic } from './setupClaim.js';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
