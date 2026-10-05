@@ -135,33 +135,72 @@ test('POSIX EPERM is not converted to Windows recovery contention', async () => 
 test('Windows recovery publication tolerates repeated owner turnover within its deadline', async () => {
   const f = await fixture();
   let pending: Promise<void> | undefined;
+  let releasePublication!: () => void;
+  const publication = new Promise<void>(resolvePublication => { releasePublication = resolvePublication; });
+  let fifthDenial!: () => void;
+  const denialsObserved = new Promise<void>(resolveDenial => { fifthDenial = resolveDenial; });
   try {
-    let denied = 0;
-    const lock = await acquire({ process: { platform: 'win32', pid: process.pid, kill: process.kill.bind(process) },
+    let attempts = 0; let clock = 0;
+    const lock = await acquire({ Date: { now: () => clock },
+      setTimeout: (done: () => void, milliseconds: number) => setImmediate(() => { clock += milliseconds; done(); }),
+      process: { platform: 'win32', pid: process.pid, kill: process.kill.bind(process) },
       rename: async (source: string, target: string) => {
-        if (target === f.recovery && denied++ < 5) throw permissionError();
+        if (target === f.recovery) {
+          attempts++;
+          if (attempts <= 5) {
+            if (attempts === 5) fifthDenial();
+            throw permissionError();
+          }
+          await publication;
+        }
         await fs.rename(source, target);
       } });
     let state = 'waiting';
     pending = lock(f.lock, 500, 'lock timeout').then(async release => {
       state = 'acquired'; await release();
     }, error => { state = error.code || error.message; });
-    await new Promise(done => setTimeout(done, 75));
+    await Promise.race([denialsObserved, pending.then(() => { throw new Error('lock settled before five denials'); })]);
     assert.equal(state, 'waiting', 'transient publication denial must not fail early or claim ownership');
+    assert.equal(attempts, 5);
     assert.equal(await fs.readFile(f.lock, 'utf8'), `${process.pid}\n`);
     await fs.unlink(f.lock);
+    releasePublication();
     await pending;
     assert.equal(state, 'acquired');
-    assert.ok(denied >= 6);
+    assert.equal(attempts, 6);
+    assert.ok(clock < 500, 'publication must still complete within the original deadline');
     assert.deepEqual(await fs.readdir(f.root), []);
-  } finally { await pending; await f.cleanup(); }
+  } finally { releasePublication(); await pending; await f.cleanup(); }
 });
 
 test('native filesystem PID lock serializes concurrent contenders and removes its own receipts', async () => {
   const f = await fixture();
   try {
     await fs.unlink(f.lock);
-    const lock = await acquire();
+    const observations: string[] = [];
+    const observe = (value: string) => {
+      observations.push(value);
+      if (observations.length > 120) observations.shift();
+    };
+    const label = (path: string) => path === f.recovery ? 'recovery'
+      : path === resolve(f.recovery, 'owner') ? 'owner' : 'candidate';
+    const lock = await acquire({
+      rename: async (source: string, target: string) => {
+        try { await fs.rename(source, target); observe(`rename:${label(target)}:ok`); }
+        catch (error) { observe(`rename:${label(target)}:${(error as NodeJS.ErrnoException).code}`); throw error; }
+      },
+      lstat: async (path: string) => {
+        try {
+          const stat = await fs.lstat(path);
+          observe(`lstat:${label(path)}:${stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'file'}`);
+          return stat;
+        } catch (error) { observe(`lstat:${label(path)}:${(error as NodeJS.ErrnoException).code}`); throw error; }
+      },
+      readFile: async (path: string, encoding: 'utf8') => {
+        try { const text = await fs.readFile(path, encoding); observe(`read:${label(path)}:ok`); return text; }
+        catch (error) { observe(`read:${label(path)}:${(error as NodeJS.ErrnoException).code}`); throw error; }
+      },
+    });
     let active = 0; let maximum = 0; let completed = 0;
     const results = await Promise.allSettled(Array.from({ length: 20 }, async () => {
       const release = await lock(f.lock, 5000, 'lock timeout');
@@ -172,7 +211,7 @@ test('native filesystem PID lock serializes concurrent contenders and removes it
       } finally { active--; await release(); }
     }));
     const failures = results.filter(result => result.status === 'rejected');
-    assert.deepEqual(failures, [], 'all contenders must finish before fixture cleanup');
+    assert.deepEqual(failures, [], `all contenders must finish before fixture cleanup; bounded fixture metadata: ${observations.join(',')}`);
     assert.equal(maximum, 1);
     assert.equal(completed, 20);
     assert.deepEqual(await fs.readdir(f.root), []);
