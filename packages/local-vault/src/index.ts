@@ -62,6 +62,24 @@ interface CodexSetupRow {
 }
 const setupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/;
 const setupDigest = /^sha256:[a-f0-9]{64}$(?![\s\S])/;
+const SETUP_JOURNAL_SCHEMA = `create table if not exists codex_setup_operations (
+  operation_id text primary key,
+  intent_digest text not null,
+  lease_hash text not null unique,
+  state text not null check (state in ('running', 'terminal')),
+  nonce blob,
+  tag blob,
+  ciphertext blob,
+  check ((state = 'running' and nonce is null and tag is null and ciphertext is null)
+    or (state = 'terminal' and nonce is not null and tag is not null and ciphertext is not null))
+);`;
+
+export interface ScopedCodexSetupJournal {
+  claimCodexSetupOperation(operationId: string, intentDigest: string): Promise<LocalCodexSetupClaim>;
+  finishCodexSetupOperation(leaseId: string, intentDigest: string, result: LocalCodexSetupResult): Promise<void>;
+  close(): void;
+}
+
 function parseCodexSetupResult(value: unknown): LocalCodexSetupResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('setup_operation_invalid');
   const properties = Object.getOwnPropertyDescriptors(value);
@@ -141,6 +159,48 @@ export class LocalVault {
     this.root = options.root;
     this.#masterKey = options.masterKey;
     this.#database = database;
+  }
+
+  /** Open only the existing encrypted setup ledger; no capture or retention work. */
+  static async openSetupJournal(options: Pick<VaultOptions, 'root' | 'masterKey'>,
+    scope: VaultOperationScope): Promise<ScopedCodexSetupJournal> {
+    if (typeof options.root !== 'string' || !isAbsolute(options.root) || resolve(options.root) !== options.root
+      || !Buffer.isBuffer(options.masterKey) || options.masterKey.length !== 32 || !scope) {
+      throw new Error('vault_setup_journal_input_invalid');
+    }
+    const root = options.root, masterKey = Buffer.from(options.masterKey);
+    const fence = createVaultEffectFence(scope, 'vault_setup_journal');
+    let database: DatabaseSync | undefined, closed = false;
+    const close = () => {
+      fence.close();
+      if (closed) return;
+      closed = true;
+      try {database?.close();}
+      catch {throw new Error('vault_setup_journal_close_failed');}
+      finally {masterKey.fill(0);}
+    };
+    try {
+      await fence.step(() => mkdir(root, {recursive: true, mode: 0o700}));
+      // Capture the handle before post-open admission can reject it.
+      await fence.step(async () => {database = new DatabaseSync(resolve(root, 'vault.sqlite'));});
+      await fence.step(async () => {database!.exec('pragma journal_mode = WAL; pragma synchronous = FULL;');});
+      await fence.step(async () => {database!.exec(SETUP_JOURNAL_SCHEMA);});
+      const vault = new LocalVault({root, masterKey}, database!);
+      return Object.freeze({
+        claimCodexSetupOperation: (operationId: string, intentDigest: string) =>
+          fence.step(async () => vault.claimCodexSetupOperation(operationId, intentDigest)),
+        finishCodexSetupOperation: async (leaseId: string, intentDigest: string, result: LocalCodexSetupResult) => {
+          let accepted: LocalCodexSetupResult;
+          try {accepted = parseCodexSetupResult(result);}
+          catch {
+            await fence.assert();
+            throw new Error('setup_operation_invalid');
+          }
+          await fence.step(async () => vault.finishCodexSetupOperation(leaseId, intentDigest, accepted));
+        },
+        close,
+      });
+    } catch (error) {close(); throw error;}
   }
 
   static async open(options: VaultOptions): Promise<LocalVault> {
@@ -252,17 +312,7 @@ export class LocalVault {
         receipt_hash text references blobs(content_id),
         primary key (binding_id, work_key)
       );
-      create table if not exists codex_setup_operations (
-        operation_id text primary key,
-        intent_digest text not null,
-        lease_hash text not null unique,
-        state text not null check (state in ('running', 'terminal')),
-        nonce blob,
-        tag blob,
-        ciphertext blob,
-        check ((state = 'running' and nonce is null and tag is null and ciphertext is null)
-          or (state = 'terminal' and nonce is not null and tag is not null and ciphertext is not null))
-      );
+      ${SETUP_JOURNAL_SCHEMA}
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -1312,13 +1362,13 @@ export function loadExplicitTestKey(env: NodeJS.ProcessEnv): Buffer {
   return key;
 }
 
-export interface VaultKeyOperationScope {
+export interface VaultOperationScope {
   signal: AbortSignal;
   current(): Promise<boolean>;
 }
+export type VaultKeyOperationScope = VaultOperationScope;
 
-/** Cooperative effect admission, not proof that an OS adapter child has stopped. */
-export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore, scope?: VaultKeyOperationScope): Promise<Buffer> {
+function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: string) {
   const signal = scope?.signal, qualify = scope?.current.bind(scope);
   let withdrawn = false;
   const assertCurrent = async () => {
@@ -1327,18 +1377,29 @@ export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore, scop
     if (!withdrawn && signal instanceof AbortSignal && !signal.aborted) {
       try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
     }
-    if (!current || signal?.aborted) {withdrawn = true; throw new Error('vault_key_scope_unavailable');}
+    if (withdrawn || !current || signal?.aborted) {withdrawn = true; throw new Error(`${prefix}_scope_unavailable`);}
   };
   const step = async <T>(operation: () => Promise<T>): Promise<T> => {
     await assertCurrent();
     try {const result = await operation(); await assertCurrent(); return result;}
     catch (error) {
       await assertCurrent();
-      if (scope) throw new Error('vault_key_storage_unavailable');
+      if (scope) {
+        const safe = new Set(['setup_operation_invalid', 'setup_operation_conflict', 'setup_operation_integrity_failed',
+          'setup_operation_transaction_active', 'setup_operation_durability_unqualified']);
+        if (prefix === 'vault_setup_journal' && error instanceof Error && safe.has(error.message)) throw new Error(error.message);
+        throw new Error(`${prefix}_storage_unavailable`);
+      }
       throw error;
     }
   };
-  await assertCurrent();
+  return {assert: assertCurrent, step, close: () => {withdrawn = true;}};
+}
+
+/** Cooperative effect admission, not proof that an OS adapter child has stopped. */
+export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore, scope?: VaultKeyOperationScope): Promise<Buffer> {
+  const fence = createVaultEffectFence(scope, 'vault_key'), step = fence.step;
+  await fence.assert();
   if (!scope && process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
   const secureStore = await step(async () => store ?? await createSystemSecureStore());
   const account = 'vault-master-key-v1';
