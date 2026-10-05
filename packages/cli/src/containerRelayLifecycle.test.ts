@@ -148,6 +148,15 @@ test('entrypoint relaunches a failed owned child and renews boot identity while 
   const f = await fixture();
   await enableRelayAutostart(f.options);
   const children: ChildProcess[] = [];
+  const admittedChild = (child: ChildProcess) => until(async () => {
+    const heartbeat = await readFile(join(f.home, 'relay', 'container-heartbeat.json'), 'utf8')
+      .then(value => JSON.parse(value)).catch(error => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+    return heartbeat?.lifecycle === 'running' && heartbeat.childPid === child.pid
+      && heartbeat.startTicks === f.identity.startTicks && typeof heartbeat.childStartTicks === 'string';
+  });
   async function boot() {
     const controller = new AbortController();
     const result = run({ home: f.home, uid: f.options.uid, signal: controller.signal,
@@ -161,14 +170,17 @@ test('entrypoint relaunches a failed owned child and renews boot identity while 
   const first = await boot();
   try {
     await until(() => children.length === 1);
+    await admittedChild(children[0]!);
     children[0]!.kill('SIGTERM');
     await until(() => children.length === 2);
+    await admittedChild(children[1]!);
   } finally { first.controller.abort(); }
   assert.equal((await first.result).restarts, 1);
   f.identity.startTicks = '54321';
   const second = await boot();
   try {
     await until(() => children.length === 3);
+    await admittedChild(children[2]!);
     assert.equal((await relayAutostartStatus(f.options)).state, 'enabled');
     const marker = JSON.parse(await readFile(join(f.home, 'relay', 'container-entrypoint.json'), 'utf8'));
     assert.equal(marker.startTicks, '54321');
