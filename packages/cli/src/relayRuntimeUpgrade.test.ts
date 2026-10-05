@@ -77,6 +77,117 @@ test('cross-version recovery admission cannot authorize an upgrade, unknown pair
   }
 });
 
+test('validated rollback pauses an auto-restarting owned runtime before requiring it stopped', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture('0.2.149', '0.2.151');
+  await upgradeRelayRuntime(f.input, f.deps);
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  const journal = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(path, JSON.stringify({ ...journal, state: 'installed' }));
+  let live = true;
+  const calls: string[] = [];
+  const deps = { ...f.deps,
+    inspectStartup: async () => { calls.push('verified-startup'); return f.deps.inspectStartup(); },
+    assertStopped: async () => { calls.push('assert-stopped'); if (live) throw new Error('relay_upgrade_runtime_busy'); },
+    stop: async () => { calls.push('owned-pause-and-stop'); live = false; },
+  };
+  const result = await upgradeRelayRuntime({ ...f.input, rollback: true }, deps);
+  assert.equal(result.state, 'rolled_back');
+  assert.deepEqual(calls.slice(0, 3), ['verified-startup', 'owned-pause-and-stop', 'assert-stopped']);
+});
+
+test('rollback planning is read-only on a live runtime and invalid recovery never pauses it', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  for (const invalid of [false, true]) {
+    const f = await fixture('0.2.149', '0.2.151');
+    await upgradeRelayRuntime(f.input, f.deps);
+    const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+    const journal = JSON.parse(await readFile(path, 'utf8'));
+    await writeFile(path, JSON.stringify({ ...journal, state: 'installed',
+      ...(invalid ? { organizationId: 'org_foreign' } : {}) }));
+    const before = await readFile(path, 'utf8');
+    let pauses = 0;
+    const deps = { ...f.deps, assertStopped: async () => { throw new Error('relay_upgrade_runtime_busy'); },
+      stop: async () => { pauses++; } };
+    const input = { ...f.input, rollback: true, dryRun: true };
+    if (invalid) await assert.rejects(upgradeRelayRuntime(input, deps), /journal_invalid/);
+    else assert.equal((await upgradeRelayRuntime(input, deps)).state, 'planned');
+    assert.equal(pauses, 0);
+    assert.equal(await readFile(path, 'utf8'), before);
+  }
+});
+
+test('live rollback rejects unavailable, foreign and tampered recovery before pausing or changing files', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  for (const mode of ['missing', 'foreign-journal', 'foreign-startup', 'tampered-previous', 'tampered-current']) {
+    const f = await fixture('0.2.149', '0.2.151');
+    const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+    if (mode !== 'missing') {
+      await upgradeRelayRuntime(f.input, f.deps);
+      const journal = JSON.parse(await readFile(path, 'utf8'));
+      journal.state = 'installed';
+      if (mode === 'foreign-journal') journal.deviceId = '33333333-3333-4333-8333-333333333333';
+      if (mode === 'tampered-previous') journal.previous.shell += '# unapproved\n';
+      await writeFile(path, JSON.stringify(journal));
+    }
+    if (mode === 'tampered-current') {
+      await writeFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), '# unapproved\n');
+    }
+    const before = mode === 'missing' ? undefined : await readFile(path, 'utf8');
+    const shell = await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8');
+    const windows = await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma.cmd'), 'utf8');
+    const effects: string[] = [];
+    const deps = { ...f.deps,
+      assertStopped: async () => { throw new Error('relay_upgrade_runtime_busy'); },
+      inspectStartup: async () => mode === 'foreign-startup'
+        ? { version: '0.2.151', workspace: join(f.input.workspace, 'foreign') } : f.deps.inspectStartup(),
+      stop: async () => { effects.push('stop'); },
+      configureStartup: async () => { effects.push('configure'); },
+      start: async () => { effects.push('start'); },
+    };
+    const code = mode === 'missing' ? /rollback_unavailable/ : mode === 'foreign-startup'
+      ? /workspace_conflict/ : mode === 'tampered-current' ? /launcher_conflict/ : /journal_invalid/;
+    await assert.rejects(upgradeRelayRuntime({ ...f.input, rollback: true }, deps), code);
+    assert.deepEqual(effects, []);
+    if (before === undefined) await assert.rejects(readFile(path), { code: 'ENOENT' });
+    else assert.equal(await readFile(path, 'utf8'), before);
+    assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), shell);
+    assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma.cmd'), 'utf8'), windows);
+  }
+});
+
+test('rollback does not change launchers if the owned pause cannot prove a stopped runtime', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture('0.2.149', '0.2.151');
+  await upgradeRelayRuntime(f.input, f.deps);
+  const shell = await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8');
+  const calls: string[] = [];
+  const deps = { ...f.deps, stop: async () => { calls.push('stop'); },
+    assertStopped: async () => { calls.push('assert-stopped'); throw new Error('relay_upgrade_runtime_busy'); },
+    configureStartup: async () => { calls.push('configure'); }, start: async () => { calls.push('start'); } };
+  const result = await upgradeRelayRuntime({ ...f.input, rollback: true }, deps);
+  assert.equal(result.state, 'rollback_failed');
+  assert.equal(result.runtimeObservation, 'unconfirmed');
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls, ['stop', 'assert-stopped']);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), shell);
+});
+
+test('a recovery control refusing a busy named session cannot pause, reconfigure or overwrite launchers', async () => {
+  const { upgradeRelayRuntime } = await import(modulePath);
+  const f = await fixture('0.2.149', '0.2.151');
+  await upgradeRelayRuntime(f.input, f.deps);
+  const shell = await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8');
+  const effects: string[] = [];
+  const deps = { ...f.deps, stop: async () => { throw new Error('relay_upgrade_session_busy'); },
+    configureStartup: async () => { effects.push('configure'); }, start: async () => { effects.push('start'); } };
+  const result = await upgradeRelayRuntime({ ...f.input, rollback: true }, deps);
+  assert.equal(result.state, 'rollback_failed');
+  assert.equal(result.ok, false);
+  assert.deepEqual(effects, []);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), shell);
+});
+
 test('published command boundary identifies missing enrollment rather than an unknown command', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-upgrade-empty-'));
   const result = spawnSync(process.execPath, [join(import.meta.dirname, 'index.js'), 'relay', 'upgrade', '--dry-run'],

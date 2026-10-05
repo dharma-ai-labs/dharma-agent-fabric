@@ -81,7 +81,8 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
   if (!VERSION.test(input.version)) fail('version_invalid');
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(input.organizationId)
     || ![input.deviceId, input.workspaceId].every(id => /^[0-9a-f-]{36}$/i.test(id))) fail('identity_invalid');
-  await deps.assertStopped();
+  // Validated rollback owns the startup pause; an auto-restarting relay cannot be stopped first.
+  if (!input.rollback) await deps.assertStopped();
   const journalPath = join(input.home, 'relay', 'runtime-upgrade.json');
   let saved: unknown;
   try {

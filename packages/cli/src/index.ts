@@ -105,7 +105,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.152';
+const VERSION = '0.2.153';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1694,10 +1694,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     || startup.policy !== resolve(workspace, '.dharma', 'approved-policy.json')) {
     throw new Error('relay_upgrade_workspace_conflict');
   }
-  const assertStopped = async () => {
-    if (await relaySupervisorProcessState(home) !== 'stopped' || await relayProcessState(home) !== 'stopped') {
-      throw new Error('relay_upgrade_runtime_busy: finish current work, then stop the owned relay before upgrading.');
-    }
+  const assertSessionsStopped = async () => {
     const entries = await readdir(resolve(home, 'sessions'), { withFileTypes: true }).catch(error => {
       if (error.code === 'ENOENT') return []; throw error;
     });
@@ -1707,6 +1704,12 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         throw new Error('relay_upgrade_session_busy: finish and stop the named session before upgrading.');
       }
     }
+  };
+  const assertStopped = async () => {
+    if (await relaySupervisorProcessState(home) !== 'stopped' || await relayProcessState(home) !== 'stopped') {
+      throw new Error('relay_upgrade_runtime_busy: finish current work, then stop the owned relay before upgrading.');
+    }
+    await assertSessionsStopped();
   };
   return withRelayStartupMutation(async () => {
     const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
@@ -1728,6 +1731,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         launcher: startup.launcher, policy: startup.policy, version }),
       start: () => startRelayAutostart(startupOptions),
       stop: async () => {
+        await assertSessionsStopped();
         const activationLocks = resolve(home, 'registry', 'skill-activation-locks');
         const locks = await readdir(activationLocks).catch(error => {
           if (error.code === 'ENOENT') return []; throw error;
