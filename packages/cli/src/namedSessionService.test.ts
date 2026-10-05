@@ -79,6 +79,8 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         if (method === 'turn/start') {
           assert.equal(params.threadId, binding.sessionId);
           assert.equal(params.approvalPolicy, 'never');
+          const prompt = (params.input as Array<{ text: string }>)[0]!.text;
+          assert.equal(prompt.includes('SIGNED_REPOSITORY_CONTEXT_FIXTURE'), params.permissions === 'dharma_work');
           turns.push(String(params.permissions)); active++; maximumActive = Math.max(maximumActive, active);
           const turnId = randomUUID();
           const fail = failWork && turns.length === 2;
@@ -150,7 +152,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       withActivationBoundary: async (operation, work) => {
         assert.equal(boundaryWorkId, null);
         boundaryWorkId = work?.workId ?? null;
-        try { return await operation(); }
+        try { return await operation(work ? 'SIGNED_REPOSITORY_CONTEXT_FIXTURE' : undefined); }
         finally { boundaryWorkId = null; }
       } });
     try {
