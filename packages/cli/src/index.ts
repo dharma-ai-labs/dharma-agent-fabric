@@ -17,7 +17,7 @@ import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, refer
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
-  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
+  AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
@@ -1478,15 +1478,18 @@ export async function probeRelayConnection(
 }
 
 async function organizationApi(flags: Map<string, string | boolean>) {
+  const hostScope = currentBootstrapHostScope();
+  await hostScope?.assert();
   let enrolled: DeviceConfig | null = null;
   try { enrolled = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; } catch {}
   const organizationId = String(flags.get('organization-id') || enrolled?.organizationId || '').trim();
   if (!organizationId) throw new Error('Organization command requires --organization-id or an enrolled device.');
-  const token = String(process.env.DHARMA_ORG_API_TOKEN || '').trim()
+  const token = (hostScope ? '' : String(process.env.DHARMA_ORG_API_TOKEN || '').trim())
     || await loadOrganizationApiToken({
       hqUrl: enrolled?.hqUrl || portalUrl(flags),
       organizationId,
       installationId: enrolled?.installationId,
+      hostScope,
     }) || '';
   if (!token) throw new Error('Organization command requires a token in the OS credential store or DHARMA_ORG_API_TOKEN. Tokens are not accepted on the command line.');
   return new AgentFabricApiClient({
@@ -2346,12 +2349,13 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       config.serverSigningKeyset = redeemed.serverSigningKeyset;
     }
     await saveDeviceConfig(configPath(), config);
-    await saveDeviceEnrollmentAnchor({ config });
+    await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
     await saveOrganizationApiToken({
       hqUrl,
       organizationId,
       installationId: config.installationId,
       token: redeemed.organizationApiToken,
+      hostScope: currentBootstrapHostScope(),
     });
     scopes = redeemed.organizationApiTokenScopes;
   }
@@ -2360,8 +2364,9 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   try {
     organizationApiTokenStored = Boolean(await loadOrganizationApiToken({
       hqUrl, organizationId, installationId: config.installationId,
+      hostScope: currentBootstrapHostScope(),
     }));
-    if (!organizationApiTokenStored && !String(process.env.DHARMA_ORG_API_TOKEN || '').trim()) {
+    if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(process.env.DHARMA_ORG_API_TOKEN || '').trim())) {
       credentialFailure = 'organization_api_credentials_required';
     }
   } catch {
@@ -3040,7 +3045,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         config.serverSigningKeyset = candidate;
       }
       await saveDeviceConfig(configPath(), config);
-      await saveDeviceEnrollmentAnchor({ config });
+      await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
       await rm(pendingEnrollmentPath(), { force: true });
       return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
     }
@@ -3390,7 +3395,7 @@ async function workspaceRecoverRegistry(flags: Map<string, string | boolean>): P
   if (flags.has('apply') && flags.has('dry-run')) throw new Error('registry_recovery_flags_conflict');
   const config = await readDeviceConfig();
   if (!config) throw new Error('registry_recovery_enrollment_required');
-  const enrollment = await loadDeviceEnrollmentAnchor({ config });
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
   const workspace = await realpath(String(flags.get('workspace') || '.'));
   const home = dharmaHome();
   const startup = await inspectOwnedRelayAutostart({ home });
@@ -3600,6 +3605,8 @@ export async function receiptAwareProviderCapabilities(
   providers: ProviderCapability[],
   now = new Date(),
 ): Promise<ProviderCapability[]> {
+  const hostScope = currentBootstrapHostScope();
+  await hostScope?.assert();
   const selfTestedAt = now.toISOString();
   let freshUntil = now.toISOString();
   let receiverState: 'available' | 'unavailable' = 'unavailable';
@@ -3607,8 +3614,8 @@ export async function receiptAwareProviderCapabilities(
   let trustedKeyVersions: string[] = [];
   try {
     const config = await recoverDeviceEnrollmentConsistency({ configPath: configPath(), now,
-      hostScope: currentBootstrapHostScope() });
-    await loadDeviceEnrollmentAnchor({ config });
+      hostScope });
+    await loadDeviceEnrollmentAnchor({ config, hostScope });
     const keyset = config.serverSigningKeyset;
     if (!keyset) throw new Error('trusted_server_signing_keyset_unavailable');
     if (!validateTrustedServerSigningKeysetContract(keyset).ok
@@ -3625,8 +3632,10 @@ export async function receiptAwareProviderCapabilities(
     receiverState = 'available';
     reason = '';
   } catch (error) {
-    reason = error instanceof Error ? error.message : String(error);
+    await hostScope?.assert();
+    reason = hostScope ? 'codex_setup_host_receiver_unavailable' : error instanceof Error ? error.message : String(error);
   }
+  await hostScope?.assert();
   return providers.map((provider) => {
     const available = provider.taskExecution === 'available' && receiverState === 'available';
     return {
@@ -4301,6 +4310,12 @@ async function readDeviceConfig(): Promise<DeviceConfig | null> {
   } catch {await scope?.assert(); return null;}
 }
 
+async function enrolledDeviceIdentity(config: DeviceConfig, store?: SecureSecretStore) {
+  const hostScope = currentBootstrapHostScope();
+  return hostScope ? loadDeviceIdentity({config, store, hostScope}) : loadOrCreateDeviceIdentity({
+    hqUrl: config.hqUrl, organizationId: config.organizationId, installationId: config.installationId, store});
+}
+
 async function activeSkillAuthorization(
   provider: ProviderId,
   workspaceId: string,
@@ -4312,13 +4327,9 @@ async function activeSkillAuthorization(
   if (!await pathExistsOrThrow(pointer)) return null;
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
-    loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-    }),
-    loadDeviceEnrollmentAnchor({ config }),
-    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+    enrolledDeviceIdentity(config),
+    loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider, hostScope: currentBootstrapHostScope() }),
   ]);
   if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
@@ -4348,6 +4359,7 @@ async function activeSkillAuthorization(
       || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
     const refreshed = await loadActiveSkillAuthorizationAnchor({
       config, workspaceId, organizationAgentId, provider, fresh: true,
+      hostScope: currentBootstrapHostScope(),
     });
     if (!refreshed) throw error;
     return getActiveSkillBundleAuthorization(authorizationInput(refreshed.receiptHash));
@@ -4363,13 +4375,9 @@ async function expiredSkillAuthorizationForReplacement(
   const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId });
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
-    loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-    }),
-    loadDeviceEnrollmentAnchor({ config }),
-    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+    enrolledDeviceIdentity(config),
+    loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider, hostScope: currentBootstrapHostScope() }),
   ]);
   if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
@@ -4399,6 +4407,7 @@ async function expiredSkillAuthorizationForReplacement(
       || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
     const refreshed = await loadActiveSkillAuthorizationAnchor({
       config, workspaceId, organizationAgentId, provider, fresh: true,
+      hostScope: currentBootstrapHostScope(),
     });
     if (!refreshed) throw error;
     return getExpiredSkillBundleAuthorizationForReplacement(authorizationInput(refreshed.receiptHash));
@@ -4529,7 +4538,7 @@ async function repositoryInstallerRecoveryCommand(flags: Map<string, string | bo
   const organizationId = required(flags, 'organization-id');
   const config = await readDeviceConfig();
   if (!config || config.organizationId !== organizationId) throw new Error('Recovery requires current organization enrollment.');
-  await loadDeviceEnrollmentAnchor({ config });
+  await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
   const identity = await preflightBootstrapWorkspaceIdentity(workspace);
   const registered = selectLegacyInstallerRecoveryWorkspace(await registry(), { organizationId, deviceId: config.deviceId,
     path: workspace, repositoryRemoteHash: identity.fingerprint, workspaceId });
@@ -4593,6 +4602,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const requestedHqUrl = normalizeHqUrl(portalUrl(flags));
   let config = await readDeviceConfig();
   if (!config) {
+    if (currentBootstrapHostScope()) throw new Error('codex_setup_host_enrollment_missing');
     const loginFlags = new Map(flags);
     loginFlags.set('hq-url', requestedHqUrl);
     loginFlags.set('organization-id', organizationId);
@@ -5683,6 +5693,7 @@ export async function nativeSkillDirectoryForWorkspace(input: {
         const anchor = await loadActiveSkillAuthorizationAnchor({
           config, workspaceId: input.workspaceId, organizationAgentId: registered.repositoryAgentId,
           provider: input.provider, fresh: true,
+          hostScope: currentBootstrapHostScope(),
         });
         if (anchor) {
           const matching = await nativeSkillRootMatchingAuthorization({
@@ -6437,7 +6448,7 @@ export async function loadSkillSynchronizationPolicy(
   verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: config.serverPublicKeyEd25519,
     organizationId: config.organizationId, workspaceId });
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
-  const enrollment = await loadDeviceEnrollmentAnchor({ config, store: secureStore });
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, store: secureStore, hostScope: currentBootstrapHostScope() });
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
   verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
     organizationId: config.organizationId, workspaceId });
@@ -6479,7 +6490,8 @@ export async function prepareSkillUpdate(input: {
   let legacyBaselineMigrationRequested = false;
   if (input.automatic) {
     activeBundleId = (await loadActiveSkillAuthorizationAnchor({ config, workspaceId,
-      organizationAgentId: String(workspace.repositoryAgentId || ''), provider, store: input.store, fresh: true }))?.bundleId ?? null;
+      organizationAgentId: String(workspace.repositoryAgentId || ''), provider, store: input.store, fresh: true,
+      hostScope: currentBootstrapHostScope() }))?.bundleId ?? null;
     assertRunning();
   } else {
   try {
@@ -6625,12 +6637,9 @@ async function activatePreparedSkillUpdate(input: {
       workspaceId,
       organizationAgentId: String(workspace.repositoryAgentId || ''),
       provider,
+      hostScope: currentBootstrapHostScope(),
     });
-    const identity = await loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-    });
+    const identity = await enrolledDeviceIdentity(config);
     repositoryDelivery?.assertCurrent();
     const current = await loadSkillSynchronizationPolicy(policyPath, workspaceId);
     if (canonicalize(current.policy) !== canonicalize(policy)
@@ -6677,9 +6686,10 @@ async function activatePreparedSkillUpdate(input: {
           receiptHash: previousAnchor.receiptHash,
           activatedAt: previousAnchor.activatedAt,
           expiresAt: previousAnchor.expiresAt,
+          hostScope: currentBootstrapHostScope(),
         });
       } else {
-        await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider });
+        await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider, hostScope: currentBootstrapHostScope() });
       }
     };
     const recoverLocalInstallation = async (error: unknown): Promise<never> => {
@@ -6714,6 +6724,7 @@ async function activatePreparedSkillUpdate(input: {
           receiptHash: receipt.receiptHash,
           activatedAt: receipt.completedAt,
           expiresAt: bundle.expiresAt ?? null,
+          hostScope: currentBootstrapHostScope(),
         });
       }
     } catch (error) {
@@ -6757,12 +6768,8 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord, selected
   if (!config || config.organizationId !== workspace.organizationId || !workspace.repositoryBindingId || !workspace.repositoryAgentId) {
     throw new Error('Installed repository knowledge requires current enrolled workspace scope.');
   }
-  const identity = await loadOrCreateDeviceIdentity({
-    hqUrl: config.hqUrl,
-    organizationId: config.organizationId,
-    installationId: config.installationId,
-  });
-  const enrollment = await loadDeviceEnrollmentAnchor({ config });
+  const identity = await enrolledDeviceIdentity(config);
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) throw new Error('Installed knowledge device identity mismatch.');
   const organizationAgentId = workspace.repositoryAgentId;
   return selectInstalledRepositoryKnowledge({ organizationId: config.organizationId,
@@ -6773,7 +6780,8 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord, selected
         provider, workspaceId: workspace.workspaceId, workspace: workspace.path,
       });
       if (!await pathExistsOrThrow(resolve(root, '.dharma-managed/workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE'))) return null;
-      const anchorInput = { config, workspaceId: workspace.workspaceId, organizationAgentId, provider };
+      const anchorInput = { config, workspaceId: workspace.workspaceId, organizationAgentId, provider,
+        hostScope: currentBootstrapHostScope() };
       const active = await loadActiveSkillAuthorizationAnchor(anchorInput);
       if (!active) throw new Error('Installed knowledge release lacks a protected authorization anchor.');
       const read = (expectedReceiptHash: string) => readVerifiedRepositoryKnowledge({

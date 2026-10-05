@@ -8,6 +8,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import { appendRecoveredWorkspace, resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { bootstrapGrantMode } from './privateGrantInput.js';
+import { assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost } from './bootstrapHostScope.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -25,7 +26,9 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
     reportDiagnostics: true,
   });
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
-  return runInNewContext(`${compiled.outputText}\n${name}`, dependencies, {
+  return runInNewContext(`${compiled.outputText}\n${name}`, {
+    assertBootstrapHostSource, currentBootstrapHostScope, ...dependencies,
+  }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;
 }
@@ -97,6 +100,26 @@ function bootstrapDependencies(onboarding: Onboarding) {
   };
   return { dependencies, calls };
 }
+
+test('host onboarding cannot replace absent accepted enrollment with a legacy login', async () => {
+  const f = bootstrapDependencies({}); let logins = 0;
+  f.dependencies.login = async () => {logins++; return {status: 'pending'};};
+  const onboard = await caller('onboard', f.dependencies);
+  const workspace = resolve('/fixture', 'onboard');
+  const flags = new Map<string, string | boolean>([['workspace', workspace],
+    ['organization-id', 'org_fixture'], ['policy-revision', 'policy-v1']]);
+  const uuid = '11111111-1111-4111-8111-111111111111', digest = `sha256:${'a'.repeat(64)}`;
+  const now = Date.now();
+  await assert.rejects(runCodexBootstrapHost({workspace, signal: new AbortController().signal, current: async () => true,
+    intent: {schema: 'dharma.codex-setup-intent/v1', operationId: uuid, setupReference: uuid,
+      organizationId: 'org_fixture', recipientMembershipId: uuid, origin: 'https://fixture.invalid',
+      repositoryFingerprint: digest, policyRevision: 'policy-v1', scopeDigest: digest, contractDigest: digest,
+      hostContextId: uuid, issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()},
+  }, async () => onboard(flags)), {message: 'codex_setup_host_enrollment_missing'});
+  assert.equal(logins, 0);
+  assert.equal((await onboard(flags)).stage, 'approve_device');
+  assert.equal(logins, 1, 'ordinary legacy onboarding keeps its existing login path');
+});
 
 test('registry recovery command plans before applying one current-device anchor row', async () => {
   const workspace = resolve('/fixture', 'anchor');

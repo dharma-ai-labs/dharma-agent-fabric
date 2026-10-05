@@ -269,3 +269,14 @@ test('source mismatch permanently withdraws subsequent protected operations', as
   }), {message: 'codex_setup_host_scope_unavailable'});
   assert.equal(effects, 0);
 });
+
+test('capability projection cannot downgrade a closed scope into an ordinary unavailable receiver', async () => {
+  const api = contextApi();
+  let observed: PromiseSettledResult<unknown>[] = [];
+  await assert.rejects(api.runCodexBootstrapHost(await fixture(), async prepared => {
+    prepared.scope.close();
+    observed = await Promise.allSettled([cli.receiptAwareProviderCapabilities([])]);
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(observed[0]?.status, 'rejected');
+  if (observed[0]?.status === 'rejected') assert.equal(observed[0].reason.message, 'codex_setup_host_scope_unavailable');
+});

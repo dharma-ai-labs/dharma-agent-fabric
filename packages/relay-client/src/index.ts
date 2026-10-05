@@ -201,20 +201,40 @@ function organizationApiTokenAccountFor(hqUrl: string, organizationId: string, i
   return `organization-api-${sha256(scope).slice(0, 32)}`;
 }
 
+async function protectedStore(store: SecureSecretStore | undefined, scope?: HostOperationScope): Promise<SecureSecretStore> {
+  if (!scope) return store ?? await createSystemSecureStore();
+  const fence = new HostOperationFence(scope);
+  const raw = await fence.step(async () => store ?? await createSystemSecureStore());
+  return fence.store(raw);
+}
+
+function parseProtectedAnchor<T>(serialized: string, scope: HostOperationScope | undefined, message: string): T {
+  try {
+    const parsed = JSON.parse(serialized) as T;
+    if (scope && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) throw new Error();
+    return parsed;
+  } catch (error) {
+    if (scope) throw new Error(message);
+    throw error;
+  }
+}
+
 export async function saveOrganizationApiToken(input: {
   hqUrl: string;
   organizationId: string;
   installationId?: string;
   token: string;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<void> {
-  if (!/^dharma_org_[A-Za-z0-9_-]{40,120}$/.test(input.token)) {
+  const {hqUrl, organizationId, installationId, token, store: suppliedStore, hostScope} = input;
+  if (!/^dharma_org_[A-Za-z0-9_-]{40,120}$/.test(token)) {
     throw new Error('Organization API token is invalid.');
   }
-  const store = input.store ?? await createSystemSecureStore();
-  const account = organizationApiTokenAccountFor(input.hqUrl, input.organizationId, input.installationId);
-  await store.put(account, input.token);
-  if (await store.get(account) !== input.token) throw new Error('Secure store did not confirm the organization API token write.');
+  const account = organizationApiTokenAccountFor(hqUrl, organizationId, installationId);
+  const store = await protectedStore(suppliedStore, hostScope);
+  await store.put(account, token);
+  if (await store.get(account) !== token) throw new Error('Secure store did not confirm the organization API token write.');
 }
 
 export async function loadOrganizationApiToken(input: {
@@ -222,9 +242,11 @@ export async function loadOrganizationApiToken(input: {
   organizationId: string;
   installationId?: string;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<string | null> {
-  const store = input.store ?? await createSystemSecureStore();
-  const token = await store.get(organizationApiTokenAccountFor(input.hqUrl, input.organizationId, input.installationId));
+  const account = organizationApiTokenAccountFor(input.hqUrl, input.organizationId, input.installationId);
+  const store = await protectedStore(input.store, input.hostScope);
+  const token = await store.get(account);
   if (token && !/^dharma_org_[A-Za-z0-9_-]{40,120}$/.test(token)) {
     throw new Error('Organization API token in the secure store is corrupt.');
   }
@@ -292,11 +314,12 @@ export interface ActiveSkillAuthorizationAnchor {
 export async function saveDeviceEnrollmentAnchor(input: {
   config: DeviceConfig;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<DeviceEnrollmentAnchor> {
-  const store = input.store ?? await createSystemSecureStore();
-  const anchor = enrollmentAnchorFromConfig(input.config);
+  const anchor = enrollmentAnchorFromConfig(input.hostScope ? structuredClone(input.config) : input.config);
   const serialized = JSON.stringify(anchor);
   const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId, anchor.deviceId);
+  const store = await protectedStore(input.store, input.hostScope);
   await store.put(account, serialized);
   if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
   return anchor;
@@ -305,23 +328,26 @@ export async function saveDeviceEnrollmentAnchor(input: {
 export async function loadDeviceEnrollmentAnchor(input: {
   config: DeviceConfig;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<DeviceEnrollmentAnchor> {
-  const store = input.store ?? await createSystemSecureStore();
+  const {hostScope, store: suppliedStore} = input;
+  const config = hostScope ? structuredClone(input.config) : input.config;
   const account = enrollmentAnchorAccountFor(
-    input.config.hqUrl,
-    input.config.organizationId,
-    input.config.deviceId,
+    config.hqUrl,
+    config.organizationId,
+    config.deviceId,
   );
+  const store = await protectedStore(suppliedStore, hostScope);
   let serialized = await store.get(account);
   let migratedLegacy = false;
   if (!serialized) {
-    serialized = await store.get(legacyEnrollmentAnchorAccountFor(input.config.hqUrl, input.config.organizationId));
+    serialized = await store.get(legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
     migratedLegacy = Boolean(serialized);
   }
   if (!serialized) throw new Error('Device enrollment is not anchored in secure storage. Run dharma login again.');
-  const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
-  if (!enrollmentAnchorHasBaseIdentity(anchor, input.config)
-    || JSON.stringify(anchor.serverSigningKeyset ?? null) !== JSON.stringify(input.config.serverSigningKeyset ?? null)
+  const anchor = parseProtectedAnchor<DeviceEnrollmentAnchor>(serialized, hostScope, 'Protected enrollment anchor is corrupt.');
+  if (!enrollmentAnchorHasBaseIdentity(anchor, config)
+    || JSON.stringify(anchor.serverSigningKeyset ?? null) !== JSON.stringify(config.serverSigningKeyset ?? null)
   ) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
@@ -342,6 +368,7 @@ export async function saveActiveSkillAuthorizationAnchor(input: {
   activatedAt: string;
   expiresAt: string | null;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<ActiveSkillAuthorizationAnchor> {
   if (!/^[0-9a-f-]{36}$/i.test(input.organizationAgentId)
     || !/^[0-9a-f-]{36}$/i.test(input.bundleId) || !/^sha256:[a-f0-9]{64}$/i.test(input.receiptHash)
@@ -349,7 +376,6 @@ export async function saveActiveSkillAuthorizationAnchor(input: {
     || (input.expiresAt !== null && !Number.isFinite(Date.parse(input.expiresAt)))) {
     throw new Error('Active skill authorization anchor is invalid.');
   }
-  const store = input.store ?? await createSystemSecureStore();
   const anchor: ActiveSkillAuthorizationAnchor = {
     schema: 'dharma.active-skill-authorization-anchor/v1',
     organizationId: input.config.organizationId,
@@ -364,6 +390,7 @@ export async function saveActiveSkillAuthorizationAnchor(input: {
   };
   const serialized = JSON.stringify(anchor);
   const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  const store = await protectedStore(input.store, input.hostScope);
   await store.put(account, serialized);
   if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the active skill anchor write.');
   return anchor;
@@ -376,19 +403,22 @@ export async function loadActiveSkillAuthorizationAnchor(input: {
   provider: ProviderId;
   fresh?: boolean;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<ActiveSkillAuthorizationAnchor | null> {
-  const store = input.store ?? await createSystemSecureStore();
-  const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
-  const serialized = input.fresh && store.getFresh
+  const {workspaceId, organizationAgentId, provider, fresh, hostScope, store: suppliedStore} = input;
+  const config = {...input.config};
+  const account = activeSkillAnchorAccountFor(config, workspaceId, provider);
+  const store = await protectedStore(suppliedStore, hostScope);
+  const serialized = fresh && store.getFresh
     ? await store.getFresh(account)
     : await store.get(account);
   if (!serialized) return null;
-  const anchor = JSON.parse(serialized) as ActiveSkillAuthorizationAnchor;
+  const anchor = parseProtectedAnchor<ActiveSkillAuthorizationAnchor>(serialized, hostScope, 'Protected active skill authorization anchor is corrupt.');
   if (anchor.schema !== 'dharma.active-skill-authorization-anchor/v1'
-    || anchor.organizationId !== input.config.organizationId || anchor.deviceId !== input.config.deviceId
-    || anchor.organizationAgentId !== input.organizationAgentId
+    || anchor.organizationId !== config.organizationId || anchor.deviceId !== config.deviceId
+    || anchor.organizationAgentId !== organizationAgentId
     || !/^[0-9a-f-]{36}$/i.test(anchor.organizationAgentId)
-    || anchor.workspaceId !== input.workspaceId || anchor.provider !== input.provider
+    || anchor.workspaceId !== workspaceId || anchor.provider !== provider
     || !/^[0-9a-f-]{36}$/i.test(anchor.bundleId) || !/^sha256:[a-f0-9]{64}$/i.test(anchor.receiptHash)
     || !Number.isFinite(Date.parse(anchor.activatedAt))
     || (anchor.expiresAt !== null && !Number.isFinite(Date.parse(anchor.expiresAt)))) {
@@ -402,9 +432,10 @@ export async function deleteActiveSkillAuthorizationAnchor(input: {
   workspaceId: string;
   provider: ProviderId;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<void> {
-  const store = input.store ?? await createSystemSecureStore();
   const account = activeSkillAnchorAccountFor(input.config, input.workspaceId, input.provider);
+  const store = await protectedStore(input.store, input.hostScope);
   await store.delete(account);
   if (await store.get(account) !== null) throw new Error('Secure store did not confirm the active skill anchor deletion.');
 }
@@ -420,13 +451,16 @@ export interface EvidenceQuotaAnchor {
 export async function loadEvidenceQuotaAnchor(input: {
   config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<EvidenceQuotaAnchor | null> {
-  const store = input.store ?? await createSystemSecureStore();
-  const value = await store.get(evidenceQuotaAccountFor(
+  const {hostScope, store: suppliedStore} = input;
+  const account = evidenceQuotaAccountFor(
     input.config.hqUrl, input.config.organizationId, input.config.deviceId,
-  ));
+  );
+  const store = await protectedStore(suppliedStore, hostScope);
+  const value = await store.get(account);
   if (!value) return null;
-  const anchor = JSON.parse(value) as EvidenceQuotaAnchor;
+  const anchor = parseProtectedAnchor<EvidenceQuotaAnchor>(value, hostScope, 'Protected evidence quota anchor is corrupt.');
   if (anchor.schema !== 'dharma.evidence-quota-anchor/v1'
     || !/^\d{4}-\d{2}-\d{2}$/.test(anchor.day)
     || !Number.isSafeInteger(anchor.totalBytes) || anchor.totalBytes < 0
@@ -441,14 +475,16 @@ export async function saveEvidenceQuotaAnchor(input: {
   config: Pick<DeviceConfig, 'hqUrl' | 'organizationId' | 'deviceId'>;
   anchor: EvidenceQuotaAnchor;
   store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
 }): Promise<void> {
-  const store = input.store ?? await createSystemSecureStore();
   const account = evidenceQuotaAccountFor(
     input.config.hqUrl, input.config.organizationId, input.config.deviceId,
   );
-  await store.put(account, JSON.stringify(input.anchor));
+  const serialized = JSON.stringify(input.anchor);
+  const store = await protectedStore(input.store, input.hostScope);
+  await store.put(account, serialized);
   const confirmed = await store.get(account);
-  if (confirmed !== JSON.stringify(input.anchor)) {
+  if (confirmed !== serialized) {
     throw new Error('Secure store did not confirm the evidence quota anchor write.');
   }
 }
@@ -587,6 +623,16 @@ async function existingHostDeviceIdentity(config: DeviceConfig, store: SecureSec
       || !/^[A-Za-z0-9_-]{43}$/.test(privateJwk.x ?? '') || !/^[A-Za-z0-9_-]{43}$/.test(privateJwk.d ?? '')) throw unavailable();
     return {account, privateJwk, publicKeyEd25519: privateJwk.x!};
   } catch {throw unavailable();}
+}
+
+/** Read the accepted identity; never repair a missing key by generating one. */
+export async function loadDeviceIdentity(input: {config: DeviceConfig; store?: SecureSecretStore;
+  hostScope?: HostOperationScope}) {
+  const config = {...input.config};
+  const store = await protectedStore(input.store, input.hostScope);
+  const identity = await existingHostDeviceIdentity(config, store);
+  if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('relay_host_device_identity_unavailable');
+  return identity;
 }
 
 export async function beginEnrollment(input: {
