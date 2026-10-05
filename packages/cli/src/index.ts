@@ -104,7 +104,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.150';
+const VERSION = '0.2.151';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3992,7 +3992,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         }
         try {
           const context = work ? await readNamedSessionRepositoryContext({ installation: skill,
-            sharedRepositoryReady: sharedReady, scope: repositoryRoleScope(item),
+            sharedRepositoryReady: sharedReady, scope: repositoryRoleScope(item), workspaceRoot: item.path,
             loadAuthority: async () => ({ policy: await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
               source: await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) }) : undefined;
           return await operation(context);
