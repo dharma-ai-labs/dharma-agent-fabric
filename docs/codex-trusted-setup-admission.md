@@ -24,17 +24,35 @@ The following are deliberately not supplied by this module:
 
 - A supported host controller registering the dynamic tool only for the admitted
   setup operation, never through `runCodexLocalWork` or a peer handler.
-- An atomic, durable public operation journal binding operation, full intent and
-  connection context. Changed-payload reuse must fail. Interrupted/running leases
-  must not be recycled merely because time has passed or a client reconnected.
 - A fixed official bootstrap executor selecting host paths and immutable package
   internally, preserving genuine Codex harness attribution and recipient browser
   approval. No credential content or raw CLI output may enter the tool response.
 - Independent verification of a full readiness receipt against the frozen intent.
   A receipt-shaped UUID, successful delivery or executor return is not readiness.
 
-Callbacks in the offline tests are synthetic stubs for these required components.
-They do not establish that the components exist on either client.
+The executor, host qualification and readiness callbacks in the offline tests
+remain synthetic stubs. They do not establish those components on either client.
+
+## Local Journal Backend
+
+`createCodexSetupVaultJournal` adapts the public `LocalVault` setup-operation API.
+Its additive local SQLite table binds the operation to the admission's full
+intent/connection digest. Atomic insertion admits one lease; only the matching
+lease can write a terminal disposition. Running fences never expire or recycle
+automatically. An uncertain completion stays terminal and cannot be promoted to
+completed by a retry.
+
+Terminal dispositions are encrypted with the already-supplied vault key and
+authenticated against the operation and digest. The raw lease is not persisted.
+Journal writes require SQLite FULL or EXTRA synchronization. This component
+does not obtain a key, unlock a store, create an enrolled device, or select a
+vault path. Integration must use the existing, approved protected-vault boundary.
+No production database migration is part of this local table addition.
+
+SQLite reopen/lost-acknowledgement fixtures use synthetic keys and the same
+connection, thread and turn binding. They prove component persistence, not
+recovery across a changed native session. An owning controller still needs a
+reviewed reconciliation contract; a new context must not bypass the digest fence.
 
 ## Interruption And Reconciliation
 

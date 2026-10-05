@@ -51,6 +51,33 @@ export interface LocalProviderSessionLease {
   release(): void;
 }
 
+export type LocalCodexSetupResult = {state: 'completed'; readinessReceiptId: string}
+  | {state: 'unconfirmed'; code: 'setup_execution_unconfirmed'};
+export type LocalCodexSetupClaim = {state: 'acquired'; leaseId: string; intentDigest: string}
+  | {state: 'running'; intentDigest: string}
+  | {state: 'terminal'; intentDigest: string; result: LocalCodexSetupResult};
+interface CodexSetupRow {
+  operation_id: string; intent_digest: string; lease_hash: string; state: 'running' | 'terminal';
+  nonce: Uint8Array | null; tag: Uint8Array | null; ciphertext: Uint8Array | null;
+}
+const setupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/;
+const setupDigest = /^sha256:[a-f0-9]{64}$(?![\s\S])/;
+function parseCodexSetupResult(value: unknown): LocalCodexSetupResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('setup_operation_invalid');
+  const properties = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(properties).length !== 2
+    || Reflect.ownKeys(properties).some(key => typeof key !== 'string'
+      || !Object.hasOwn(properties[key]!, 'value'))) throw new Error('setup_operation_invalid');
+  if (properties.state?.value === 'completed' && properties.readinessReceiptId
+    && typeof properties.readinessReceiptId.value === 'string' && setupId.test(properties.readinessReceiptId.value)) {
+    return {state: 'completed', readinessReceiptId: properties.readinessReceiptId.value};
+  }
+  if (properties.state?.value === 'unconfirmed' && properties.code?.value === 'setup_execution_unconfirmed') {
+    return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+  }
+  throw new Error('setup_operation_invalid');
+}
+
 function processIsAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid < 1) return true;
   try { process.kill(pid, 0); return true; }
@@ -224,6 +251,17 @@ export class LocalVault {
         acknowledged_at text,
         receipt_hash text references blobs(content_id),
         primary key (binding_id, work_key)
+      );
+      create table if not exists codex_setup_operations (
+        operation_id text primary key,
+        intent_digest text not null,
+        lease_hash text not null unique,
+        state text not null check (state in ('running', 'terminal')),
+        nonce blob,
+        tag blob,
+        ciphertext blob,
+        check ((state = 'running' and nonce is null and tag is null and ciphertext is null)
+          or (state = 'terminal' and nonce is not null and tag is not null and ciphertext is not null))
       );
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
@@ -509,6 +547,69 @@ export class LocalVault {
     const actual = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
     if (actual !== contentId) throw new Error('Vault content hash mismatch.');
     return plaintext;
+  }
+
+  #assertSetupJournalDurability(): void {
+    const row = this.#database.prepare('pragma synchronous').get() as {synchronous: number};
+    if (!row || !Number.isInteger(row.synchronous) || row.synchronous < 2 || row.synchronous > 3) {
+      throw new Error('setup_operation_durability_unqualified');
+    }
+  }
+
+  #decodeCodexSetupResult(row: CodexSetupRow): LocalCodexSetupResult {
+    try {
+      if (row.state !== 'terminal' || !row.nonce || !row.tag || !row.ciphertext) throw new Error();
+      const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.nonce);
+      decipher.setAAD(Buffer.from(canonicalize({operationId: row.operation_id,
+        intentDigest: row.intent_digest, state: 'terminal'})));
+      decipher.setAuthTag(row.tag);
+      const value: unknown = JSON.parse(Buffer.concat([decipher.update(row.ciphertext), decipher.final()]).toString('utf8'));
+      return parseCodexSetupResult(value);
+    } catch {throw new Error('setup_operation_integrity_failed');}
+  }
+
+  claimCodexSetupOperation(operationId: string, intentDigest: string): LocalCodexSetupClaim {
+    if (typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_operation_invalid');
+    this.#assertSetupJournalDurability();
+    const leaseId = randomUUID();
+    const leaseHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const inserted = this.#database.prepare(`insert into codex_setup_operations
+      (operation_id, intent_digest, lease_hash, state) values (?, ?, ?, 'running')
+      on conflict(operation_id) do nothing`).run(operationId, intentDigest, leaseHash);
+    if (Number(inserted.changes) === 1) return {state: 'acquired', leaseId, intentDigest};
+    const row = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupRow | undefined;
+    if (!row || row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    if (row.state === 'running') return {state: 'running', intentDigest};
+    return {state: 'terminal', intentDigest, result: this.#decodeCodexSetupResult(row)};
+  }
+
+  finishCodexSetupOperation(leaseId: string, intentDigest: string, result: LocalCodexSetupResult): void {
+    if (typeof leaseId !== 'string' || !setupId.test(leaseId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_operation_invalid');
+    const accepted = parseCodexSetupResult(result); this.#assertSetupJournalDurability();
+    const leaseHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const row = this.#database.prepare('select * from codex_setup_operations where lease_hash = ? and intent_digest = ?')
+      .get(leaseHash, intentDigest) as unknown as CodexSetupRow | undefined;
+    if (!row) throw new Error('setup_operation_conflict');
+    if (row.state === 'terminal') {
+      if (canonicalize(this.#decodeCodexSetupResult(row)) !== canonicalize(accepted)) throw new Error('setup_operation_conflict');
+      return;
+    }
+    const nonce = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    cipher.setAAD(Buffer.from(canonicalize({operationId: row.operation_id, intentDigest, state: 'terminal'})));
+    const ciphertext = Buffer.concat([cipher.update(canonicalize(accepted)), cipher.final()]);
+    const changed = this.#database.prepare(`update codex_setup_operations set
+      state = 'terminal', nonce = ?, tag = ?, ciphertext = ?
+      where operation_id = ? and lease_hash = ? and intent_digest = ? and state = 'running'`)
+      .run(nonce, cipher.getAuthTag(), ciphertext, row.operation_id, leaseHash, intentDigest);
+    if (Number(changed.changes) !== 1) {
+      const current = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+        .get(row.operation_id) as unknown as CodexSetupRow;
+      if (!current || current.state !== 'terminal'
+        || canonicalize(this.#decodeCodexSetupResult(current)) !== canonicalize(accepted)) throw new Error('setup_operation_conflict');
+    }
   }
 
   #readProviderSessionBinding(bindingId: string): LocalProviderSessionBinding | null {
