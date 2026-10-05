@@ -153,12 +153,23 @@ function sameLocalProviderSessionIdentity(
 export class LocalVault {
   readonly root: string;
   readonly #masterKey: Buffer;
-  readonly #database: DatabaseSync;
+  readonly #databaseHandle: DatabaseSync;
+  #closed = false;
+  #databaseClosed = false;
 
   private constructor(options: VaultOptions, database: DatabaseSync) {
     this.root = options.root;
     this.#masterKey = options.masterKey;
-    this.#database = database;
+    this.#databaseHandle = database;
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) throw new Error('vault_closed');
+  }
+
+  get #database(): DatabaseSync {
+    this.#assertOpen();
+    return this.#databaseHandle;
   }
 
   /** Open only the existing encrypted setup ledger; no capture or retention work. */
@@ -204,10 +215,17 @@ export class LocalVault {
   }
 
   static async open(options: VaultOptions): Promise<LocalVault> {
-    if (options.masterKey.length !== 32) throw new Error('Vault master key must contain exactly 32 bytes.');
-    await mkdir(resolve(options.root, 'blobs'), { recursive: true, mode: 0o700 });
-    const database = new DatabaseSync(resolve(options.root, 'vault.sqlite'));
-    database.exec(`
+    const suppliedKey = options.masterKey;
+    if (!Buffer.isBuffer(suppliedKey) || suppliedKey.length !== 32) {
+      throw new Error('Vault master key must contain exactly 32 bytes.');
+    }
+    const root = options.root, rawLocalDays = options.rawLocalDays;
+    options = {root, rawLocalDays, masterKey: Buffer.from(suppliedKey)};
+    let database: DatabaseSync | undefined, vault: LocalVault | undefined;
+    try {
+      await mkdir(resolve(options.root, 'blobs'), { recursive: true, mode: 0o700 });
+      database = new DatabaseSync(resolve(options.root, 'vault.sqlite'));
+      database.exec(`
       pragma journal_mode = WAL;
       create table if not exists blobs (
         content_id text primary key,
@@ -319,19 +337,29 @@ export class LocalVault {
       create index if not exists capsule_content_refs_lookup_idx
         on capsule_content_refs(content_id, available_locally, trajectory_id, revision);
     `);
-    database.exec('begin immediate');
-    try {
-      const columns = database.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
-      if (!columns.some(column => column.name === 'receipt_hash')) {
-        database.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
-      }
-      database.exec('commit');
-    } catch (error) { database.exec('rollback'); database.close(); throw error; }
-    const vault = new LocalVault(options, database);
-    await vault.#recoverRetentionQuarantine();
-    await vault.#backfillCapsuleContentRefs();
-    await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
-    return vault;
+      database.exec('begin immediate');
+      try {
+        const columns = database.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
+        if (!columns.some(column => column.name === 'receipt_hash')) {
+          database.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
+        }
+        database.exec('commit');
+      } catch (error) { database.exec('rollback'); throw error; }
+      vault = new LocalVault(options, database);
+      await vault.#recoverRetentionQuarantine();
+      await vault.#backfillCapsuleContentRefs();
+      await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
+      return vault;
+    } catch (error) {
+      let cleanupConfirmed = true;
+      try {
+        if (vault) vault.close();
+        else database?.close();
+      } catch {cleanupConfirmed = false;}
+      finally {options.masterKey.fill(0);}
+      if (!cleanupConfirmed) throw new Error('vault_open_cleanup_unconfirmed');
+      throw error;
+    }
   }
 
   async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
@@ -343,6 +371,7 @@ export class LocalVault {
     if (existing) return { contentId, created: false };
 
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    this.#assertOpen();
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
@@ -546,7 +575,9 @@ export class LocalVault {
   }
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
+    this.#assertOpen();
     const source = await stat(sourcePath);
+    this.#assertOpen();
     if (!source.isFile() || source.size < 1) throw new Error('Vault source must be a non-empty file.');
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
@@ -554,8 +585,10 @@ export class LocalVault {
     const incoming = resolve(this.root, 'blobs', `.incoming-${process.pid}-${randomBytes(8).toString('hex')}`);
     const destination = await open(incoming, 'wx', 0o600);
     try {
+      this.#assertOpen();
       await destination.write(Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, Buffer.alloc(16)]));
       for await (const value of createReadStream(sourcePath, { highWaterMark: 1_048_576 })) {
+        this.#assertOpen();
         const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
         hash.update(chunk);
         const encrypted = cipher.update(chunk);
@@ -587,7 +620,9 @@ export class LocalVault {
   }
 
   async getBlob(contentId: string): Promise<Buffer> {
+    this.#assertOpen();
     const envelope = await readFile(this.#blobPath(contentId));
+    this.#assertOpen();
     if (envelope[0] !== BLOB_VERSION || envelope.length < 29) throw new Error('Unsupported or corrupt vault blob.');
     const nonce = envelope.subarray(1, 13);
     const tag = envelope.subarray(13, 29);
@@ -1172,7 +1207,13 @@ export class LocalVault {
   }
 
   close(): void {
-    this.#database.close();
+    this.#closed = true;
+    try {
+      if (!this.#databaseClosed) {
+        this.#databaseHandle.close();
+        this.#databaseClosed = true;
+      }
+    } finally {this.#masterKey.fill(0);}
   }
 
   #blobPath(contentId: string): string {
