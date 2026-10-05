@@ -3628,7 +3628,7 @@ export async function receiptAwareProviderCapabilities(
       .map((key) => key.keyVersion);
     if (trustedKeyVersions.length === 0) throw new Error('trusted_server_signing_keys_unavailable');
     freshUntil = actionDecisionCapabilityFreshUntil(keyset, trustedKeyVersions, now);
-    await new FileActionExecutionJournal(resolve(dharmaHome(), 'relay', 'action-execution-journal')).selfTest();
+    await new FileActionExecutionJournal(resolve(dharmaHome(), 'relay', 'action-execution-journal')).selfTest(hostScope);
     receiverState = 'available';
     reason = '';
   } catch (error) {

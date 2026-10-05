@@ -60,6 +60,24 @@ test('every CLI vault-key caller explicitly forwards the owning host scope', asy
   visit(source); assert.equal(callers, 11);
 });
 
+test('receiver readiness forwards the owning scope into its journal self-test', async () => {
+  const text = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const functions = source.statements.filter(ts.isFunctionDeclaration)
+    .filter(node => node.name?.text === 'receiptAwareProviderCapabilities');
+  assert.equal(functions.length, 1); let calls = 0;
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'selfTest') {
+      calls++; assert.equal(node.arguments.length, 1);
+      const scope = node.arguments[0];
+      assert.ok(scope && ts.isIdentifier(scope) && scope.text === 'hostScope');
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(functions[0]!); assert.equal(calls, 1);
+});
+
 test('official host entry refuses cancelled scope before selecting a checkout or protected store', async () => {
   const input = await fixture(); const aborted = new AbortController(); aborted.abort('private-abort-canary');
   await assert.rejects(invoke({...input, signal: aborted.signal}), {message: 'codex_setup_host_scope_unavailable'});
