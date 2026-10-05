@@ -103,6 +103,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
@@ -820,6 +821,8 @@ async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T
 }
 
 async function writeJsonAtomic(path: string, value: unknown) {
+  const hostScope = currentBootstrapHostScope();
+  if (hostScope) return writeBootstrapHostJson(path, value, hostScope);
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
