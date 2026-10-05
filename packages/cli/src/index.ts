@@ -105,7 +105,7 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 
-const VERSION = '0.2.151';
+const VERSION = '0.2.152';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
