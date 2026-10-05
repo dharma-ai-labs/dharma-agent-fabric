@@ -196,6 +196,20 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
       || !['local_analysis', 'customer_authorized_content'].includes(mode ?? '')) {
       throw new Error('named_session_repository_context_not_authorized');
     }
+    const authorization = loaded.policy.serverAuthorization;
+    if (authorization) {
+      if (authorization.schema !== 'dharma.workspace-policy-authorization/v1'
+        || authorization.organizationId !== input.scope.organizationId
+        || authorization.workspaceId !== input.scope.workspaceId) {
+        throw new Error('named_session_repository_context_scope_mismatch');
+      }
+      const issued = Date.parse(authorization.issuedAt), expires = Date.parse(authorization.expiresAt);
+      const now = (input.now ?? (() => new Date()))().getTime();
+      if (!Number.isFinite(issued) || !Number.isFinite(expires) || issued > now + 300_000
+        || expires <= now || expires <= issued || !authorization.signature || !authorization.keyVersion) {
+        throw new Error('named_session_repository_context_not_authorized');
+      }
+    }
     return { policy: loaded.policy, source: validateRepositorySourceAuthorization(loaded.source, input.scope,
       (input.now ?? (() => new Date()))()) };
   }
@@ -304,7 +318,18 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
     throw new Error('named_session_repository_context_not_authorized');
   }
   const final = await authority();
-  if (canonicalize(final) !== canonicalize(initial)
+  // Both loads retain current verification. Compare effective authority, not renewed transport metadata.
+  const effective = (loaded: typeof initial) => {
+    const authorization = loaded.policy.serverAuthorization;
+    if (!authorization) return loaded;
+    const { issuedAt: _issued, expiresAt: _expires, signature: _signature, ...binding } = authorization;
+    return { ...loaded, policy: { ...loaded.policy, serverAuthorization: binding } };
+  };
+  const before = initial.policy.serverAuthorization, after = final.policy.serverAuthorization;
+  if ((before && after && (Date.parse(after.issuedAt) < Date.parse(before.issuedAt)
+    || Date.parse(after.expiresAt) < Date.parse(before.expiresAt)
+    || (Date.parse(after.issuedAt) === Date.parse(before.issuedAt) && after.signature !== before.signature)))
+    || canonicalize(effective(final)) !== canonicalize(effective(initial))
     || canonicalize(await readNamedSessionPackageContent(input.installation, input.sharedRepositoryReady)) !== canonicalize(content)) {
     throw new Error('named_session_repository_context_changed');
   }
