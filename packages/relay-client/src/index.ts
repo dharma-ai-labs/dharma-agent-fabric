@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
-import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import {
   canonicalize,
@@ -12,6 +12,8 @@ import {
   type TrustedServerSigningKeyset,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
+export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
   type SetupClaimFailurePhase, type SetupClaimFailureDiagnostic } from './setupClaim.js';
@@ -451,7 +453,34 @@ export async function saveEvidenceQuotaAnchor(input: {
   }
 }
 
-async function atomicJson(path: string, value: unknown) {
+async function atomicJson(path: string, value: unknown, fence?: HostOperationFence) {
+  if (fence) {
+    await fence.step(() => mkdir(dirname(path), {recursive: true, mode: 0o700}));
+    const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let owned = false;
+    try {
+      await fence.assert(); handle = await open(temporary, 'wx', 0o600); owned = true; await fence.assert();
+      await fence.step(() => handle!.writeFile(`${JSON.stringify(value, null, 2)}\n`));
+      await fence.step(() => handle!.sync());
+      await handle.close(); handle = undefined;
+      await fence.step(() => rename(temporary, path));
+      let directory: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        await fence.assert(); directory = await open(dirname(path), 'r'); await fence.assert();
+        await fence.step(() => directory!.sync());
+      } catch {
+        // Unsupported directory fsync is not permission to swallow withdrawal.
+        await fence.assert();
+      } finally {await directory?.close();}
+    } finally {
+      await handle?.close();
+      // Cleanup only this successfully created, random temporary. Never undo a
+      // committed state rename or remove another actor's file after withdrawal.
+      if (owned) await rm(temporary, {force: true});
+    }
+    return;
+  }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   const handle = await open(temporary, 'wx', 0o600);
@@ -467,6 +496,35 @@ async function atomicJson(path: string, value: unknown) {
     try { await directory.sync(); } finally { await directory.close(); }
   } catch {
     // Directory fsync is unavailable on some supported hosts.
+  }
+}
+
+async function scopedResponseJson(response: Response, fence: HostOperationFence): Promise<Record<string, unknown>> {
+  const invalid = () => new Error('relay_host_transport_response_invalid');
+  if (!response.body || Number(response.headers.get('content-length')) > 5_000_000) throw invalid();
+  await fence.assert();
+  const reader = response.body.getReader();
+  const cancel = () => {void reader.cancel().catch(() => undefined);};
+  fence.signal.addEventListener('abort', cancel, {once: true});
+  const chunks: Uint8Array[] = []; let size = 0;
+  try {
+    await fence.assert();
+    while (true) {
+      const next = await fence.step(() => reader.read());
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > 5_000_000) throw invalid();
+      chunks.push(next.value);
+    }
+    await fence.assert();
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw invalid();
+    return parsed as Record<string, unknown>;
+  } catch {
+    await fence.assert(); throw invalid();
+  } finally {
+    fence.signal.removeEventListener('abort', cancel);
+    await reader.cancel().catch(() => undefined); reader.releaseLock();
   }
 }
 
@@ -516,6 +574,19 @@ export async function loadOrCreateDeviceIdentity(input: {
     throw new Error('Stored device identity is corrupt.');
   }
   return { account, privateJwk, publicKeyEd25519: privateJwk.x };
+}
+
+async function existingHostDeviceIdentity(config: DeviceConfig, store: SecureSecretStore) {
+  const account = accountFor(config.hqUrl, config.organizationId, config.installationId);
+  const current = await store.get(account);
+  const unavailable = () => new Error('relay_host_device_identity_unavailable');
+  if (!current) throw unavailable();
+  try {
+    const privateJwk = JSON.parse(current) as JsonWebKey;
+    if (privateJwk.kty !== 'OKP' || privateJwk.crv !== 'Ed25519'
+      || !/^[A-Za-z0-9_-]{43}$/.test(privateJwk.x ?? '') || !/^[A-Za-z0-9_-]{43}$/.test(privateJwk.d ?? '')) throw unavailable();
+    return {account, privateJwk, publicKeyEd25519: privateJwk.x!};
+  } catch {throw unavailable();}
 }
 
 export async function beginEnrollment(input: {
@@ -664,8 +735,9 @@ export async function pollEnrollment(input: {
   return body;
 }
 
-export async function saveDeviceConfig(path: string, config: DeviceConfig) {
-  await atomicJson(path, { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) });
+export async function saveDeviceConfig(path: string, config: DeviceConfig, hostScope?: HostOperationScope) {
+  const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
+  await atomicJson(path, { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) }, fence);
 }
 
 function verifyKeysetTransition(
@@ -688,9 +760,20 @@ export async function recoverDeviceEnrollmentConsistency(input: {
   configPath: string;
   store?: SecureSecretStore;
   now?: Date;
+  hostScope?: HostOperationScope;
 }): Promise<DeviceConfig> {
-  const config = await loadDeviceConfig(input.configPath);
-  const store = input.store ?? await createSystemSecureStore();
+  return recoverEnrollmentWithFence({...input,
+    hostFence: input.hostScope === undefined ? undefined : new HostOperationFence(input.hostScope)});
+}
+
+async function recoverEnrollmentWithFence(input: {
+  configPath: string; store?: SecureSecretStore; now?: Date; hostFence?: HostOperationFence;
+}): Promise<DeviceConfig> {
+  const config = input.hostFence ? await input.hostFence.step(() => loadDeviceConfig(input.configPath))
+    : await loadDeviceConfig(input.configPath);
+  const rawStore = input.hostFence ? await input.hostFence.step(async () => input.store ?? await createSystemSecureStore())
+    : input.store ?? await createSystemSecureStore();
+  const store = input.hostFence ? input.hostFence.store(rawStore) : rawStore;
   const account = enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId);
   let serialized = await store.get(account);
   let migratedLegacy = false;
@@ -716,7 +799,7 @@ export async function recoverDeviceEnrollmentConsistency(input: {
     const verification = verifyKeysetTransition(config, config.serverSigningKeyset, anchor.serverSigningKeyset, now);
     if (verification.ok) {
       const recovered = { ...config, serverSigningKeyset: anchor.serverSigningKeyset };
-      await saveDeviceConfig(input.configPath, recovered);
+      await atomicJson(input.configPath, recovered, input.hostFence);
       return recovered;
     }
   }
@@ -735,9 +818,20 @@ export async function installTrustedServerSigningKeyset(input: {
   candidate: TrustedServerSigningKeyset;
   store?: SecureSecretStore;
   now?: Date;
+  hostScope?: HostOperationScope;
 }): Promise<DeviceConfig> {
-  const store = input.store ?? await createSystemSecureStore();
-  const config = await recoverDeviceEnrollmentConsistency({ configPath: input.configPath, store, now: input.now });
+  return installKeysetWithFence({...input,
+    hostFence: input.hostScope === undefined ? undefined : new HostOperationFence(input.hostScope)});
+}
+
+async function installKeysetWithFence(input: {
+  configPath: string; candidate: TrustedServerSigningKeyset; store?: SecureSecretStore; now?: Date;
+  hostFence?: HostOperationFence;
+}): Promise<DeviceConfig> {
+  const rawStore = input.hostFence ? await input.hostFence.step(async () => input.store ?? await createSystemSecureStore())
+    : input.store ?? await createSystemSecureStore();
+  const store = input.hostFence ? input.hostFence.store(rawStore) : rawStore;
+  const config = await recoverEnrollmentWithFence({configPath: input.configPath, store, now: input.now, hostFence: input.hostFence});
   const now = input.now ?? new Date();
   if (canonicalize(config.serverSigningKeyset ?? null) === canonicalize(input.candidate)) return config;
   const verification = verifyKeysetTransition(config, config.serverSigningKeyset, input.candidate, now);
@@ -746,7 +840,7 @@ export async function installTrustedServerSigningKeyset(input: {
   // The protected anchor is the write-ahead record. If the process stops before
   // the disk configuration is replaced, startup verifies and completes it.
   await saveDeviceEnrollmentAnchor({ config: next, store });
-  await saveDeviceConfig(input.configPath, next);
+  await atomicJson(input.configPath, next, input.hostFence);
   return next;
 }
 
@@ -767,12 +861,14 @@ export class AgentFabricClient {
   readonly #store: SecureSecretStore;
   readonly #fetcher: typeof fetch;
   readonly #directTransport: boolean;
+  readonly #hostFence?: HostOperationFence;
+  readonly #hostBinding: string;
   #state: ProtocolState;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
-    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch;
+    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -782,12 +878,33 @@ export class AgentFabricClient {
     this.#state = input.state;
     this.#fetcher = input.fetcher || fetch;
     this.#directTransport = Boolean(input.fetcher);
+    this.#hostFence = input.hostFence;
+    this.#hostBinding = this.#binding();
   }
 
-  static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch }) {
-    const store = input.store ?? await createSystemSecureStore();
-    const config = await recoverDeviceEnrollmentConsistency({ configPath: input.configPath, store });
-    const identity = await loadOrCreateDeviceIdentity({
+  #binding() {
+    const {schema, organizationId, deviceId, installationId, hqUrl, relayUrl, publicKeyEd25519,
+      serverPublicKeyEd25519, enrolledAt, platform, setupClaimReference, setupClaimRepositoryFingerprint} = this.config;
+    return canonicalize({organizationId, deviceId, installationId: installationId ?? null, hqUrl, relayUrl,
+      publicKeyEd25519, serverPublicKeyEd25519, enrolledAt, platform, schema,
+      setupClaimReference: setupClaimReference ?? null, setupClaimRepositoryFingerprint: setupClaimRepositoryFingerprint ?? null});
+  }
+  async #assertHostScope() {
+    if (!this.#hostFence) return;
+    try {if (this.#binding() !== this.#hostBinding) this.#hostFence.withdraw();}
+    catch {this.#hostFence.withdraw();}
+    await this.#hostFence.assert();
+  }
+
+  static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch;
+    hostScope?: HostOperationScope }) {
+    const {configPath, statePath, store: suppliedStore, fetcher, hostScope} = input;
+    const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
+    const rawStore = fence ? await fence.step(async () => suppliedStore ?? await createSystemSecureStore())
+      : suppliedStore ?? await createSystemSecureStore();
+    const store = fence ? fence.store(rawStore) : rawStore;
+    const config = await recoverEnrollmentWithFence({configPath, store, hostFence: fence});
+    const identity = fence ? await existingHostDeviceIdentity(config, store) : await loadOrCreateDeviceIdentity({
       hqUrl: config.hqUrl,
       organizationId: config.organizationId,
       installationId: config.installationId,
@@ -805,22 +922,26 @@ export class AgentFabricClient {
       recoveredTaskCompletions: [],
     };
     try {
-      const parsed = JSON.parse(await readFile(input.statePath, 'utf8')) as unknown;
+      const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
+      const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
       state = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (fence) await fence.assert();
         throw new Error('Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.', { cause: error });
       }
     }
     state.recoveredTaskCompletions ??= [];
+    await fence?.assert();
     return new AgentFabricClient({
-      config, privateJwk: identity.privateJwk, configPath: input.configPath,
-      statePath: input.statePath, state, store, fetcher: input.fetcher,
+      config, privateJwk: identity.privateJwk, configPath,
+      statePath, state, store, fetcher, hostFence: fence,
     });
   }
 
   async openSession(relayVersion = '0.1.0') {
+    await this.#assertHostScope();
     if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
       // Content-bearing requests require refreshed consent. Repository connect
       // requests depend on current workspace registration. Both are rebuilt by
@@ -843,10 +964,11 @@ export class AgentFabricClient {
   async registerWorkspace(body: unknown) {
     const response = await this.signedPost('/agent-fabric/workspaces', body);
     if (response.serverSigningKeyset !== undefined) {
-      const next = await installTrustedServerSigningKeyset({
+      const next = await installKeysetWithFence({
         configPath: this.#configPath,
         candidate: response.serverSigningKeyset as TrustedServerSigningKeyset,
         store: this.#store,
+        hostFence: this.#hostFence,
       });
       Object.assign(this.config, next);
     }
@@ -879,6 +1001,7 @@ export class AgentFabricClient {
   }
   acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
     const operation = this.#serial.then(async () => {
+      await this.#assertHostScope();
       const current = this.#state.recoveredTaskCompletions || [];
       const matching = current.find((item) => item.taskId === taskId);
       if (!matching) return;
@@ -928,6 +1051,7 @@ export class AgentFabricClient {
   }
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
+    await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
     const serialized = method === 'GET' ? '' : canonicalize(body);
@@ -948,6 +1072,7 @@ export class AgentFabricClient {
       if (sameRequest) return recovered;
     }
     const timestamp = new Date().toISOString();
+    await this.#assertHostScope();
     const messageId = randomUUID();
     const nonce = randomBytes(24).toString('base64url');
     const sequence = this.#state.nextSequence;
@@ -977,6 +1102,7 @@ export class AgentFabricClient {
   }
 
   async #sendPending(): Promise<Record<string, unknown>> {
+    await this.#assertHostScope();
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');
     try {
@@ -1060,19 +1186,37 @@ export class AgentFabricClient {
     let status: number;
     let body: Record<string, unknown>;
     if (this.#directTransport) {
-      const response = await this.#fetcher(`${this.config.hqUrl.replace(/\/$/, '')}${pending.pathname}`, {
-        method: pending.method,
-        headers: pending.headers,
-        body: pending.method === 'GET' ? undefined : pending.body,
-      });
-      status = response.status;
-      body = await response.json() as Record<string, unknown>;
+      await this.#assertHostScope();
+      const url = `${this.config.hqUrl.replace(/\/$/, '')}${pending.pathname}`;
+      let response: Response | undefined;
+      try {
+        response = await this.#fetcher(url, {
+          method: pending.method, headers: pending.headers,
+          body: pending.method === 'GET' ? undefined : pending.body,
+          ...(this.#hostFence ? {signal: this.#hostFence.signal, redirect: 'error' as const} : {}),
+        });
+        await this.#assertHostScope();
+        if (this.#hostFence && (response.redirected || response.url && response.url !== url)) {
+          throw new Error('relay_host_transport_response_invalid');
+        }
+        status = response.status;
+        body = this.#hostFence ? await scopedResponseJson(response, this.#hostFence)
+          : await response.json() as Record<string, unknown>;
+      } catch (error) {
+        if (this.#hostFence) {
+          await response?.body?.cancel().catch(() => undefined);
+          await this.#assertHostScope();
+        }
+        throw error;
+      }
     } else {
       const response = await this.#sendViaRelay(pending);
+      await this.#assertHostScope();
       status = response.status;
       try { body = JSON.parse(response.body) as Record<string, unknown>; }
       catch { body = { ok: false, error: { code: 'invalid_relay_response', message: 'Relay returned invalid JSON.' } }; }
     }
+    await this.#assertHostScope();
     if (status < 200 || status >= 300) {
       // A deterministic client rejection is an acknowledgement, not an unknown
       // delivery outcome. Retaining it would permanently block the device
@@ -1146,7 +1290,8 @@ export class AgentFabricClient {
     }
   }
 
-  #sendViaRelay(pending: PendingRequest): Promise<{ status: number; body: string }> {
+  async #sendViaRelay(pending: PendingRequest): Promise<{ status: number; body: string }> {
+    await this.#assertHostScope();
     return new Promise((accept, reject) => {
       const relay = new URL(normalizeRelayUrl(this.config.relayUrl));
       relay.pathname = '/v1/connect';
@@ -1157,6 +1302,7 @@ export class AgentFabricClient {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        this.#hostFence?.signal.removeEventListener('abort', abort);
         callback();
         if (closeSocket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
       };
@@ -1164,11 +1310,19 @@ export class AgentFabricClient {
         () => finish(() => reject(new Error('Relay response timed out.'))),
         RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
       );
-      socket.addEventListener('open', () => socket.send(JSON.stringify({
-        requestId: pending.headers['x-dharma-message-id'], method: pending.method,
-        pathname: pending.pathname, headers: pending.headers, body: pending.body,
-      })));
+      const abort = () => finish(() => reject(new Error('relay_host_scope_unavailable')));
+      this.#hostFence?.signal.addEventListener('abort', abort, {once: true});
+      if (this.#hostFence?.signal.aborted) abort();
+      socket.addEventListener('open', () => {
+        const send = () => {if (!settled) socket.send(JSON.stringify({
+          requestId: pending.headers['x-dharma-message-id'], method: pending.method,
+          pathname: pending.pathname, headers: pending.headers, body: pending.body,
+        }));};
+        if (!this.#hostFence) send();
+        else void this.#assertHostScope().then(send).catch(error => finish(() => reject(error)));
+      });
       socket.addEventListener('message', (event) => {
+        if (settled) return;
         try {
           const response = JSON.parse(String(event.data)) as { requestId: string; status: number; body: string };
           if (response.requestId !== pending.headers['x-dharma-message-id']) return;
@@ -1185,14 +1339,15 @@ export class AgentFabricClient {
     });
   }
 
-  #persist() {
+  async #persist() {
+    await this.#assertHostScope();
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay
     // that can outlive consent or the workspace registration they depend on.
     const durableState = this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)
       ? { ...this.#state, nextSequence: this.#state.nextSequence + 1, pending: null }
       : this.#state;
-    return atomicJson(this.#statePath, durableState);
+    return atomicJson(this.#statePath, durableState, this.#hostFence);
   }
 }
 

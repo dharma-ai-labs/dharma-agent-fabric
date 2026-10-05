@@ -6,6 +6,7 @@ import {
   type SetupClaimContext, type SetupClaimChallenge,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
 import {
   loadOrCreateDeviceIdentity, normalizeHqUrl, normalizeRelayUrl, saveDeviceConfig,
   saveDeviceEnrollmentAnchor, saveOrganizationApiToken,
@@ -35,7 +36,7 @@ export interface ClaimSetupReferenceInput {
   onRecipientApprovalRequired?: (approval: BootstrapRecipientApproval) => Promise<void> | void;
   /** Owning host only; never derived from model arguments or cached approval.
    * Absence preserves the existing CLI claim path. Cancellation is cooperative. */
-  hostScope?: {signal: AbortSignal; current(): Promise<boolean>};
+  hostScope?: HostOperationScope;
   /** Local phase observation only: no vendor exception, response body, or retry authority. */
   onFailureDiagnostic?: (diagnostic: Readonly<SetupClaimFailureDiagnostic>) => void;
 }
@@ -126,16 +127,9 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     if (!Number.isFinite(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 900_000) return fail();
     const deadline = now() + maximumWaitMs;
     const hostScope = input.hostScope;
-    if (hostScope !== undefined && (!hostScope || !(hostScope.signal instanceof AbortSignal)
-      || typeof hostScope.current !== 'function')) return fail();
-    const withdrawn = new AbortController();
-    const scopeSignal = hostScope ? AbortSignal.any([hostScope.signal, withdrawn.signal]) : undefined;
-    const current = hostScope?.current.bind(hostScope);
-    const assertScope = async () => {
-      try {
-        if (scopeSignal?.aborted || current && await current() !== true || scopeSignal?.aborted) return fail();
-      } catch {withdrawn.abort(); return fail();}
-    };
+    const hostFence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
+    const scopeSignal = hostFence?.signal;
+    const assertScope = async () => {await hostFence?.assert();};
     const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
       await assertScope(); const result = await operation(); await assertScope(); return result;
     };
@@ -144,13 +138,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     };
     phase = 'store_preflight';
     const rawStore = await guarded(async () => input.store ?? await createSystemSecureStore());
-    const store: SecureSecretStore = hostScope ? {
-      backend: rawStore.backend,
-      get: account => guarded(() => rawStore.get(account)),
-      getFresh: account => guarded(() => (rawStore.getFresh ?? rawStore.get).call(rawStore, account)),
-      put: (account, value) => guarded(() => rawStore.put(account, value)),
-      delete: account => guarded(() => rawStore.delete(account)),
-    } : rawStore;
+    const store: SecureSecretStore = hostFence ? hostFence.store(rawStore) : rawStore;
     const probeAccount = `setup-claim-preflight-${randomBytes(16).toString('hex')}`;
     const probeValue = randomBytes(32).toString('base64url');
     try {
@@ -292,7 +280,8 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       await assertCommit();
       await saveDeviceEnrollmentAnchor({ config, store });
       await assertCommit();
-      await saveDeviceConfig(input.configPath, config);
+      await saveDeviceConfig(input.configPath, config, {signal: scopeSignal ?? new AbortController().signal,
+        current: async () => {await assertCommit(); return true;}});
       await assertCommit();
       return { config, scopes: [...SCOPES] };
     }
