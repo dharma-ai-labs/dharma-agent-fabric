@@ -720,117 +720,180 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
 }
 
 async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessage: string): Promise<() => Promise<void>> {
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
+  type OwnedPath = {dev: bigint; ino: bigint; directory: boolean};
+  const owned = new Map<string, OwnedPath | null>();
+  const recordOwned = async (path: string) => {
+    if (!scope) return;
+    owned.set(path, null);
+    // Metadata for cooperative cleanup is captured even if creation withdrew authority.
+    const metadata = await lstat(path, {bigint: true});
+    if (metadata.isSymbolicLink() || !metadata.isFile() && !metadata.isDirectory()) {
+      throw new Error('codex_setup_host_lock_cleanup_unconfirmed');
+    }
+    owned.set(path, {dev: metadata.dev, ino: metadata.ino, directory: metadata.isDirectory()});
+  };
+  const cleanupOwned = async (path: string, directory = false) => {
+    if (!scope) {
+      if (directory) await rm(path, {recursive: true, force: true});
+      else await unlink(path).catch(() => undefined);
+      return;
+    }
+    if (!owned.has(path)) return;
     try {
-      await writeFile(candidate, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
-      await link(candidate, lockPath);
-      await unlink(candidate);
-      return async () => { await unlink(lockPath).catch(() => undefined); };
-    } catch (error) {
-      await unlink(candidate).catch(() => undefined);
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const recoveryPath = `${lockPath}.recovery`;
-      const recoveryCandidate = `${recoveryPath}.${process.pid}.${randomUUID()}.candidate`;
-      let windowsRecoveryOwner: number | undefined;
+      const expected = owned.get(path);
+      if (!expected) throw new Error();
+      const metadata = await lstat(path, {bigint: true}).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error;
+      });
+      if (metadata) {
+        if (metadata.isSymbolicLink() || metadata.dev !== expected.dev || metadata.ino !== expected.ino
+          || metadata.isDirectory() !== expected.directory || !expected.directory && !metadata.isFile()) throw new Error();
+        if (expected.directory) await rm(path, {recursive: true, force: true});
+        else await unlink(path);
+      }
+      owned.delete(path);
+    } catch {throw new Error('codex_setup_host_lock_cleanup_unconfirmed');}
+  };
+  try {
+    await step(() => mkdir(dirname(lockPath), { recursive: true, mode: 0o700 }));
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
       try {
-        await mkdir(recoveryCandidate);
-        await writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 });
-        for (;;) {
-          try { await rename(recoveryCandidate, recoveryPath); break; }
-          catch (renameError) {
-            if (process.platform !== 'win32' || (renameError as NodeJS.ErrnoException).code !== 'EPERM') throw renameError;
-            // Windows uses EPERM for an existing destination. Its owner can
-            // finish during inspection; retry publication, never ignore denial.
+        await step(async () => {
+          await writeFile(candidate, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
+          await recordOwned(candidate);
+        });
+        await step(async () => {
+          await link(candidate, lockPath);
+          if (scope) owned.set(lockPath, owned.get(candidate)!);
+        });
+        await step(() => cleanupOwned(candidate));
+      let release: Promise<void> | undefined;
+      return () => release ??= cleanupOwned(lockPath);
+      } catch (error) {
+        await cleanupOwned(candidate);
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const recoveryPath = `${lockPath}.recovery`;
+        const recoveryCandidate = `${recoveryPath}.${process.pid}.${randomUUID()}.candidate`;
+        let windowsRecoveryOwner: number | undefined;
+        try {
+          await step(async () => {await mkdir(recoveryCandidate); await recordOwned(recoveryCandidate);});
+          await step(() => writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 }));
+          for (;;) {
             try {
-              const directory = await lstat(recoveryPath);
-              const ownerPath = resolve(recoveryPath, 'owner');
-              const ownerFile = await lstat(ownerPath);
-              const ownerText = (await readFile(ownerPath, 'utf8')).trim();
-              const owner = Number(ownerText);
-              if (!directory.isDirectory() || directory.isSymbolicLink()
-                || !ownerFile.isFile() || ownerFile.isSymbolicLink()
-                || !/^[1-9][0-9]*$/.test(ownerText) || !Number.isSafeInteger(owner)) throw renameError;
-              windowsRecoveryOwner = owner;
-            } catch (inspectionError) {
-              let disappeared = (inspectionError as NodeJS.ErrnoException).code === 'ENOENT';
-              if (!disappeared && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
-                // Windows can deny owner reads while its directory is being
-                // deleted. Retry only when fresh metadata confirms absence.
-                try { await lstat(recoveryPath); }
-                catch (readbackError) { disappeared = (readbackError as NodeJS.ErrnoException).code === 'ENOENT'; }
-              }
-              if (disappeared && Date.now() < deadline) {
-                await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-                continue;
+              await step(async () => {
+                await rename(recoveryCandidate, recoveryPath);
+                if (scope) {owned.set(recoveryPath, owned.get(recoveryCandidate)!); owned.delete(recoveryCandidate);}
+              });
+              break;
+            }
+            catch (renameError) {
+              if (process.platform !== 'win32' || (renameError as NodeJS.ErrnoException).code !== 'EPERM') throw renameError;
+              // Windows uses EPERM for an existing destination. Its owner can
+              // finish during inspection; retry publication, never ignore denial.
+              try {
+                const directory = await step(() => lstat(recoveryPath));
+                const ownerPath = resolve(recoveryPath, 'owner');
+                const ownerFile = await step(() => lstat(ownerPath));
+                const ownerText = (await step(() => readFile(ownerPath, 'utf8'))).trim();
+                const owner = Number(ownerText);
+                if (!directory.isDirectory() || directory.isSymbolicLink()
+                  || !ownerFile.isFile() || ownerFile.isSymbolicLink()
+                  || !/^[1-9][0-9]*$/.test(ownerText) || !Number.isSafeInteger(owner)) throw renameError;
+                windowsRecoveryOwner = owner;
+              } catch (inspectionError) {
+                let disappeared = (inspectionError as NodeJS.ErrnoException).code === 'ENOENT';
+                if (!disappeared && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
+                  // Windows can deny owner reads while its directory is being
+                  // deleted. Retry only when fresh metadata confirms absence.
+                  try { await step(() => lstat(recoveryPath)); }
+                  catch (readbackError) { disappeared = (readbackError as NodeJS.ErrnoException).code === 'ENOENT'; }
+                }
+                if (disappeared && Date.now() < deadline) {
+                  await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
+                  continue;
+                }
+                throw renameError;
               }
               throw renameError;
             }
-            throw renameError;
           }
-        }
-        try {
-          let ownerPid = 0;
-          try { ownerPid = Number((await readFile(lockPath, 'utf8')).trim()); }
-          catch (readError) {
-            if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          }
-          let ownerAlive = Number.isSafeInteger(ownerPid) && ownerPid > 0;
-          if (ownerAlive) {
-            try { process.kill(ownerPid, 0); }
-            catch (killError) { ownerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
-          }
-          if (!ownerAlive) {
-            const quarantine = `${lockPath}.dead.${randomUUID()}`;
-            try {
-              await rename(lockPath, quarantine);
-              await unlink(quarantine);
-              continue;
-            } catch (renameError) {
-              if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+          try {
+            let ownerPid = 0;
+            try { ownerPid = Number((await step(() => readFile(lockPath, 'utf8'))).trim()); }
+            catch (readError) {
+              if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
             }
+            let ownerAlive = Number.isSafeInteger(ownerPid) && ownerPid > 0;
+            if (ownerAlive) {
+              try { await step(async () => {process.kill(ownerPid, 0);}); }
+              catch (killError) { ownerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+            }
+            if (!ownerAlive) {
+              const quarantine = `${lockPath}.dead.${randomUUID()}`;
+              try {
+                await step(() => rename(lockPath, quarantine));
+                await step(() => unlink(quarantine));
+                continue;
+              } catch (renameError) {
+                if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+              }
+            }
+          } finally {
+            await cleanupOwned(recoveryPath, true);
           }
-        } finally {
-          await rm(recoveryPath, { recursive: true, force: true });
+        } catch (recoveryError) {
+          await cleanupOwned(recoveryCandidate, true);
+          const recoveryCode = (recoveryError as NodeJS.ErrnoException).code || '';
+          let recoveryOwner = 0;
+          if (process.platform === 'win32' && recoveryCode === 'EPERM') {
+            if (windowsRecoveryOwner === undefined) throw recoveryError;
+            recoveryOwner = windowsRecoveryOwner;
+          } else {
+            if (!['EEXIST', 'ENOTEMPTY'].includes(recoveryCode)) throw recoveryError;
+            try { recoveryOwner = Number((await step(() => readFile(resolve(recoveryPath, 'owner'), 'utf8'))).trim()); } catch {}
+          }
+          let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
+          if (recoveryOwnerAlive) {
+            try { await step(async () => {process.kill(recoveryOwner, 0);}); }
+            catch (killError) { recoveryOwnerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+          }
+          if (!recoveryOwnerAlive) {
+            const quarantine = `${recoveryPath}.dead.${randomUUID()}`;
+            try {
+              await step(() => rename(recoveryPath, quarantine));
+              await step(() => rm(quarantine, { recursive: true, force: true }));
+            }
+            catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError; }
+          }
         }
-      } catch (recoveryError) {
-        await rm(recoveryCandidate, { recursive: true, force: true });
-        const recoveryCode = (recoveryError as NodeJS.ErrnoException).code || '';
-        let recoveryOwner = 0;
-        if (process.platform === 'win32' && recoveryCode === 'EPERM') {
-          if (windowsRecoveryOwner === undefined) throw recoveryError;
-          recoveryOwner = windowsRecoveryOwner;
-        } else {
-          if (!['EEXIST', 'ENOTEMPTY'].includes(recoveryCode)) throw recoveryError;
-          try { recoveryOwner = Number((await readFile(resolve(recoveryPath, 'owner'), 'utf8')).trim()); } catch {}
-        }
-        let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
-        if (recoveryOwnerAlive) {
-          try { process.kill(recoveryOwner, 0); }
-          catch (killError) { recoveryOwnerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
-        }
-        if (!recoveryOwnerAlive) {
-          const quarantine = `${recoveryPath}.dead.${randomUUID()}`;
-          try { await rename(recoveryPath, quarantine); await rm(quarantine, { recursive: true, force: true }); }
-          catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError; }
-        }
+        if (Date.now() >= deadline) throw new Error(scope ? 'codex_setup_host_lock_timeout' : timeoutMessage);
+        await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
       }
-      if (Date.now() >= deadline) throw new Error(timeoutMessage);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
+  } catch (error) {
+    let cleanupFailed = false;
+    for (const path of owned.keys()) try {await cleanupOwned(path);} catch {cleanupFailed = true;}
+    if (cleanupFailed) throw new Error('codex_setup_host_lock_cleanup_unconfirmed');
+    if (!scope) throw error;
+    await scope.assert();
+    if (error instanceof Error && error.message === 'codex_setup_host_lock_timeout') throw error;
+    throw new Error('codex_setup_host_lock_failed');
   }
 }
 
 async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
-  const release = await acquirePidLock(
-    `${evidenceUploadLedgerPath()}.lock`,
-    5_000,
-    'Timed out waiting for the evidence upload ledger lock.',
-  );
-  try { return await operation(); }
-  finally { await release(); }
+  const scope = currentBootstrapHostScope();
+  const step = <R>(effect: () => Promise<R>): Promise<R> => scope ? scope.step(effect) : effect();
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await step(async () => {release = await acquirePidLock(
+      `${evidenceUploadLedgerPath()}.lock`, 5_000, 'Timed out waiting for the evidence upload ledger lock.');});
+    return await step(operation);
+  } finally { await release?.(); }
 }
 
 async function writeJsonAtomic(path: string, value: unknown) {
@@ -1080,16 +1143,24 @@ async function withFileLock<T>(
   operation: () => Promise<T>,
   timeoutMessage = 'Timed out waiting for the workspace authorization lock.',
 ): Promise<T> {
-  const release = await acquirePidLock(lockPath, 10_000, timeoutMessage);
-  try { return await operation(); }
-  finally { await release(); }
+  const scope = currentBootstrapHostScope();
+  const step = <R>(effect: () => Promise<R>): Promise<R> => scope ? scope.step(effect) : effect();
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await step(async () => {release = await acquirePidLock(lockPath, 10_000, timeoutMessage);});
+    return await step(operation);
+  } finally { await release?.(); }
 }
 
 export async function withRelayStartupMutation<T>(operation: () => Promise<T>, home = dharmaHome()): Promise<T> {
-  const release = await acquirePidLock(resolve(home, 'autostart-mutation.lock'), 30_000,
-    'demo_watch_startup_busy: another startup operation is still running.');
-  try { return await operation(); }
-  finally { await release(); }
+  const scope = currentBootstrapHostScope();
+  const step = <R>(effect: () => Promise<R>): Promise<R> => scope ? scope.step(effect) : effect();
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await step(async () => {release = await acquirePidLock(resolve(home, 'autostart-mutation.lock'), 30_000,
+      'demo_watch_startup_busy: another startup operation is still running.');});
+    return await step(operation);
+  } finally { await release?.(); }
 }
 
 export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
@@ -1440,21 +1511,45 @@ async function registry(): Promise<WorkspaceRecord[]> {
 }
 
 async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
-  await mkdir(resolve(dharmaHome(), 'registry'), { recursive: true, mode: 0o700 });
-  await writeJsonAtomic(workspaceRegistryPath(), items);
+  const scope = currentBootstrapHostScope();
+  try {
+    await scope?.assert();
+    const snapshot = scope ? structuredClone(items) : items;
+    const directory = resolve(dharmaHome(), 'registry');
+    if (scope) await scope.step(() => mkdir(directory, {recursive: true, mode: 0o700}));
+    else await mkdir(directory, {recursive: true, mode: 0o700});
+    await writeJsonAtomic(workspaceRegistryPath(), snapshot);
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('workspace_registry_write_failed');
+  }
 }
 
 async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
-  const release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
-    'Workspace registry is busy; preserve it for recovery.');
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
+  let release: (() => Promise<void>) | undefined;
   try {
-    const value = await readFile(workspaceRegistryPath(), 'utf8').catch(error => {
+    await scope?.assert();
+    const snapshot = scope ? structuredClone(entry) : entry;
+    await step(async () => {release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
+      'Workspace registry is busy; preserve it for recovery.');});
+    const value = await step(() => readFile(workspaceRegistryPath(), 'utf8')).catch(error => {
       if (error.code === 'ENOENT') return '[]'; throw error;
     });
     const items = JSON.parse(value) as WorkspaceRecord[];
     if (!Array.isArray(items)) throw new Error('Workspace registry is invalid; preserve it for recovery.');
-    await saveRegistry([...items.filter(item => item.workspaceId !== entry.workspaceId), entry]);
-  } finally { await release(); }
+    await saveRegistry([...items.filter(item => item.workspaceId !== snapshot.workspaceId), snapshot]);
+  } catch (error) {
+    if (!scope) throw error;
+    if (error instanceof Error && error.message === 'codex_setup_host_lock_cleanup_unconfirmed') throw error;
+    await scope.assert();
+    if (error instanceof Error && error.message === 'Workspace registry is invalid; preserve it for recovery.') {
+      throw new Error('workspace_registry_invalid');
+    }
+    throw new Error('workspace_registry_write_failed');
+  } finally { await release?.(); }
 }
 
 async function gitValue(workspace: string, argv: string[]) {

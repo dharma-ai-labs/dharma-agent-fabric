@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import {currentBootstrapHostScope, prepareCodexBootstrapHost} from './bootstrapHostScope.js';
 
 type Acquire = (path: string, timeout: number, message: string) => Promise<() => Promise<void>>;
 
@@ -21,9 +22,132 @@ async function acquire(overrides: Record<string, unknown> = {}): Promise<Acquire
   });
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${compiled.outputText}\nacquirePidLock`, {
-    ...fs, dirname, resolve, randomUUID, Date, setTimeout, process, ...overrides,
+    ...fs, dirname, resolve, randomUUID, Date, setTimeout, process, currentBootstrapHostScope, ...overrides,
   }, { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } }) as Acquire;
 }
+
+function scopedFixture(workspace: string, current: () => Promise<boolean>) {
+  const now = Date.now(), digest = `sha256:${'a'.repeat(64)}`;
+  const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
+  return prepareCodexBootstrapHost({workspace, signal: new AbortController().signal, current,
+    intent: {schema: 'dharma.codex-setup-intent/v1', operationId: id(1), setupReference: id(2),
+      organizationId: 'org_demo', recipientMembershipId: id(3), origin: 'https://hq.example',
+      repositoryFingerprint: digest, policyRevision: 'policy-v1', scopeDigest: digest, contractDigest: digest,
+      hostContextId: id(4), issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()}}).scope;
+}
+
+test('scoped PID lock denies a closed owner before filesystem admission', async () => {
+  const f = await fixture(); const calls: string[] = [];
+  const scope = scopedFixture(f.root, async () => true); scope.close();
+  try {
+    const lock = await acquire({currentBootstrapHostScope: () => scope,
+      mkdir: async () => {calls.push('mkdir');}});
+    await assert.rejects(lock(resolve(f.root, 'new', 'lock'), 50, 'private-timeout-canary'),
+      {message: 'codex_setup_host_scope_unavailable'});
+    assert.deepEqual(calls, []);
+  } finally {scope.close(); await f.cleanup();}
+});
+
+for (const boundary of ['write', 'link', 'candidate_unlink'] as const) {
+  test(`scoped PID lock releases acquired resources after withdrawal during ${boundary}`, async () => {
+    const f = await fixture(); await fs.unlink(f.lock); let allowed = true;
+    const scope = scopedFixture(f.root, async () => allowed); const effects: string[] = [];
+    try {
+      const lock = await acquire({currentBootstrapHostScope: () => scope,
+        writeFile: async (path: string, value: string, options: unknown) => {
+          effects.push('write'); await fs.writeFile(path, value, options as Parameters<typeof fs.writeFile>[2]);
+          if (boundary === 'write') allowed = false;
+        }, link: async (from: string, to: string) => {
+          effects.push('link'); await fs.link(from, to); if (boundary === 'link') allowed = false;
+        }, unlink: async (path: string) => {
+          effects.push(path === f.lock ? 'primary_unlink' : 'candidate_unlink'); await fs.unlink(path);
+          if (boundary === 'candidate_unlink' && path !== f.lock) allowed = false;
+        }});
+      await assert.rejects(lock(f.lock, 50, 'private-timeout-canary'), {message: 'codex_setup_host_scope_unavailable'});
+      assert.deepEqual(await fs.readdir(f.root), []);
+      if (boundary === 'write') assert.equal(effects.includes('link'), false);
+    } finally {scope.close(); await f.cleanup();}
+  });
+}
+
+test('scoped PID contention cancellation preserves foreign lock and recovery ownership', async () => {
+  const f = await fixture(); let allowed = true;
+  await fs.mkdir(f.recovery); await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
+  const before = await fs.readFile(f.lock, 'utf8'), scope = scopedFixture(f.root, async () => allowed);
+  try {
+    const lock = await acquire({currentBootstrapHostScope: () => scope,
+      link: async (from: string, to: string) => {
+        try {await fs.link(from, to);} catch (error) {allowed = false; throw error;}
+      }});
+    await assert.rejects(lock(f.lock, 50, 'private-timeout-canary'), {message: 'codex_setup_host_scope_unavailable'});
+    assert.equal(await fs.readFile(f.lock, 'utf8'), before);
+    assert.equal(await fs.readFile(resolve(f.recovery, 'owner'), 'utf8'), `${process.pid}\n`);
+    assert.deepEqual((await fs.readdir(f.root)).sort(), ['startup.lock', 'startup.lock.recovery']);
+  } finally {scope.close(); await f.cleanup();}
+});
+
+test('scoped PID lock cleanup never removes a replacement foreign lock', async () => {
+  const f = await fixture(); await fs.unlink(f.lock);
+  const scope = scopedFixture(f.root, async () => true);
+  try {
+    const lock = await acquire({currentBootstrapHostScope: () => scope});
+    const release = await lock(f.lock, 50, 'timeout');
+    // Keep the old inode live so filesystem reuse cannot make a false match.
+    await fs.rename(f.lock, resolve(f.root, 'original'));
+    await fs.writeFile(f.lock, 'foreign-owner-canary\n'); scope.close();
+    await assert.rejects(release(), {message: 'codex_setup_host_lock_cleanup_unconfirmed'});
+    assert.equal(await fs.readFile(f.lock, 'utf8'), 'foreign-owner-canary\n');
+  } finally {scope.close(); await f.cleanup();}
+});
+
+test('scoped PID lock current acquisition and repeated release preserve ordinary exclusion', async () => {
+  const f = await fixture(); await fs.unlink(f.lock);
+  const scope = scopedFixture(f.root, async () => true);
+  try {
+    const lock = await acquire({currentBootstrapHostScope: () => scope});
+    const release = await lock(f.lock, 50, 'timeout');
+    assert.equal(await fs.readFile(f.lock, 'utf8'), `${process.pid}\n`);
+    scope.close(); await Promise.all([release(), release(), release()]); await release();
+    assert.deepEqual(await fs.readdir(f.root), []);
+  } finally {scope.close(); await f.cleanup();}
+});
+
+for (const boundary of ['recovery_publication', 'dead_primary_quarantine'] as const) {
+  test(`scoped PID recovery preserves foreign evidence after withdrawal during ${boundary}`, async () => {
+    const f = await fixture(); await fs.writeFile(f.lock, '2147483647\n'); let allowed = true;
+    const scope = scopedFixture(f.root, async () => allowed);
+    try {
+      const lock = await acquire({currentBootstrapHostScope: () => scope,
+        process: {platform: 'linux', pid: process.pid, kill: () => {
+          throw Object.assign(new Error('fixture dead PID'), {code: 'ESRCH'});
+        }}, rename: async (from: string, to: string) => {
+          await fs.rename(from, to);
+          if (boundary === 'recovery_publication' && to === f.recovery
+            || boundary === 'dead_primary_quarantine' && from === f.lock) allowed = false;
+        }});
+      await assert.rejects(lock(f.lock, 100, 'private-timeout-canary'), {message: 'codex_setup_host_scope_unavailable'});
+      const files = await fs.readdir(f.root);
+      assert.equal(files.some(name => name.includes('.candidate') || name === 'startup.lock.recovery'), false);
+      const preserved = boundary === 'recovery_publication' ? f.lock
+        : resolve(f.root, files.find(name => name.startsWith('startup.lock.dead.'))!);
+      assert.equal(await fs.readFile(preserved, 'utf8'), '2147483647\n');
+    } finally {scope.close(); await f.cleanup();}
+  });
+}
+
+test('scoped PID lock retains qualified stale-owner recovery', async () => {
+  const f = await fixture(); await fs.writeFile(f.lock, '2147483647\n');
+  const scope = scopedFixture(f.root, async () => true);
+  try {
+    const lock = await acquire({currentBootstrapHostScope: () => scope,
+      process: {platform: 'linux', pid: process.pid, kill: () => {
+        throw Object.assign(new Error('fixture dead PID'), {code: 'ESRCH'});
+      }}});
+    const release = await lock(f.lock, 100, 'timeout');
+    assert.equal(await fs.readFile(f.lock, 'utf8'), `${process.pid}\n`);
+    await release(); assert.deepEqual(await fs.readdir(f.root), []);
+  } finally {scope.close(); await f.cleanup();}
+});
 
 function permissionError() {
   return Object.assign(new Error('Windows directory rename denied'), { code: 'EPERM' });
