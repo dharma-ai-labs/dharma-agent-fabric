@@ -27,6 +27,12 @@ lines.on('line', line => {
   const value = JSON.parse(line);
   if (value.method === 'initialize') send({id: value.id, result: {userAgent: 'setup-fixture'}});
   else if (value.method === 'ping') send({id: value.id, result: {pong: true}});
+  else if (value.method === 'disconnect') {
+    if (value.params.mode === 'exit') process.exit(0);
+    else if (value.params.mode === 'eof') {require('node:fs').closeSync(1); setInterval(() => {}, 1000);}
+    else if (value.params.mode === 'timeout') return;
+    else process.stdout.write('invalid-json\\n');
+  }
   else if (value.method === 'setup') {
     send({id: value.id, result: {dispatched: true}});
     send({id: 'fixture_' + (++call), method: 'item/tool/call', params: {
@@ -57,9 +63,15 @@ async function fixture(execute: Execute) {
       argv: ['-e', server], cwd: root, environment: process.platform === 'win32'
         ? {SystemRoot: process.env.SystemRoot} : {}, requestTimeoutMs: 2000, toolCallTimeoutMs: 1000});
     const unregister = transport.onToolCall(owner.handler);
+    const lifetime = transport.signal;
+    const closeOwner = () => owner.close();
+    lifetime.addEventListener('abort', closeOwner, {once: true});
+    if (lifetime.aborted) owner.close();
     const close = async () => {
       owner.close(); unregister();
-      try {await transport.close();} finally {await owner.settled; await clean();}
+      try {await transport.close();} finally {
+        await owner.settled; lifetime.removeEventListener('abort', closeOwner); await clean();
+      }
     };
     const request = async () => {
       let timer: NodeJS.Timeout | undefined; let unregisterNotification = () => {};
@@ -115,3 +127,31 @@ test('normal owning lifecycle closes a returned callback operation without a pro
   assert.equal(f.owner.pending, false);
   await assert.rejects(f.transport.request('ping', {}), /codex_app_server_unavailable/);
 });
+
+for (const mode of ['close', 'exit', 'eof', 'timeout', 'invalid-frame'] as const) {
+  // Closing fd 1 on Windows did not close the child pipe; keep that fixture
+  // failure, and qualify actual EOF separately on the Linux client route.
+  test(`transport ${mode} withdraws setup authority after its callback has returned`,
+    {skip: mode === 'eof' && process.platform !== 'linux'}, async () => {
+    let release!: () => void; let effects = 0; let signal: AbortSignal | undefined;
+    const finish = new Promise<void>(done => {release = done;});
+    const f = await fixture(async (_intent, context, current) => {
+      signal = context; await finish;
+      if (await current()) effects++;
+      return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+    });
+    try {
+      assert.equal(JSON.parse((await f.request()).contentItems[0].text).code, 'codex_setup_in_progress');
+      assert.ok(signal); assert.equal(signal.aborted, false);
+      if (mode === 'close') await f.transport.close();
+      else await assert.rejects(f.transport.request('disconnect', {mode}),
+        mode === 'timeout' ? /codex_app_server_request_timeout:disconnect/
+          : /codex_app_server_closed|codex_app_server_frame_invalid|codex_app_server_write_failed/);
+      release(); await f.owner.settled;
+      assert.equal(f.transport.signal.aborted, true);
+      assert.equal(signal.aborted, true);
+      assert.equal(effects, 0);
+      assert.equal(f.owner.pending, false);
+    } finally {release(); await f.close();}
+  });
+}

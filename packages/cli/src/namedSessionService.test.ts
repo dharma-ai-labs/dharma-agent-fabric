@@ -65,10 +65,12 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 300000).toISOString(),
       nonce: randomUUID(), signerKeyVersion: 'test-v1' };
     const question = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
+    const lifetime = new AbortController();
     const transport = {
+      signal: lifetime.signal,
       onToolCall() { return () => {}; },
       onNotification(listener: (value: unknown) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-      async close() { closed = true; },
+      async close() { lifetime.abort(); closed = true; },
       async request(method: string, params: Record<string, unknown>): Promise<unknown> {
         if (method === 'permissionProfile/list') return { data: ['dharma_bridge', 'dharma_work'].map(id => ({ id, allowed: true })) };
         if (method === 'config/read') return { config: { permissions: {

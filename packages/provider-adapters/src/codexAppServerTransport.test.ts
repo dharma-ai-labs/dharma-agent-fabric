@@ -139,7 +139,9 @@ test('normal transport close cancels an active tool context', async () => {
 
 test('stdio transport initializes, parses fragmented notifications, and matches responses', async () => {
   const transport = await open('normal');
+  const lifetime = transport.signal;
   try {
+    assert.equal(lifetime.aborted, false);
     const seen: unknown[] = [];
     const unsubscribe = transport.onNotification(event => seen.push(event));
     assert.deepEqual(await transport.request('ping', { value: 'first' }), { pong: 'first' });
@@ -147,6 +149,9 @@ test('stdio transport initializes, parses fragmented notifications, and matches 
     assert.equal(seen.length, 2);
     unsubscribe();
   } finally { await transport.close(); }
+  assert.equal(lifetime.aborted, true);
+  assert.equal(transport.signal, lifetime);
+  await transport.close();
   await assert.rejects(transport.request('ping', {}), /codex_app_server_unavailable/);
 });
 
@@ -171,7 +176,10 @@ test('stdio transport fails closed on oversized frames and provider-originated r
     ['request', /codex_app_server_unexpected_request/],
   ] as const) {
     const transport = await open(mode, { maximumFrameBytes: 1_024 });
-    try { await assert.rejects(transport.request('ping', {}), expected); }
+    try {
+      await assert.rejects(transport.request('ping', {}), expected);
+      assert.equal(transport.signal.aborted, true);
+    }
     finally { await transport.close(); }
   }
 });

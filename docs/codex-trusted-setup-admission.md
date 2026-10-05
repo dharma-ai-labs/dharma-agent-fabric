@@ -69,7 +69,13 @@ and journal fence remain owned until actual settlement. Status requests are
 limited to 16 distinct native call IDs and require the original admitted binding.
 
 The host must close the gate on transport/turn closure, interruption or scope
-change and await `settled` before releasing operation resources. The executor
+change and await `settled` before releasing operation resources. The candidate
+public stdio adapter exposes a read-only lifetime `signal`, aborted on normal
+close, process exit, EOF or transport failure, even after a tool callback has
+returned. The host binds that signal to admission `close` and checks its current
+state when attaching. It still must close on turn/scope changes separately.
+Aborting this signal withdraws admission; it does not prove child termination.
+The executor
 receives the cancellation signal and a live current-scope check; it must check
 both at every protected effect and retain its actual child handles until they
 stop. That guard requalifies still-applicable host/package/source authority, not
