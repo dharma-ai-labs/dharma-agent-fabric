@@ -23,6 +23,57 @@ function store(): SecureSecretStore {
   return { backend: 'linux-secret-service', get: async k => values.get(k) ?? null,
     put: async (k, v) => { values.set(k, v); }, delete: async k => { values.delete(k); } };
 }
+test('claim failures expose only the locally observed phase, never vendor content', async () => {
+  const identityStore = store(); const get = identityStore.get;
+  identityStore.get = async key => {
+    if (key.startsWith('setup-claim-preflight-')) return get.call(identityStore, key);
+    throw new Error('secret-canary');
+  };
+  const cases: Array<{phase: string; store: SecureSecretStore; input?: Partial<typeof scope>}> = [
+    {phase: 'input_validation', store: store(), input: {setupReference: 'invalid'}},
+    {phase: 'store_preflight', store: {...store(), put: async () => { throw new Error('secret-canary'); }}},
+    {phase: 'identity', store: identityStore},
+    {phase: 'challenge', store: store()},
+  ];
+  for (const value of cases) {
+    const reports: unknown[] = []; let requests = 0;
+    const onFailureDiagnostic = (report: unknown) => { reports.push(report); assert.equal(Object.isFrozen(report), true); };
+    await assert.rejects(claimSetupReference({...scope, ...value.input, store: value.store,
+      ...{onFailureDiagnostic}, fetcher: async () => { requests++; throw new Error('secret-canary'); }}),
+    /^Error: setup_claim_failed$/);
+    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: value.phase}]);
+    assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
+    assert.equal(requests, value.phase === 'challenge' ? 1 : 0);
+  }
+});
+
+test('diagnostic observer failure cannot replace the sanitized claim failure', async () => {
+  let observations = 0;
+  const onFailureDiagnostic = () => { observations++; throw new Error('observer-secret-canary'); };
+  await assert.rejects(claimSetupReference({...scope, setupReference: 'invalid', ...{onFailureDiagnostic}}),
+    /^Error: setup_claim_failed$/);
+  assert.equal(observations, 1);
+});
+
+test('asynchronous diagnostic rejection cannot escape as an unhandled vendor error', async () => {
+  const onFailureDiagnostic = async () => { throw new Error('observer-secret-canary'); };
+  await assert.rejects(claimSetupReference({...scope, setupReference: 'invalid', ...{onFailureDiagnostic}}),
+    /^Error: setup_claim_failed$/);
+  await new Promise<void>(resolve => setImmediate(resolve));
+});
+
+test('phase diagnostic schema rejects private fields and unbounded error classifications', async () => {
+  const schemaDir = resolve(import.meta.dirname, '../../../schemas');
+  const schemaId = 'https://schemas.dharma-ai.io/setup-claim-failure/v1';
+  const report = {schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'store_preflight'};
+  const phases = ['input_validation', 'store_preflight', 'identity', 'challenge', 'signing', 'finalize',
+    'recipient_approval', 'credential_validation', 'credential_commit'];
+  for (const phase of phases) assert.equal((await validateContract(schemaDir, schemaId, {...report, phase})).ok, true);
+  for (const extra of [{message: 'secret-canary'}, {exception: 'secret-canary'}, {response: {token: 'secret-canary'}},
+    {phase: 'secret-canary'}, {code: 'safe_to_retry'}, {status: 'ready'}, {schema: 'foreign'}]) {
+    assert.equal((await validateContract(schemaDir, schemaId, {...report, ...extra})).ok, false);
+  }
+});
 test('locked protected store fails before any HTTP operation and sanitizes vendor errors', async () => {
   let requests = 0;
   const locked = store(); locked.get = async () => { throw new Error('secret-canary'); };
@@ -119,6 +170,45 @@ async function fixture(change?: (payload: Record<string, unknown>) => void, pend
     input:{...scope,configPath:resolve(root,'device.json'),store:memory,fetcher,now:()=>time,
       sleep:async(ms:number)=>{time+=ms;}}, advance:(ms:number)=>{time+=ms;} };
 }
+
+test('post-challenge failures report finalize, approval, validation and commit distinctly', async t => {
+  for (const phase of ['finalize', 'recipient_approval', 'credential_validation', 'credential_commit']) {
+    await t.test(phase, async () => {
+      const f = await fixture(phase === 'credential_validation' ? payload => { payload.organizationApiToken = 'secret-canary'; }
+        : undefined, phase === 'recipient_approval');
+      const reports: unknown[] = []; const originalFetch = f.input.fetcher;
+      if (phase === 'credential_commit') {
+        const put = f.memory.put;
+        f.memory.put = async (key, value) => {
+          if (key.startsWith('organization-api-')) throw new Error('secret-canary');
+          return put.call(f.memory, key, value);
+        };
+      }
+      const onFailureDiagnostic = (report: unknown) => { reports.push(report); };
+      try {
+        await assert.rejects(claimSetupReference({...f.input, ...{onFailureDiagnostic},
+          fetcher: async (url, init) => {
+            if (phase === 'finalize' && JSON.parse(String(init?.body)).action === 'finalize') throw new Error('secret-canary');
+            return originalFetch(url, init);
+          }, onRecipientApprovalRequired: () => { throw new Error('secret-canary'); }}), /^Error: setup_claim_failed$/);
+        assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase}]);
+        assert.equal(JSON.stringify(reports).includes(f.secret), false);
+        assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
+        await assert.rejects(readFile(f.input.configPath), {code: 'ENOENT'});
+      } finally { await rm(f.root, {recursive: true, force: true}); }
+    });
+  }
+});
+
+test('successful setup emits no failure diagnostic', async () => {
+  const f = await fixture(); let observations = 0;
+  const onFailureDiagnostic = () => { observations++; };
+  try {
+    const result = await claimSetupReference({...f.input, ...{onFailureDiagnostic}});
+    assert.equal(result.config.setupClaimReference, scope.setupReference);
+    assert.equal(observations, 0);
+  } finally { await rm(f.root, {recursive: true, force: true}); }
+});
 test('small server clock lead waits for strict time validity before approval or finalize', async t => {
   for (const lead of [2208, 5000]) await t.test(`lead_${lead}ms`, async () => {
     const f = await fixture(undefined, true, lead); const waits: number[] = [];

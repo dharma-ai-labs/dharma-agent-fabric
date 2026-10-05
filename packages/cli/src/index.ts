@@ -2241,6 +2241,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       name: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
       platform: await platform(), installationId: existing?.installationId ?? await loadOrCreateInstallationId(),
       existingConfig: existing, configPath: configPath(),
+      onFailureDiagnostic: diagnostic => {
+        process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
+      },
       onRecipientApprovalRequired: async approval => {
         recipientApproval.required = true;
         recipientApproval.browserOpened = flags.has('no-browser') ? false : await openVerificationUri(approval.url);
