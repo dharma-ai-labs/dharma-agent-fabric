@@ -12,7 +12,7 @@ const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-11111111
 const workspace = resolve('synthetic-source');
 type Input = {
   transport: CodexStdioTransport; workspace: string; name: string; intent: CodexSetupIntent;
-  openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void}>;
+  openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void | Promise<void>}>;
   signal: AbortSignal; maximumProviderCostCents: number;
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   current(): Promise<boolean>; reserve(operationId: string, cents: number): Promise<boolean>;
@@ -242,6 +242,35 @@ test('terminal native turn closes its owning journal scope and backend before se
     assert.equal(await scope.current(), false); assert.equal(closes, 1);
   } finally {await host.close();}
   assert.equal(closes, 1);
+});
+
+test('native settlement waits for asynchronous protected-vault closure and does not close it twice', async () => {
+  const f = fixture(), original = f.input.openJournal;
+  let entered!: () => void, release!: () => void, closes = 0, settled = false;
+  const started = new Promise<void>(done => {entered = done;});
+  const closure = new Promise<void>(done => {release = done;});
+  f.input.openJournal = async scope => ({...await original(scope), close: async () => {
+    closes++; entered(); await closure;
+  }});
+  const owner = await open(f.input);
+  try {
+    void owner.settled.then(() => {settled = true;});
+    f.complete(); await started; await new Promise<void>(done => setImmediate(done));
+    assert.equal(settled, false, 'native settlement is not proof of pending vault closure');
+    assert.equal(closes, 1); release(); await owner.settled;
+    await owner.close(); assert.equal(closes, 1);
+  } finally {release(); await owner.close();}
+});
+
+test('asynchronous journal cleanup failure remains unconfirmed and does not expose private errors', async () => {
+  const f = fixture(), original = f.input.openJournal; let closes = 0;
+  f.input.openJournal = async scope => ({...await original(scope), close: async () => {
+    closes++; throw new Error('private-vault-close-canary');
+  }});
+  const owner = await open(f.input); f.complete();
+  await assert.rejects(owner.settled, {message: 'codex_setup_native_journal_close_unconfirmed'});
+  await assert.rejects(owner.close(), {message: 'codex_setup_native_journal_close_unconfirmed'});
+  assert.equal(closes, 1); assert.equal(f.counts.handler, false); assert.equal(f.counts.listeners, 0);
 });
 
 test('individual native tool cancellation withdraws the original scope and waits for its accepted executor to settle', async () => {

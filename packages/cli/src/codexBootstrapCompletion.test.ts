@@ -11,13 +11,18 @@ import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness}
   from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
-import {prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
+import {currentBootstrapHostScope, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {assertCodexSetupExecutionLease, createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 import {isNamedSessionOwnerReceipt} from './namedSessionTrust.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
 import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
+import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract} from './index.js';
+import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
+import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
+import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const hash = `sha256:${'a'.repeat(64)}`;
@@ -237,3 +242,71 @@ test('actual runtime-state reader enforces ownership, private mode, bounds and u
   await assert.rejects(read('synthetic-owned-state', f.prepared.scope), /scope_unavailable/);
   assert.equal(opens, 3);
 });
+
+for (const withdrawAfterOpen of [false, true]) {
+  test(`official composition owns the same protected vault and closes a denied opening (withdraw=${withdrawAfterOpen})`, async t => {
+    const f = await fixture(t), key = randomBytes(32), home = resolve(f.row.path, 'native-home');
+    let allowed = true, opens = 0, closes = 0, vault: ScopedLocalVault | undefined;
+    let originalScope: typeof f.prepared.scope | undefined, handler: CodexToolHandler | undefined;
+    const listeners = new Set<(value: unknown) => void>(), lifetime = new AbortController();
+    t.after(() => {key.fill(0);});
+    const transport: CodexStdioTransport = {
+      signal: lifetime.signal, close: async () => {lifetime.abort();},
+      onNotification: listener => {listeners.add(listener); return () => {listeners.delete(listener);};},
+      onToolCall: callback => {handler = callback; return () => {handler = undefined;};},
+      request: async (method: string) => {
+        if (method === 'permissionProfile/list') return {data: [{id: 'dharma_bridge', allowed: true}]};
+        if (method === 'config/read') return {config: {permissions: {dharma_bridge: {
+          filesystem: {':minimal': 'read', ':workspace_roots': {'.': 'read'}}, network: {enabled: false}}}}};
+        if (method === 'thread/start' || method === 'thread/read') return {thread: {
+          id: 'synthetic_thread', cwd: f.row.path, name: 'reviewer', status: {type: 'idle'}}};
+        if (method === 'thread/name/set' || method === 'turn/interrupt') return {};
+        if (method === 'turn/start') return {turn: {id: 'synthetic_turn', status: 'inProgress'}};
+        throw new Error('fixture_native_method_unexpected');
+      },
+    };
+    const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
+      runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease,
+      observeCodexBootstrapRuntime: f.observe, bootstrapFromCodexSetupScope,
+    });
+    const start = await declaration('startCodexBootstrapNativeHost', {resolve, dharmaHome: () => home,
+      runCodexBootstrapHostScope, startCodexSetupNativeHost, createCodexBootstrapCompletionOwner: compose,
+      openBootstrapVault: async (options: {root: string}) => {
+        opens++; assert.equal(options.root, resolve(home, 'vault'));
+        const scope = currentBootstrapHostScope(); assert.ok(scope); originalScope = scope;
+        vault = await LocalVault.open({...options, masterKey: key}, scope);
+        if (withdrawAfterOpen) allowed = false;
+        const owned = vault;
+        return {...owned, close: async () => {closes++; await owned.close();}};
+      },
+    }) as (input: Omit<Parameters<typeof startCodexSetupNativeHost>[0], 'openJournal' | 'execute' | 'verifyReadiness'>)
+      => ReturnType<typeof startCodexSetupNativeHost>;
+    const contract = await loadAgentFabricOnboardingContract();
+    const input = {transport, workspace: f.row.path, name: 'reviewer',
+      intent: {...f.prepared.intent, contractDigest: `sha256:${contract.sha256}`},
+      signal: new AbortController().signal, current: async () => allowed,
+      maximumProviderCostCents: 25, reserve: async () => true};
+    if (withdrawAfterOpen) {
+      await assert.rejects(start(input), {message: 'codex_setup_host_scope_unavailable'});
+      assert.equal(opens, 1); assert.equal(closes, 1); assert.equal(handler, undefined);
+      return;
+    }
+    const host = await start(input);
+    try {
+      assert.ok(handler); assert.ok(originalScope); assert.equal(await originalScope.current(), true);
+      const response = await handler({threadId: 'synthetic_thread', turnId: 'synthetic_turn', callId: 'setup_call',
+        tool: 'dharma_setup_reference', namespace: null, arguments: {operationId: id(1), setupReference: id(2)}},
+      {signal: transport.signal});
+      assert.equal(response.success, false);
+      assert.equal(JSON.parse(response.contentItems[0]!.text).code, 'codex_setup_execution_unconfirmed');
+      assert.equal(f.calls.length, 0, 'the guarded actual bootstrap cannot synthesize live readiness');
+      assert.equal(opens, 1); assert.equal(closes, 0);
+      for (const listener of listeners) listener({method: 'turn/completed',
+        params: {threadId: 'synthetic_thread', turn: {id: 'synthetic_turn', status: 'completed'}}});
+      await host.settled;
+      assert.equal(closes, 1); assert.equal(await originalScope.current(), false);
+      assert.equal(handler, undefined); assert.equal(listeners.size, 0);
+    } finally {await host.close();}
+    assert.equal(closes, 1);
+  });
+}

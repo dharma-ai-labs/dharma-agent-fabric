@@ -106,6 +106,7 @@ import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 // Trusted runtime composition only; these exports do not enable effectful setup.
+import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
@@ -2557,6 +2558,47 @@ export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostSc
       return readiness.record(lease);
     },
     verify: readiness.verify,
+  });
+}
+
+/** Official native-host composition. The caller supplies its already owned
+ * transport and qualification, never a vault, executor or readiness callback. */
+export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeof startCodexSetupNativeHost>[0],
+  'openJournal' | 'execute' | 'verifyReadiness'>) {
+  const root = resolve(dharmaHome(), 'vault');
+  let completion: Awaited<ReturnType<typeof createCodexBootstrapCompletionOwner>> | undefined;
+  let ownerScope: BootstrapHostScope | undefined;
+  return startCodexSetupNativeHost({...input,
+    openJournal: async scope => {
+      let vault: ScopedLocalVault | undefined;
+      try {
+        await runCodexBootstrapHostScope(scope, async () => {
+          // Capture the owned handle before the borrower's post-open check.
+          // The original ALS scope selects the scoped LocalVault overload.
+          vault = await openBootstrapVault({root}) as ScopedLocalVault;
+        });
+        completion = await createCodexBootstrapCompletionOwner(scope, vault!);
+        ownerScope = scope;
+        return Object.freeze({
+          claim: (operationId: string, intentDigest: string) => vault!.claimCodexSetupOperation(operationId, intentDigest),
+          finish: (leaseId: string, intentDigest: string,
+            result: Parameters<ScopedLocalVault['finishCodexSetupOperation']>[2]) =>
+            vault!.finishCodexSetupOperation(leaseId, intentDigest, result),
+          close: async () => {await vault!.close();},
+        });
+      } catch (error) {
+        try {await vault?.close();} catch {throw new Error('codex_setup_native_journal_close_unconfirmed');}
+        throw error;
+      }
+    },
+    execute: async (_intent, _signal, _current, lease, scope) => {
+      if (!completion || scope !== ownerScope) throw new Error('codex_setup_host_scope_unavailable');
+      return completion.execute(lease);
+    },
+    verifyReadiness: async (receiptId, intent, digest) => {
+      if (!completion) return false;
+      return completion.verify(receiptId, intent, digest);
+    },
   });
 }
 

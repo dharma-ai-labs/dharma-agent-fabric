@@ -10,7 +10,7 @@ type Admission = Parameters<typeof createCodexSetupAdmission>[0];
 type Input = {
   /** Already owned, individually qualified native connection; never a peer's process. */
   transport: CodexStdioTransport; workspace: string; name: string; intent: CodexSetupIntent;
-  openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void}>;
+  openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void | Promise<void>}>;
   signal: AbortSignal; maximumProviderCostCents: number;
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   /** Requalifies package/source, provider account, host ownership and signed scope. */
@@ -46,11 +46,14 @@ export async function startCodexSetupNativeHost(input: Input) {
   const filesystem = Object.freeze({...input.additionalFilesystemRules});
   let threadId = '', turnId = '', closed = false, terminalObserved = false;
   let admission: ReturnType<typeof createCodexSetupAdmission> | undefined;
-  let journal: (CodexSetupJournal & {close(): void}) | undefined, journalClosed = false;
+  let journal: (CodexSetupJournal & {close(): void | Promise<void>}) | undefined;
+  let journalClosing: Promise<void> | undefined;
   const closeJournal = () => {
-    if (!journal || journalClosed) return;
-    journalClosed = true;
-    try {journal.close();} catch {throw new Error('codex_setup_native_journal_close_unconfirmed');}
+    if (!journal) return Promise.resolve();
+    const owned = journal;
+    return journalClosing ??= Promise.resolve().then(() => owned.close()).catch(() => {
+      throw new Error('codex_setup_native_journal_close_unconfirmed');
+    });
   };
   let unregisterTools = () => {}, unsubscribe = () => {};
   const callbacks = new Set<Promise<CodexToolResult>>(), completions = new Set<string>();
@@ -62,8 +65,8 @@ export async function startCodexSetupNativeHost(input: Input) {
     if (closed) return;
     closed = true; scope.close(); admission?.close(); bind(); unregisterTools(); unsubscribe();
     scope.signal.removeEventListener('abort', withdraw);
-    void Promise.allSettled([...callbacks, ...(admission ? [admission.settled] : [])]).then(() => {
-      try {closeJournal(); finish();} catch {fail(new Error('codex_setup_native_journal_close_unconfirmed'));}
+    void Promise.allSettled([...callbacks, ...(admission ? [admission.settled] : [])]).then(async () => {
+      try {await closeJournal(); finish();} catch {fail(new Error('codex_setup_native_journal_close_unconfirmed'));}
     });
   };
   scope.signal.addEventListener('abort', withdraw, {once: true});
@@ -76,7 +79,7 @@ export async function startCodexSetupNativeHost(input: Input) {
       try {await transport.request('turn/interrupt', {threadId, turnId});}
       catch {interrupted = false;}
     }
-    await settled; closeJournal();
+    await settled; await closeJournal();
     if (!interrupted) throw new Error('codex_setup_native_interrupt_unconfirmed');
   })();
   try {
