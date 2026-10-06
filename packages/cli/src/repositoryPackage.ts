@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { link, lstat as nativeLstat, mkdir, open, opendir, realpath as nativeRealpath, rename, rmdir, unlink } from 'node:fs/promises';
+import { constants, type BigIntStats } from 'node:fs';
+import { link as nativeLink, lstat as nativeLstat, mkdir as nativeMkdir, open, opendir, realpath as nativeRealpath,
+  rename as nativeRename, rmdir as nativeRmdir, unlink as nativeUnlink } from 'node:fs/promises';
 import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {types} from 'node:util';
@@ -82,41 +83,46 @@ function errorCode(error: unknown): string | undefined {
   return field && Object.hasOwn(field, 'value') && typeof field.value === 'string' ? field.value : undefined;
 }
 function missing(error: unknown) { return ['ENOENT', 'ENOTDIR'].includes(errorCode(error) || ''); }
-async function packageRead<T>(scope: BootstrapHostScope | undefined, operation: () => Promise<T>): Promise<T> {
+async function packageEffect<T>(scope: BootstrapHostScope | undefined, operation: () => Promise<T>): Promise<T> {
   if (!scope) return operation();
   try {return await scope.step(operation);}
   catch (error) {
+    if (error && typeof error === 'object' && cleanupFailures.has(error)) throw error;
     await scope.assert();
     const code = errorCode(error);
     throw Object.assign(new Error('repository_package_storage_unavailable'),
-      ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(code || '') ? {code} : {});
+      ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EEXIST', 'ENOTEMPTY', 'ESRCH'].includes(code || '') ? {code} : {});
   }
 }
-const lstat: typeof nativeLstat = ((...args: Parameters<typeof nativeLstat>) =>
-  packageRead(currentBootstrapHostScope(), () => nativeLstat(...args))) as typeof nativeLstat;
-const realpath: typeof nativeRealpath = ((...args: Parameters<typeof nativeRealpath>) =>
-  packageRead(currentBootstrapHostScope(), () => nativeRealpath(...args))) as typeof nativeRealpath;
+function admitted<F extends (...args: any[]) => Promise<any>>(operation: F): F {
+  return ((...args: Parameters<F>) => packageEffect(currentBootstrapHostScope(), () => operation(...args))) as F;
+}
+const lstat = admitted(nativeLstat), realpath = admitted(nativeRealpath), mkdir = admitted(nativeMkdir),
+  link = admitted(nativeLink), rename = admitted(nativeRename), rmdir = admitted(nativeRmdir), unlink = admitted(nativeUnlink);
 const cleanupFailures = new WeakSet<object>();
+function cleanupFailure() {
+  const failure = new Error('repository_package_cleanup_unconfirmed'); cleanupFailures.add(failure); return failure;
+}
 async function closeReadHandle(handle: {close(): Promise<void>} | undefined, scope: BootstrapHostScope | undefined) {
   try {await handle?.close();}
   catch (error) {
     if (!scope) throw error;
-    const failure = new Error('repository_package_cleanup_unconfirmed'); cleanupFailures.add(failure); throw failure;
+    throw cleanupFailure();
   }
 }
 async function* directoryEntries(source: string) {
   const scope = currentBootstrapHostScope();
   let directory: Awaited<ReturnType<typeof opendir>> | undefined;
   try {
-    await packageRead(scope, async () => {directory = await opendir(source);});
+    await packageEffect(scope, async () => {directory = await opendir(source);});
     for (;;) {
-      const entry = await packageRead(scope, () => directory!.read());
+      const entry = await packageEffect(scope, () => directory!.read());
       if (!entry) break;
       yield entry;
     }
   } finally {await closeReadHandle(directory, scope);}
 }
-function snapshotInventoryInput(input: RepositoryPackageInventoryInput, scope: BootstrapHostScope | undefined): RepositoryPackageInventoryInput {
+function snapshotPackageInput<T extends object>(input: T, scope: BootstrapHostScope | undefined, keys: readonly string[]): T {
   if (!scope) return input;
   let nodes = 0, bytes = 0;
   const invalid = () => new Error('repository_package_input_invalid');
@@ -148,14 +154,13 @@ function snapshotInventoryInput(input: RepositoryPackageInventoryInput, scope: B
   };
   if (!input || typeof input !== 'object' || types.isProxy(input)) throw invalid();
   const result: Record<string, unknown> = {};
-  for (const key of ['workspace', 'organizationId', 'workspaceId', 'repositoryAgentId', 'repositoryBindingId',
-    'sourceAuthorization', 'approvedOutputs', 'observations', 'limits', 'now', 'retainedKnowledge']) {
+  for (const key of keys) {
     const field = Object.getOwnPropertyDescriptor(input, key);
     if (!field) continue;
     if (!Object.hasOwn(field, 'value')) throw invalid();
     result[key] = clone(field.value, 0);
   }
-  return Object.freeze(result) as unknown as RepositoryPackageInventoryInput;
+  return Object.freeze(result) as T;
 }
 function pathKey(value: string) {
   if (!value || value.includes('\\') || isAbsolute(value) || /^[A-Za-z]:/.test(value)) throw new Error('Invalid repository package path.');
@@ -230,18 +235,18 @@ async function readStable(workspace: string, path: string, maximumBytes: number)
   if (!(await lstat(source)).isFile()) throw new Error('Repository package requires regular files.');
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    await packageRead(scope, async () => {handle = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));});
-    const before = await packageRead(scope, () => handle!.stat());
+    await packageEffect(scope, async () => {handle = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));});
+    const before = await packageEffect(scope, () => handle!.stat());
     if (!before.isFile()) throw new Error('Repository package requires regular files.');
     if (before.size > maximumBytes) throw new Error('Repository package file byte limit exceeded.');
     const buffer = Buffer.alloc(before.size + 1);
     let size = 0;
     while (size < buffer.length) {
-      const result = await packageRead(scope, () => handle!.read(buffer, size, buffer.length - size, size));
+      const result = await packageEffect(scope, () => handle!.read(buffer, size, buffer.length - size, size));
       if (!result.bytesRead) break;
       size += result.bytesRead;
     }
-    const after = await packageRead(scope, () => handle!.stat());
+    const after = await packageEffect(scope, () => handle!.stat());
     const current = await lstat(await checkedPath(workspace, path));
     if (size !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs
       || before.ctimeMs !== after.ctimeMs || current.ino !== before.ino || current.dev !== before.dev
@@ -265,7 +270,8 @@ function sourceContentType(path: string) {
 
 export async function inventoryRepositoryPackage(input: RepositoryPackageInventoryInput): Promise<RepositoryPackageSnapshot> {
   const scope = currentBootstrapHostScope();
-  input = snapshotInventoryInput(input, scope);
+  input = snapshotPackageInput(input, scope, ['workspace', 'organizationId', 'workspaceId', 'repositoryAgentId', 'repositoryBindingId',
+    'sourceAuthorization', 'approvedOutputs', 'observations', 'limits', 'now', 'retainedKnowledge']);
   if (scope) await scope.assert();
   if (![input.organizationId, input.workspaceId].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value))) {
     throw new Error('Repository package requires bounded organization and workspace identities.');
@@ -711,9 +717,11 @@ export function serializeRepositoryPackageSnapshot(snapshot: RepositoryPackageSn
 }
 
 async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: string) {
+  const scope = currentBootstrapHostScope();
+  if (scope) await scope.assert();
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
-  const validated = await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
-    `https://schemas.dharma-ai.io/repository-package/${input.snapshot.manifest.schema.split('/')[1]}`, input.snapshot.manifest);
+  const validated = await packageEffect(scope, () => validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
+    `https://schemas.dharma-ai.io/repository-package/${input.snapshot.manifest.schema.split('/')[1]}`, input.snapshot.manifest));
   if (!validated.ok) throw new Error('Repository package manifest schema is invalid.');
   const activeManifestPath = `${GENERATED_ROOT}/MANIFEST.json`;
   const activeManifest = input.candidateOnly ? null : await optionalBytes(workspace, activeManifestPath);
@@ -731,6 +739,7 @@ async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: st
     try {
       marker = JSON.parse((await readStable(workspace, `${GENERATED_ROOT}/.dharma-agent-fabric.json`, 4096)).toString('utf8'));
     } catch (error) {
+      if (scope) await scope.assert();
       if (String(error).includes('symlink')) throw error;
       throw new Error('Refusing to write into an unmanaged repository skill.');
     }
@@ -752,24 +761,25 @@ async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: st
   for (const part of posix.dirname(snapshotPath).split('/')) {
     current = current ? `${current}/${part}` : part;
     try { await mkdir(resolve(workspace, current), { mode: 0o700 }); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (errorCode(error) !== 'EEXIST') throw error;
     }
     await checkedPath(workspace, current);
   }
   await checkedPath(workspace, posix.dirname(snapshotPath));
   for (const [path, content] of [[snapshotPath, serialized], [candidateManifestPath, `${canonicalize(input.snapshot.manifest)}\n`]] as const) {
     const stagedSnapshot = `${snapshotRoot}/.snapshot-${randomUUID()}.tmp`;
+    let identity: StagingIdentity | undefined;
     try {
-      const handle = await open(resolve(workspace, stagedSnapshot), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
-      try { await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
+      identity = await freshFile(workspace, stagedSnapshot, content);
       await checkedPath(workspace, snapshotRoot);
+      await verifyStaging(workspace, stagedSnapshot, identity);
       try { await link(resolve(workspace, stagedSnapshot), resolve(workspace, path)); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (errorCode(error) !== 'EEXIST') throw error;
         const existing = await readStable(workspace, path, 8_388_608);
         if (existing.toString('utf8') !== content) throw new Error('Repository package CAS conflict.');
       }
-    } finally { await unlink(resolve(workspace, stagedSnapshot)).catch(error => { if (!missing(error)) throw error; }); }
+    } finally {if (identity) await cleanupStaging(workspace, stagedSnapshot, identity);}
   }
   await syncDirectory(workspace, posix.dirname(snapshotPath));
   if (!candidateOnly) {
@@ -779,6 +789,7 @@ async function persistSnapshot(input: RepositoryPackageWriteInput, workspace: st
       await prepareCopies(workspace, input.snapshot, input.onCopyCheckpoint);
     });
   }
+  if (scope) await scope.assert();
   return { manifestPath, snapshotPath, snapshotHash: input.snapshot.manifest.snapshotHash,
     managedCopiesPath: candidateOnly ? null : `${GENERATED_ROOT}/skills/source`,
     disposition: candidateOnly ? 'candidate_only' as const : 'local_bootstrap_inventory' as const,
@@ -795,9 +806,18 @@ export interface RepositoryPackageWriteInput {
 }
 const writers = new Map<string, Promise<unknown>>();
 export async function writeRepositoryPackageSnapshot(input: RepositoryPackageWriteInput) {
+  const scope = currentBootstrapHostScope();
+  if (scope) {
+    const copied = snapshotPackageInput(input, scope, ['workspace', 'snapshot', 'candidateOnly']);
+    const field = Object.getOwnPropertyDescriptor(input, 'onCopyCheckpoint');
+    if (field && (!Object.hasOwn(field, 'value') || field.value !== undefined
+      && (typeof field.value !== 'function' || types.isProxy(field.value)))) throw new Error('repository_package_input_invalid');
+    input = Object.freeze({...copied, onCopyCheckpoint: field?.value});
+    await scope.assert();
+  }
   const workspace = await realpath(input.workspace);
   const previous = writers.get(workspace) || Promise.resolve();
-  const operation = previous.catch(() => {}).then(() => persistSnapshot(input, workspace));
+  const operation = previous.catch(() => {}).then(async () => {if (scope) await scope.assert(); return persistSnapshot(input, workspace);});
   writers.set(workspace, operation);
   try { return await operation; } finally { if (writers.get(workspace) === operation) writers.delete(workspace); }
 }
@@ -844,30 +864,77 @@ async function directories(workspace: string, path: string) {
   for (const part of pathKey(path).split('/')) {
     current = current ? `${current}/${part}` : part;
     try { await mkdir(resolve(workspace, current), { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    catch (error) { if (errorCode(error) !== 'EEXIST') throw error; }
     if (!(await lstat(await checkedPath(workspace, current))).isDirectory()) throw new Error('Managed mapping directory conflict.');
   }
 }
 async function syncDirectory(workspace: string, path: string) {
+  const scope = currentBootstrapHostScope();
+  if (scope) await scope.assert();
   if (process.platform === 'win32') return; // Windows does not support opening directories for fsync.
-  const handle = await open(await checkedPath(workspace, path), constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-  try { await handle.sync(); } finally { await handle.close(); }
+  const source = await checkedPath(workspace, path);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    await packageEffect(scope, async () => {handle = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));});
+    await packageEffect(scope, () => handle!.sync());
+  } finally {await closeReadHandle(handle, scope);}
 }
+type StagingIdentity = {dev: bigint; ino: bigint; parentDev: bigint; parentIno: bigint; sizeBytes: number; sha256: string};
 async function freshFile(workspace: string, path: string, bytes: string | Buffer) {
+  const scope = currentBootstrapHostScope();
+  const content = Buffer.from(bytes);
   await directories(workspace, posix.dirname(path));
-  const handle = await open(resolve(workspace, path), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
-  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+  const parent = await lstat(await checkedPath(workspace, posix.dirname(path)), {bigint: true});
+  let handle: Awaited<ReturnType<typeof open>> | undefined, identity: StagingIdentity | undefined;
+  try {
+    await packageEffect(scope, async () => {handle = await open(resolve(workspace, path),
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);});
+    const metadata = await packageEffect(scope, () => handle!.stat({bigint: true}));
+    if (!metadata.isFile() || metadata.ino === 0n || metadata.nlink !== 1n) throw cleanupFailure();
+    identity = {dev: metadata.dev, ino: metadata.ino, parentDev: parent.dev, parentIno: parent.ino,
+      sizeBytes: content.length, sha256: digest(content)};
+    await packageEffect(scope, () => handle!.writeFile(content));
+    await packageEffect(scope, () => handle!.sync());
+  } finally {await closeReadHandle(handle, scope);}
   await syncDirectory(workspace, posix.dirname(path));
+  return identity!;
+}
+async function verifyStaging(workspace: string, path: string, identity: StagingIdentity) {
+  const parent = await lstat(await checkedPath(workspace, posix.dirname(path)), {bigint: true});
+  const metadata = await lstat(await checkedPath(workspace, path), {bigint: true});
+  if (!parent.isDirectory() || parent.dev !== identity.parentDev || parent.ino !== identity.parentIno
+    || !ownedLockMetadata(metadata, identity) || metadata.size !== BigInt(identity.sizeBytes)) throw cleanupFailure();
+  const bytes = await readStable(workspace, path, identity.sizeBytes);
+  const current = await lstat(await checkedPath(workspace, path), {bigint: true});
+  if (!ownedLockMetadata(current, identity) || bytes.length !== identity.sizeBytes || digest(bytes) !== identity.sha256) throw cleanupFailure();
+}
+async function cleanupStaging(workspace: string, path: string, identity: StagingIdentity) {
+  const scope = currentBootstrapHostScope();
+  if (scope && !await scope.current()) return; // Interrupted generated evidence is retained.
+  try {
+    const parent = await lstat(await checkedPath(workspace, posix.dirname(path)), {bigint: true});
+    if (parent.dev !== identity.parentDev || parent.ino !== identity.parentIno) throw cleanupFailure();
+    const metadata = await lstat(resolve(workspace, path), {bigint: true}).catch(error => {if (missing(error)) return null; throw error;});
+    if (!metadata) return;
+    if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.dev !== identity.dev || metadata.ino !== identity.ino
+      || metadata.nlink < 1n || metadata.nlink > 2n) throw cleanupFailure();
+    await verifyStaging(workspace, path, identity);
+    await unlink(resolve(workspace, path));
+  } catch (error) {
+    if (scope) await scope.assert();
+    throw cleanupFailure();
+  }
 }
 async function atomicMetadata(workspace: string, path: string, value: unknown) {
   const temporary = `${GENERATED_ROOT}/.metadata-${randomUUID()}.tmp`;
-  await freshFile(workspace, temporary, `${canonicalize(value)}\n`);
+  const identity = await freshFile(workspace, temporary, `${canonicalize(value)}\n`);
   try {
     await checkedPath(workspace, GENERATED_ROOT);
     await optionalBytes(workspace, path);
+    await verifyStaging(workspace, temporary, identity);
     await rename(resolve(workspace, temporary), resolve(workspace, path));
     await syncDirectory(workspace, GENERATED_ROOT);
-  } finally { await unlink(resolve(workspace, temporary)).catch(error => { if (!missing(error)) throw error; }); }
+  } finally {await cleanupStaging(workspace, temporary, identity);}
 }
 async function snapshotFor(workspace: string, hash: string) {
   if (!/^sha256:[a-f0-9]{64}$/.test(hash)) throw new Error('Managed copies snapshot integrity failed.');
@@ -877,8 +944,8 @@ async function snapshotFor(workspace: string, hash: string) {
   if (snapshot.manifest.snapshotHash !== hash || serializeRepositoryPackageSnapshot(snapshot) !== bytes.toString('utf8')) {
     throw new Error('Managed copies snapshot integrity failed.');
   }
-  const validated = await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
-    `https://schemas.dharma-ai.io/repository-package/${snapshot.manifest.schema.split('/')[1]}`, snapshot.manifest);
+  const validated = await packageEffect(currentBootstrapHostScope(), () => validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
+    `https://schemas.dharma-ai.io/repository-package/${snapshot.manifest.schema.split('/')[1]}`, snapshot.manifest));
   if (!validated.ok) throw new Error('Managed copies snapshot schema integrity failed.');
   return snapshot;
 }
@@ -970,7 +1037,7 @@ async function prepareCopies(workspace: string, snapshot: RepositoryPackageSnaps
     if (operation.after) await freshFile(workspace, staged, blobs.get(operation.after.sha256)!);
   }
   await atomicMetadata(workspace, JOURNAL_PATH, journal);
-  await checkpoint?.('journal_prepared');
+  await copyCheckpoint(checkpoint, 'journal_prepared');
   await applyJournal(workspace, journal, snapshot, checkpoint);
 }
 async function recoverCopies(workspace: string) {
@@ -1037,24 +1104,24 @@ async function applyJournal(workspace: string, journal: CopyJournal, snapshot: R
         await rename(resolve(workspace, target), resolve(workspace, backup));
         await syncDirectory(workspace, posix.dirname(target));
         await syncDirectory(workspace, posix.dirname(backup));
-        await checkpoint?.('file_backed_up');
+        await copyCheckpoint(checkpoint, 'file_backed_up');
       } else if (operation.before && !saved && !installed) throw new Error('Managed copies missing backup conflict.');
       if (operation.after && !installed) {
         if (!await matches(workspace, staged, operation.after)) throw new Error('Managed copies missing staged file conflict.');
         await directories(workspace, posix.dirname(target));
         try { await link(resolve(workspace, staged), resolve(workspace, target)); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Managed copies unmanaged destination conflict.'); throw error; }
+        catch (error) { if (errorCode(error) === 'EEXIST') throw new Error('Managed copies unmanaged destination conflict.'); throw error; }
         await syncDirectory(workspace, posix.dirname(target));
-        await checkpoint?.('file_installed');
+        await copyCheckpoint(checkpoint, 'file_installed');
       }
     }
     await verifyCopies(workspace, journal);
     await verifyMetadata(workspace, journal, desiredManifest);
     await atomicMetadata(workspace, INDEX_PATH, journal.desired);
-    await checkpoint?.('copies_index_written');
+    await copyCheckpoint(checkpoint, 'copies_index_written');
     await verifyMetadata(workspace, journal, desiredManifest);
     await atomicMetadata(workspace, `${GENERATED_ROOT}/MANIFEST.json`, snapshot.manifest);
-    await checkpoint?.('manifest_written');
+    await copyCheckpoint(checkpoint, 'manifest_written');
   }
   await verifyCopies(workspace, journal);
   for (const [number, operation] of operations.entries()) {
@@ -1063,7 +1130,7 @@ async function applyJournal(workspace: string, journal: CopyJournal, snapshot: R
       if (await matches(workspace, path, file)) {
         await unlink(resolve(workspace, path));
         await syncDirectory(workspace, posix.dirname(path));
-        await checkpoint?.('cleanup_file_removed');
+        await copyCheckpoint(checkpoint, 'cleanup_file_removed');
       }
     }
   }
@@ -1079,43 +1146,94 @@ async function applyJournal(workspace: string, journal: CopyJournal, snapshot: R
   }
   for (const folder of [...folders].sort((a, b) => b.split('/').length - a.split('/').length || compare(a, b))) {
     try { await rmdir(await checkedPath(workspace, folder)); }
-    catch (error) { if (!missing(error) && !['ENOTEMPTY', 'EEXIST'].includes(String((error as NodeJS.ErrnoException).code))) throw error; }
+    catch (error) { if (!missing(error) && !['ENOTEMPTY', 'EEXIST'].includes(errorCode(error) || '')) throw error; }
   }
   const bytes = await readStable(workspace, JOURNAL_PATH, METADATA_LIMIT);
   if (bytes.toString('utf8') !== `${canonicalize(journal)}\n`) throw new Error('Managed copies journal conflict.');
   await unlink(resolve(workspace, JOURNAL_PATH));
   await syncDirectory(workspace, GENERATED_ROOT);
 }
+async function copyCheckpoint(checkpoint: RepositoryPackageWriteInput['onCopyCheckpoint'], point: RepositoryPackageCopyCheckpoint) {
+  await packageEffect(currentBootstrapHostScope(), async () => {await checkpoint?.(point);});
+}
+function ownedLockMetadata(metadata: BigIntStats, identity: StagingIdentity) {
+  return metadata.isFile() && !metadata.isSymbolicLink() && metadata.dev === identity.dev && metadata.ino === identity.ino
+    && metadata.nlink >= 1n && metadata.nlink <= 2n;
+}
+// Cooperative release can inspect/delete only this acquired inode and nonce,
+// even after ordinary setup admission closes. It never resumes journal work.
+async function releaseLockFile(workspace: string, path: string, identity: StagingIdentity, text: string) {
+  const scope = currentBootstrapHostScope(), parentPath = resolve(workspace, posix.dirname(path)), source = resolve(workspace, path);
+  try {
+    const parent = await nativeLstat(parentPath, {bigint: true});
+    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== identity.parentDev || parent.ino !== identity.parentIno) throw cleanupFailure();
+    const metadata = await nativeLstat(source, {bigint: true}).catch(error => {if (missing(error)) return null; throw error;});
+    if (!metadata) return;
+    if (!ownedLockMetadata(metadata, identity)) throw cleanupFailure();
+    const expected = Buffer.from(text), bytes = Buffer.alloc(expected.length + 1);
+    let handle: Awaited<ReturnType<typeof open>> | undefined, before: BigIntStats | undefined;
+    try {
+      handle = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+      before = await handle.stat({bigint: true});
+      if (!ownedLockMetadata(before, identity) || before.size !== BigInt(expected.length)) throw cleanupFailure();
+      let size = 0;
+      while (size < bytes.length) {
+        const result = await handle.read(bytes, size, bytes.length - size, size);
+        if (!result.bytesRead) break;
+        size += result.bytesRead;
+      }
+      const after = await handle.stat({bigint: true});
+      if (!ownedLockMetadata(after, identity) || size !== expected.length || !bytes.subarray(0, size).equals(expected)
+        || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw cleanupFailure();
+    } finally {await closeReadHandle(handle, scope);}
+    const current = await nativeLstat(source, {bigint: true});
+    if (!ownedLockMetadata(current, identity) || before!.size !== current.size
+      || before!.mtimeNs !== current.mtimeNs || before!.ctimeNs !== current.ctimeNs) throw cleanupFailure();
+    await nativeUnlink(source);
+    if (process.platform !== 'win32') {
+      let directory: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        directory = await open(parentPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+        const currentParent = await directory.stat({bigint: true});
+        if (!currentParent.isDirectory() || currentParent.dev !== identity.parentDev || currentParent.ino !== identity.parentIno) throw cleanupFailure();
+        await directory.sync();
+      } finally {await closeReadHandle(directory, scope);}
+    }
+  } catch {throw cleanupFailure();}
+}
 async function withCopyLock(workspace: string, action: () => Promise<void>) {
+  const scope = currentBootstrapHostScope();
   const lock = { schema: 'dharma.repository-package-copy-lock/v1', platform: process.platform, pid: process.pid, nonce: randomUUID() };
   const text = `${canonicalize(lock)}\n`;
   const temporary = `${GENERATED_ROOT}/.lock-${lock.nonce}.tmp`;
-  await freshFile(workspace, temporary, text);
+  const identity = await freshFile(workspace, temporary, text);
   let acquired = false;
   try {
+    await verifyStaging(workspace, temporary, identity);
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { await link(resolve(workspace, temporary), resolve(workspace, LOCK_PATH)); acquired = true; break; }
+      try {
+        await packageEffect(scope, async () => {await nativeLink(resolve(workspace, temporary), resolve(workspace, LOCK_PATH)); acquired = true;});
+        break;
+      }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (errorCode(error) !== 'EEXIST') throw error;
         const bytes = await readStable(workspace, LOCK_PATH, 4096);
         const existing = JSON.parse(bytes.toString('utf8'));
         if (existing.schema !== lock.schema || existing.platform !== lock.platform || !Number.isSafeInteger(existing.pid) || existing.pid < 1) {
           throw new Error('Managed copies lock conflict.');
         }
-        try { process.kill(existing.pid, 0); throw new Error('Managed copies writer is active; retry later.'); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        try {await packageEffect(scope, async () => {process.kill(existing.pid, 0);}); throw new Error('Managed copies writer is active; retry later.');}
+        catch (error) { if (errorCode(error) !== 'ESRCH') throw error; }
         if (!(await readStable(workspace, LOCK_PATH, 4096)).equals(bytes)) throw new Error('Managed copies lock conflict.');
         await unlink(resolve(workspace, LOCK_PATH));
       }
     }
     if (!acquired) throw new Error('Managed copies lock conflict.');
-    await action();
+    await packageEffect(scope, action);
   } finally {
-    if (acquired) {
-      if ((await readStable(workspace, LOCK_PATH, 4096)).toString('utf8') !== text) throw new Error('Managed copies lock conflict.');
-      await unlink(resolve(workspace, LOCK_PATH));
-      await syncDirectory(workspace, GENERATED_ROOT);
-    }
-    await unlink(resolve(workspace, temporary));
+    let failed = false;
+    if (acquired) try {await releaseLockFile(workspace, LOCK_PATH, identity, text);} catch {failed = true;}
+    try {await releaseLockFile(workspace, temporary, identity, text);} catch {failed = true;}
+    if (failed) throw cleanupFailure();
   }
 }
