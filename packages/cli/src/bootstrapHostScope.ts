@@ -68,7 +68,8 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
       if (signal.aborted || Date.now() < issued || Date.now() >= expires) {withdrawn.abort(); return false;}
       let valid = false;
       try {valid = await requalify() === true;} catch { /* Withhold host/private diagnostics. */ }
-      valid = valid && !signal.aborted && Date.now() >= issued && Date.now() < expires;
+      valid = valid && (context?.scope !== scope || context.lifetime.active)
+        && !signal.aborted && Date.now() >= issued && Date.now() < expires;
       if (!valid) withdrawn.abort();
       return valid;
     },

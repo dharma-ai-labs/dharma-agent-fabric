@@ -1,7 +1,8 @@
 import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
 import {types} from 'node:util';
-import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness,
-  type ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
+import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness}
+  from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
+import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {prepareCodexBootstrapHost, type BootstrapHostScope} from './bootstrapHostScope.js';
 import type {CodexSetupExecutionLease, CodexSetupIntent} from './codexSetupAdmission.js';
 

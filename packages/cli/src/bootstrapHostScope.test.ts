@@ -438,3 +438,19 @@ test('settled borrowed context cannot admit a detached effect while the original
   assert.equal(effects, 0); assert.equal(original.scope.signal.aborted, true);
   await assert.rejects(cli.bootstrapFromCodexSetupScope(original.scope), {message: 'codex_setup_host_scope_unavailable'});
 });
+
+test('late qualification started in a borrowed context cannot authorize an effect after that context settles', async () => {
+  let calls = 0, entered!: () => void, release!: () => void, late!: Promise<void>, effects = 0;
+  const ready = new Promise<void>(done => {entered = done;});
+  const wait = new Promise<void>(done => {release = done;});
+  const original = prepareCodexBootstrapHost({...await fixture(), current: async () => {
+    if (++calls === 2) {entered(); await wait;} return true;
+  }});
+  await host.runCodexBootstrapHostScope(original.scope, async () => {
+    late = original.scope.step(async () => {effects++;});
+    await ready;
+  });
+  const rejected = assert.rejects(late, {message: 'codex_setup_host_scope_unavailable'});
+  release(); await rejected;
+  assert.equal(effects, 0); assert.equal(original.scope.signal.aborted, true);
+});
