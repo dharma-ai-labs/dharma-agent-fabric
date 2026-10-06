@@ -9,7 +9,7 @@ import ts from 'typescript';
 import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {LocalVault, type LocalCodexSetupSessionRequest} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {runCodexSetupChildStartup, type CodexSetupChildScope} from './codexSetupChildStartup.js';
-import {isNamedSessionOwnerReceipt} from './namedSessionTrust.js';
+import {isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt} from './namedSessionTrust.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -52,7 +52,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     openCodexAppServerTransport: async () => {effects.push('transport'); mutations.transport?.(); return {close: async () => {effects.push('close-transport');}, request: async () => {
       effects.push('account-read'); mutations.account?.(); return {account: {type: 'synthetic'}};
     }};}, flags: new Map(), boundedInteger: (_raw: unknown, fallback: number) => fallback,
-    randomUUID: () => uuid(40), UUID_PATTERN: /^[0-9a-f-]{36}$/, isNamedSessionOwnerReceipt, startNamedCodexThread: async () => {
+    randomUUID: () => uuid(40), UUID_PATTERN: /^[0-9a-f-]{36}$/, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, startNamedCodexThread: async () => {
       effects.push('thread-start'); mutations.thread?.(); return 'synthetic-thread';
     }, saveNamedSession: async () => {effects.push('save-registration');}};
   async function compile() {
@@ -139,8 +139,8 @@ test('actual provider initializer rechecks the owner receipt deadline immediatel
   assert.equal(f.effects.includes('transport'), false); assert.equal(f.effects.includes('thread-start'), false);
 });
 
-for (const change of ['none', 'member', 'device', 'expiry', 'replay', 'missing'] as const) {
-  test(`actual resumed provider initializer requires a current authenticated owner receipt before provider startup (${change})`, async t => {
+for (const change of ['none', 'member', 'device', 'expiry', 'replay', 'missing', 'detached', 'revision_exhausted', 'future_lease'] as const) {
+  test(`actual resumed provider initializer verifies reconnect ownership without claiming live presence (${change})`, async t => {
     const f = await fixture(t);
     f.remote.leaseUntil = new Date(Date.now() + 60_000).toISOString(); f.remote.replay = false;
     const identity = {organizationId: f.request.organizationId, workspaceId: f.request.workspaceId,
@@ -152,7 +152,13 @@ for (const change of ['none', 'member', 'device', 'expiry', 'replay', 'missing']
     if (change === 'expiry') f.remote.leaseUntil = new Date(Date.now() - 1).toISOString();
     if (change === 'replay') f.remote.replay = true;
     if (change === 'missing') delete f.remote.membershipId;
-    if (change === 'none') {await f.run(); assert.ok(f.effects.indexOf('attach') < f.effects.indexOf('transport'));}
+    if (change === 'detached') f.remote.state = 'detached';
+    if (change === 'revision_exhausted') f.remote.revision = 2147483647;
+    if (change === 'future_lease') f.remote.leaseUntil = new Date(Date.now() + 86400000).toISOString();
+    if (change === 'none' || change === 'expiry') {
+      await f.run(); assert.ok(f.effects.indexOf('attach') < f.effects.indexOf('transport'));
+      assert.equal(isNamedSessionOwnerReceipt(f.response, uuid(40), identity as Parameters<typeof isNamedSessionOwnerReceipt>[2]), change === 'none');
+    }
     else {await assert.rejects(f.run(), /registration_invalid/); assert.equal(f.effects.includes('transport'), false);}
     assert.equal(f.effects.includes('thread-start'), false); assert.equal(f.effects.includes('save-registration'), false);
   });
