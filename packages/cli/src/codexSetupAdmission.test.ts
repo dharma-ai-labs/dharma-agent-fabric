@@ -405,7 +405,7 @@ test('bounded status withholds readiness while independent verification is pendi
 });
 
 test('host response budget is bounded and cannot be selected by model arguments', async () => {
-  for (const responseWaitMs of [0, -1, 0.5, 5001, Number.NaN]) {
+  for (const responseWaitMs of [0, -1, 0.5, 900001, Number.NaN]) {
     const f = fixture();
     assert.throws(() => createCodexSetupAdmission({...f.input, responseWaitMs}), /^Error: codex_setup_intent_invalid$/);
     assert.equal(f.calls, 0); assert.equal(f.claims, 0);

@@ -149,7 +149,7 @@ test('matching completion during turn/start response prevents later setup even i
   finally {await host.close();}
 });
 
-test('disconnect after bounded status withdraws a still-owned pending setup operation', async () => {
+test('disconnect while approval is pending withdraws the original owned setup operation', async () => {
   const f = fixture(); let entered!: () => void, stopped = false, effects = 0;
   const running = new Promise<void>(done => {entered = done;});
   f.input.execute = async (_intent, signal, current) => {
@@ -159,9 +159,25 @@ test('disconnect after bounded status withdraws a still-owned pending setup oper
   const host = await open(f.input);
   try {
     const response = f.tool(); await running;
-    assert.equal((await response).success, false); assert.equal(stopped, false);
-    f.lifetime.abort(); await host.settled;
+    assert.equal(stopped, false);
+    f.lifetime.abort(); assert.equal((await response).success, false); await host.settled;
     assert.equal(stopped, true); assert.equal(effects, 0); assert.equal(f.counts.handler, false);
+  } finally {await host.close();}
+});
+
+test('native setup keeps the original tool call pending while recipient approval is outstanding', async () => {
+  const f = fixture(); let finished = false;
+  f.input.execute = async (_intent, signal, current) => {
+    await new Promise<void>(done => setTimeout(done, 450));
+    assert.equal(signal.aborted, false); assert.equal(await current(), true);
+    finished = true; return {state: 'completed', readinessReceiptId: id(6)};
+  };
+  const host = await open(f.input);
+  try {
+    const response = await f.tool();
+    assert.equal(response.success, true, 'an early in-progress response lets Codex end and cancel browser approval');
+    assert.equal(finished, true); assert.equal(f.counts.claims, 1);
+    f.complete(); await host.settled;
   } finally {await host.close();}
 });
 

@@ -32,9 +32,9 @@ lines.on('line', line => {
       global.pendingPing = message.id;
       return;
     }
-    if (mode === 'tool-deferred') {
+    if (mode === 'tool-deferred' || mode === 'setup-deferred') {
       process.stdout.write(JSON.stringify({ id: message.id, result: { dispatched: true } }) + '\\n');
-      process.stdout.write(JSON.stringify({ id: 'call-1', method: 'item/tool/call', params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'dharma_peer_ask', arguments: {} } }) + '\\n');
+      process.stdout.write(JSON.stringify({ id: 'call-1', method: 'item/tool/call', params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: mode === 'setup-deferred' ? 'dharma_setup_reference' : 'dharma_peer_ask', arguments: {} } }) + '\\n');
       return;
     }
     if (mode === 'error') {
@@ -46,7 +46,7 @@ lines.on('line', line => {
     process.stdout.write(notification.slice(12));
     process.stdout.write(JSON.stringify({ id: message.id, result: { pong: message.params.value } }) + '\\n');
   } else if (message.id === 'call-1' && message.result) {
-    if (mode === 'tool-deferred') {
+    if (mode === 'tool-deferred' || mode === 'setup-deferred') {
       process.stdout.write(JSON.stringify({ method: 'tool/completed', params: message.result }) + '\\n');
       return;
     }
@@ -55,12 +55,13 @@ lines.on('line', line => {
 });
 `;
 
-function open(mode: string, options: { maximumFrameBytes?: number; requestTimeoutMs?: number; toolCallTimeoutMs?: number; experimentalApi?: boolean } = {}) {
+function open(mode: string, options: { maximumFrameBytes?: number; requestTimeoutMs?: number; toolCallTimeoutMs?: number; setupApprovalTimeoutMs?: number; experimentalApi?: boolean } = {}) {
   return openCodexAppServerTransport({
     command: process.execPath, argv: ['-e', fakeServer, mode], cwd: process.cwd(),
     requestTimeoutMs: options.requestTimeoutMs ?? 1_000,
     maximumFrameBytes: options.maximumFrameBytes,
     toolCallTimeoutMs: options.toolCallTimeoutMs,
+    setupApprovalTimeoutMs: options.setupApprovalTimeoutMs,
     ...{ experimentalApi: options.experimentalApi },
   });
 }
@@ -121,6 +122,34 @@ test('invalid callback deadlines fail before launching a provider', async () => 
   for (const toolCallTimeoutMs of [0, -1, 1.5, 60001]) {
     await assert.rejects(open('normal', { toolCallTimeoutMs }), /codex_app_server_launch_invalid/);
   }
+});
+
+test('recipient approval wait is limited to the setup tool and cannot extend peer execution', async () => {
+  for (const mode of ['setup-deferred', 'tool-deferred']) {
+    const transport = await open(mode, {experimentalApi: true, toolCallTimeoutMs: 30, setupApprovalTimeoutMs: 500});
+    let completed = false, cancelled = false;
+    try {
+      transport.onNotification((event: any) => {if (event.method === 'tool/completed') completed = true;});
+      transport.onToolCall(async (_params, context) => {
+        assert.ok(context);
+        await new Promise(done => setTimeout(done, 100)); cancelled = context.signal.aborted;
+        return {success: true, contentItems: [{type: 'inputText', text: 'receipt'}]};
+      });
+      await transport.request('ping', {});
+      await new Promise(done => setTimeout(done, 180));
+      assert.equal(completed, mode === 'setup-deferred');
+      assert.equal(cancelled, mode === 'tool-deferred');
+    } finally {await transport.close();}
+  }
+});
+
+test('setup-only approval deadline remains finite and requires the native experimental protocol', async () => {
+  for (const setupApprovalTimeoutMs of [0, -1, 1.5, 900001]) {
+    await assert.rejects(open('normal', {experimentalApi: true, setupApprovalTimeoutMs}), /codex_app_server_launch_invalid/);
+  }
+  await assert.rejects(open('normal', {setupApprovalTimeoutMs: 900000}), /codex_app_server_launch_invalid/);
+  const transport = await open('normal', {experimentalApi: true, setupApprovalTimeoutMs: 900000});
+  await transport.close();
 });
 
 test('normal transport close cancels an active tool context', async () => {

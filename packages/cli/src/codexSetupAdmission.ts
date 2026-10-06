@@ -99,7 +99,7 @@ export function createCodexSetupAdmission(input: Input) {
   const keys = ['schema', 'operationId', 'setupReference', 'organizationId', 'recipientMembershipId', 'origin',
     'repositoryFingerprint', 'policyRevision', 'scopeDigest', 'contractDigest', 'hostContextId', 'issuedAt', 'expiresAt'];
   if (!exact(value, keys) || Object.values(value).some(item => typeof item !== 'string')
-    || !Number.isInteger(responseWaitMs) || responseWaitMs < 1 || responseWaitMs > 5000) return invalid();
+    || !Number.isInteger(responseWaitMs) || responseWaitMs < 1 || responseWaitMs > 900_000) return invalid();
   const intent = Object.freeze({...input.intent});
   let origin: URL; try {origin = new URL(intent.origin);} catch {return invalid();}
   const issued = Date.parse(intent.issuedAt), expires = Date.parse(intent.expiresAt);
