@@ -2536,7 +2536,8 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     [process.execPath, entry, 'relay', 'start', '--policy', startup.policy],
     [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
   if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
-    || canonicalize(value.argv) !== canonicalize(argv[i])) || processes[1]!.parentPid !== supervisorPid) {
+    || canonicalize(value.argv) !== canonicalize(argv[i])) || processes[1]!.parentPid !== supervisorPid
+    || processes[2]!.parentPid !== supervisorPid) {
     throw new Error('setup_runtime_process_unconfirmed');
   }
   const supervisor = await readBootstrapRuntimeJson(resolve(home, 'relay', 'supervisor-workspace.json'), scope) as Record<string, unknown>;

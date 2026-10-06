@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';
 import {mkdtemp, readFile, realpath, rm} from 'node:fs/promises';
@@ -31,7 +32,10 @@ const hash = `sha256:${'a'.repeat(64)}`;
 // Execute unchanged production declarations; only OS/server/native boundaries
 // are fixtures. These tests do not establish Linux or production readiness.
 async function declaration(name: string, dependencies: Record<string, unknown>) {
-  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const baseline = process.env.DHARMA_COMPLETION_PARENT_TEST_BASELINE;
+  if (baseline && baseline !== 'e48fcd0798c26f9b8078f3ec2b4ea5bc782ad383') throw new Error('fixture_source_unqualified');
+  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8'})
+    : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const matches = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.equal(matches.length, 1);
@@ -84,7 +88,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
       argv: ['synthetic-node', entry, 'relay', 'supervise', '--policy', policyPath]},
     {pid: 102, uid: 1000, parentPid: 101, processGroupId: 101, sessionId: 101, startTicks: '20',
       argv: ['synthetic-node', entry, 'relay', 'start', '--policy', policyPath]},
-    {pid: 103, uid: 1000, parentPid: 1, processGroupId: 103, sessionId: 103, startTicks: '30',
+    {pid: 103, uid: 1000, parentPid: 101, processGroupId: 101, sessionId: 101, startTicks: '30',
       argv: ['synthetic-node', entry, 'sessions', 'serve', '--name', name, '--workspace-id', workspaceId, '--apply']},
   ];
   const paths = new Map<string, unknown>([
@@ -209,6 +213,13 @@ test('actual CLI producer joins scoped identity, server role, native package and
   assert.equal(await owner.verify(receipt.readinessReceiptId, f.prepared.intent, hash), true);
   f.native.sessionId = 'different_session';
   assert.equal(await owner.verify(receipt.readinessReceiptId, f.prepared.intent, hash), false);
+});
+
+test('actual CLI producer rejects a named worker not owned by the verified standing supervisor', async t => {
+  const f = await fixture(t);
+  f.processes[2]!.parentPid = 1;
+  await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history'),
+    {message: 'setup_runtime_process_unconfirmed'});
 });
 
 for (const change of ['source', 'recipient', 'role', 'package', 'native', 'lease', 'startup', 'poll', 'process', 'withdrawn'] as const) {
