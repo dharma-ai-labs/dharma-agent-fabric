@@ -9,6 +9,7 @@ import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provide
 import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { NamedSessionEvidenceReceipt } from './namedSessionEvidence.js';
 import { composeNamedSessionRepositoryPrompt } from './namedSessionPackageGate.js';
+import {parseNamedCodexSkillObservation, type NamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 
 export interface NamedSessionRegistration {
   schema: 'dharma.named-session/v1';
@@ -107,6 +108,7 @@ export async function runNamedSessionService(input: {
   localWriteRoots: string[];
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   authorizeLocalWork(): Promise<boolean>;
+  observeNativeSkill?(): Promise<NamedCodexSkillObservation>;
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
   syncTaskExports?(): Promise<import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult>;
@@ -194,6 +196,19 @@ export async function runNamedSessionService(input: {
           if (request.action === 'status') return status();
           if (request.action === 'stop') { closing = true; return { ok: true, state: 'stop_requested' }; }
           return enqueue(async () => {
+            if (request.action === 'readiness') {
+              if (Object.keys(request).length !== 1 || !input.observeNativeSkill || !await owner!.assertActive()) {
+                throw new Error('named_session_readiness_unavailable');
+              }
+              let nativeSkill: NamedCodexSkillObservation;
+              try {
+                nativeSkill = await input.withActivationBoundary(async () =>
+                  parseNamedCodexSkillObservation(await input.observeNativeSkill!()));
+              } catch {throw new Error('named_session_readiness_unavailable');}
+              if (!await owner!.assertActive()) throw new Error('named_session_readiness_unavailable');
+              return {ok: true, schema: 'dharma.named-session-readiness/v1', name: registration.name,
+                bindingId: binding.bindingId, sessionId: binding.sessionId, ...registration.identity, nativeSkill};
+            }
             if (request.action === 'work') {
               if (typeof request.prompt !== 'string' || typeof request.workId !== 'string') throw new Error('named_session_work_invalid');
               assertCodexWorkPrompt(request.prompt);

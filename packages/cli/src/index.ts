@@ -101,6 +101,7 @@ import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provid
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
+import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
@@ -2712,7 +2713,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     usage,
   });
   const operatingContract = await loadAgentFabricOnboardingContract();
-  const namedSession = !joinedBindingId && provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
+  let namedSession = !joinedBindingId && provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
     ? await withOnboardingStage('named_session', String(onboarded.workspaceId),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
       () => namedSessionCommand('start', new Map<string, string | boolean>([
@@ -2722,9 +2723,23 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         ? [['session-budget-cents', String(flags.get('session-budget-cents'))] as [string, string]] : []),
     ]))) as Record<string, unknown>
     : null;
+  if (namedSession) {
+    const native = await withOnboardingStage('readiness', String(onboarded.workspaceId),
+      `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+      () => namedSessionCommand('readiness', new Map<string, string | boolean>([
+        ['name', String(flags.get('session-name') || `codex-${String(onboarded.workspaceId).slice(0, 8)}`)],
+        ['workspace-id', String(onboarded.workspaceId)],
+      ]))) as Record<string, unknown>;
+    if (['name', 'bindingId', 'sessionId', 'organizationId', 'repositoryBindingId', 'workspaceId',
+      'endpointId', 'membershipId', 'deviceId', 'provider'].some(key => native[key] !== namedSession![key])) {
+      throw new Error('named_session_readiness_scope_mismatch');
+    }
+    namedSession = {...namedSession, nativeSkill: parseNamedCodexSkillObservation(native.nativeSkill)};
+  }
   const repositoryReceipt = onboarded as Record<string, unknown>;
   const namedSessionReady = Boolean(joinedBindingId) || provider !== 'codex' || process.platform !== 'linux'
-    || Boolean(namedSession?.ok === true && ['running', 'executing'].includes(String(namedSession.state)));
+    || Boolean(namedSession?.ok === true && namedSession.nativeSkill
+      && ['running', 'executing'].includes(String(namedSession.state)));
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
@@ -4059,6 +4074,17 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     catch { return { ok: true, name, state: 'stopped', registered: Boolean(existing), enabled: existing?.enabled ?? false,
       bindingId: existing?.bindingId ?? null }; }
   }
+  if (action === 'readiness') {
+    if (!existing?.enabled) throw new Error('named_session_readiness_unavailable');
+    const result = await namedSessionRequest(dharmaHome(), name, {action: 'readiness'});
+    if (Object.keys(result).sort().join(',') !== 'bindingId,deviceId,endpointId,membershipId,name,nativeSkill,ok,organizationId,provider,repositoryBindingId,schema,sessionId,workspaceId'
+      || result.schema !== 'dharma.named-session-readiness/v1' || result.name !== name || result.bindingId !== existing.bindingId
+      || typeof result.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(result.sessionId)
+      || Object.entries(existing.identity).some(([key, value]) => result[key] !== value)) {
+      throw new Error('named_session_readiness_scope_mismatch');
+    }
+    return {...result, nativeSkill: parseNamedCodexSkillObservation(result.nativeSkill)};
+  }
   if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
   if (action === 'stop') {
@@ -4186,6 +4212,16 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
         localWriteRoots: writeRoots, additionalFilesystemRules: filesystem.additionalFilesystemRules,
+      observeNativeSkill: async () => {
+        const installation = await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path});
+        const native = await observeNamedCodexSkill(transport!, {workspace: item.path, installation,
+          sharedRepositoryReady: await repositorySharedReady(item)});
+        const current = await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path});
+        if (!current.signedLifecycleReady || current.activeBundleId !== native.bundleId
+          || current.activeBundleHash !== native.bundleHash || current.nativeSkillPath !== installation.nativeSkillPath
+          || !await repositorySharedReady(item)) throw new Error('named_session_native_skill_unavailable');
+        return native;
+      },
       syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),

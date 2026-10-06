@@ -17,6 +17,7 @@ import {
 } from './repositoryPackageTransfer.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
+import {observeNamedCodexSkill} from './namedCodexSkillDiscovery.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 
 const keys = generateKeyPairSync('ed25519');
@@ -823,6 +824,63 @@ test('filesystem integration: delivered five-file package installs through the p
     assert.equal(packageContent.manifestHash, input.envelope.descriptor.manifestHash);
     assert.equal(packageContent.catalogHash, input.envelope.descriptor.catalogHash);
     assert.equal('releaseId' in packageContent, false);
+    let nativeRequests = 0;
+    const lifetime = new AbortController();
+    const nativeResponse = () => ({data: [{cwd: source, errors: [], skills: [{name: 'dharma-agent-fabric',
+      enabled: true, path: installation.nativeSkillPath, description: 'Signed synthetic fixture', scope: 'user'}]}]});
+    const nativeTransport = {signal: lifetime.signal, request: async (method: string, params: unknown) => {
+      nativeRequests++; assert.equal(method, 'skills/list'); assert.deepEqual(params, {cwds: [source], forceReload: true});
+      return nativeResponse();
+    }};
+    const nativeObserved = await observeNamedCodexSkill(nativeTransport, {workspace: source, installation, sharedRepositoryReady: true});
+    assert.equal(nativeObserved.nativeDiscovered, true);
+    for (const key of ['bundleId', 'bundleHash', 'manifestHash', 'catalogHash', 'skillsHash'] as const) {
+      assert.equal(nativeObserved[key], packageContent[key]);
+    }
+    assert.equal(JSON.stringify(nativeObserved).includes(installation.nativeSkillPath), false);
+    assert.equal(nativeRequests, 1);
+    for (const failure of ['disabled', 'foreign_path', 'foreign_workspace', 'duplicate', 'errors', 'unsupported']) {
+      const failing = {...nativeTransport, request: async () => {
+        if (failure === 'unsupported') throw new Error('RAW_NATIVE_PRIVATE_DIAGNOSTIC');
+        const value = nativeResponse(), entry = value.data[0]!;
+        if (failure === 'disabled') entry.skills[0]!.enabled = false;
+        if (failure === 'foreign_path') entry.skills[0]!.path = resolve(owned, 'foreign', 'SKILL.md');
+        if (failure === 'foreign_workspace') entry.cwd = resolve(owned, 'foreign');
+        if (failure === 'duplicate') entry.skills.push({...entry.skills[0]!});
+        if (failure === 'errors') (entry.errors as unknown[]).push({message: 'RAW_NATIVE_PRIVATE_DIAGNOSTIC'});
+        return value;
+      }};
+      await assert.rejects(observeNamedCodexSkill(failing, {workspace: source, installation, sharedRepositoryReady: true}),
+        {message: 'named_session_native_skill_unavailable'}, failure);
+    }
+    let getterCalls = 0;
+    const getterResponse = {...nativeTransport, request: async () => ({get data() {getterCalls++; return nativeResponse().data;}})};
+    await assert.rejects(observeNamedCodexSkill(getterResponse, {workspace: source, installation, sharedRepositoryReady: true}),
+      {message: 'named_session_native_skill_unavailable'});
+    assert.equal(getterCalls, 0);
+    const originalNativeSkill = await readFile(installation.nativeSkillPath);
+    const changedPackage = {...nativeTransport, request: async () => {
+      await writeFile(installation.nativeSkillPath, 'changed while native discovery was pending');
+      return nativeResponse();
+    }};
+    try {
+      await assert.rejects(observeNamedCodexSkill(changedPackage, {workspace: source, installation, sharedRepositoryReady: true}),
+        {message: 'named_session_native_skill_unavailable'});
+    } finally {await writeFile(installation.nativeSkillPath, originalNativeSkill);}
+    const mutableInput = {workspace: source, installation: {...installation}, sharedRepositoryReady: true};
+    const changesInput = {...nativeTransport, request: async () => {
+      mutableInput.workspace = resolve(owned, 'foreign'); mutableInput.sharedRepositoryReady = false;
+      mutableInput.installation.nativeSkillPath = resolve(owned, 'foreign', 'SKILL.md');
+      return nativeResponse();
+    }};
+    assert.equal((await observeNamedCodexSkill(changesInput, mutableInput)).bundleHash, packageContent.bundleHash);
+    const interrupted = {...nativeTransport, request: async () => {lifetime.abort(); return nativeResponse();}};
+    await assert.rejects(observeNamedCodexSkill(interrupted, {workspace: source, installation, sharedRepositoryReady: true}),
+      {message: 'named_session_native_skill_unavailable'});
+    let forbiddenRequests = 0;
+    await assert.rejects(observeNamedCodexSkill({...nativeTransport, request: async () => {forbiddenRequests++; return nativeResponse();}},
+      {workspace: source, installation, sharedRepositoryReady: true}), {message: 'named_session_native_skill_unavailable'});
+    assert.equal(forbiddenRequests, 0);
     const visibleSkill = installation.nativeSkillPath;
     const original = await readFile(visibleSkill);
     await writeFile(visibleSkill, 'post-install tamper');
