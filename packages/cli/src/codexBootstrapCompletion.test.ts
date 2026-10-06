@@ -493,9 +493,9 @@ for (const withdrawAfterOpen of [false, true]) {
         if (method === 'permissionProfile/list') return {data: [{id: 'dharma_bridge', allowed: true}]};
         if (method === 'config/read') return {config: {permissions: {dharma_bridge: {
           filesystem: {':minimal': 'read', ':workspace_roots': {'.': 'read'}}, network: {enabled: false}}}}};
-        if (method === 'thread/start' || method === 'thread/read') return {thread: {
+        if (['thread/start', 'thread/read', 'thread/unarchive', 'thread/resume'].includes(method)) return {thread: {
           id: 'synthetic_thread', cwd: f.row.path, name: 'reviewer', status: {type: 'idle'}}};
-        if (method === 'thread/name/set' || method === 'turn/interrupt') return {};
+        if (['thread/name/set', 'thread/archive', 'turn/interrupt'].includes(method)) return {};
         if (method === 'turn/start') return {turn: {id: 'synthetic_turn', status: 'inProgress'}};
         throw new Error('fixture_native_method_unexpected');
       },
