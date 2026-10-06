@@ -104,7 +104,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
-import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 // Trusted runtime composition only; these exports do not enable effectful setup.
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
@@ -2332,6 +2332,18 @@ export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): P
   try {return await runCodexBootstrapHost(input, prepared => bootstrap(prepared.flags, prepared.scope));}
   catch (error) {
     const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable', 'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch']);
+    let code = 'codex_setup_host_operation_failed';
+    try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
+    throw new Error(code);
+  }
+}
+
+/** Native-owner continuation: no caller-selected flags or replacement authority. */
+export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope): Promise<Output> {
+  try {return await runCodexBootstrapHostScope(scope, prepared => bootstrap(prepared.flags, prepared.scope));}
+  catch (error) {
+    const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable',
+      'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch']);
     let code = 'codex_setup_host_operation_failed';
     try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
     throw new Error(code);

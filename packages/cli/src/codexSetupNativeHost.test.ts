@@ -16,7 +16,7 @@ type Input = {
   signal: AbortSignal; maximumProviderCostCents: number;
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   current(): Promise<boolean>; reserve(operationId: string, cents: number): Promise<boolean>;
-  execute: Parameters<typeof import('./codexSetupAdmission.js').createCodexSetupAdmission>[0]['execute'];
+  execute: Parameters<typeof native.startCodexSetupNativeHost>[0]['execute'];
   verifyReadiness: Parameters<typeof import('./codexSetupAdmission.js').createCodexSetupAdmission>[0]['verifyReadiness'];
 };
 type Host = {threadId: string; turnId: string; close(): Promise<void>; settled: Promise<unknown>};
@@ -242,4 +242,34 @@ test('terminal native turn closes its owning journal scope and backend before se
     assert.equal(await scope.current(), false); assert.equal(closes, 1);
   } finally {await host.close();}
   assert.equal(closes, 1);
+});
+
+test('individual native tool cancellation withdraws the original scope and waits for its accepted executor to settle', async () => {
+  const f = fixture(), original = f.input.openJournal, call = new AbortController();
+  let owning!: BootstrapHostScope, handler!: CodexToolHandler, entered!: () => void, release!: () => void;
+  let closed = 0, effects = 0, settled = false;
+  const enteredExecution = new Promise<void>(done => {entered = done;});
+  const wait = new Promise<void>(done => {release = done;});
+  const register = f.transport.onToolCall;
+  f.transport.onToolCall = next => {handler = next; return register(next);};
+  f.input.openJournal = async scope => {
+    owning = scope; const backend = await original(scope);
+    return {...backend, close() {closed++; backend.close();}};
+  };
+  f.input.execute = async (_intent, _signal, _current, _lease, scope) => {
+    assert.equal(scope, owning); entered(); await wait;
+    await assert.rejects(scope.step(async () => {effects++;}), {message: 'codex_setup_host_scope_unavailable'});
+    return {state: 'completed', readinessReceiptId: id(6)};
+  };
+  const owner = await open(f.input);
+  try {
+    const response = handler({threadId: 'synthetic_thread', turnId: 'synthetic_turn', callId: 'private_call',
+      tool: 'dharma_setup_reference', namespace: null, arguments: {operationId: id(1), setupReference: id(2)}}, {signal: call.signal});
+    await enteredExecution; call.abort();
+    void owner.settled.then(() => {settled = true;});
+    await new Promise<void>(done => setImmediate(done));
+    assert.equal(owning.signal.aborted, true); assert.equal(settled, false); assert.equal(closed, 0);
+    release(); assert.equal((await response).success, false); await owner.settled;
+    assert.equal(closed, 1); assert.equal(effects, 0);
+  } finally {release(); await owner.close();}
 });

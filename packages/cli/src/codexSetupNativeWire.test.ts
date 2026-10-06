@@ -7,11 +7,11 @@ import test from 'node:test';
 import {openCodexAppServerTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import type {SecureSecretStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {LocalVault, type LocalCodexSetupReadiness, type ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
-import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
+import {prepareCodexBootstrapHost, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
-import {bootstrapFromCodexSetup, loadAgentFabricOnboardingContract} from './index.js';
+import {bootstrapFromCodexSetup, bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract} from './index.js';
 import * as cli from './index.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
@@ -50,7 +50,7 @@ lines.on('line', line => {
 `;
 
 async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>[0],
-  disposition: Promise<unknown>) => Promise<void>) {
+  disposition: Promise<unknown>, journalScope: () => BootstrapHostScope | undefined) => Promise<void>) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-native-setup-wire-'));
   const workspace = resolve(root, 'source'), now = Date.now();
   const contract = await loadAgentFabricOnboardingContract();
@@ -65,6 +65,7 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined, unsubscribe = () => {};
   let vault: ScopedLocalVault | undefined;
   let readiness: ReturnType<typeof createCodexSetupReadinessOwner> | undefined;
+  let journalScope: BootstrapHostScope | undefined;
   let timer: NodeJS.Timeout | undefined;
   try {
     transport = await openCodexAppServerTransport({command: process.execPath, argv: ['-e', server], cwd: root,
@@ -90,6 +91,7 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
       verifiedAt: new Date(now).toISOString(), expiresAt: prepared.intent.expiresAt};
     await run({transport, workspace, name: 'implementer', intent: prepared.intent,
       openJournal: async scope => {
+        journalScope = scope;
         vault = await LocalVault.open({root: resolve(root, 'vault'), masterKey: Buffer.from(key, 'base64')}, scope);
         readiness = createCodexSetupReadinessOwner({intent: prepared.intent, workspace, scope, vault,
           observe: async () => ({...observation})});
@@ -100,7 +102,7 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
         if (!readiness) throw new Error('fixture_readiness_owner_missing');
         return readiness.record(lease);
       },
-      verifyReadiness: async (...args) => readiness ? readiness.verify(...args) : false}, disposition);
+      verifyReadiness: async (...args) => readiness ? readiness.verify(...args) : false}, disposition, () => journalScope);
   } finally {
     if (timer) clearTimeout(timer); unsubscribe(); prepared.scope.close();
     try {await transport?.close();} finally {
@@ -157,5 +159,26 @@ test('an invented receipt UUID cannot pass the persisted native readiness verifi
       assert.equal(JSON.stringify(result).includes(id(99)), false);
       await host.settled;
     } finally {await host.close();}
+  });
+});
+
+test('actual CLI continuation receives the original native journal scope without ending its owner lifetime', async () => {
+  await fixture(async (input, disposition, journalScope) => {
+    let bootstrap: Record<string, unknown> | undefined, inherited: BootstrapHostScope | undefined;
+    input.execute = async (_intent, _signal, _current, _lease, scope) => {
+      inherited = scope; assert.equal(scope, journalScope());
+      bootstrap = await bootstrapFromCodexSetupScope(scope) as Record<string, unknown>;
+      assert.equal(await scope.current(), true, 'bootstrap settlement must not close native readiness verification');
+      return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+    };
+    const owner = await startCodexSetupNativeHost(input);
+    try {
+      const result = await disposition as {success: boolean};
+      assert.equal(result.success, false); await owner.settled;
+      assert.equal(bootstrap?.code, 'codex_setup_host_execution_unqualified');
+      assert.equal(bootstrap?.effects, false); assert.equal(bootstrap?.grantRedeemed, false);
+      assert.ok(inherited); assert.equal(inherited.signal.aborted, true);
+      await assert.rejects(bootstrapFromCodexSetupScope(inherited), {message: 'codex_setup_host_scope_unavailable'});
+    } finally {await owner.close();}
   });
 });

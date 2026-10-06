@@ -16,7 +16,9 @@ type Input = {
   /** Requalifies package/source, provider account, host ownership and signed scope. */
   current(): Promise<boolean>;
   reserve(operationId: string, cents: number): Promise<boolean>;
-  execute: Admission['execute']; verifyReadiness: Admission['verifyReadiness'];
+  execute(intent: Readonly<CodexSetupIntent>, signal: AbortSignal, current: () => Promise<boolean>,
+    lease: Parameters<Admission['execute']>[3], scope: BootstrapHostScope): Promise<unknown>;
+  verifyReadiness: Admission['verifyReadiness'];
 };
 function record(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -122,7 +124,20 @@ export async function startCodexSetupNativeHost(input: Input) {
       turnId = turn.id; terminalObserved = completions.has(turnId);
     });
     const binding = Object.freeze({connectionId, threadId, turnId, hostContextId: intent.hostContextId});
-    admission = createCodexSetupAdmission({...binding, intent, journal: journal!, execute, verifyReadiness,
+    admission = createCodexSetupAdmission({...binding, intent, journal: journal!,
+      execute: async (requested, signal, current, lease) => {
+        const cancel = () => scope.close();
+        signal.addEventListener('abort', cancel, {once: true});
+        if (signal.aborted) cancel();
+        try {
+          await scope.assert();
+          if (!await current()) throw new Error('codex_setup_host_scope_unavailable');
+          const result = await execute(requested, signal, current, lease, scope);
+          await scope.assert();
+          if (!await current()) throw new Error('codex_setup_host_scope_unavailable');
+          return result;
+        } finally {signal.removeEventListener('abort', cancel);}
+      }, verifyReadiness,
       current: async () => ({...binding, mode: closed ? 'peer' : 'setup'}),
       qualifyHost: async () => scope.current()});
     if (completions.has(turnId)) {terminalObserved = true; withdraw();}

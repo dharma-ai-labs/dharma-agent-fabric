@@ -18,6 +18,11 @@ export interface BootstrapHostScope {
   step<T>(operation: () => Promise<T>): Promise<T>;
 }
 
+type HostPreparation = Readonly<{intent: Readonly<CodexSetupIntent>; workspace: string;
+  flags: ReadonlyArray<readonly [string, string | boolean]>}>;
+const nativeScopes = new WeakMap<BootstrapHostScope, HostPreparation>();
+const borrowedScopes = new WeakSet<BootstrapHostScope>();
+
 function plain(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   try {
@@ -58,6 +63,8 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
   const scope: BootstrapHostScope = {
     signal,
     async current() {
+      const context = hostContext.getStore();
+      if (context?.scope === scope && !context.lifetime.active) {withdrawn.abort(); return false;}
       if (signal.aborted || Date.now() < issued || Date.now() >= expires) {withdrawn.abort(); return false;}
       let valid = false;
       try {valid = await requalify() === true;} catch { /* Withhold host/private diagnostics. */ }
@@ -81,10 +88,13 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
     ['setup-contract-digest', intent.contractDigest], ['policy-revision', intent.policyRevision],
   ]);
   if (outer.dryRun === true) flags.set('dry-run', true);
+  nativeScopes.set(scope, Object.freeze({intent, workspace: outer.workspace,
+    flags: Object.freeze([...flags].map(entry => Object.freeze(entry)))}));
   return {intent, flags, scope};
 }
 
-const hostContext = new AsyncLocalStorage<Readonly<{scope: BootstrapHostScope; workspace: string; fingerprint: string}>>();
+const hostContext = new AsyncLocalStorage<Readonly<{scope: BootstrapHostScope; workspace: string; fingerprint: string;
+  lifetime: {active: boolean}}>>();
 
 /** Closed descendants retain the closed scope, never a legacy unscoped fallback. */
 export function currentBootstrapHostScope(): BootstrapHostScope | undefined {
@@ -105,9 +115,27 @@ export async function runCodexBootstrapHost<T>(input: CodexBootstrapHostInput,
   operation: (prepared: ReturnType<typeof prepareCodexBootstrapHost>) => Promise<T>): Promise<T> {
   if (hostContext.getStore()) throw new Error('codex_setup_host_context_conflict');
   const prepared = prepareCodexBootstrapHost(input);
+  const lifetime = {active: true};
   const owning = Object.freeze({scope: prepared.scope, workspace: String(prepared.flags.get('workspace')),
-    fingerprint: prepared.intent.repositoryFingerprint});
+    fingerprint: prepared.intent.repositoryFingerprint, lifetime});
+  borrowedScopes.add(prepared.scope);
   try {
     return await hostContext.run(owning, () => prepared.scope.step(() => operation(prepared)));
-  } finally {prepared.scope.close();}
+  } finally {lifetime.active = false; borrowedScopes.delete(prepared.scope); prepared.scope.close();}
+}
+
+/** Borrow the original native owner's lifetime; never mint a replacement scope.
+ * The owner, not this continuation, remains responsible for closing it. */
+export async function runCodexBootstrapHostScope<T>(scope: BootstrapHostScope,
+  operation: (prepared: ReturnType<typeof prepareCodexBootstrapHost>) => Promise<T>): Promise<T> {
+  if (hostContext.getStore() || borrowedScopes.has(scope)) throw new Error('codex_setup_host_context_conflict');
+  const retained = nativeScopes.get(scope);
+  if (!retained) throw new Error('codex_setup_host_scope_invalid');
+  // Reconstruct only the privately captured selection, not a caller's mutable flags.
+  const prepared = {scope, intent: retained.intent, flags: new Map(retained.flags)};
+  const lifetime = {active: true};
+  const owning = Object.freeze({scope, workspace: retained.workspace, fingerprint: retained.intent.repositoryFingerprint, lifetime});
+  borrowedScopes.add(scope);
+  try {return await hostContext.run(owning, () => scope.step(() => operation(prepared)));}
+  finally {lifetime.active = false; borrowedScopes.delete(scope);}
 }

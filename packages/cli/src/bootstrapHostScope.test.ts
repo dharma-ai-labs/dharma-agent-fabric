@@ -342,3 +342,99 @@ test('capability projection cannot downgrade a closed scope into an ordinary una
   assert.equal(observed[0]?.status, 'rejected');
   if (observed[0]?.status === 'rejected') assert.equal(observed[0].reason.message, 'codex_setup_host_scope_unavailable');
 });
+
+test('original native scope continuation preserves owner identity and immutable preparation through actual CLI planning', async () => {
+  const input = await fixture(), prepared = prepareCodexBootstrapHost(input);
+  prepared.flags.set('workspace', resolve('foreign-synthetic-checkout'));
+  prepared.flags.delete('dry-run'); input.workspace = resolve('another-synthetic-checkout');
+  input.intent.organizationId = 'org_foreign';
+  try {
+    await host.runCodexBootstrapHostScope(prepared.scope, async captured => {
+      assert.equal(captured.scope, prepared.scope);
+      assert.equal(host.currentBootstrapHostScope(), prepared.scope);
+      assert.equal(captured.intent.organizationId, 'org_demo');
+      assert.notEqual(captured.flags.get('workspace'), input.workspace);
+      assert.equal(captured.flags.get('dry-run'), true);
+      await host.assertBootstrapHostSource(String(captured.flags.get('workspace')), captured.intent.repositoryFingerprint);
+    });
+    const result = await cli.bootstrapFromCodexSetupScope(prepared.scope) as Record<string, unknown>;
+    assert.equal(result.stage, 'plan'); assert.equal(result.effects, false); assert.equal(result.organizationId, 'org_demo');
+    assert.equal(prepared.scope.signal.aborted, false, 'only the native owner may finish this live lifetime');
+    assert.equal(host.currentBootstrapHostScope(), undefined);
+  } finally {prepared.scope.close();}
+  await assert.rejects(cli.bootstrapFromCodexSetupScope(prepared.scope), {message: 'codex_setup_host_scope_unavailable'});
+});
+
+test('original native scope continuation refuses counterfeit authority without invoking it', async () => {
+  let calls = 0;
+  const original = prepareCodexBootstrapHost(await fixture());
+  const counterfeit = {...original.scope, current: async () => {calls++; return true;},
+    assert: async () => {calls++;}, step: async <T>(operation: () => Promise<T>) => {calls++; return operation();}};
+  try {
+    await assert.rejects(cli.bootstrapFromCodexSetupScope(counterfeit), {message: 'codex_setup_host_scope_invalid'});
+    const proxy = new Proxy(original.scope, {get() {calls++; throw new Error('private-counterfeit');}});
+    await assert.rejects(cli.bootstrapFromCodexSetupScope(proxy), {message: 'codex_setup_host_scope_invalid'});
+    assert.equal(calls, 0);
+  } finally {original.scope.close();}
+});
+
+test('original native scope continuation rejects nested and concurrent substitution', async () => {
+  const original = prepareCodexBootstrapHost(await fixture());
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(done => {entered = done;});
+  const wait = new Promise<void>(done => {release = done;});
+  const active = host.runCodexBootstrapHostScope(original.scope, async () => {
+    await assert.rejects(cli.bootstrapFromCodexSetupScope(original.scope), {message: 'codex_setup_host_context_conflict'});
+    entered(); await wait;
+  });
+  try {
+    await ready;
+    await assert.rejects(cli.bootstrapFromCodexSetupScope(original.scope), {message: 'codex_setup_host_context_conflict'});
+    release(); await active;
+    assert.equal(await original.scope.current(), true);
+  } finally {release(); await active; original.scope.close();}
+});
+
+test('original native scope continuation keeps detached work subject to later owner withdrawal', async () => {
+  const original = prepareCodexBootstrapHost(await fixture());
+  let release!: () => void, late!: Promise<void>, effects = 0;
+  const wait = new Promise<void>(done => {release = done;});
+  await host.runCodexBootstrapHostScope(original.scope, async () => {
+    late = (async () => {
+      await wait;
+      const scope = host.currentBootstrapHostScope(); assert.equal(scope, original.scope);
+      await assert.rejects(scope!.step(async () => {effects++;}), {message: 'codex_setup_host_scope_unavailable'});
+    })();
+  });
+  original.scope.close(); release(); await late; assert.equal(effects, 0);
+});
+
+test('original native scope continuation cannot borrow a scope still owned by another host run', async () => {
+  const input = await fixture(); let exported: host.BootstrapHostScope | undefined;
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(done => {entered = done;});
+  const wait = new Promise<void>(done => {release = done;});
+  const active = host.runCodexBootstrapHost(input, async prepared => {exported = prepared.scope; entered(); await wait;});
+  try {
+    await ready;
+    await assert.rejects(cli.bootstrapFromCodexSetupScope(exported!), {message: 'codex_setup_host_context_conflict'});
+    release(); await active;
+  } finally {release(); await active;}
+});
+
+test('settled borrowed context cannot admit a detached effect while the original native owner is still live', async () => {
+  const original = prepareCodexBootstrapHost(await fixture());
+  let release!: () => void, late!: Promise<void>, effects = 0;
+  const wait = new Promise<void>(done => {release = done;});
+  await host.runCodexBootstrapHostScope(original.scope, async () => {
+    late = (async () => {
+      await wait;
+      const scope = host.currentBootstrapHostScope(); assert.equal(scope, original.scope);
+      await assert.rejects(scope!.step(async () => {effects++;}), {message: 'codex_setup_host_scope_unavailable'});
+    })();
+  });
+  assert.equal(await original.scope.current(), true);
+  release(); await late;
+  assert.equal(effects, 0); assert.equal(original.scope.signal.aborted, true);
+  await assert.rejects(cli.bootstrapFromCodexSetupScope(original.scope), {message: 'codex_setup_host_scope_unavailable'});
+});
