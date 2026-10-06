@@ -3,11 +3,17 @@ import * as fs from 'node:fs/promises';
 import * as syncFs from 'node:fs';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
+import * as util from 'node:util';
 import {tmpdir} from 'node:os';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
 import {currentBootstrapHostScope, runCodexBootstrapHost} from './bootstrapHostScope.js';
+import * as authorization from './repositorySourceAuthorization.js';
+import {loadAgentFabricOnboardingContract, installRepositoryAgentFabricSkill} from './index.js';
+import {initializeRepositoryKnowledge, readRepositoryKnowledgeSource} from './repositoryKnowledge.js';
+import {inventoryRepositoryPackage, writeRepositoryPackageSnapshot} from './repositoryPackage.js';
 
 function input(workspace: string) {
   const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
@@ -33,15 +39,42 @@ async function module(overrides: Record<string, unknown> = {}) {
     module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});
   assert.equal(result.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   const exports: Record<string, any> = {};
-  runInNewContext(result.outputText, {exports, Buffer, process, require: (name: string) => {
+  runInNewContext(result.outputText, {exports, Buffer, Date, process, require: (name: string) => {
     if (name === 'node:fs') return syncFs;
     if (name === 'node:fs/promises') return {...fs, ...overrides};
     if (name === 'node:crypto') return crypto;
     if (name === 'node:path') return path;
+    if (name === 'node:util') return util;
     if (name === './bootstrapHostScope.js') return {currentBootstrapHostScope};
+    if (name === './repositorySourceAuthorization.js') return authorization;
     throw new Error('unexpected fixture dependency');
   }}, {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}});
   return exports;
+}
+
+async function actualEntry(overrides: Record<string, unknown> = {}, loadContract = loadAgentFabricOnboardingContract) {
+  const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('index.ts', source, ts.ScriptTarget.ES2023, true);
+  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'installRepositoryAgentFabricSkill');
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration));
+  const result = ts.transpileModule(declaration.getText(parsed), {compilerOptions: {target: ts.ScriptTarget.ES2023,
+    module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});
+  assert.equal(result.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
+  const exports: Record<string, any> = {}, installer = await module(overrides);
+  runInNewContext(result.outputText, {exports, Buffer, Date, process, resolve: path.resolve,
+    realpath: overrides.realpath || fs.realpath, mkdir: overrides.mkdir || fs.mkdir,
+    currentBootstrapHostScope, validateRepositorySourceAuthorization: authorization.validateRepositorySourceAuthorization,
+    assertRepositoryInstallerOwnership: installer.assertRepositoryInstallerOwnership,
+    writeRepositoryInstallerFile: installer.writeRepositoryInstallerFile,
+    captureRepositoryInstallerInput: installer.captureRepositoryInstallerInput,
+    prepareRepositoryInstallerWorkspace: installer.prepareRepositoryInstallerWorkspace,
+    loadAgentFabricOnboardingContract: loadContract, initializeRepositoryKnowledge, readRepositoryKnowledgeSource,
+    inventoryRepositoryPackage, writeRepositoryPackageSnapshot},
+  {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}});
+  return exports.installRepositoryAgentFabricSkill as typeof installRepositoryAgentFabricSkill;
+}
+function connection(workspace: string) {
+  return {workspace, hqUrl: 'https://hq.example', organizationId: 'org_demo', workspaceId: 'synthetic', policyRevision: 'policy-v1'};
 }
 test('installer scope refuses path inspection before any filesystem access', async t => {
   const f = await fixture(t); let stats = 0;
@@ -206,4 +239,148 @@ test('installer scope reports unavailable owned staging cleanup without leaking 
   {message: 'repository_installer_cleanup_unconfirmed'});
   assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
   assert.equal((await fs.readdir(path.dirname(f.target))).filter(name => name.includes('.staging-')).length, 1);
+});
+
+test('actual installer entry refuses input accessors before workspace inspection', async t => {
+  const f = await fixture(t), supplied = connection(f.root); let getters = 0, stats = 0;
+  Object.defineProperty(supplied, 'organizationId', {get: () => {getters++; throw new Error('private entry input canary');}});
+  const install = await actualEntry({lstat: async (...args: Parameters<typeof fs.lstat>) => {stats++; return fs.lstat(...args);}});
+  await assert.rejects(runCodexBootstrapHost(input(f.root), () => install(supplied)),
+    {message: 'repository_installer_input_invalid'});
+  assert.equal(getters, 0); assert.equal(stats, 0); assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+});
+test('actual installer entry freezes identity before canonical workspace resolution yields', async t => {
+  const f = await fixture(t), supplied = connection(f.root);
+  const install = await actualEntry({realpath: async (...args: Parameters<typeof fs.realpath>) => {
+    const value = await fs.realpath(...args); supplied.organizationId = 'org_foreign'; return value;
+  }});
+  const actual = await runCodexBootstrapHost(input(f.root), () => install(supplied));
+  assert.equal(actual.repositoryPackage.disposition, 'local_bootstrap_inventory');
+  assert.equal(JSON.parse(await fs.readFile(f.target, 'utf8')).organizationId, 'org_demo');
+  assert.match(await fs.readFile(path.join(f.root, '.agents/skills/dharma-agent-fabric/references/organization.md'), 'utf8'), /Organization: org_demo/);
+});
+test('actual installer entry freezes identity before asynchronous owner revalidation', async t => {
+  const f = await fixture(t), supplied = connection(f.root), install = await actualEntry(); let armed = false;
+  await runCodexBootstrapHost({...input(f.root), current: async () => {
+    if (armed) supplied.organizationId = 'org_foreign'; return true;
+  }}, () => {armed = true; return install(supplied);});
+  assert.equal(JSON.parse(await fs.readFile(f.target, 'utf8')).organizationId, 'org_demo');
+});
+test('actual installer entry stops directory creation after its first mkdir withdraws authority', async t => {
+  const f = await fixture(t); let directories = 0, contracts = 0;
+  await assert.rejects(runCodexBootstrapHost(input(f.root), async ({scope}) => {
+    const install = await actualEntry({mkdir: async (...args: Parameters<typeof fs.mkdir>) => {
+      directories++; const value = await fs.mkdir(...args); scope.close(); return value;
+    }}, async () => {contracts++; return loadAgentFabricOnboardingContract();});
+    await install(connection(f.root));
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(directories, 1); assert.equal(contracts, 0); assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+});
+test('actual installer entry does not publish a skill after contract loading withdraws authority', async t => {
+  const f = await fixture(t); let writes = 0;
+  await assert.rejects(runCodexBootstrapHost(input(f.root), async ({scope}) => {
+    const install = await actualEntry({open: async (...args: Parameters<typeof fs.open>) => {
+      if (Number(args[1]) & syncFs.constants.O_CREAT) writes++; return fs.open(...args);
+    }}, async () => {const value = await loadAgentFabricOnboardingContract(); scope.close(); return value;});
+    await install(connection(f.root));
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(writes, 0); assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+});
+test('installer preparation does not invoke native error proxy traps', async t => {
+  const f = await fixture(t); let traps = 0;
+  const failure = new Proxy(new Error('private proxy canary'), {getOwnPropertyDescriptor: () => {traps++; throw new Error('private trap canary');}});
+  const api = await module({lstat: async () => {throw failure;}});
+  await assert.rejects(runCodexBootstrapHost(input(f.root), () => api.assertRepositoryInstallerOwnership(f.root, 'synthetic')),
+    {message: 'repository_installer_storage_unavailable'});
+  assert.equal(traps, 0);
+});
+test('actual compiled scoped installer prepares its generated directories and full unsigned package', async t => {
+  const f = await fixture(t);
+  const actual = await runCodexBootstrapHost(input(f.root), () => installRepositoryAgentFabricSkill(connection(f.root)));
+  assert.equal(actual.repositoryPackage.disposition, 'local_bootstrap_inventory');
+  assert.equal(actual.repositoryPackage.authority, 'local_inventory_not_signed');
+  const root = path.join(f.root, '.agents/skills/dharma-agent-fabric');
+  const marker = JSON.parse(await fs.readFile(path.join(root, '.dharma-agent-fabric.json'), 'utf8'));
+  assert.deepEqual(marker, {managedBy: 'dharma-agent-fabric', workspaceId: 'synthetic'});
+  assert.equal(JSON.parse(await fs.readFile(f.target, 'utf8')).organizationId, 'org_demo');
+  assert.ok((await fs.readFile(path.join(root, 'SKILL.md'), 'utf8')).includes((await loadAgentFabricOnboardingContract()).markdown));
+});
+
+test('actual installer entry rejects an input proxy without invoking it or inspecting the workspace', async t => {
+  const f = await fixture(t); let traps = 0, stats = 0;
+  const supplied = new Proxy(connection(f.root), {ownKeys: () => {traps++; throw new Error('private input proxy canary');}});
+  const install = await actualEntry({lstat: async (...args: Parameters<typeof fs.lstat>) => {stats++; return fs.lstat(...args);}});
+  await assert.rejects(runCodexBootstrapHost(input(f.root), () => install(supplied)),
+    {message: 'repository_installer_input_invalid'});
+  assert.equal(traps, 0); assert.equal(stats, 0);
+});
+
+test('actual installer entry rejects invalid source authority before preparing directories', async t => {
+  const f = await fixture(t); let stats = 0;
+  const install = await actualEntry({lstat: async (...args: Parameters<typeof fs.lstat>) => {stats++; return fs.lstat(...args);}});
+  await assert.rejects(runCodexBootstrapHost(input(f.root), () => install({...connection(f.root), sourceAuthorization: {}})),
+    /Repository source authorization fields are invalid/);
+  assert.equal(stats, 0); assert.deepEqual(await fs.readdir(f.root), ['.dharma']);
+});
+
+test('actual installer entry cannot prepare directories after canonical resolution withdraws authority', async t => {
+  const f = await fixture(t); let directories = 0;
+  await assert.rejects(runCodexBootstrapHost(input(f.root), async ({scope}) => {
+    const install = await actualEntry({realpath: async (...args: Parameters<typeof fs.realpath>) => {
+      const value = await fs.realpath(...args); scope.close(); return value;
+    }, mkdir: async (...args: Parameters<typeof fs.mkdir>) => {directories++; return fs.mkdir(...args);}});
+    await install(connection(f.root));
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(directories, 0); assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+});
+
+test('installer preparation rechecks a concurrent directory collision rather than trusting EEXIST', async t => {
+  const f = await fixture(t); let directories = 0, contracts = 0;
+  const install = await actualEntry({mkdir: async (...args: Parameters<typeof fs.mkdir>) => {
+    directories++; await fs.writeFile(String(args[0]), 'foreign file');
+    throw Object.assign(new Error('private collision canary'), {code: 'EEXIST'});
+  }}, async () => {contracts++; return loadAgentFabricOnboardingContract();});
+  await assert.rejects(runCodexBootstrapHost(input(f.root), () => install(connection(f.root))),
+    {message: 'Invalid repository installer directory.'});
+  assert.equal(directories, 1); assert.equal(contracts, 0);
+  assert.equal(await fs.readFile(path.join(f.root, '.agents'), 'utf8'), 'foreign file');
+  assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+});
+
+test('installer preparation preserves signed ownership without creating unsigned reference directories', async t => {
+  const f = await fixture(t), skill = path.join(f.root, '.agents/skills/dharma-agent-fabric');
+  await fs.mkdir(skill, {recursive: true});
+  const marker = JSON.stringify({bundleId: '33333333-3333-4333-8333-333333333333', skillId: 'dharma-agent-fabric', workspaceId: 'synthetic'});
+  await fs.writeFile(path.join(skill, '.dharma-agent-fabric.json'), marker);
+  let directories = 0;
+  const api = await module({mkdir: async (...args: Parameters<typeof fs.mkdir>) => {directories++; return fs.mkdir(...args);}});
+  const result = await runCodexBootstrapHost(input(f.root), () => api.prepareRepositoryInstallerWorkspace(f.root, 'synthetic')) as {ownership: string};
+  assert.equal(result.ownership, 'signed'); assert.equal(directories, 0);
+  assert.deepEqual(await fs.readdir(skill), ['.dharma-agent-fabric.json']);
+  assert.equal(await fs.readFile(path.join(skill, '.dharma-agent-fabric.json'), 'utf8'), marker);
+});
+
+test('actual installer entry retains its approved source policy despite caller mutation during preparation', async t => {
+  const f = await fixture(t), id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
+  const policy = {action: 'authorize', confirmed: true, requestId: id(5), repositoryBindingId: id(6), expectedRevision: 0,
+    allowedContentClasses: ['approved_outputs', 'repository_content', 'repository_skills'], approvedRepositoryPaths: ['README.md'],
+    approvedOutputFolders: [], automaticValidatedPublication: true, retentionDays: 30, maximumFileBytes: 262144,
+    maximumSnapshotBytes: 4194304, maximumDailyUploadBytes: 8388608, expiresAt: null};
+  const sourceAuthorization = {schema: 'dharma.repository-source-authorization/v1', organizationId: 'org_demo',
+    workspaceId: id(7), repositoryBindingId: id(6), repositoryAgentId: id(8), revision: 1, generationId: id(9),
+    receiptId: `repo_consent_${id(9)}`, policyRevision: `repository-source-${id(9)}`, confirmedAt: '2026-09-18T08:00:00.000Z',
+    policyHash: `sha256:${crypto.createHash('sha256').update(canonicalize(policy)).digest('hex')}`, policy};
+  const supplied = {...connection(f.root), workspaceId: id(7), repositoryBindingId: id(6), repositoryAgentId: id(8), sourceAuthorization};
+  await fs.writeFile(path.join(f.root, 'README.md'), '# Logical job');
+  await fs.writeFile(path.join(f.root, 'unapproved.md'), 'Excluded synthetic fixture.');
+  const install = await actualEntry({realpath: async (...args: Parameters<typeof fs.realpath>) => {
+    const value = await fs.realpath(...args); policy.approvedRepositoryPaths.push('unapproved.md'); return value;
+  }});
+  const result = await runCodexBootstrapHost(input(f.root), () => install(supplied));
+  assert.equal(result.knowledge?.disposition, 'initialized');
+  const manifest = JSON.parse(await fs.readFile(path.join(f.root, '.agents/skills/dharma-agent-fabric/MANIFEST.json'), 'utf8'));
+  assert.equal(manifest.schema, 'dharma.repository-package/v2');
+  assert.ok(manifest.files.some((file: {path: string}) => file.path === 'README.md'));
+  assert.ok(manifest.files.every((file: {path: string}) => file.path !== 'unapproved.md'));
+  assert.equal(JSON.parse(await fs.readFile(f.target, 'utf8')).workspaceId, id(7));
 });

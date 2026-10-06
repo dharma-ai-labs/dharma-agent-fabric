@@ -1,8 +1,10 @@
 import { constants } from 'node:fs';
-import { lstat, open, readFile, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { types } from 'node:util';
 import { currentBootstrapHostScope, type BootstrapHostScope } from './bootstrapHostScope.js';
+import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const MARKER = `${ROOT}/.dharma-agent-fabric.json`;
@@ -10,12 +12,81 @@ const FILES = [MARKER, `${ROOT}/SKILL.md`, `${ROOT}/references/organization.md`,
   '.dharma/agent-fabric.json', '.dharma/repository-agent.json'] as const;
 type InstallerFile = typeof FILES[number];
 
+export interface RepositoryInstallerInput {
+  workspace: string;
+  hqUrl: string;
+  organizationId: string;
+  workspaceId: string;
+  policyRevision: string;
+  repositoryAgentId?: string | null;
+  repositoryBindingId?: string | null;
+  sourceAuthorization?: unknown;
+  repositoryAgentKey?: string | null;
+  controlBranch?: string | null;
+}
+
+// Capture the approved connection before any asynchronous owner check can yield.
+export function captureRepositoryInstallerInput(input: RepositoryInstallerInput): RepositoryInstallerInput {
+  let captured: RepositoryInstallerInput;
+  if (currentBootstrapHostScope()) {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || types.isProxy(input)) {
+      throw new Error('repository_installer_input_invalid');
+    }
+    const fields = Object.getOwnPropertyDescriptors(input);
+    const required = ['workspace', 'hqUrl', 'organizationId', 'workspaceId', 'policyRevision'] as const;
+    const optional = ['repositoryAgentId', 'repositoryBindingId', 'repositoryAgentKey', 'controlBranch'] as const;
+    const values: Record<string, unknown> = Object.create(null);
+    for (const name of [...required, ...optional]) {
+      const field = fields[name];
+      if (field && !Object.hasOwn(field, 'value')) throw new Error('repository_installer_input_invalid');
+      const value = field?.value;
+      if (required.includes(name as typeof required[number])
+        ? typeof value !== 'string' || value.length === 0 || value.length > 8192
+        : value !== undefined && value !== null && (typeof value !== 'string' || value.length > 8192)) {
+        throw new Error('repository_installer_input_invalid');
+      }
+      values[name] = value;
+    }
+    const authorization = fields.sourceAuthorization;
+    if (authorization && !Object.hasOwn(authorization, 'value')) throw new Error('repository_installer_input_invalid');
+    captured = values as unknown as RepositoryInstallerInput;
+    captured.sourceAuthorization = authorization?.value;
+  } else captured = {...input};
+  if (captured.sourceAuthorization !== undefined) captured.sourceAuthorization =
+    validateRepositorySourceAuthorization(captured.sourceAuthorization, captured, new Date());
+  return Object.freeze(captured);
+}
+
 function errorCode(error: unknown): string | undefined {
   try {
-    if (!error || typeof error !== 'object') return undefined;
+    if (!error || typeof error !== 'object' || types.isProxy(error)) return undefined;
     const field = Object.getOwnPropertyDescriptor(error, 'code');
     return field && Object.hasOwn(field, 'value') && typeof field.value === 'string' ? field.value : undefined;
   } catch {return undefined;}
+}
+
+export async function prepareRepositoryInstallerWorkspace(workspace: string, workspaceId: string) {
+  const scope = currentBootstrapHostScope();
+  await assertRepositoryInstallerOwnership(workspace, workspaceId);
+  workspace = await installerEffect(scope, () => realpath(workspace));
+  const ownership = await assertRepositoryInstallerOwnership(workspace, workspaceId);
+  const paths = ownership === 'signed' ? ['.dharma']
+    : ['.agents', '.agents/skills', ROOT, `${ROOT}/references`, '.dharma'];
+  for (const path of paths) {
+    const target = resolve(workspace, path);
+    if (!await checkedPath(workspace, dirname(target), 'directory', scope)) {
+      throw new Error('Repository installer parent directory is missing.');
+    }
+    if (!await checkedPath(workspace, target, 'directory', scope)) {
+      try {await installerEffect(scope, () => mkdir(target, {mode: 0o700}));}
+      catch (error) {await scope?.assert(); if (errorCode(error) !== 'EEXIST') throw error;}
+      if (!await checkedPath(workspace, target, 'directory', scope)) {
+        throw new Error('Repository installer directory is missing.');
+      }
+    }
+  }
+  await scope?.assert();
+  return {workspace, ownership};
 }
 
 async function installerEffect<T>(scope: BootstrapHostScope | undefined, operation: () => Promise<T>): Promise<T> {

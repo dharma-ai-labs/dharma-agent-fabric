@@ -57,7 +57,8 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
-import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
+import { captureRepositoryInstallerInput, prepareRepositoryInstallerWorkspace, writeRepositoryInstallerFile,
+  type RepositoryInstallerInput } from './repositoryInstallerFiles.js';
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
@@ -4621,32 +4622,19 @@ async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
   return verified;
 }
 
-export async function installRepositoryAgentFabricSkill(input: {
-  workspace: string;
-  hqUrl: string;
-  organizationId: string;
-  workspaceId: string;
-  policyRevision: string;
-  repositoryAgentId?: string | null;
-  repositoryBindingId?: string | null;
-  sourceAuthorization?: unknown;
-  repositoryAgentKey?: string | null;
-  controlBranch?: string | null;
-}) {
-  if (input.sourceAuthorization !== undefined) input = { ...input,
-    sourceAuthorization: validateRepositorySourceAuthorization(input.sourceAuthorization, input, new Date()) };
-  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
-  input = { ...input, workspace: await realpath(input.workspace) };
-  const ownership = await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
-  const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
-  if (ownership !== 'signed') await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
-  await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
+export async function installRepositoryAgentFabricSkill(input: RepositoryInstallerInput) {
+  const scope = currentBootstrapHostScope();
+  input = captureRepositoryInstallerInput(input);
+  const prepared = await prepareRepositoryInstallerWorkspace(input.workspace, input.workspaceId);
+  input = {...input, workspace: prepared.workspace};
+  const ownership = prepared.ownership;
+  const contract = scope ? await scope.step(() => loadAgentFabricOnboardingContract()) : await loadAgentFabricOnboardingContract();
   const skill = `---
 name: dharma-agent-fabric
 description: Connect this repository to Dharma Agent Fabric for shared knowledge, signed skills, and team coordination.
 ---
 
-${(await loadAgentFabricOnboardingContract()).markdown}
+${contract.markdown}
 `;
   const reference = `# Organization connection
 
@@ -4706,6 +4694,7 @@ The CLI enrolls this device through browser-confirmed Clerk organization consent
   });
   await writeRepositoryInstallerFile(input.workspace, '.dharma/agent-fabric.json', `${JSON.stringify(connection, null, 2)}\n`);
   await writeRepositoryInstallerFile(input.workspace, '.dharma/repository-agent.json', `${JSON.stringify(repositoryAgent, null, 2)}\n`);
+  await scope?.assert();
   return {
     skillPath: '.agents/skills/dharma-agent-fabric/SKILL.md',
     connectionPath: '.dharma/agent-fabric.json',
