@@ -298,10 +298,11 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
         excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) !== canonicalize(text)) {
       throw new Error('named_session_repository_context_not_authorized');
     }
-    if (!bytes.equals(await workspaceSource(sourcePath, maximumBytes))) {
+    // Consent applies to the original source path; execution reads its verified signed copy inside this checkout.
+    if (!bytes.equals(await workspaceSource(row.path, maximumBytes))) {
       throw new Error('named_session_repository_context_changed');
     }
-    files.push({ path: sourcePath, role: row.role, sha256: row.sha256, sizeBytes: row.sizeBytes,
+    files.push({ path: row.path, role: row.role, sha256: row.sha256, sizeBytes: row.sizeBytes,
       contentDisposition: 'verified_workspace_reference' });
   }
   const context = canonicalize({ kind: 'signed_repository_material',
