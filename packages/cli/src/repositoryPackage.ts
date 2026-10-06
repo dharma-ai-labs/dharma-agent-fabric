@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, opendir, realpath, rename, rmdir, unlink } from 'node:fs/promises';
+import { link, lstat as nativeLstat, mkdir, open, opendir, realpath as nativeRealpath, rename, rmdir, unlink } from 'node:fs/promises';
 import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {types} from 'node:util';
+import {currentBootstrapHostScope, type BootstrapHostScope} from './bootstrapHostScope.js';
 import { canonicalize, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { redactValue, type RedactionStats } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { readRepositoryKnowledgeSource, validateRepositoryKnowledgeCatalog, validateRepositoryKnowledgeRetention,
@@ -74,7 +76,87 @@ export interface RepositoryPackageInventoryInput {
 
 function digest(value: string | Buffer) { return `sha256:${createHash('sha256').update(value).digest('hex')}`; }
 function compare(a: string, b: string) { return a < b ? -1 : a > b ? 1 : 0; }
-function missing(error: unknown) { return ['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException).code)); }
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || types.isProxy(error)) return undefined;
+  const field = Object.getOwnPropertyDescriptor(error, 'code');
+  return field && Object.hasOwn(field, 'value') && typeof field.value === 'string' ? field.value : undefined;
+}
+function missing(error: unknown) { return ['ENOENT', 'ENOTDIR'].includes(errorCode(error) || ''); }
+async function packageRead<T>(scope: BootstrapHostScope | undefined, operation: () => Promise<T>): Promise<T> {
+  if (!scope) return operation();
+  try {return await scope.step(operation);}
+  catch (error) {
+    await scope.assert();
+    const code = errorCode(error);
+    throw Object.assign(new Error('repository_package_storage_unavailable'),
+      ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(code || '') ? {code} : {});
+  }
+}
+const lstat: typeof nativeLstat = ((...args: Parameters<typeof nativeLstat>) =>
+  packageRead(currentBootstrapHostScope(), () => nativeLstat(...args))) as typeof nativeLstat;
+const realpath: typeof nativeRealpath = ((...args: Parameters<typeof nativeRealpath>) =>
+  packageRead(currentBootstrapHostScope(), () => nativeRealpath(...args))) as typeof nativeRealpath;
+const cleanupFailures = new WeakSet<object>();
+async function closeReadHandle(handle: {close(): Promise<void>} | undefined, scope: BootstrapHostScope | undefined) {
+  try {await handle?.close();}
+  catch (error) {
+    if (!scope) throw error;
+    const failure = new Error('repository_package_cleanup_unconfirmed'); cleanupFailures.add(failure); throw failure;
+  }
+}
+async function* directoryEntries(source: string) {
+  const scope = currentBootstrapHostScope();
+  let directory: Awaited<ReturnType<typeof opendir>> | undefined;
+  try {
+    await packageRead(scope, async () => {directory = await opendir(source);});
+    for (;;) {
+      const entry = await packageRead(scope, () => directory!.read());
+      if (!entry) break;
+      yield entry;
+    }
+  } finally {await closeReadHandle(directory, scope);}
+}
+function snapshotInventoryInput(input: RepositoryPackageInventoryInput, scope: BootstrapHostScope | undefined): RepositoryPackageInventoryInput {
+  if (!scope) return input;
+  let nodes = 0, bytes = 0;
+  const invalid = () => new Error('repository_package_input_invalid');
+  const clone = (value: unknown, depth: number): any => {
+    if (++nodes > 65_536 || depth > 16) throw invalid();
+    if (value === null || value === undefined || typeof value === 'boolean') return value;
+    if (typeof value === 'number') {if (!Number.isFinite(value)) throw invalid(); return value;}
+    if (typeof value === 'string') {bytes += Buffer.byteLength(value); if (bytes > 16_777_216) throw invalid(); return value;}
+    if (typeof value !== 'object' || types.isProxy(value)) throw invalid();
+    if (types.isDate(value)) {
+      const time = Date.prototype.getTime.call(value); if (!Number.isFinite(time)) throw invalid(); return new Date(time);
+    }
+    if (Buffer.isBuffer(value)) {
+      const length = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength')!.get!.call(value);
+      bytes += length; if (bytes > 16_777_216) throw invalid();
+      const copy = Buffer.alloc(length); Uint8Array.prototype.set.call(copy, value); return copy;
+    }
+    const array = Array.isArray(value), prototype = Object.getPrototypeOf(value);
+    if (!array && prototype !== null && (types.isProxy(prototype) || Object.getPrototypeOf(prototype) !== null)) throw invalid();
+    const fields = Object.getOwnPropertyDescriptors(value), result: any = array ? [] : Object.create(null);
+    if (Object.getOwnPropertySymbols(value).length || array && (fields.length!.value > 8192
+      || Object.keys(fields).length !== fields.length!.value + 1)) throw invalid();
+    for (const [key, field] of Object.entries(fields)) {
+      if (array && key === 'length') continue;
+      if (!Object.hasOwn(field, 'value') || array && !/^(?:0|[1-9][0-9]*)$/.test(key)) throw invalid();
+      Object.defineProperty(result, key, {value: clone(field.value, depth + 1), enumerable: true});
+    }
+    return Object.freeze(result);
+  };
+  if (!input || typeof input !== 'object' || types.isProxy(input)) throw invalid();
+  const result: Record<string, unknown> = {};
+  for (const key of ['workspace', 'organizationId', 'workspaceId', 'repositoryAgentId', 'repositoryBindingId',
+    'sourceAuthorization', 'approvedOutputs', 'observations', 'limits', 'now', 'retainedKnowledge']) {
+    const field = Object.getOwnPropertyDescriptor(input, key);
+    if (!field) continue;
+    if (!Object.hasOwn(field, 'value')) throw invalid();
+    result[key] = clone(field.value, 0);
+  }
+  return Object.freeze(result) as unknown as RepositoryPackageInventoryInput;
+}
 function pathKey(value: string) {
   if (!value || value.includes('\\') || isAbsolute(value) || /^[A-Za-z]:/.test(value)) throw new Error('Invalid repository package path.');
   const parts = value.split('/');
@@ -143,27 +225,29 @@ async function checkedPath(workspace: string, path: string) {
   return current;
 }
 async function readStable(workspace: string, path: string, maximumBytes: number) {
+  const scope = currentBootstrapHostScope();
   const source = await checkedPath(workspace, path);
   if (!(await lstat(source)).isFile()) throw new Error('Repository package requires regular files.');
-  const handle = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const before = await handle.stat();
+    await packageRead(scope, async () => {handle = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));});
+    const before = await packageRead(scope, () => handle!.stat());
     if (!before.isFile()) throw new Error('Repository package requires regular files.');
     if (before.size > maximumBytes) throw new Error('Repository package file byte limit exceeded.');
     const buffer = Buffer.alloc(before.size + 1);
     let size = 0;
     while (size < buffer.length) {
-      const result = await handle.read(buffer, size, buffer.length - size, size);
+      const result = await packageRead(scope, () => handle!.read(buffer, size, buffer.length - size, size));
       if (!result.bytesRead) break;
       size += result.bytesRead;
     }
-    const after = await handle.stat();
+    const after = await packageRead(scope, () => handle!.stat());
     const current = await lstat(await checkedPath(workspace, path));
     if (size !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs
       || before.ctimeMs !== after.ctimeMs || current.ino !== before.ino || current.dev !== before.dev
       || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error('Repository package source changed during snapshot.');
     return buffer.subarray(0, size);
-  } finally { await handle.close(); }
+  } finally {await closeReadHandle(handle, scope);}
 }
 function dependencies(text: string) {
   const paths = new Set<string>();
@@ -180,6 +264,9 @@ function sourceContentType(path: string) {
 }
 
 export async function inventoryRepositoryPackage(input: RepositoryPackageInventoryInput): Promise<RepositoryPackageSnapshot> {
+  const scope = currentBootstrapHostScope();
+  input = snapshotInventoryInput(input, scope);
+  if (scope) await scope.assert();
   if (![input.organizationId, input.workspaceId].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value))) {
     throw new Error('Repository package requires bounded organization and workspace identities.');
   }
@@ -223,8 +310,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
       const metadata = await lstat(source);
       if (metadata.isDirectory()) {
         const names: string[] = [];
-        const directory = await opendir(source);
-        for await (const entry of directory) {
+        for await (const entry of directoryEntries(source)) {
           const child = `${path}/${entry.name}`;
           if (generated(child)) continue;
           if (prohibited(child)) { exclude(child, 'excluded_path'); continue; }
@@ -237,10 +323,11 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
         if (posix.basename(path) === 'SKILL.md') skillRoots.set(posix.dirname(path), providerRoot);
       } else exclude(path, 'not_regular_file');
     } catch (error) {
+      if (scope) await scope.assert();
       if (missing(error)) return;
       if (String(error).includes('symlink')) { exclude(path, 'symlink'); return; }
       if (String(error).includes('limit')) throw error;
-      if (['EACCES', 'EPERM'].includes(String((error as NodeJS.ErrnoException).code))) { exclude(path, 'unavailable'); return; }
+      if (['EACCES', 'EPERM'].includes(errorCode(error) || '')) { exclude(path, 'unavailable'); return; }
       throw error;
     }
   }
@@ -263,6 +350,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
       let source: string;
       try { source = path === '.' ? workspace : await checkedPath(workspace, path); }
       catch (error) {
+        if (scope) await scope.assert();
         if (missing(error)) { witnesses.set(path, 'missing'); return false; }
         if (String(error).includes('symlink')) { exclude(path, 'symlink'); witnesses.set(path, 'symlink'); return false; }
         throw error;
@@ -270,8 +358,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
       const metadata = await lstat(source);
       if (metadata.isDirectory()) {
         const names: string[] = [];
-        const directory = await opendir(source);
-        for await (const entry of directory) {
+        for await (const entry of directoryEntries(source)) {
           if (++scanned > limits.maximumScannedSourceEntries) throw new Error('Repository source scan limit exceeded.');
           const child = path === '.' ? entry.name : `${path}/${entry.name}`;
           if (broadRoot && child === 'output') continue;
@@ -344,6 +431,8 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
     let content: Buffer;
     try { content = await readStable(workspace, path, limits.maximumFileBytes); }
     catch (error) {
+      if (error && typeof error === 'object' && cleanupFailures.has(error)) throw error;
+      if (scope) await scope.assert();
       if (String(error).includes('limit') || String(error).includes('changed during')) throw error;
       exclude(path, missing(error) ? 'missing_dependency' : String(error).includes('symlink') ? 'symlink' : 'unavailable');
       continue;
@@ -460,6 +549,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
     ...(knowledge ? { knowledge } : {}), ...(authorization ? { sourceAuthorization: authorization } : {}) };
   const fingerprinted = authorization ? { ...base, sourceFingerprint: sourceFingerprint(base) } : base;
   const snapshotHash = digest(canonicalize(fingerprinted));
+  if (scope) await scope.assert();
   return { schema: 'dharma.repository-package-snapshot/v1', capturedAt: (input.now || new Date()).toISOString(),
     manifest: { ...fingerprinted, snapshotHash, snapshotId: `repository-package-${snapshotHash.slice(7)}` },
     blobs: [...blobs].sort(([a], [b]) => compare(a, b)).map(([sha256, contentBase64]) => ({ sha256, contentBase64 })) };
