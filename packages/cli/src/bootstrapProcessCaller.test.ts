@@ -25,12 +25,15 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
       hostContextId: id(4), issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()}});
   const entry = resolve(workspace, 'index.js'), policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
   const item = {path: workspace, workspaceId: id(5), organizationId: 'org_demo', repositoryRemoteHash: hash};
-  const children: ChildProcess[] = [], effects: string[] = [], spawnCalls: Array<{argv: string[]; options: Record<string, unknown>}> = [];
+  const children: ChildProcess[] = [], serviceChildren: ChildProcess[] = [], effects: string[] = [], spawnCalls: Array<{argv: string[]; options: Record<string, unknown>}> = [];
   let running = false, preexisting = false, withdrawInSpawn = false, withdrawInStatus = false;
   let container = false, withdrawInBackend = false, withdrawInContainerStart = false;
+  let standingService = false;
+  let serviceUnavailable = false;
   t.after(async () => {
     await drainBootstrapHostChildren(prepared.scope);
     for (const child of children) await watchOwnedChild(child).stop({graceMs: 1000});
+    for (const child of serviceChildren) await watchOwnedChild(child).stop({graceMs: 1000});
     await rm(workspace, {recursive: true, force: true});
   });
   const dependencies: Record<string, unknown> = {
@@ -48,7 +51,10 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
       return {backend: container ? 'container-entrypoint' : 'systemd-user'};
     },
     startRelayAutostart: async () => {
-      assert.equal(container, true); effects.push('container_start'); running = true;
+      if (serviceUnavailable) throw new Error('autostart_conflict: owned service unavailable');
+      effects.push(container ? 'container_start' : 'user_service_start'); running = true;
+      if (standingService) serviceChildren.push(spawn(process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'], {cwd: workspace, stdio: 'ignore'}));
       if (withdrawInContainerStart) prepared.scope.close();
     },
     spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
@@ -99,8 +105,11 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const call = (kind: 'relay' | 'session') => runCodexBootstrapHostScope(prepared.scope, async () => kind === 'relay'
     ? relay(resolve(item.path, '.dharma', 'approved-policy.json'))
     : session('start', new Map<string, string | boolean>([['name', 'implementer'], ['workspace-id', item.workspaceId], ['apply', true]])));
-  return {prepared, call, session, children, effects, spawnCalls, item, workspace, entry, policyPath,
-    preexisting: () => {preexisting = true;}, cancelInSpawn: () => {withdrawInSpawn = true;},
+  return {prepared, call, session, children, serviceChildren, effects, spawnCalls, item, workspace, entry, policyPath,
+    useStandingService: () => {standingService = true;},
+    denyStandingService: () => {serviceUnavailable = true;},
+    legacyRelay: () => relay(policyPath),
+    preexisting: () => {preexisting = true;}, cancelInSpawn: () => {withdrawInSpawn = true; withdrawInContainerStart = true;},
     cancelInStatus: () => {withdrawInStatus = true;}, useContainer: () => {container = true;},
     cancelInBackend: () => {withdrawInBackend = true;},
     cancelInContainerStart: () => {withdrawInContainerStart = true;}};
@@ -125,17 +134,58 @@ test('actual relay caller preserves an already running container-owned service w
   assert.equal(f.effects.includes('container_start'), false); assert.equal(f.children.length, 0);
 });
 
+test('actual relay caller requests its verified user service instead of spawning a setup-owned supervisor', async t => {
+  const f = await fixture(t); f.useStandingService(); await f.call('relay');
+  assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
+  assert.equal(f.spawnCalls.length, 0); assert.equal(f.children.length, 0);
+  assert.equal(f.serviceChildren.length, 1);
+  await drainBootstrapHostChildren(f.prepared.scope);
+  assert.equal(f.serviceChildren[0]!.exitCode, null);
+  assert.equal(f.serviceChildren[0]!.signalCode, null);
+  // The fixture's service owner, not the setup scope, drains this handle in t.after.
+});
+
+test('actual relay caller refuses user service start after setup withdrawal during backend discovery', async t => {
+  const f = await fixture(t); f.cancelInBackend();
+  await assert.rejects(f.call('relay'), /codex_setup_host_scope_unavailable/);
+  assert.equal(f.effects.includes('user_service_start'), false); assert.equal(f.spawnCalls.length, 0);
+});
+
+test('actual relay caller withholds readiness after withdrawal inside admitted user service start', async t => {
+  const f = await fixture(t); f.cancelInContainerStart();
+  await assert.rejects(f.call('relay'), /codex_setup_host_scope_unavailable/);
+  assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
+  assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
+});
+
+test('actual relay caller refuses an unavailable owned user service without detached fallback', async t => {
+  const f = await fixture(t); f.denyStandingService();
+  await assert.rejects(f.call('relay'), /autostart_conflict/);
+  assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
+  assert.equal(f.effects.includes('user_service_start'), false);
+});
+
+test('actual legacy relay caller retains its unscoped detached supervisor startup', async t => {
+  const f = await fixture(t); await f.legacyRelay();
+  assert.equal(f.spawnCalls.length, 1); assert.equal(f.spawnCalls[0]!.options.detached, true);
+  assert.equal(f.effects.includes('user_service_start'), false);
+});
+
 for (const kind of ['relay', 'session'] as const) {
-  test(`actual ${kind} caller captures only its scoped attached child and drains it on owner withdrawal`, async t => {
+  test(`actual ${kind} caller uses its selected lifecycle owner on setup withdrawal`, async t => {
     const f = await fixture(t); await f.call(kind);
-    assert.equal(f.children.length, 1); assert.equal(f.spawnCalls[0]!.options.detached, false);
-    assert.equal(f.spawnCalls[0]!.options.cwd, f.workspace);
-    assert.deepEqual(f.spawnCalls[0]!.argv, kind === 'relay'
-      ? [f.entry, 'relay', 'supervise', '--policy', f.policyPath]
-      : [f.entry, 'sessions', 'serve', '--name', 'implementer', '--workspace-id', f.item.workspaceId, '--apply']);
-    assert.equal(f.children[0]!.exitCode, null); assert.equal(f.children[0]!.signalCode, null);
+    if (kind === 'session') {
+      assert.equal(f.children.length, 1); assert.equal(f.spawnCalls[0]!.options.detached, false);
+      assert.equal(f.spawnCalls[0]!.options.cwd, f.workspace);
+      assert.deepEqual(f.spawnCalls[0]!.argv,
+        [f.entry, 'sessions', 'serve', '--name', 'implementer', '--workspace-id', f.item.workspaceId, '--apply']);
+      assert.equal(f.children[0]!.exitCode, null); assert.equal(f.children[0]!.signalCode, null);
+    } else {
+      assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
+      assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
+    }
     await drainBootstrapHostChildren(f.prepared.scope);
-    assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
+    if (kind === 'session') assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
   });
 
   test(`actual ${kind} caller preserves a preexisting service without acquiring its process`, async t => {
@@ -144,12 +194,13 @@ for (const kind of ['relay', 'session'] as const) {
     assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
   });
 
-  test(`actual ${kind} caller drains its child when cancellation occurs inside spawn`, async t => {
+  test(`actual ${kind} caller refuses completion after cancellation inside its admitted startup`, async t => {
     const f = await fixture(t); f.cancelInSpawn();
     await assert.rejects(f.call(kind), /^Error: codex_setup_host_scope_unavailable$/);
     await drainBootstrapHostChildren(f.prepared.scope);
-    assert.equal(f.children.length, 1);
-    assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
+    assert.equal(f.children.length, kind === 'session' ? 1 : 0);
+    if (kind === 'session') assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
+    else assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
   });
 
   test(`actual ${kind} caller refuses a foreign checkout before starting a process`, async t => {

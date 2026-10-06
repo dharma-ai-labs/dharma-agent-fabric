@@ -2048,7 +2048,9 @@ async function startRelayDaemon(policyPath: string) {
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
   if (supervisorState === 'stopped') {
-    if ((await relayAutostartStatus({ home: dharmaHome() })).backend === 'container-entrypoint') {
+    const startupBackend = (await relayAutostartStatus({ home: dharmaHome() })).backend;
+    // A setup turn cannot own a supervisor intended to outlive that turn.
+    if (hostScope || startupBackend === 'container-entrypoint') {
       await step(() => startRelayAutostart({ home: dharmaHome() }));
     } else {
       await step(async () => {
