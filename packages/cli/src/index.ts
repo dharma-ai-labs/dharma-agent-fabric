@@ -4655,12 +4655,51 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const writeRoots = policy.tasks.writePaths.filter(path => /^[a-zA-Z0-9_-]+\/\*\*$/.test(path))
       .map(path => path.slice(0, -3));
     if (!writeRoots.length) throw new Error('named_session_workspace_write_not_authorized');
+    let registration = existing, pending: NamedSessionRegistration | undefined;
+    let ownerReceipt: Record<string, unknown>;
+    // Resolve authenticated ownership before opening any provider transport.
+    if (registration) {
+      const response = await startupStep(() => fabric.signedPost('/agent-fabric/provider-sessions', {
+        schema: 'dharma.provider-session-registration/v1', action: 'inspect', provider: 'codex', mode: 'bridge_owned',
+        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        bindingId: registration!.bindingId, expectedRevision: 0, leaseSeconds: 60,
+      }));
+      if (!isNamedSessionOwnerReceipt(response, registration.bindingId, registration.identity)) {
+        throw new Error('named_session_registration_invalid');
+      }
+      ownerReceipt = response;
+    } else {
+      const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
+      const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
+      const bindingId = randomUUID();
+      const response = await startupStep(() => fabric.signedPost('/agent-fabric/provider-sessions', {
+        schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
+        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        bindingId, expectedRevision: 0, leaseSeconds: 60,
+      }));
+      const remote = response.registration as Record<string, unknown> | undefined;
+      if (!remote || !UUID_PATTERN.test(String(remote.membershipId))
+        || childScope && remote.membershipId !== childScope.request.membershipId || remote.revision !== 1) {
+        throw new Error('named_session_registration_invalid');
+      }
+      const identity = {organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
+        workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
+        provider: 'codex' as const};
+      if (!isNamedSessionOwnerReceipt(response, bindingId, identity)) throw new Error('named_session_registration_invalid');
+      ownerReceipt = response;
+      pending = {schema: 'dharma.named-session/v1', name, bindingId, identity,
+        maximumCostCents, maximumTurnCostCents, enabled: true};
+    }
     const environment = namedCodexEnvironment(process.env);
     const privateRoots = [dharmaHome(), resolve(environment.CODEX_HOME || resolve(homedir(), '.codex'))];
     if (environment.XDG_RUNTIME_DIR) privateRoots.push(environment.XDG_RUNTIME_DIR);
     if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
     const filesystem = await startupStep(() => namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots }));
     await startupStep(async () => {
+    const expectedOwner = registration ?? pending!;
+    if (!isNamedSessionOwnerReceipt(ownerReceipt, expectedOwner.bindingId, expectedOwner.identity)) {
+      throw new Error('named_session_registration_invalid');
+    }
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
       environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
       argv: ['-c', 'default_permissions="dharma_bridge"',
@@ -4672,35 +4711,13 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     });
     const account = await startupStep(() => transport!.request('account/read', { refreshToken: false })) as { account?: unknown };
     if (!account.account) throw new Error('named_session_provider_authentication_required');
-    let registration = existing;
-    if (!registration) {
-      const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
-      const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
-      const bindingId = randomUUID();
-      const response = await startupStep(() => fabric.signedPost('/agent-fabric/provider-sessions', {
-        schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
-        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
-        bindingId, expectedRevision: 0, leaseSeconds: 60,
-      }));
-      const remote = response.registration as Record<string, unknown> | undefined;
-      if (response.ok !== true || response.organizationId !== config.organizationId || !remote
-        || remote.bindingId !== bindingId || remote.workspaceId !== workspaceId || remote.endpointId !== scope.endpointId
-        || remote.repositoryBindingId !== scope.repositoryBindingId || remote.deviceId !== config.deviceId
-        || !UUID_PATTERN.test(String(remote.membershipId)) || childScope && remote.membershipId !== childScope.request.membershipId
-        || remote.provider !== 'codex'
-        || remote.mode !== 'bridge_owned' || remote.state !== 'attached' || remote.revision !== 1) {
-        throw new Error('named_session_registration_invalid');
-      }
-      const identity = { organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
-        workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
-        provider: 'codex' as const };
+    if (pending) {
       const threadId = await startupStep(() => startNamedCodexThread(transport!, item.path, name));
-      await startupStep(async () => vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
-        bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
+      await startupStep(async () => vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...pending!.identity,
+        bindingId: pending!.bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
-        maximumProviderCostCents: maximumTurnCostCents }));
-      registration = { schema: 'dharma.named-session/v1', name, bindingId, identity,
-        maximumCostCents, maximumTurnCostCents, enabled: true };
+        maximumProviderCostCents: pending!.maximumTurnCostCents }));
+      registration = pending;
       await startupStep(async () => saveNamedSession(dharmaHome(), registration!));
     }
     return {registration: registration!, filesystem, fabric, trust, policyPath, writeRoots};
