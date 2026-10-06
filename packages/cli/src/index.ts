@@ -103,6 +103,7 @@ import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReco
 import { startNamedCodexThread } from './namedCodexThread.js';
 import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
+import { namedCodexNodeOutputArguments } from './namedCodexNodeOutput.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
@@ -4816,7 +4817,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     }
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
       environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
-      argv: ['-c', 'allow_login_shell=false', '-c', 'default_permissions="dharma_bridge"',
+      argv: [...namedCodexNodeOutputArguments(), '-c', 'allow_login_shell=false', '-c', 'default_permissions="dharma_bridge"',
         '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
         '-c', 'permissions.dharma_bridge.network={enabled=false}',
         '-c', `permissions.dharma_work.filesystem=${filesystem.work}`,
