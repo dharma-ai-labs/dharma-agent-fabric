@@ -1,12 +1,37 @@
+import {AsyncLocalStorage} from 'node:async_hooks';
 import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult,
   type LocalVault, type ScopedLocalVault, type LocalCodexSetupSessionRequest,
   type LocalCodexSetupSessionResult} from '@dharma-ai-labs/agent-fabric-local-vault';
-import type {BootstrapHostScope} from './bootstrapHostScope.js';
+import {currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, type BootstrapHostScope} from './bootstrapHostScope.js';
+import {assertCodexSetupExecutionLease, type CodexSetupExecutionLease, type CodexSetupIntent} from './codexSetupAdmission.js';
 import {currentNamedSessionChildOwner, type NamedSessionChildOwner} from './namedSessionChildOwner.js';
 
 type SenderVault = Pick<ScopedLocalVault, 'stageCodexSetupSession' | 'readCodexSetupSession'>;
 type ReceiverVault = Pick<LocalVault, 'listPendingCodexSetupSessions' | 'readCodexSetupSession' | 'acceptCodexSetupSession'>;
+type Sender = Readonly<{scope: BootstrapHostScope; vault: SenderVault; lease: Readonly<CodexSetupExecutionLease>;
+  intent: Readonly<CodexSetupIntent>; active: {value: boolean}}>;
+const originalSenders = new WeakMap<BootstrapHostScope, Sender>();
+
+/** Private original-lease continuation. Public-shaped JSON is not admission. */
+export async function withCodexSetupSessionSender<T>(input: {scope: BootstrapHostScope; vault: SenderVault;
+  lease: Readonly<CodexSetupExecutionLease>}, operation: () => Promise<T>): Promise<T> {
+  const prepared = await inspectCodexBootstrapHostPreparation(input.scope);
+  await input.scope.step(() => assertCodexSetupExecutionLease(input.lease, prepared.intent));
+  if (originalSenders.has(input.scope)) throw new Error('setup_session_sender_conflict');
+  const sender: Sender = Object.freeze({...input, intent: prepared.intent, active: {value: true}});
+  originalSenders.set(input.scope, sender);
+  try {return await operation();}
+  finally {sender.active.value = false; originalSenders.delete(input.scope);}
+}
+
+export async function originalCodexSetupSessionSender(scope: BootstrapHostScope): Promise<Sender> {
+  const sender = originalSenders.get(scope);
+  if (!sender?.active.value || currentBootstrapHostScope() !== scope) throw new Error('setup_session_sender_unavailable');
+  await scope.step(() => assertCodexSetupExecutionLease(sender.lease, sender.intent));
+  if (!sender.active.value || originalSenders.get(scope) !== sender) throw new Error('setup_session_sender_unavailable');
+  return sender;
+}
 
 /** Original setup caller stages a request; it never starts or adopts a daemon. */
 export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: BootstrapHostScope;
@@ -42,6 +67,9 @@ export interface AcceptedSetupSessionScope {
   step<T>(operation: () => Promise<T>): Promise<T>;
 }
 const receiverContext = new WeakSet<AcceptedSetupSessionScope>();
+const acceptedContext = new AsyncLocalStorage<AcceptedSetupSessionScope>();
+/** Closed descendants keep the closed context; they never become unscoped. */
+export function currentAcceptedSetupSessionScope() {return acceptedContext.getStore();}
 
 /** Only an existing standing owner can consume once. This component does not
  * confer signed policy, enrollment or provider authority on a JSON request. */
@@ -89,7 +117,7 @@ export async function consumeCodexSetupSessions(input: {vault: ReceiverVault; ow
     }});
     receiverContext.add(scope);
     try {
-      const result = await scope.step(() => input.start(scope));
+      const result = await scope.step(() => acceptedContext.run(scope, () => input.start(scope)));
       const accepted = parseLocalCodexSetupSessionResult(result);
       if (accepted.state === 'started' && (accepted.supervisorPid !== process.pid
         || input.owner.ownedPid(request.name) !== accepted.sessionPid)) throw new Error('setup_session_owner_unconfirmed');

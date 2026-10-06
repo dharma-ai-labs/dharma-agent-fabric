@@ -157,6 +157,7 @@ test('actual supervisor declaration drains its fresh C-only session child before
   assert.equal(output.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
   const dependencies = {process: {platform: 'linux', stderr: {write: () => {}}}, createNamedSessionChildOwner,
     resolve, dharmaHome: () => root, setTimeout, clearTimeout,
+    access: async () => {throw Object.assign(new Error('synthetic vault absent'), {code: 'ENOENT'});},
     readdir: async () => [{name: 'reviewer', isDirectory: () => true}],
     readNamedSession: async () => ({enabled: true, name: 'reviewer', identity: {workspaceId: 'synthetic_workspace'}}),
     namedSessionCommand: async (action: string, flags: Map<string, string | boolean>) => {

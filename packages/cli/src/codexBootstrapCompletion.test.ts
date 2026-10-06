@@ -22,6 +22,7 @@ import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract} from './index.js';
+import {withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -255,7 +256,7 @@ test('actual CLI producer denies process reuse and policy withdrawal during read
 test('actual completion composition denies copied leases and retains the incomplete-execution guard', async t => {
   const f = await fixture(t); let executions = 0;
   const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
-    runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease,
+    runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
     observeCodexBootstrapRuntime: f.observe,
     bootstrapFromCodexSetupScope: async () => {executions++; return {ok: false, stage: 'host_setup_unavailable',
       code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};},
@@ -338,7 +339,7 @@ for (const withdrawAfterOpen of [false, true]) {
       },
     };
     const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
-      runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease,
+      runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
       observeCodexBootstrapRuntime: f.observe, bootstrapFromCodexSetupScope,
     });
     const start = await declaration('startCodexBootstrapNativeHost', {resolve, dharmaHome: () => home,

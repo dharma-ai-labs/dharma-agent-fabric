@@ -11,6 +11,7 @@ import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHo
   drainBootstrapHostChildren, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {watchOwnedChild} from './ownedChildLifecycle.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
+import {currentAcceptedSetupSessionScope, originalCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 // Actual caller declarations, with synthetic registry/OS readiness boundaries.
@@ -37,7 +38,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     await rm(workspace, {recursive: true, force: true});
   });
   const dependencies: Record<string, unknown> = {
-    currentBootstrapHostScope, captureBootstrapHostChild, assertBootstrapHostSource, currentNamedSessionChildOwner,
+    currentBootstrapHostScope, captureBootstrapHostChild, assertBootstrapHostSource, currentNamedSessionChildOwner, currentAcceptedSetupSessionScope,
+    requestBootstrapNamedSession: async (scope: typeof prepared.scope) => originalCodexSetupSessionSender(scope),
     resolve, dirname, Error, Promise, Number, String, Date, VERSION: '0.2.153',
     process: {execPath: process.execPath, env: {}, platform: 'linux'},
     setTimeout: (done: () => void) => {queueMicrotask(done);},
@@ -171,21 +173,12 @@ test('actual legacy relay caller retains its unscoped detached supervisor startu
   assert.equal(f.effects.includes('user_service_start'), false);
 });
 
-for (const kind of ['relay', 'session'] as const) {
+for (const kind of ['relay'] as const) {
   test(`actual ${kind} caller uses its selected lifecycle owner on setup withdrawal`, async t => {
     const f = await fixture(t); await f.call(kind);
-    if (kind === 'session') {
-      assert.equal(f.children.length, 1); assert.equal(f.spawnCalls[0]!.options.detached, false);
-      assert.equal(f.spawnCalls[0]!.options.cwd, f.workspace);
-      assert.deepEqual(f.spawnCalls[0]!.argv,
-        [f.entry, 'sessions', 'serve', '--name', 'implementer', '--workspace-id', f.item.workspaceId, '--apply']);
-      assert.equal(f.children[0]!.exitCode, null); assert.equal(f.children[0]!.signalCode, null);
-    } else {
-      assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
-      assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
-    }
+    assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
+    assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
     await drainBootstrapHostChildren(f.prepared.scope);
-    if (kind === 'session') assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
   });
 
   test(`actual ${kind} caller preserves a preexisting service without acquiring its process`, async t => {
@@ -198,9 +191,8 @@ for (const kind of ['relay', 'session'] as const) {
     const f = await fixture(t); f.cancelInSpawn();
     await assert.rejects(f.call(kind), /^Error: codex_setup_host_scope_unavailable$/);
     await drainBootstrapHostChildren(f.prepared.scope);
-    assert.equal(f.children.length, kind === 'session' ? 1 : 0);
-    if (kind === 'session') assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
-    else assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
+    assert.equal(f.children.length, 0);
+    assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
   });
 
   test(`actual ${kind} caller refuses a foreign checkout before starting a process`, async t => {
@@ -211,12 +203,12 @@ for (const kind of ['relay', 'session'] as const) {
   });
 }
 
-test('actual session caller withholds status returned after setup withdrawal and drains its acquired child', async t => {
-  const f = await fixture(t); f.cancelInStatus();
-  await assert.rejects(f.call('session'), /^Error: codex_setup_host_scope_unavailable$/);
+test('actual session caller refuses a setup scope without its original private sender and acquires no child', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.call('session'), /^Error: setup_session_sender_unavailable$/);
   await drainBootstrapHostChildren(f.prepared.scope);
-  assert.equal(f.children.length, 1);
-  assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
+  assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
+  assert.deepEqual(f.effects, []);
 });
 
 test('actual session caller binds a fresh attached child to its standing supervisor and drains it at shutdown', async t => {

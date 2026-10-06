@@ -20,7 +20,8 @@ async function fixture(run: (input: {root: string; key: Buffer; vault: LocalVaul
   const claim = vault.claimCodexSetupOperation(id(1), digest);
   assert.equal(claim.state, 'acquired'); if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
   const request: LocalCodexSetupSessionRequest = {schema: 'dharma.local-codex-setup-session/v1', operationId: id(1),
-    intentDigest: digest, organizationId: 'org_demo', membershipId: id(2), deviceId: id(3), workspaceId: id(4),
+    intentDigest: digest, setupReference: id(99), senderPid: process.pid, senderStartTicks: '1',
+    organizationId: 'org_demo', membershipId: id(2), deviceId: id(3), workspaceId: id(4),
     repositoryBindingId: id(5), endpointId: id(6), provider: 'codex', origin: 'https://hq.example',
     repositoryFingerprint: digest, policyRevision: 'policy-v1', policyHash: digest, scopeDigest: digest,
     contractDigest: digest, name: 'implementer', workspaceRoot: resolve(root, 'source'),
@@ -180,7 +181,7 @@ test('session request rejects coercible objects without invoking their private m
   const privateValue = {toString() {called++; throw new Error('private-canary');}};
   for (const field of ['origin', 'issuedAt', 'expiresAt']) {
     assert.throws(() => parseLocalCodexSetupSessionRequest(Object.fromEntries([
-      ...['schema', 'operationId', 'intentDigest', 'organizationId', 'membershipId', 'deviceId', 'workspaceId',
+      ...['schema', 'operationId', 'intentDigest', 'setupReference', 'senderPid', 'senderStartTicks', 'organizationId', 'membershipId', 'deviceId', 'workspaceId',
         'repositoryBindingId', 'endpointId', 'provider', 'origin', 'repositoryFingerprint', 'policyRevision',
         'policyHash', 'scopeDigest', 'contractDigest', 'name', 'workspaceRoot', 'maximumCostCents',
         'maximumTurnCostCents', 'issuedAt', 'expiresAt'].map(key => [key, key === field ? privateValue : null]),

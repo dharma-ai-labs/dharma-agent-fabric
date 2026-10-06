@@ -6,9 +6,11 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
 import {LocalVault, type LocalCodexSetupSessionRequest, type LocalCodexSetupSessionResult} from '@dharma-ai-labs/agent-fabric-local-vault';
-import type {BootstrapHostScope} from './bootstrapHostScope.js';
+import {prepareCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope} from './bootstrapHostScope.js';
+import {createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createNamedSessionChildOwner} from './namedSessionChildOwner.js';
-import {awaitCodexSetupSession, consumeCodexSetupSessions, type AcceptedSetupSessionScope} from './codexSetupSessionHandoff.js';
+import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
+  originalCodexSetupSessionSender, withCodexSetupSessionSender, type AcceptedSetupSessionScope} from './codexSetupSessionHandoff.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -19,7 +21,8 @@ async function fixture(run: (f: {vault: LocalVault; request: LocalCodexSetupSess
   const claim = vault.claimCodexSetupOperation(uuid(1), digest);
   if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
   const request: LocalCodexSetupSessionRequest = {schema: 'dharma.local-codex-setup-session/v1', operationId: uuid(1),
-    intentDigest: digest, organizationId: 'org_demo', membershipId: uuid(2), deviceId: uuid(3), workspaceId: uuid(4),
+    intentDigest: digest, setupReference: uuid(99), senderPid: process.pid, senderStartTicks: '1',
+    organizationId: 'org_demo', membershipId: uuid(2), deviceId: uuid(3), workspaceId: uuid(4),
     repositoryBindingId: uuid(5), endpointId: uuid(6), provider: 'codex', origin: 'https://hq.example',
     repositoryFingerprint: digest, policyRevision: 'policy-v1', policyHash: digest, scopeDigest: digest,
     contractDigest: digest, name: 'reviewer', workspaceRoot: root, maximumCostCents: 1000, maximumTurnCostCents: 25,
@@ -190,6 +193,66 @@ test('a descendant cannot return tool results when callback settlement happens d
         }});
       release();
       await assert.rejects(pending!, /setup_session_scope_unavailable/);
+    });
+  });
+});
+
+test('original sender requires the admitted lease and original context; copied and settled contexts are denied', async () => {
+  await fixture(async f => {
+    const prepared = prepareCodexBootstrapHost({workspace: f.request.workspaceRoot, signal: f.signal, current: async () => true,
+      intent: {schema: 'dharma.codex-setup-intent/v1', operationId: uuid(18), setupReference: uuid(99),
+        organizationId: f.request.organizationId, recipientMembershipId: f.request.membershipId, origin: f.request.origin,
+        repositoryFingerprint: digest, policyRevision: 'policy-v1', scopeDigest: digest, contractDigest: digest,
+        hostContextId: uuid(19), issuedAt: f.request.issuedAt, expiresAt: f.request.expiresAt}});
+    const binding = {connectionId: uuid(20), threadId: 'synthetic_thread', turnId: 'synthetic_turn', hostContextId: uuid(19)};
+    let admitted = 0, late!: () => Promise<unknown>, executionError: unknown;
+    const owner = createCodexSetupAdmission({...binding, intent: prepared.intent,
+      current: async () => ({...binding, mode: 'setup'}), qualifyHost: async () => true,
+      journal: {claim: async (id, value) => f.vault.claimCodexSetupOperation(id, value),
+        read: async (id, value) => f.vault.readCodexSetupOperation(id, value),
+        finish: async (id, value, result) => f.vault.finishCodexSetupOperation(id, value, result)},
+      execute: async (_intent, _signal, _current, lease) => {try {return await runCodexBootstrapHostScope(prepared.scope, async () => {
+        await assert.rejects(withCodexSetupSessionSender({scope: prepared.scope, vault: sender(f.vault), lease: {...lease}},
+          async () => {admitted++;}), /execution_lease_unavailable/);
+        await withCodexSetupSessionSender({scope: prepared.scope, vault: sender(f.vault), lease}, async () => {
+          assert.equal((await originalCodexSetupSessionSender(prepared.scope)).lease, lease); admitted++;
+          await assert.rejects(withCodexSetupSessionSender({scope: prepared.scope, vault: sender(f.vault), lease},
+            async () => {admitted++;}), /sender_conflict/);
+          late = () => originalCodexSetupSessionSender(prepared.scope);
+        });
+        await assert.rejects(late(), /sender_unavailable/);
+        return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+      });} catch (error) {executionError = error; throw error;}}, verifyReadiness: async () => false});
+    try {
+      const result = await owner.handler({threadId: binding.threadId, turnId: binding.turnId, callId: 'synthetic_call',
+        tool: 'dharma_setup_reference', namespace: null, arguments: {operationId: uuid(18), setupReference: uuid(99)}},
+        {signal: f.signal});
+      await owner.settled;
+      if (executionError) throw executionError;
+      assert.equal(result.success, false); assert.equal(admitted, 1);
+      await assert.rejects(late(), /sender_unavailable/);
+    } finally {owner.close(); await owner.settled; prepared.scope.close();}
+  });
+});
+
+test('accepted receiver descendants retain a closed context instead of falling back to unscoped authority', async () => {
+  await fixture(async f => {
+    f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
+    const owner = createNamedSessionChildOwner(f.signal);
+    let release!: () => void, pending!: Promise<void>, effects = 0;
+    const gate = new Promise<void>(done => {release = done;});
+    await owner.run(async () => {
+      await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal, authorize: async () => true,
+        start: async scope => {
+          assert.equal(currentAcceptedSetupSessionScope(), scope);
+          pending = (async () => {await gate;
+            assert.equal(currentAcceptedSetupSessionScope(), scope);
+            await assert.rejects(currentAcceptedSetupSessionScope()!.step(async () => {effects++;}), /scope_unavailable/);
+          })();
+          return unconfirmed;
+        }});
+      assert.equal(currentAcceptedSetupSessionScope(), undefined);
+      release(); await pending; assert.equal(effects, 0);
     });
   });
 });

@@ -121,6 +121,16 @@ export function currentBootstrapHostScope(): BootstrapHostScope | undefined {
   return hostContext.getStore()?.scope;
 }
 
+/** Read the original private preparation without entering a nested context. */
+export async function inspectCodexBootstrapHostPreparation(scope: BootstrapHostScope) {
+  const retained = nativeScopes.get(scope), context = hostContext.getStore();
+  if (!retained || context && context.scope !== scope || borrowedScopes.has(scope) && context?.scope !== scope) {
+    throw new Error('codex_setup_host_context_conflict');
+  }
+  await scope.assert();
+  return {scope, intent: retained.intent, flags: new Map(retained.flags)};
+}
+
 /** Capture this caller's fresh spawn before any asynchronous post-effect check.
  * Capturing cleanup remains necessary if cancellation occurred inside spawn. */
 export function captureBootstrapHostChild(scope: BootstrapHostScope, child: ChildProcess): void {

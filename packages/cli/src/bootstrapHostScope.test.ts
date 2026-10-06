@@ -28,6 +28,46 @@ async function invoke(input: unknown): Promise<any> {
   return entry!(input);
 }
 
+test('private preparation read preserves the active original context and does not expose mutable captured flags', async () => {
+  const input = await fixture(), prepared = prepareCodexBootstrapHost(input);
+  try {
+    const outside = await host.inspectCodexBootstrapHostPreparation(prepared.scope);
+    outside.flags.set('workspace', 'changed');
+    await host.runCodexBootstrapHostScope(prepared.scope, async original => {
+      const inside = await host.inspectCodexBootstrapHostPreparation(prepared.scope);
+      assert.equal(host.currentBootstrapHostScope(), prepared.scope);
+      assert.equal(inside.flags.get('workspace'), input.workspace);
+      assert.equal(inside.intent, original.intent);
+      await assert.rejects(host.runCodexBootstrapHostScope(prepared.scope, async () => {}), /context_conflict/);
+    });
+  } finally {prepared.scope.close();}
+});
+
+test('private preparation read denies copied scope and foreign active context', async () => {
+  const prepared = prepareCodexBootstrapHost(await fixture()), foreign = prepareCodexBootstrapHost(await fixture());
+  try {
+    await assert.rejects(host.inspectCodexBootstrapHostPreparation({...prepared.scope}), /context_conflict/);
+    await host.runCodexBootstrapHostScope(prepared.scope, async () => {
+      await assert.rejects(host.inspectCodexBootstrapHostPreparation(foreign.scope), /context_conflict/);
+    });
+  } finally {prepared.scope.close(); foreign.scope.close();}
+});
+
+test('private preparation read denies descendants of a settled or withdrawn context', async () => {
+  const prepared = prepareCodexBootstrapHost(await fixture());
+  let release!: () => void, pending!: Promise<void>;
+  const gate = new Promise<void>(done => {release = done;});
+  try {
+    await host.runCodexBootstrapHostScope(prepared.scope, async () => {
+      pending = (async () => {await gate;
+        await assert.rejects(host.inspectCodexBootstrapHostPreparation(prepared.scope), /scope_unavailable/);
+      })();
+    });
+    release(); await pending;
+    await assert.rejects(host.inspectCodexBootstrapHostPreparation(prepared.scope), /scope_unavailable/);
+  } finally {prepared.scope.close();}
+});
+
 test('vault key access carries the closed owning context without opening a store', async () => {
   let reads = 0, outcome: PromiseSettledResult<Buffer>[] = [];
   const store = {backend: 'linux-secret-service' as const,
