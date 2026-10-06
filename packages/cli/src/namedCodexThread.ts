@@ -26,8 +26,21 @@ async function startThread(transport: CodexAppServerTransport, workspaceRoot: st
   const thread = created?.thread;
   if (!thread || typeof thread.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(thread.id)
     || thread.cwd !== workspaceRoot || thread.status?.type !== 'idle') throw new Error('named_session_thread_invalid');
-  // Codex lazily persists an empty rollout; its supported naming call flushes it before remote registration.
+  // Naming only stages metadata. Archive/unarchive materializes a fresh native
+  // rollout without inference; verify the same identity resumes before binding it.
   await request('thread/name/set', { threadId: thread.id, name });
+  await request('thread/archive', { threadId: thread.id });
+  const restored = await request('thread/unarchive', { threadId: thread.id }) as {
+    thread?: { id?: string; cwd?: string };
+  };
+  if (restored?.thread?.id !== thread.id || restored.thread.cwd !== workspaceRoot) {
+    throw new Error('named_session_thread_invalid');
+  }
+  const resumed = await request('thread/resume', { threadId: thread.id }) as {
+    thread?: { id?: string; cwd?: string; status?: { type?: string } };
+  };
+  if (resumed?.thread?.id !== thread.id || resumed.thread.cwd !== workspaceRoot
+    || resumed.thread.status?.type !== 'idle') throw new Error('named_session_thread_invalid');
   const read = await request('thread/read', { threadId: thread.id, includeTurns: false }) as {
     thread?: { id?: string; cwd?: string; name?: string; status?: { type?: string } };
   };

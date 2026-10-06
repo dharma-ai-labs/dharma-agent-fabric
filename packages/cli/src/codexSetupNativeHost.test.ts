@@ -51,8 +51,8 @@ function fixture() {
       if (method === 'permissionProfile/list') return {data: [{id: 'dharma_bridge', allowed: permission}]};
       if (method === 'config/read') return {config: {permissions: {dharma_bridge: {
         filesystem: {':minimal': 'read', ':workspace_roots': {'.': 'read'}}, network: {enabled: network}}}}};
-      if (method === 'thread/start' || method === 'thread/read') return {thread};
-      if (method === 'thread/name/set' || method === 'turn/interrupt') return {};
+      if (['thread/start', 'thread/read', 'thread/unarchive', 'thread/resume'].includes(method)) return {thread};
+      if (['thread/name/set', 'thread/archive', 'turn/interrupt'].includes(method)) return {};
       if (method === 'turn/start') return {turn: {id: 'synthetic_turn', status: 'inProgress'}};
       throw new Error('unexpected synthetic method');
     },
