@@ -4,8 +4,10 @@ import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/pro
 import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {types} from 'node:util';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
 import type { FormatsPlugin } from 'ajv-formats';
+import {currentBootstrapHostScope, type BootstrapHostScope} from './bootstrapHostScope.js';
 
 const addFormats = createRequire(import.meta.url)('ajv-formats').default as FormatsPlugin;
 
@@ -21,6 +23,47 @@ const HASH = /^sha256:[0-9a-f]{64}$/;
 const CONCEPT_ID = /^concept_[a-z0-9][a-z0-9_-]{0,79}$/;
 const CONCEPT_PATH = /^concepts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:json|md)$/;
 const UNSAFE_COMPONENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)|(?:^|[._-])(?:secrets?|credentials?|passwords?|private[-_]?keys?|tokens?|keystore)(?:[._-]|$)/i;
+
+function errorCode(error: unknown): string | undefined {
+  try {
+    if (!error || typeof error !== 'object' || types.isProxy(error)) return undefined;
+    const field = Object.getOwnPropertyDescriptor(error, 'code');
+    return field && Object.hasOwn(field, 'value') && typeof field.value === 'string' ? field.value : undefined;
+  } catch {return undefined;}
+}
+async function knowledgeEffect<T>(scope: BootstrapHostScope | undefined, operation: () => Promise<T>): Promise<T> {
+  if (!scope) return operation();
+  try {return await scope.step(operation);}
+  catch (error) {
+    await scope.assert();
+    const code = errorCode(error);
+    throw Object.assign(new Error('repository_knowledge_storage_unavailable'),
+      code === 'ENOENT' || code === 'ENOTDIR' || code === 'EEXIST' ? {code} : {});
+  }
+}
+function snapshotInput<T extends RepositoryKnowledgeInput>(input: T, scope: BootstrapHostScope | undefined): T {
+  if (!scope) return input;
+  if (!input || typeof input !== 'object' || types.isProxy(input)) throw new Error('repository_knowledge_input_invalid');
+  const result: Record<string, unknown> = {};
+  for (const key of ['workspace', 'organizationId', 'repositoryAgentId', 'repositoryBindingId', 'workspaceId', 'dryRun', 'now']) {
+    const field = Object.getOwnPropertyDescriptor(input, key);
+    if (!field) continue;
+    if (!Object.hasOwn(field, 'value')) throw new Error('repository_knowledge_input_invalid');
+    const value = field.value;
+    if (key === 'now' && value !== undefined) {
+      if (!types.isDate(value)) throw new Error('repository_knowledge_input_invalid');
+      result.now = new Date(Date.prototype.getTime.call(value));
+    } else {
+      if (value !== undefined && value !== null && !['string', 'boolean'].includes(typeof value)) throw new Error('repository_knowledge_input_invalid');
+      result[key] = value;
+    }
+  }
+  return Object.freeze(result) as T;
+}
+async function closeOwned(handle: Awaited<ReturnType<typeof open>> | undefined, scope: BootstrapHostScope | undefined) {
+  try {await handle?.close();}
+  catch (error) {if (scope) throw new Error('repository_knowledge_cleanup_unconfirmed'); throw error;}
+}
 
 export interface RepositoryKnowledgeIdentity {
   organizationId: string;
@@ -145,6 +188,9 @@ export function validateRepositoryKnowledgeRetention(input: {
 }
 
 export async function readRepositoryKnowledgeSource(input: RepositoryKnowledgeSourceInput): Promise<RepositoryKnowledgeSource | null> {
+  const scope = currentBootstrapHostScope();
+  input = snapshotInput(input, scope);
+  await scope?.assert();
   const workspace = await workspaceRoot(input);
   const catalogBytes = await readOptional(workspace, REPOSITORY_KNOWLEDGE_CATALOG_PATH, RETENTION_MAXIMUM_BYTES);
   let candidate: unknown;
@@ -275,57 +321,67 @@ function initialCatalog(input: RepositoryKnowledgeInitializationInput): Reposito
   };
   return validateRepositoryKnowledgeCatalog({ ...content, catalogHash: hash(content) }, input);
 }
-function missing(error: unknown) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+function missing(error: unknown) { return errorCode(error) === 'ENOENT'; }
 
 async function workspaceRoot(input: RepositoryKnowledgeInput) {
+  const scope = currentBootstrapHostScope();
+  await scope?.assert();
   validateIdentity(input);
   if (typeof input.workspace !== 'string' || !input.workspace || input.workspace.includes('\0')) throw new Error('Invalid knowledge workspace.');
   const absolute = resolve(input.workspace);
   // OS ancestors can be aliases; the workspace and all managed descendants cannot.
-  const metadata = await lstat(absolute);
+  const metadata = await knowledgeEffect(scope, () => lstat(absolute));
   if (metadata.isSymbolicLink()) throw new Error('Repository knowledge workspace symlink is forbidden.');
   if (!metadata.isDirectory()) throw new Error('Invalid repository knowledge workspace.');
-  return realpath(absolute);
+  return knowledgeEffect(scope, () => realpath(absolute));
 }
 async function checkedPath(workspace: string, path: string): Promise<string | null> {
+  const scope = currentBootstrapHostScope();
+  await scope?.assert();
   let current = workspace;
   for (const component of path.split('/')) {
     current = resolve(current, component);
     let metadata;
-    try { metadata = await lstat(current); } catch (error) { if (missing(error)) return null; throw error; }
+    try { metadata = await knowledgeEffect(scope, () => lstat(current)); }
+    catch (error) {await scope?.assert(); if (missing(error)) return null; throw error;}
     if (metadata.isSymbolicLink()) throw new Error('Repository knowledge symlink is forbidden.');
-    const actual = await realpath(current);
+    const actual = await knowledgeEffect(scope, () => realpath(current));
     const route = relative(workspace, actual);
     if (isAbsolute(route) || route === '..' || route.startsWith(`..${sep}`)) throw new Error('Repository knowledge path escape.');
   }
   return current;
 }
 async function readOptional(workspace: string, path: string, maximumBytes = MAXIMUM_BYTES): Promise<Buffer | null> {
+  const scope = currentBootstrapHostScope();
+  await scope?.assert();
   const target = await checkedPath(workspace, path);
   if (!target) return null;
-  if (!(await lstat(target)).isFile()) throw new Error('Invalid repository knowledge regular file.');
-  const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+  if (!(await knowledgeEffect(scope, () => lstat(target))).isFile()) throw new Error('Invalid repository knowledge regular file.');
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const before = await handle.stat();
+    await knowledgeEffect(scope, async () => {
+      handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+    });
+    const before = await knowledgeEffect(scope, () => handle!.stat());
     if (!before.isFile() || before.size > maximumBytes) throw new Error('Repository knowledge file limit or type is invalid.');
     const buffer = Buffer.alloc(before.size + 1);
     let count = 0;
     while (count < buffer.length) {
-      const result = await handle.read(buffer, count, buffer.length - count, count);
+      const result = await knowledgeEffect(scope, () => handle!.read(buffer, count, buffer.length - count, count));
       if (!result.bytesRead) break;
       count += result.bytesRead;
     }
-    const after = await handle.stat();
+    const after = await knowledgeEffect(scope, () => handle!.stat());
     const checked = await checkedPath(workspace, path);
     if (!checked) throw new Error('Repository knowledge file changed.');
-    const current = await lstat(checked);
+    const current = await knowledgeEffect(scope, () => lstat(checked));
     if (count !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs
       || current.ino !== before.ino || current.dev !== before.dev
       || current.size !== after.size || current.mtimeMs !== after.mtimeMs) {
       throw new Error('Repository knowledge file changed.');
     }
     return buffer.subarray(0, count);
-  } finally { await handle.close(); }
+  } finally { await closeOwned(handle, scope); }
 }
 function parseCatalog(bytes: Buffer, input: RepositoryKnowledgeIdentity) {
   const text = bytes.toString('utf8');
@@ -335,17 +391,21 @@ function parseCatalog(bytes: Buffer, input: RepositoryKnowledgeIdentity) {
   return validateRepositoryKnowledgeCatalog(value, input);
 }
 async function managedWorkspace(input: RepositoryKnowledgeInput) {
+  const scope = currentBootstrapHostScope();
   const workspace = await workspaceRoot(input);
   const marker = await readOptional(workspace, `${SKILL_ROOT}/.dharma-agent-fabric.json`, 4096);
   let value: { managedBy?: unknown };
   try { value = JSON.parse(marker?.toString('utf8') ?? 'null'); } catch { throw new Error('Invalid managed repository skill marker.'); }
   if (!value || value.managedBy !== 'dharma-agent-fabric') throw new Error('Unmanaged repository skill root.');
   const directory = await checkedPath(workspace, KNOWLEDGE_ROOT);
-  if (directory && !(await lstat(directory)).isDirectory()) throw new Error('Invalid repository knowledge directory.');
+  if (directory && !(await knowledgeEffect(scope, () => lstat(directory))).isDirectory()) throw new Error('Invalid repository knowledge directory.');
   return workspace;
 }
 
 export async function readRepositoryKnowledge(input: RepositoryKnowledgeInput): Promise<RepositoryKnowledgeCatalog | null> {
+  const scope = currentBootstrapHostScope();
+  input = snapshotInput(input, scope);
+  await scope?.assert();
   const workspace = await managedWorkspace(input);
   let intent = await readOptional(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH);
   if (intent) parseCatalog(intent, input);
@@ -358,19 +418,27 @@ export async function readRepositoryKnowledge(input: RepositoryKnowledgeInput): 
     parseCatalog(intent, input);
     const replay = await readOptional(workspace, REPOSITORY_KNOWLEDGE_CATALOG_PATH);
     if (replay) return parseCatalog(replay, input);
-    if ((await readdir(directory)).some(name => name !== 'CATALOG.json')) {
+    if ((await knowledgeEffect(scope, () => readdir(directory))).some(name => name !== 'CATALOG.json')) {
       throw new Error('Unmanaged files in interrupted repository knowledge initialization.');
     }
   }
   return null;
 }
 async function syncDirectory(path: string) {
+  const scope = currentBootstrapHostScope();
+  await scope?.assert();
   if (process.platform === 'win32') return;
-  const handle = await open(path, constants.O_RDONLY);
-  try { await handle.sync(); } finally { await handle.close(); }
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    await knowledgeEffect(scope, async () => {handle = await open(path, constants.O_RDONLY);});
+    await knowledgeEffect(scope, () => handle!.sync());
+  } finally { await closeOwned(handle, scope); }
 }
 
 export async function initializeRepositoryKnowledge(input: RepositoryKnowledgeInitializationInput): Promise<RepositoryKnowledgeInitializationResult> {
+  const scope = currentBootstrapHostScope();
+  input = snapshotInput(input, scope);
+  await scope?.assert();
   const workspace = await managedWorkspace(input);
   const result = (catalog: RepositoryKnowledgeCatalog, disposition: RepositoryKnowledgeInitializationResult['disposition']): RepositoryKnowledgeInitializationResult =>
     ({ catalog, relativePath: REPOSITORY_KNOWLEDGE_CATALOG_PATH, disposition });
@@ -386,7 +454,7 @@ export async function initializeRepositoryKnowledge(input: RepositoryKnowledgeIn
   let catalog = intentBytes ? parseCatalog(intentBytes, input) : initialCatalog(input);
   const directory = await checkedPath(workspace, KNOWLEDGE_ROOT);
   if (directory) {
-    const names = await readdir(directory);
+    const names = await knowledgeEffect(scope, () => readdir(directory));
     if (names.some(name => name !== 'CATALOG.json')) throw new Error('Unmanaged files in interrupted repository knowledge initialization.');
   }
   if (input.dryRun) return result(catalog, 'planned');
@@ -395,43 +463,65 @@ export async function initializeRepositoryKnowledge(input: RepositoryKnowledgeIn
     const staging = `${SKILL_ROOT}/.knowledge-init-${randomUUID()}.tmp`;
     const parent = await checkedPath(workspace, SKILL_ROOT);
     if (!parent) throw new Error('Unmanaged repository skill root.');
-    const handle = await open(resolve(workspace, staging), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
+    let handle: Awaited<ReturnType<typeof open>> | undefined, closeResult: Promise<void> | undefined;
+    let identity: {dev: bigint; ino: bigint} | undefined;
+    const finishOwned = () => closeResult ??= closeOwned(handle, scope);
     try {
-      await handle.writeFile(`${canonical(catalog)}\n`, 'utf8');
-      await handle.sync();
-    } finally { await handle.close(); }
-    try {
+      await knowledgeEffect(scope, async () => {
+        handle = await open(resolve(workspace, staging), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
+      });
+      if (scope) {
+        const metadata = await knowledgeEffect(scope, () => handle!.stat({bigint: true}));
+        identity = {dev: metadata.dev, ino: metadata.ino};
+      }
+      await knowledgeEffect(scope, () => handle!.writeFile(`${canonical(catalog)}\n`, 'utf8'));
+      await knowledgeEffect(scope, () => handle!.sync());
+      await finishOwned();
       await checkedPath(workspace, staging);
       await checkedPath(workspace, SKILL_ROOT);
-      try { await link(resolve(workspace, staging), resolve(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH)); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      try { await knowledgeEffect(scope, () => link(resolve(workspace, staging), resolve(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH))); }
+      catch (error) {await scope?.assert(); if (errorCode(error) !== 'EEXIST') throw error;}
       await syncDirectory(parent);
       intentBytes = await readOptional(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH);
       if (!intentBytes) throw new Error('Repository knowledge initialization record missing.');
       catalog = parseCatalog(intentBytes, input);
     } finally {
-      const target = await checkedPath(workspace, staging);
-      if (target) await unlink(target);
+      if (handle) await finishOwned();
+      if (handle && (!scope || await scope.current())) {
+        if (scope) {
+          try {
+            if (!identity) throw new Error('repository_knowledge_cleanup_unconfirmed');
+            const current = await knowledgeEffect(scope, () => lstat(resolve(workspace, staging), {bigint: true}));
+            if (!current.isFile() || current.nlink < 1n || current.nlink > 2n
+              || current.dev !== identity.dev || current.ino !== identity.ino) throw new Error('repository_knowledge_cleanup_unconfirmed');
+            await knowledgeEffect(scope, () => unlink(resolve(workspace, staging)));
+          } catch {await scope.assert(); throw new Error('repository_knowledge_cleanup_unconfirmed');}
+        } else {
+          const target = await checkedPath(workspace, staging);
+          if (target) await unlink(target);
+        }
+      }
     }
   }
 
   await checkedPath(workspace, SKILL_ROOT);
-  try { await mkdir(resolve(workspace, KNOWLEDGE_ROOT), { mode: 0o700 }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  try { await knowledgeEffect(scope, () => mkdir(resolve(workspace, KNOWLEDGE_ROOT), { mode: 0o700 })); }
+  catch (error) {await scope?.assert(); if (errorCode(error) !== 'EEXIST') throw error;}
   const targetDirectory = await checkedPath(workspace, KNOWLEDGE_ROOT);
-  if (!targetDirectory || !(await lstat(targetDirectory)).isDirectory()) throw new Error('Invalid repository knowledge directory.');
+  if (!targetDirectory || !(await knowledgeEffect(scope, () => lstat(targetDirectory))).isDirectory()) throw new Error('Invalid repository knowledge directory.');
   const existingAfterIntent = await readRepositoryKnowledge(input);
   if (existingAfterIntent) return result(existingAfterIntent, 'reused');
-  if ((await readdir(targetDirectory)).length) {
+  if ((await knowledgeEffect(scope, () => readdir(targetDirectory))).length) {
     const replay = await readRepositoryKnowledge(input);
     if (replay) return result(replay, 'reused');
     throw new Error('Unmanaged files in interrupted repository knowledge initialization.');
   }
   const source = await checkedPath(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH);
   if (!source) throw new Error('Repository knowledge initialization record missing.');
-  try { await link(source, resolve(workspace, REPOSITORY_KNOWLEDGE_CATALOG_PATH)); }
+  try { await knowledgeEffect(scope, () => link(source, resolve(workspace, REPOSITORY_KNOWLEDGE_CATALOG_PATH))); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    await scope?.assert();
+    if (errorCode(error) !== 'EEXIST') throw error;
     const replay = await readRepositoryKnowledge(input);
     if (!replay) throw new Error('Repository knowledge catalog missing.');
     return result(replay, 'reused');
