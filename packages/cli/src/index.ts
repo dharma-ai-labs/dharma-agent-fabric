@@ -104,7 +104,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
-import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 // Trusted runtime composition only; these exports do not enable effectful setup.
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
@@ -2032,6 +2032,9 @@ export async function waitForRelayReadiness(options: {
 }
 
 async function startRelayDaemon(policyPath: string) {
+  const hostScope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
+  await hostScope?.assert();
   const config = await readDeviceConfig();
   if (!config) throw new Error('Relay startup requires current device enrollment.');
   const policy = await loadOrganizationPolicy(policyPath);
@@ -2039,6 +2042,7 @@ async function startRelayDaemon(policyPath: string) {
   const selected = (await registry()).find(row => row.workspaceId === workspaceId
     && row.organizationId === config.organizationId && resolve(row.path, '.dharma', 'approved-policy.json') === policyPath);
   if (!selected) throw new Error('Relay policy must belong to this enrolled repository.');
+  await assertBootstrapHostSource(selected.path, String(selected.repositoryRemoteHash || ''));
   const alreadyRunning = await relayProcessState() === 'running';
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
@@ -2046,14 +2050,18 @@ async function startRelayDaemon(policyPath: string) {
     if ((await relayAutostartStatus({ home: dharmaHome() })).backend === 'container-entrypoint') {
       await startRelayAutostart({ home: dharmaHome() });
     } else {
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-        cwd: dirname(dirname(policyPath)), detached: true, stdio: 'ignore', env: process.env,
+      await step(async () => {
+        const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
+          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: process.env,
+        });
+        if (hostScope) captureBootstrapHostChild(hostScope, child);
+        else child.unref();
       });
-      child.unref();
     }
   }
   let supervisorReady = false;
   for (let attempt = 0; attempt < 80; attempt += 1) {
+    await hostScope?.assert();
     if (await relaySupervisorProcessState() === 'running') {
       const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
         .catch(() => '0')).trim());
@@ -2075,6 +2083,7 @@ async function startRelayDaemon(policyPath: string) {
   }
   if (!supervisorReady) throw new Error('The relay supervisor did not become ready after bootstrap.');
   const readiness = await waitForRelayReadiness({ expectedVersion: VERSION, attempts: 120, delayMs: 1000, processState: async () => {
+    await hostScope?.assert();
     if (await relayProcessState() !== 'running') return 'stopped';
     const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')).trim());
     const poll = await readFile(resolve(dharmaHome(), 'relay', 'repositories', selected.workspaceId,
@@ -2082,6 +2091,7 @@ async function startRelayDaemon(policyPath: string) {
     return repositoryRelayObservationReady({ observation: poll, workspaceId: selected.workspaceId,
       version: VERSION, pid }) ? 'running' : 'stopped';
   } });
+  await hostScope?.assert();
   return { started: !alreadyRunning, supervisor: 'running' as const, ...readiness };
 }
 
@@ -2482,10 +2492,28 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
   const startupState = await step(() => relayAutostartStatus({home: dharmaHome()}));
   if (!['systemd-user', 'container-entrypoint'].includes(startup.backend) || startupState.state !== 'enabled'
     || startupState.backend !== startup.backend || startup.version !== VERSION || startupState.version !== VERSION
-    || startup.workspace !== workspace || startup.policy !== policyPath || startup.launcher !== resolve(workspace, '.dharma', 'bin', 'dharma')
+    || resolve(startup.workspace) !== startup.workspace
+    || startup.policy !== resolve(startup.workspace, '.dharma', 'approved-policy.json')
+    || startup.launcher !== resolve(startup.workspace, '.dharma', 'bin', 'dharma')
     || startup.backend === 'container-entrypoint' && startupState.lifecycle !== 'running') {
     throw new Error('setup_runtime_startup_unconfirmed');
   }
+  // A standard relay can retain another repository as its same-device anchor.
+  // Verify that anchor independently; selected-repository evidence stays scoped.
+  const anchorRows = await step(() => registry());
+  const startupItem = selectDeviceWorkspace(anchorRows, {organizationId: intent.organizationId,
+    deviceId: config.deviceId, path: startup.workspace});
+  if (!startupItem || startupItem.status !== 'active' || startupItem.routeHash !== sha256(startup.workspace)) {
+    throw new Error('setup_runtime_startup_unconfirmed');
+  }
+  const startupRoute = canonicalize({workspaceId: startupItem.workspaceId, path: startupItem.path,
+    routeHash: startupItem.routeHash, repositoryRemoteHash: startupItem.repositoryRemoteHash, status: startupItem.status});
+  const startupPolicy = await step(() => loadVerifiedWorkspacePolicy(startup.policy!, startupItem.workspaceId));
+  verifyServerAuthorizedPolicy({policy: startupPolicy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: intent.organizationId, workspaceId: startupItem.workspaceId});
+  await step(() => assertWorkspaceAuthorizationCurrent(startupItem.workspaceId, startupPolicy.serverAuthorization!));
+  const startupSnapshot = canonicalize(startup), startupStateSnapshot = canonicalize(startupState);
+  const startupPolicyHash = sha256(canonicalize(startupPolicy));
   const pidFrom = async (path: string) => {
     const value = await readBootstrapRuntimeJson(path, scope);
     if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 2147483647) {
@@ -2498,8 +2526,8 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
   const relayPid = await pidFrom(resolve(home, 'relay', 'relay.pid'));
   const sessionPid = await pidFrom(resolve(namedSessionPaths(home, name).root, 'service.lock'));
   const processes = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
-  const argv = [[process.execPath, entry, 'relay', 'supervise', '--policy', policyPath],
-    [process.execPath, entry, 'relay', 'start', '--policy', policyPath],
+  const argv = [[process.execPath, entry, 'relay', 'supervise', '--policy', startup.policy],
+    [process.execPath, entry, 'relay', 'start', '--policy', startup.policy],
     [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
   if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
     || canonicalize(value.argv) !== canonicalize(argv[i])) || processes[1]!.parentPid !== supervisorPid) {
@@ -2507,7 +2535,7 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
   }
   const supervisor = await readBootstrapRuntimeJson(resolve(home, 'relay', 'supervisor-workspace.json'), scope) as Record<string, unknown>;
   if (supervisor.pid !== supervisorPid || supervisor.organizationId !== intent.organizationId || supervisor.deviceId !== config.deviceId
-    || supervisor.policyPath !== policyPath || supervisor.version !== VERSION || supervisor.standardRepositories !== true) {
+    || supervisor.policyPath !== startup.policy || supervisor.version !== VERSION || supervisor.standardRepositories !== true) {
     throw new Error('setup_runtime_process_unconfirmed');
   }
   const poll = await readBootstrapRuntimeJson(resolve(home, 'relay', 'repositories', item.workspaceId,
@@ -2522,6 +2550,20 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
   }
   const currentProcesses = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
   if (processes.some((value, i) => canonicalize(value) !== canonicalize(currentProcesses[i]))) throw new Error('setup_runtime_process_changed');
+  const currentStartup = await step(() => inspectOwnedRelayAutostart({home}));
+  const currentStartupState = await step(() => relayAutostartStatus({home}));
+  const currentStartupItem = selectDeviceWorkspace(await step(() => registry()), {organizationId: intent.organizationId,
+    deviceId: config.deviceId, path: startup.workspace});
+  const currentConfig = await step(() => readDeviceConfig());
+  if (canonicalize(currentStartup) !== startupSnapshot || canonicalize(currentStartupState) !== startupStateSnapshot
+    || !currentStartupItem || canonicalize({workspaceId: currentStartupItem.workspaceId, path: currentStartupItem.path,
+      routeHash: currentStartupItem.routeHash, repositoryRemoteHash: currentStartupItem.repositoryRemoteHash,
+      status: currentStartupItem.status}) !== startupRoute
+    || !currentConfig || currentConfig.deviceId !== config.deviceId || currentConfig.organizationId !== intent.organizationId
+    || normalizeHqUrl(currentConfig.hqUrl) !== intent.origin) throw new Error('setup_runtime_startup_changed');
+  const currentStartupPolicy = await step(() => loadVerifiedWorkspacePolicy(startup.policy!, startupItem.workspaceId));
+  if (sha256(canonicalize(currentStartupPolicy)) !== startupPolicyHash) throw new Error('setup_runtime_startup_changed');
+  await step(() => assertWorkspaceAuthorizationCurrent(startupItem.workspaceId, currentStartupPolicy.serverAuthorization!));
   await step(() => assertWorkspaceAuthorizationCurrent(item.workspaceId, policy.serverAuthorization!));
   return parseLocalCodexSetupReadiness({schema: 'dharma.local-codex-setup-readiness/v1',
     operationId: intent.operationId, organizationId: intent.organizationId, membershipId: session.identity.membershipId,
@@ -2534,6 +2576,7 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     contractDigest: intent.contractDigest, cliVersion: VERSION, relayPid, relayPolledAt: poll.at,
     startupBackend: startup.backend, firstLearning, verifiedAt: new Date().toISOString(),
     expiresAt: new Date(Math.min(Date.parse(intent.expiresAt), Date.parse(policy.serverAuthorization!.expiresAt),
+      Date.parse(startupPolicy.serverAuthorization!.expiresAt),
       Date.parse(binding.expiresAt), signed.expiresAt ? Date.parse(signed.expiresAt) : Infinity)).toISOString()});
 }
 
@@ -4324,6 +4367,9 @@ async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | '
 }
 
 async function namedSessionCommand(action: string, flags: Map<string, string | boolean>): Promise<Output> {
+  const hostScope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
+  await hostScope?.assert();
   const name = String(flags.get('name') || 'codex');
   const paths = namedSessionPaths(dharmaHome(), name);
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
@@ -4331,6 +4377,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   const item = (await registry()).find(row => row.workspaceId === workspaceId);
   const config = await readDeviceConfig();
   if (!item || !config || item.organizationId !== config.organizationId) throw new Error('named_session_scope_mismatch');
+  await assertBootstrapHostSource(item.path, String(item.repositoryRemoteHash || ''));
   const scope = repositoryRoleScope(item);
   const existing = await readNamedSession(dharmaHome(), name);
   if (existing && (existing.identity.workspaceId !== item.workspaceId
@@ -4370,18 +4417,22 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await repositorySharedReady(item),
   );
   if (action === 'start') {
-    if (existing && !existing.enabled) await saveNamedSession(dharmaHome(), { ...existing, enabled: true });
-    try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Start an owned worker below. */ }
+    if (existing && !existing.enabled) await step(() => saveNamedSession(dharmaHome(), { ...existing, enabled: true }));
+    try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Start an owned worker below. */ }
     const args = [fileURLToPath(import.meta.url), 'sessions', 'serve', '--name', name,
       '--workspace-id', workspaceId, '--apply'];
     for (const key of ['session-budget-cents', 'turn-budget-cents']) {
       if (flags.has(key)) args.push(`--${key}`, required(flags, key));
     }
-    const child = spawn(process.execPath, args, { cwd: item.path, detached: true, stdio: 'ignore', env: process.env });
-    child.on('error', () => {}); child.unref();
+    await step(async () => {
+      const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope, stdio: 'ignore', env: process.env });
+      if (hostScope) captureBootstrapHostChild(hostScope, child);
+      else {child.on('error', () => {}); child.unref();}
+    });
     for (let attempt = 0; attempt < 80; attempt++) {
       await new Promise(resolveWait => setTimeout(resolveWait, 250));
-      try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Await service initialization. */ }
+      await hostScope?.assert();
+      try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Await service initialization. */ }
     }
     throw new Error('named_session_startup_failed');
   }

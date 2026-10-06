@@ -6,6 +6,9 @@ import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapt
 import {CODEX_SETUP_TOOL, type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
 import {CODEX_PEER_TOOLS} from './codexPeerTools.js';
 import type {BootstrapHostScope} from './bootstrapHostScope.js';
+import {captureBootstrapHostChild, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
+import {EventEmitter} from 'node:events';
+import type {ChildProcess} from 'node:child_process';
 import * as native from './codexSetupNativeHost.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
@@ -301,4 +304,47 @@ test('individual native tool cancellation withdraws the original scope and waits
     release(); assert.equal((await response).success, false); await owner.settled;
     assert.equal(closed, 1); assert.equal(effects, 0);
   } finally {release(); await owner.close();}
+});
+
+test('native settlement drains its original captured child before closing protected storage', async () => {
+  const f = fixture(), original = f.input.openJournal;
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, {pid: 12345, exitCode: null, signalCode: null});
+  let kills = 0, closes = 0, settled = false;
+  child.kill = () => {kills++; child.emit('error', new Error('PRIVATE_CHILD_CANARY')); return true;};
+  f.input.openJournal = async scope => {
+    const journal = await original(scope);
+    await runCodexBootstrapHostScope(scope, async () => captureBootstrapHostChild(scope, child));
+    return {...journal, close() {closes++;}};
+  };
+  const host = await open(f.input);
+  try {
+    void host.settled.then(() => {settled = true;});
+    f.complete(); await new Promise<void>(done => setImmediate(done));
+    assert.equal(kills, 1); assert.equal(closes, 0); assert.equal(settled, false);
+    child.emit('exit', null, 'SIGTERM'); await host.settled;
+    assert.equal(closes, 1); assert.equal(settled, true); await host.close(); assert.equal(kills, 1);
+  } finally {child.emit('exit', null, 'SIGTERM'); await host.close();}
+});
+
+test('native child cleanup failure stays sanitized while protected storage still closes', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const f = fixture(), original = f.input.openJournal;
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, {pid: 12345, exitCode: null, signalCode: null});
+  let kills = 0, closes = 0;
+  child.kill = () => {kills++; child.emit('error', new Error('PRIVATE_CHILD_CANARY')); return false;};
+  f.input.openJournal = async scope => {
+    const journal = await original(scope);
+    await runCodexBootstrapHostScope(scope, async () => captureBootstrapHostChild(scope, child));
+    return {...journal, close() {closes++;}};
+  };
+  const host = await open(f.input); f.complete();
+  await new Promise<void>(done => setImmediate(done));
+  t.mock.timers.tick(10_000); await new Promise<void>(done => setImmediate(done));
+  t.mock.timers.tick(10_000); await new Promise<void>(done => setImmediate(done));
+  await assert.rejects(host.settled, {message: 'codex_setup_native_child_stop_unconfirmed'});
+  await assert.rejects(host.close(), {message: 'codex_setup_native_child_stop_unconfirmed'});
+  assert.equal(kills, 2); assert.equal(closes, 1); assert.equal(f.counts.handler, false);
+  child.emit('exit', null, 'SIGTERM');
 });

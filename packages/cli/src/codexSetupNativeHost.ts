@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import {verifyCodexSetupReadOnlyProfile, type CodexToolHandler, type CodexToolResult}
   from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
-import {prepareCodexBootstrapHost, type BootstrapHostScope} from './bootstrapHostScope.js';
+import {drainBootstrapHostChildren, prepareCodexBootstrapHost, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {createCodexSetupAdmission, type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
 import {startNamedCodexSetupThread} from './namedCodexThread.js';
 
@@ -66,7 +66,10 @@ export async function startCodexSetupNativeHost(input: Input) {
     closed = true; scope.close(); admission?.close(); bind(); unregisterTools(); unsubscribe();
     scope.signal.removeEventListener('abort', withdraw);
     void Promise.allSettled([...callbacks, ...(admission ? [admission.settled] : [])]).then(async () => {
-      try {await closeJournal(); finish();} catch {fail(new Error('codex_setup_native_journal_close_unconfirmed'));}
+      let failure: string | undefined;
+      try {await drainBootstrapHostChildren(scope);} catch {failure = 'codex_setup_native_child_stop_unconfirmed';}
+      try {await closeJournal();} catch {failure ??= 'codex_setup_native_journal_close_unconfirmed';}
+      if (failure) fail(new Error(failure)); else finish();
     });
   };
   scope.signal.addEventListener('abort', withdraw, {once: true});

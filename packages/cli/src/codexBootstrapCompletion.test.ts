@@ -18,6 +18,7 @@ import {isNamedSessionOwnerReceipt} from './namedSessionTrust.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
 import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
+import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract} from './index.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
@@ -52,15 +53,16 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const vault = await LocalVault.open({root: resolve(root, 'vault'), masterKey: randomBytes(32)}, prepared.scope);
   t.after(async () => {prepared.scope.close(); await vault.close(); await rm(root, {recursive: true, force: true});});
   const profile = {roleName: 'Reviewer', description: 'Bounded synthetic code review.', questionCategories: ['code-review']};
-  const identity = {organizationId: 'org_demo', membershipId: id(3), deviceId: id(5), workspaceId: id(6),
+  const workspaceId = workspaceIdForDevice({organizationId: 'org_demo', deviceId: id(5), path: root});
+  const identity = {organizationId: 'org_demo', membershipId: id(3), deviceId: id(5), workspaceId,
     repositoryBindingId: id(7), endpointId: id(9), provider: 'codex'};
-  const roleScope = {organizationId: 'org_demo', workspaceId: id(6), repositoryBindingId: id(7),
+  const roleScope = {organizationId: 'org_demo', workspaceId, repositoryBindingId: id(7),
     repositoryAgentId: id(8), endpointId: id(9), sourceFingerprint: hash};
-  const row = {...identity, path: root, repositoryRemoteHash: hash, status: 'active', repositoryAgentId: id(8),
+  const row = {...identity, path: root, routeHash: sha256(root), repositoryRemoteHash: hash, status: 'active', repositoryAgentId: id(8),
     repositoryRole: {revision: 1, profileHash: sha256(canonicalize(profile))}};
-  const name = `codex-${id(6).slice(0, 8)}`, home = resolve(root, 'home'), entry = resolve(root, 'index.js');
+  const name = `codex-${workspaceId.slice(0, 8)}`, home = resolve(root, 'home'), entry = resolve(root, 'index.js');
   const policyPath = resolve(root, '.dharma', 'approved-policy.json');
-  const policy = {revision: 'policy-v1', serverAuthorization: {expiresAt: prepared.intent.expiresAt}};
+  const policy = {revision: 'policy-v1', serverAuthorization: {workspaceId, expiresAt: prepared.intent.expiresAt}};
   const content = {bundleId: id(11), bundleHash: hash, manifestHash: hash, catalogHash: hash, skillsHash: hash};
   const binding = {...identity, owner: 'dharma_bridge', workspaceRoot: root, bindingId: id(10),
     sessionId: 'synthetic_session', expiresAt: prepared.intent.expiresAt};
@@ -74,7 +76,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const startup = {backend: 'container-entrypoint', version: '0.2.153', workspace: root, policy: policyPath,
     launcher: resolve(root, '.dharma', 'bin', 'dharma')};
   const startupState = {state: 'enabled', backend: startup.backend, version: startup.version, lifecycle: 'running'};
-  const poll = {at: new Date(now).toISOString(), workspaceId: id(6), version: '0.2.153', pid: 102};
+  const poll = {at: new Date(now).toISOString(), workspaceId, version: '0.2.153', pid: 102};
   const supervisor = {pid: 101, organizationId: 'org_demo', deviceId: id(5), policyPath,
     version: '0.2.153', standardRepositories: true};
   const processes = [
@@ -83,17 +85,17 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     {pid: 102, uid: 1000, parentPid: 101, processGroupId: 101, sessionId: 101, startTicks: '20',
       argv: ['synthetic-node', entry, 'relay', 'start', '--policy', policyPath]},
     {pid: 103, uid: 1000, parentPid: 1, processGroupId: 103, sessionId: 103, startTicks: '30',
-      argv: ['synthetic-node', entry, 'sessions', 'serve', '--name', name, '--workspace-id', id(6), '--apply']},
+      argv: ['synthetic-node', entry, 'sessions', 'serve', '--name', name, '--workspace-id', workspaceId, '--apply']},
   ];
   const paths = new Map<string, unknown>([
     [resolve(home, 'relay', 'supervisor.pid'), 101], [resolve(home, 'relay', 'relay.pid'), 102],
     [resolve(home, 'sessions', name, 'service.lock'), 103],
     [resolve(home, 'relay', 'supervisor-workspace.json'), supervisor],
-    [resolve(home, 'relay', 'repositories', id(6), 'last-successful-poll.json'), poll],
+    [resolve(home, 'relay', 'repositories', workspaceId, 'last-successful-poll.json'), poll],
   ]);
   const calls: string[] = [], mutations: Record<string, () => void> = {};
   const dependencies: Record<string, unknown> = {
-    resolve, Date, canonicalize, sha256, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
+    resolve, Date, canonicalize, sha256, selectDeviceWorkspace, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
     isNamedSessionOwnerReceipt, repositoryRelayObservationReady, discoverRepositoryRoleMetadata,
     ENTRY_URL: 'file:///synthetic/index.js', fileURLToPath: () => entry, VERSION: '0.2.153',
     process: {platform: 'linux', execPath: 'synthetic-node', getuid: () => 1000},
@@ -112,7 +114,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     client: async () => ({signedGet: async () => ({ok: true, organizationId: 'org_demo', correlationId: 'synthetic',
       discovery: {organizationId: roleScope.organizationId, workspaceId: roleScope.workspaceId,
         repositoryBindingId: roleScope.repositoryBindingId, repositoryAgentId: roleScope.repositoryAgentId,
-        peers: [{endpointId: id(9), workspaceId: id(6), provider: 'codex', ...profile, revision: 1}],
+        peers: [{endpointId: id(9), workspaceId, provider: 'codex', ...profile, revision: 1}],
         limit: 50, possiblyTruncated: false}}),
       signedPost: async () => remote}),
     dharmaHome: () => home, readNamedSession: async () => ({enabled: true, identity, bindingId: id(10)}),
@@ -131,7 +133,65 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     first: LocalCodexSetupReadiness['firstLearning']) => Promise<LocalCodexSetupReadiness>;
   const providerVault = {getProviderSessionBinding: async () => binding};
   return {prepared, vault, observe, providerVault, calls, paths, mutations, row, profile, binding, native, remote,
-    content, startupState, poll, processes, dependencies};
+    content, startup, startupState, policy, supervisor, poll, processes, dependencies};
+}
+
+async function siblingAnchor(f: Awaited<ReturnType<typeof fixture>>) {
+  const path = resolve(f.row.path, 'sibling');
+  const workspaceId = workspaceIdForDevice({organizationId: f.row.organizationId, deviceId: f.row.deviceId, path});
+  const row = {...f.row, path, workspaceId, routeHash: sha256(path), repositoryRemoteHash: `sha256:${'b'.repeat(64)}`};
+  const policy = {...f.policy, revision: 'sibling-policy', serverAuthorization: {...f.policy.serverAuthorization, workspaceId}};
+  f.startup.workspace = path; f.startup.policy = resolve(path, '.dharma', 'approved-policy.json');
+  f.startup.launcher = resolve(path, '.dharma', 'bin', 'dharma');
+  f.supervisor.policyPath = f.startup.policy;
+  f.processes[0]!.argv[5] = f.startup.policy; f.processes[1]!.argv[5] = f.startup.policy;
+  f.dependencies.registry = async () => [f.row, row];
+  f.dependencies.loadVerifiedWorkspacePolicy = async (path: string) => path === f.startup.policy ? policy : f.policy;
+  const observe = await declaration('observeCodexBootstrapRuntime', f.dependencies) as typeof f.observe;
+  return {row, policy, observe};
+}
+
+test('actual CLI producer accepts a verified same-device sibling startup anchor without retargeting it', async t => {
+  const f = await fixture(t), sibling = await siblingAnchor(f);
+  const before = structuredClone(f.startup);
+  const result = await sibling.observe(f.prepared, f.providerVault, 'no_eligible_history');
+  assert.equal(result.workspaceId, f.row.workspaceId); assert.equal(result.policyRevision, f.policy.revision);
+  assert.deepEqual(f.startup, before);
+});
+
+for (const change of ['foreign-device', 'foreign-org', 'route', 'inactive', 'unregistered', 'policy',
+  'supervisor', 'startup-change', 'state-change', 'route-change', 'policy-change', 'config-change', 'authorization'] as const) {
+  test(`actual CLI producer rejects a sibling startup anchor with ${change}`, async t => {
+    const f = await fixture(t), sibling = await siblingAnchor(f);
+    if (change === 'foreign-device') sibling.row.workspaceId = workspaceIdForDevice({organizationId: 'org_demo', deviceId: id(99), path: sibling.row.path});
+    if (change === 'foreign-org') sibling.row.organizationId = 'org_foreign';
+    if (change === 'route') sibling.row.routeHash = `sha256:${'f'.repeat(64)}`;
+    if (change === 'inactive') sibling.row.status = 'revoked';
+    if (change === 'unregistered') f.dependencies.registry = async () => [f.row];
+    if (change === 'policy') f.dependencies.verifyServerAuthorizedPolicy = ({workspaceId}: {workspaceId: string}) => {
+      if (workspaceId === sibling.row.workspaceId) throw new Error('fixture_invalid_anchor_signature');
+    };
+    if (change === 'supervisor') f.supervisor.deviceId = id(99);
+    if (change === 'authorization') f.dependencies.assertWorkspaceAuthorizationCurrent = async (workspaceId: string) => {
+      if (workspaceId === sibling.row.workspaceId) throw new Error('fixture_anchor_authority_revoked');
+    };
+    let reads = 0;
+    f.mutations.process = () => {
+      if (++reads !== 4) return;
+      if (change === 'startup-change') f.startup.launcher = resolve(f.row.path, 'foreign-launcher');
+      if (change === 'state-change') f.startupState.lifecycle = 'stopped';
+      if (change === 'route-change') sibling.row.repositoryRemoteHash = `sha256:${'f'.repeat(64)}`;
+      if (change === 'policy-change') sibling.policy.revision = 'withdrawn';
+    };
+    if (change === 'config-change') f.dependencies.readDeviceConfig = async () => ({organizationId: 'org_demo',
+      deviceId: reads >= 4 ? id(99) : id(5), hqUrl: 'https://hq.example'});
+    const observe = await declaration('observeCodexBootstrapRuntime', f.dependencies) as typeof f.observe;
+    const expected = change === 'policy' ? /fixture_invalid_anchor_signature/
+      : change === 'authorization' ? /fixture_anchor_authority_revoked/
+      : change === 'supervisor' ? /setup_runtime_process_unconfirmed/
+      : change.endsWith('-change') ? /setup_runtime_startup_changed/ : /setup_runtime_startup_unconfirmed/;
+    await assert.rejects(observe(f.prepared, f.providerVault, 'no_eligible_history'), expected);
+  });
 }
 
 test('actual CLI producer joins scoped identity, server role, native package and creation-identity observations', async t => {
@@ -139,7 +199,7 @@ test('actual CLI producer joins scoped identity, server role, native package and
   const observation = await f.observe(f.prepared, f.providerVault, 'no_eligible_history');
   assert.equal(Object.isFrozen(observation), true); assert.equal(observation.endpointId, id(9));
   assert.equal(observation.catalogHash, hash); assert.equal(observation.firstLearning, 'no_eligible_history');
-  assert.equal(f.calls.filter(c => c === 'current-policy').length, 2);
+  assert.equal(f.calls.filter(c => c === 'current-policy').length, 4);
   assert.equal(f.calls.filter(c => c === 'process-102').length, 2);
   const claim = await f.vault.claimCodexSetupOperation(id(1), hash);
   assert.equal(claim.state, 'acquired'); if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');

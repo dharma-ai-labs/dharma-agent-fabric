@@ -9,6 +9,7 @@ import ts from 'typescript';
 import { appendRecoveredWorkspace, resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { bootstrapGrantMode } from './privateGrantInput.js';
 import { assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost } from './bootstrapHostScope.js';
+import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -27,7 +28,7 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
   });
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${compiled.outputText}\n${name}`, {
-    assertBootstrapHostSource, currentBootstrapHostScope, ...dependencies,
+    assertBootstrapHostSource, currentBootstrapHostScope, parseNamedCodexSkillObservation, ...dependencies,
   }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;
@@ -96,7 +97,17 @@ function bootstrapDependencies(onboarding: Onboarding) {
     requireCompletedBootstrapEvidence: () => undefined,
     summarizeBootstrapOrganizationApi: () => ({ ok: true }),
     loadAgentFabricOnboardingContract: async () => ({ markdown: '# fixture', sha256: 'a'.repeat(64) }),
-    namedSessionCommand: async () => { await record('named_session'); return { ok: true, state: 'running' }; },
+    namedSessionCommand: async (action: string, flags: Map<string, string | boolean>) => {
+      await record(`named_session:${action}`);
+      return {ok: true, state: 'running', name: String(flags.get('name')), bindingId: 'fixture_binding',
+        sessionId: 'fixture_session', organizationId: 'org_fixture', repositoryBindingId: 'fixture_repository',
+        workspaceId: String(flags.get('workspace-id')), endpointId: 'fixture_endpoint', membershipId: 'fixture_member',
+        deviceId: 'fixture_device', provider: 'codex',
+        nativeSkill: {schema: 'dharma.named-codex-skill-observation/v1', nativeDiscovered: true,
+          bundleId: '11111111-1111-4111-8111-111111111111', bundleHash: `sha256:${'a'.repeat(64)}`,
+          manifestHash: `sha256:${'b'.repeat(64)}`, catalogHash: `sha256:${'c'.repeat(64)}`,
+          skillsHash: `sha256:${'d'.repeat(64)}`, observedAt: new Date().toISOString()}};
+    },
   };
   return { dependencies, calls };
 }
@@ -579,7 +590,7 @@ test('bootstrap completes after the relay installs the signed shared release', a
   assert.equal((actual.repositoryReadiness as Record<string, unknown>).attempts, 3);
   assert.equal((actual.namedSession as Record<string, unknown>).state, 'running');
   assert.equal((actual.workflowReadiness as Record<string, unknown>).namedSession, 'ready');
-  assert.equal(f.calls.filter(value => value === 'named_session').length, 1);
+  assert.deepEqual(f.calls.filter(value => value.startsWith('named_session:')), ['named_session:start', 'named_session:readiness']);
 });
 
 test('published-package secret denial stays visible without repeating evidence capture', async () => {
@@ -635,11 +646,36 @@ test('a failed named session cannot produce a complete bootstrap receipt', async
 test('a stopped named session keeps an otherwise ready bootstrap incomplete', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready',
     sharedRepositoryReady: true, workspaceId: 'workspace_fixture' });
-  f.dependencies.namedSessionCommand = async () => ({ ok: true, state: 'stopped' });
+  const respond = f.dependencies.namedSessionCommand as (action: string, flags: Map<string, string | boolean>) => Promise<Record<string, unknown>>;
+  f.dependencies.namedSessionCommand = async (action: string, flags: Map<string, string | boolean>) => ({
+    ...await respond(action, flags), state: 'stopped',
+  });
   const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
   assert.equal(actual.ok, false);
   assert.equal(actual.stage, 'named_session_pending');
   assert.equal((actual.workflowReadiness as Record<string, unknown>).namedSession, 'pending');
+});
+
+test('bootstrap rejects missing or malformed native observations using the real IPC parser', async () => {
+  for (const nativeSkill of [undefined, {schema: 'foreign-observation'}]) {
+    const f = bootstrapDependencies({ok: true, stage: 'ready', localStage: 'ready',
+      sharedRepositoryReady: true, workspaceId: 'workspace_fixture'});
+    const respond = f.dependencies.namedSessionCommand as (action: string, flags: Map<string, string | boolean>) => Promise<Record<string, unknown>>;
+    f.dependencies.namedSessionCommand = async (action: string, flags: Map<string, string | boolean>) => ({
+      ...await respond(action, flags), ...(action === 'readiness' ? {nativeSkill} : {}),
+    });
+    await assert.rejects((await caller('bootstrap', f.dependencies))(bootstrapFlags(true)), /named_session_native_skill_invalid/);
+  }
+});
+
+test('bootstrap rejects a readiness identity changed after named-session start', async () => {
+  const f = bootstrapDependencies({ok: true, stage: 'ready', localStage: 'ready',
+    sharedRepositoryReady: true, workspaceId: 'workspace_fixture'});
+  const respond = f.dependencies.namedSessionCommand as (action: string, flags: Map<string, string | boolean>) => Promise<Record<string, unknown>>;
+  f.dependencies.namedSessionCommand = async (action: string, flags: Map<string, string | boolean>) => ({
+    ...await respond(action, flags), ...(action === 'readiness' ? {membershipId: 'foreign_member'} : {}),
+  });
+  await assert.rejects((await caller('bootstrap', f.dependencies))(bootstrapFlags(true)), /named_session_readiness_scope_mismatch/);
 });
 
 test('bootstrap reports a blocked repository candidate without replaying enrollment', async () => {

@@ -45,7 +45,8 @@ test('vault key access carries the closed owning context without opening a store
 test('every CLI vault-key caller explicitly forwards the owning host scope', async () => {
   const text = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  let callers = 0, opened = 0, captures = 0;
+  let callers = 0, captures = 0;
+  const opened: string[] = [];
   const visit = (node: ts.Node, owner = '') => {
     if (ts.isFunctionDeclaration(node)) owner = node.name?.text ?? owner;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
@@ -63,10 +64,14 @@ test('every CLI vault-key caller explicitly forwards the owning host scope', asy
       assert.ok(value && ts.isCallExpression(value) && ts.isIdentifier(value.expression)
         && value.expression.text === 'currentBootstrapHostScope' && value.arguments.length === 0);
     }
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'openBootstrapVault') opened++;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'openBootstrapVault') opened.push(owner);
     ts.forEachChild(node, child => visit(child, owner));
   };
-  visit(source); assert.equal(callers, 1); assert.equal(captures, 1); assert.equal(opened, 11);
+  visit(source); assert.equal(callers, 1); assert.equal(captures, 1);
+  assert.deepEqual(opened, ['startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'evidenceSync',
+    'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
+    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
+    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);
 });
 
 test('receiver readiness forwards the owning scope into its journal self-test', async () => {
@@ -453,4 +458,35 @@ test('late qualification started in a borrowed context cannot authorize an effec
   const rejected = assert.rejects(late, {message: 'codex_setup_host_scope_unavailable'});
   release(); await rejected;
   assert.equal(effects, 0); assert.equal(original.scope.signal.aborted, true);
+});
+
+test('effect dispatch never enters after asynchronous qualification outlives its borrowed frame', async () => {
+  const afterMicrotasks = (count: number, effect: () => void): void => {
+    if (count === 0) effect(); else queueMicrotask(() => afterMicrotasks(count - 1, effect));
+  };
+  // Independent Docs' retained exact-module RED covers two schedules. Test the
+  // same 21 schedules on these changed bytes without replaying the old module.
+  const violations: number[] = [];
+  for (let delay = 0; delay <= 20; delay++) {
+    let calls = 0, entered!: () => void, release!: () => void, child!: Promise<void>;
+    const started = new Promise<void>(done => {entered = done;});
+    const gate = new Promise<void>(done => {release = done;});
+    const prepared = prepareCodexBootstrapHost({...await fixture(), current: async () => {
+      if (++calls === 2) {entered(); await gate;}
+      if (calls === 3) afterMicrotasks(delay, release);
+      return true;
+    }});
+    try {
+      await host.runCodexBootstrapHostScope(prepared.scope, async () => {
+        child = prepared.scope.step(async () => {
+          const current = prepared.scope.current();
+          if (prepared.scope.signal.aborted) violations.push(delay);
+          await current;
+        });
+        void child.catch(() => {}); await started;
+      });
+      release(); await Promise.allSettled([child]);
+    } finally {release(); prepared.scope.close();}
+  }
+  assert.deepEqual(violations, [], 'a rejected post-check cannot undo forbidden effect entry');
 });

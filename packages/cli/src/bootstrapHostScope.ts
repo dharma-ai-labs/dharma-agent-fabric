@@ -1,6 +1,8 @@
 import {isAbsolute, resolve} from 'node:path';
 import {AsyncLocalStorage} from 'node:async_hooks';
+import type {ChildProcess} from 'node:child_process';
 import type {CodexSetupIntent} from './codexSetupAdmission.js';
+import {watchOwnedChild, type OwnedChildLifecycle} from './ownedChildLifecycle.js';
 
 export interface CodexBootstrapHostInput {
   intent: Readonly<CodexSetupIntent>;
@@ -22,6 +24,11 @@ type HostPreparation = Readonly<{intent: Readonly<CodexSetupIntent>; workspace: 
   flags: ReadonlyArray<readonly [string, string | boolean]>}>;
 const nativeScopes = new WeakMap<BootstrapHostScope, HostPreparation>();
 const borrowedScopes = new WeakSet<BootstrapHostScope>();
+type ChildEntry = {lifecycle: OwnedChildLifecycle; stopping?: Promise<void>};
+type ChildOwner = {children: Set<ChildEntry>; draining?: Promise<void>};
+const ownedChildren = new WeakMap<BootstrapHostScope, ChildOwner>();
+const childOwners = new WeakMap<ChildProcess, BootstrapHostScope>();
+const stopCapturedChild = (child: ChildEntry) => child.stopping ??= child.lifecycle.stop();
 
 function plain(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -60,6 +67,12 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
   const withdrawn = new AbortController();
   const signal = AbortSignal.any([outer.signal as AbortSignal, withdrawn.signal, AbortSignal.timeout(Math.max(1, expires - Date.now()))]);
   const requalify = outer.current as () => Promise<boolean>;
+  const assertLifetime = () => {
+    const context = hostContext.getStore(), now = Date.now();
+    if (signal.aborted || now < issued || now >= expires || context?.scope === scope && !context.lifetime.active) {
+      withdrawn.abort(); throw new Error('codex_setup_host_scope_unavailable');
+    }
+  };
   const scope: BootstrapHostScope = {
     signal,
     async current() {
@@ -73,11 +86,16 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
       if (!valid) withdrawn.abort();
       return valid;
     },
-    async assert() {if (!await scope.current()) throw new Error('codex_setup_host_scope_unavailable');},
+    async assert() {
+      if (!await scope.current()) throw new Error('codex_setup_host_scope_unavailable');
+      assertLifetime();
+    },
     async step(operation) {
       await scope.assert();
-      try {const result = await operation(); await scope.assert(); return result;}
-      catch (error) {await scope.assert(); throw error;}
+      // No asynchronous gap between this original-lifetime fence and dispatch.
+      assertLifetime();
+      try {const result = await operation(); await scope.assert(); assertLifetime(); return result;}
+      catch (error) {await scope.assert(); assertLifetime(); throw error;}
     },
     close() {withdrawn.abort();},
   };
@@ -91,6 +109,7 @@ export function prepareCodexBootstrapHost(input: CodexBootstrapHostInput) {
   if (outer.dryRun === true) flags.set('dry-run', true);
   nativeScopes.set(scope, Object.freeze({intent, workspace: outer.workspace,
     flags: Object.freeze([...flags].map(entry => Object.freeze(entry)))}));
+  ownedChildren.set(scope, {children: new Set()});
   return {intent, flags, scope};
 }
 
@@ -100,6 +119,39 @@ const hostContext = new AsyncLocalStorage<Readonly<{scope: BootstrapHostScope; w
 /** Closed descendants retain the closed scope, never a legacy unscoped fallback. */
 export function currentBootstrapHostScope(): BootstrapHostScope | undefined {
   return hostContext.getStore()?.scope;
+}
+
+/** Capture this caller's fresh spawn before any asynchronous post-effect check.
+ * Capturing cleanup remains necessary if cancellation occurred inside spawn. */
+export function captureBootstrapHostChild(scope: BootstrapHostScope, child: ChildProcess): void {
+  const context = hostContext.getStore(), owner = ownedChildren.get(scope);
+  if (!owner || context?.scope !== scope || !context.lifetime.active || owner.draining) {
+    throw new Error('codex_setup_host_child_owner_invalid');
+  }
+  const prior = childOwners.get(child);
+  if (prior) {
+    if (prior !== scope) throw new Error('codex_setup_host_child_owner_invalid');
+    return;
+  }
+  const lifecycle = watchOwnedChild(child);
+  const captured = {lifecycle};
+  childOwners.set(child, scope); owner.children.add(captured);
+  const stop = () => {void stopCapturedChild(captured).catch(() => {});};
+  scope.signal.addEventListener('abort', stop, {once: true});
+  void lifecycle.exited.then(() => {scope.signal.removeEventListener('abort', stop);});
+  if (scope.signal.aborted) stop();
+}
+
+/** Only the original native owner drains captured handles. No raw PID, service
+ * inventory or legacy unscoped authority is used for withdrawal cleanup. */
+export function drainBootstrapHostChildren(scope: BootstrapHostScope): Promise<void> {
+  const owner = ownedChildren.get(scope);
+  if (!owner) return Promise.reject(new Error('codex_setup_host_child_owner_invalid'));
+  scope.close();
+  return owner.draining ??= (async () => {
+    const results = await Promise.allSettled([...owner.children].map(stopCapturedChild));
+    if (results.some(result => result.status === 'rejected')) throw new Error('codex_setup_host_child_stop_unconfirmed');
+  })();
 }
 
 export async function assertBootstrapHostSource(workspace: string, fingerprint: string): Promise<void> {
@@ -122,7 +174,10 @@ export async function runCodexBootstrapHost<T>(input: CodexBootstrapHostInput,
   borrowedScopes.add(prepared.scope);
   try {
     return await hostContext.run(owning, () => prepared.scope.step(() => operation(prepared)));
-  } finally {lifetime.active = false; borrowedScopes.delete(prepared.scope); prepared.scope.close();}
+  } finally {
+    lifetime.active = false; borrowedScopes.delete(prepared.scope); prepared.scope.close();
+    await drainBootstrapHostChildren(prepared.scope);
+  }
 }
 
 /** Borrow the original native owner's lifetime; never mint a replacement scope.
