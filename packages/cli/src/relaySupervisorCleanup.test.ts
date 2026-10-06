@@ -8,7 +8,7 @@ import ts from 'typescript';
 
 // The unchanged caller is compiled; only its OS/storage/service boundaries are
 // synthetic. This does not qualify native Linux startup or client readiness.
-async function fixture(serviceError?: string) {
+async function fixture(serviceError?: string, service: 'relay' | 'session' = 'relay') {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node)
@@ -30,8 +30,8 @@ async function fixture(serviceError?: string) {
     createDemoWatchHealthRecorder: () => ({available: () => true, record() {}, drain: async () => {events.push('health-drained');}}),
     writeJsonAtomic: async () => {events.push('binding-written');},
     runDemoSupervisor: async (options: {signal: AbortSignal}) => {signal = options.signal; return {};},
-    superviseRelay: async () => {if (serviceError) throw new Error(serviceError); return {restarts: 0};},
-    superviseNamedSessions: async () => {},
+    superviseRelay: async () => {if (serviceError && service === 'relay') throw new Error(serviceError); return {restarts: 0};},
+    superviseNamedSessions: async () => {if (serviceError && service === 'session') throw new Error(serviceError);},
     readFile: async () => JSON.stringify({pid: runtime.pid}),
     rm: async () => {events.push('binding-removed');},
   };
@@ -59,4 +59,11 @@ test('actual supervisor caller preserves ordinary service failure without turnin
   const f = await fixture('synthetic_service_failure');
   await assert.rejects(f.run(), /^Error: synthetic_service_failure$/);
   assert.deepEqual(f.events, ['binding-written', 'health-drained', 'binding-removed', 'lease-released']);
+});
+
+test('actual supervisor caller preserves its binding and lease after unconfirmed named-session drain', async () => {
+  const f = await fixture('owned_child_stop_unconfirmed', 'session');
+  await assert.rejects(f.run(), /^Error: relay_supervisor_child_stop_unconfirmed$/);
+  assert.deepEqual(f.events, ['binding-written', 'health-drained']);
+  assert.equal(f.signal()?.aborted, true);
 });

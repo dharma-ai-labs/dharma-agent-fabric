@@ -40,7 +40,11 @@ test('actual CLI full-vault callsites all use the single scoped owner', async ()
     if (ts.isCallExpression(node) && node.expression.getText(ast) === 'openBootstrapVault') owned.push(owner);
     ts.forEachChild(node, child => visit(child, owner));
   }
-  visit(ast); assert.deepEqual(unscoped, []); assert.equal(owned.length, 11);
+  visit(ast); assert.deepEqual(unscoped, []);
+  assert.deepEqual(owned, ['startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'evidenceSync',
+    'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
+    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
+    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);
 });
 test('actual CLI full-vault owner refuses closed scope before module or key access', async () => {
   let effects = 0;

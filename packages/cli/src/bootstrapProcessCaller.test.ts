@@ -9,6 +9,7 @@ import ts from 'typescript';
 import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope,
   drainBootstrapHostChildren, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {watchOwnedChild} from './ownedChildLifecycle.js';
+import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 // Actual caller declarations, with synthetic registry/OS readiness boundaries.
@@ -31,7 +32,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     await rm(workspace, {recursive: true, force: true});
   });
   const dependencies: Record<string, unknown> = {
-    currentBootstrapHostScope, captureBootstrapHostChild, assertBootstrapHostSource,
+    currentBootstrapHostScope, captureBootstrapHostChild, assertBootstrapHostSource, currentNamedSessionChildOwner,
     resolve, dirname, Error, Promise, Number, String, Date, VERSION: '0.2.153',
     process: {execPath: process.execPath, env: {}, platform: 'linux'},
     setTimeout: (done: () => void) => {queueMicrotask(done);},
@@ -86,7 +87,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const call = (kind: 'relay' | 'session') => runCodexBootstrapHostScope(prepared.scope, async () => kind === 'relay'
     ? relay(resolve(item.path, '.dharma', 'approved-policy.json'))
     : session('start', new Map<string, string | boolean>([['name', 'implementer'], ['workspace-id', item.workspaceId], ['apply', true]])));
-  return {prepared, call, children, effects, spawnCalls, item, workspace, entry, policyPath,
+  return {prepared, call, session, children, effects, spawnCalls, item, workspace, entry, policyPath,
     preexisting: () => {preexisting = true;}, cancelInSpawn: () => {withdrawInSpawn = true;},
     cancelInStatus: () => {withdrawInStatus = true;}};
 }
@@ -132,4 +133,28 @@ test('actual session caller withholds status returned after setup withdrawal and
   await drainBootstrapHostChildren(f.prepared.scope);
   assert.equal(f.children.length, 1);
   assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
+});
+
+test('actual session caller binds a fresh attached child to its standing supervisor and drains it at shutdown', async t => {
+  const f = await fixture(t), signal = new AbortController(), owner = createNamedSessionChildOwner(signal.signal);
+  await owner.run(async () => {
+    await f.session('start', new Map<string, string | boolean>([['name', 'reviewer'], ['workspace-id', f.item.workspaceId], ['apply', true]]));
+    assert.equal(f.children.length, 1); assert.equal(f.spawnCalls[0]!.options.detached, false);
+    assert.equal(f.children[0]!.exitCode, null);
+  });
+  assert.ok(f.children[0]!.exitCode !== null || f.children[0]!.signalCode !== null);
+});
+
+test('actual session caller does not adopt a preexisting service into standing supervisor ownership', async t => {
+  const f = await fixture(t); f.preexisting();
+  await createNamedSessionChildOwner(new AbortController().signal).run(() => f.session('start',
+    new Map<string, string | boolean>([['name', 'reviewer'], ['workspace-id', f.item.workspaceId], ['apply', true]])));
+  assert.equal(f.children.length, 0); assert.equal(f.spawnCalls.length, 0);
+});
+
+test('actual session caller refuses overlapping setup and standing-supervisor authority before spawning', async t => {
+  const f = await fixture(t);
+  await assert.rejects(createNamedSessionChildOwner(new AbortController().signal).run(() => f.call('session')),
+    /named_session_child_owner_conflict/);
+  assert.equal(f.children.length, 0);
 });

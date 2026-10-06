@@ -104,6 +104,7 @@ import { startNamedCodexThread } from './namedCodexThread.js';
 import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
+import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 // Trusted runtime composition only; these exports do not enable effectful setup.
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
@@ -2206,30 +2207,33 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
 
 async function superviseNamedSessions(signal: AbortSignal) {
   if (process.platform !== 'linux') return;
-  while (!signal.aborted) {
-    const root = resolve(dharmaHome(), 'sessions');
-    const entries = await readdir(root, { withFileTypes: true }).catch(error => {
-      if (error.code === 'ENOENT') return []; throw error;
-    });
-    for (const entry of entries.slice(0, 50)) {
-      if (signal.aborted) break;
-      if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,47}$/.test(entry.name)) continue;
-      try {
-        const registration = await readNamedSession(dharmaHome(), entry.name);
-        if (!registration?.enabled) continue;
-        await namedSessionCommand('start', new Map<string, string | boolean>([
-          ['name', registration.name], ['workspace-id', registration.identity.workspaceId], ['apply', true],
-        ]));
-      } catch {
-        process.stderr.write(`${JSON.stringify({ event: 'named_session_reconnect_pending', name: entry.name })}\n`);
+  const owner = createNamedSessionChildOwner(signal);
+  return owner.run(async () => {
+    while (!signal.aborted) {
+      const root = resolve(dharmaHome(), 'sessions');
+      const entries = await readdir(root, { withFileTypes: true }).catch(error => {
+        if (error.code === 'ENOENT') return []; throw error;
+      });
+      for (const entry of entries.slice(0, 50)) {
+        if (signal.aborted) break;
+        if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,47}$/.test(entry.name)) continue;
+        try {
+          const registration = await readNamedSession(dharmaHome(), entry.name);
+          if (!registration?.enabled) continue;
+          await namedSessionCommand('start', new Map<string, string | boolean>([
+            ['name', registration.name], ['workspace-id', registration.identity.workspaceId], ['apply', true],
+          ]));
+        } catch {
+          process.stderr.write(`${JSON.stringify({ event: 'named_session_reconnect_pending', name: entry.name })}\n`);
+        }
       }
+      await new Promise<void>(resolveWait => {
+        const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolveWait(); };
+        const timer = setTimeout(finish, 10_000); signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) finish();
+      });
     }
-    await new Promise<void>(resolveWait => {
-      const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolveWait(); };
-      const timer = setTimeout(finish, 10_000); signal.addEventListener('abort', finish, { once: true });
-      if (signal.aborted) finish();
-    });
-  }
+  });
 }
 
 async function relayStop(): Promise<Output> {
@@ -4368,6 +4372,8 @@ async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | '
 
 async function namedSessionCommand(action: string, flags: Map<string, string | boolean>): Promise<Output> {
   const hostScope = currentBootstrapHostScope();
+  const supervisorOwner = currentNamedSessionChildOwner();
+  if (hostScope && supervisorOwner) throw new Error('named_session_child_owner_conflict');
   const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
   await hostScope?.assert();
   const name = String(flags.get('name') || 'codex');
@@ -4425,7 +4431,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       if (flags.has(key)) args.push(`--${key}`, required(flags, key));
     }
     await step(async () => {
-      const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope, stdio: 'ignore', env: process.env });
+      const start = () => spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner, stdio: 'ignore', env: process.env });
+      if (supervisorOwner) {await supervisorOwner.spawn(name, start); return;}
+      const child = start();
       if (hostScope) captureBootstrapHostChild(hostScope, child);
       else {child.on('error', () => {}); child.unref();}
     });
