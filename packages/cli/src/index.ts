@@ -4522,6 +4522,7 @@ async function activeSkillAuthorization(
     throw new Error('Active skill device identity does not match secure enrollment state.');
   }
   const authorizationInput = (expectedReceiptHash: string) => ({
+    hostScope: currentBootstrapHostScope(),
     nativeSkillDirectory: root,
     workspaceId,
     provider,
@@ -4570,6 +4571,7 @@ async function expiredSkillAuthorizationForReplacement(
     throw new Error('Active skill device identity does not match secure enrollment state.');
   }
   const authorizationInput = (expectedReceiptHash: string) => ({
+    hostScope: currentBootstrapHostScope(),
     nativeSkillDirectory: root,
     workspaceId,
     provider,
@@ -6571,6 +6573,7 @@ export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input:
   authorizationError: unknown;
 }): Promise<string> {
   const legacyBundleId = await getLegacySkillBundleIdForUpgrade({
+    hostScope: currentBootstrapHostScope(),
     nativeSkillDirectory: input.nativeSkillDirectory,
     workspaceId: input.workspaceId,
   });
@@ -6769,7 +6772,7 @@ export async function prepareSkillUpdate(input: {
     assertCurrent();
   }
   for (const skill of bundle.skills) {
-    const actual = await contentHash(containedInlinePath(sourceRoot, skill.path));
+    const actual = await contentHash(containedInlinePath(sourceRoot, skill.path), currentBootstrapHostScope());
     assertCurrent();
     if (actual !== skill.contentHash) throw new Error('Prepared skill tree does not match the signed content hash.');
   }
@@ -6810,6 +6813,7 @@ async function activatePreparedSkillUpdate(input: {
     }
     repositoryDelivery?.assertCurrent();
     const receipt = await installSkillBundle({
+      hostScope: currentBootstrapHostScope(),
       bundle,
       sourceDirectory: sourceRoot,
       nativeSkillDirectory: destination,
@@ -6857,6 +6861,7 @@ async function activatePreparedSkillUpdate(input: {
       const recoveryErrors: unknown[] = [];
       try {
         await rollbackUnconfirmedSkillBundle({
+          hostScope: currentBootstrapHostScope(),
           nativeSkillDirectory: destination,
           workspaceId,
           receipt,
@@ -6946,6 +6951,7 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord, selected
       const active = await loadActiveSkillAuthorizationAnchor(anchorInput);
       if (!active) throw new Error('Installed knowledge release lacks a protected authorization anchor.');
       const read = (expectedReceiptHash: string) => readVerifiedRepositoryKnowledge({
+        hostScope: currentBootstrapHostScope(),
         nativeSkillDirectory: root, workspaceId: workspace.workspaceId, provider,
         organizationId: config.organizationId, organizationAgentId, deviceId: config.deviceId,
         serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 }, format: 'jwk' }),
@@ -6983,7 +6989,7 @@ async function takeCachedSkillUpdate(input: {
     const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
     verifySkillBundle(bundle, serverPublicKey);
     for (const skill of bundle.skills) {
-      if (await contentHash(containedInlinePath(cached.sourceRoot, skill.path)) !== skill.contentHash) {
+      if (await contentHash(containedInlinePath(cached.sourceRoot, skill.path), currentBootstrapHostScope()) !== skill.contentHash) {
         throw new Error('Cached skill tree does not match the signed content hash.');
       }
     }

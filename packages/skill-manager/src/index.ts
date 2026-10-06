@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { randomUUID, createHash, type KeyObject } from 'node:crypto';
-import { cp, lstat, mkdir, open, opendir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, open, opendir, readdir, readFile, rename, rm, writeFile,
+  captureInstallationInput, withInstallationAdmission, installationScoped,
+  type SkillInstallationHostScope } from './installationScope.js';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { canonicalize, sha256, signCanonicalObject, verifyCanonicalObject, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+export type {SkillInstallationHostScope} from './installationScope.js';
 
 export interface SkillBundle {
   schema: 'dharma.skill-bundle/v2';
@@ -77,7 +80,10 @@ function assertContained(root: string, candidate: string): string {
   return resolve(candidate);
 }
 
-async function contentHash(path: string): Promise<string> {
+async function contentHash(path: string, hostScope?: SkillInstallationHostScope): Promise<string> {
+  return withInstallationAdmission(hostScope, () => contentHashInScope(path));
+}
+async function contentHashInScope(path: string): Promise<string> {
   const hash = createHash('sha256');
   const visit = async (entryPath: string, prefix = ''): Promise<void> => {
     const metadata = await lstat(entryPath);
@@ -144,6 +150,7 @@ function assertBundleTargetsEndpoint(bundle: SkillBundle, endpoint: {
 }
 
 async function runSmoke(commandId: string, policy: OrganizationPolicy, cwd: string): Promise<{ status: 'pass' | 'fail'; details: string | null }> {
+  if (installationScoped()) throw new Error('skill_installation_smoke_unqualified');
   const command = resolveRegisteredCommand(policy, commandId);
   const [executable, ...argv] = command.argv;
   return new Promise((accept, reject) => {
@@ -249,7 +256,12 @@ function workspaceManagedRoot(nativeSkillDirectory: string, workspaceId: string)
   return resolve(nativeSkillDirectory, '.dharma-managed', 'workspaces', workspaceId);
 }
 
-export async function getLegacySkillBundleIdForUpgrade(input: {
+export async function getLegacySkillBundleIdForUpgrade(input: Parameters<typeof getLegacySkillBundleIdForUpgradeInScope>[0]
+  & {hostScope?: SkillInstallationHostScope}) {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => getLegacySkillBundleIdForUpgradeInScope(captured.input));
+}
+async function getLegacySkillBundleIdForUpgradeInScope(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
 }): Promise<string | null> {
@@ -281,7 +293,12 @@ export async function getLegacySkillBundleIdForUpgrade(input: {
   return bundleId;
 }
 
-export async function getInstalledSkillBundleIdForRecovery(input: {
+export async function getInstalledSkillBundleIdForRecovery(input: Parameters<typeof getInstalledSkillBundleIdForRecoveryInScope>[0]
+  & {hostScope?: SkillInstallationHostScope}) {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => getInstalledSkillBundleIdForRecoveryInScope(captured.input));
+}
+async function getInstalledSkillBundleIdForRecoveryInScope(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
 }): Promise<string | null> {
@@ -314,7 +331,12 @@ export async function getInstalledSkillBundleIdForRecovery(input: {
   return bundleId;
 }
 
-export async function getExpiredSkillBundleAuthorizationForReplacement(input: {
+export async function getExpiredSkillBundleAuthorizationForReplacement(input: Parameters<typeof getExpiredSkillBundleAuthorizationForReplacementInScope>[0]
+  & {hostScope?: SkillInstallationHostScope}) {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => getExpiredSkillBundleAuthorizationForReplacementInScope(captured.input));
+}
+async function getExpiredSkillBundleAuthorizationForReplacementInScope(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
   provider: ProviderId;
@@ -554,7 +576,12 @@ async function recoverInterruptedSkillRollbacks(nativeSkillDirectory: string, wo
   }
 }
 
-export async function getActiveSkillBundleAuthorization(input: {
+export async function getActiveSkillBundleAuthorization(input: Parameters<typeof getActiveSkillBundleAuthorizationInScope>[0]
+  & {hostScope?: SkillInstallationHostScope}): Promise<ActiveSkillBundleAuthorization | null> {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => getActiveSkillBundleAuthorizationInScope(captured.input));
+}
+async function getActiveSkillBundleAuthorizationInScope(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
   provider: ProviderId;
@@ -595,7 +622,11 @@ export async function getActiveSkillBundleAuthorization(input: {
 }
 
 // Collection reads the receipt-pinned release, never the mutable provider copy.
-export async function readVerifiedRepositoryKnowledge(input: Parameters<typeof getActiveSkillBundleAuthorization>[0]): Promise<{
+export async function readVerifiedRepositoryKnowledge(input: Parameters<typeof getActiveSkillBundleAuthorization>[0]) {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => readVerifiedRepositoryKnowledgeInScope(captured.input));
+}
+async function readVerifiedRepositoryKnowledgeInScope(input: Parameters<typeof getActiveSkillBundleAuthorization>[0]): Promise<{
   catalogBytes: Buffer; manifestBytes: Buffer; authorization: ActiveSkillBundleAuthorization;
 } | null> {
   const native = resolve(input.nativeSkillDirectory);
@@ -697,7 +728,12 @@ export async function readVerifiedRepositoryKnowledge(input: Parameters<typeof g
     activatedAt: receipt.completedAt, expiresAt: bundle.expiresAt ?? null } };
 }
 
-export async function installSkillBundle(input: {
+export async function installSkillBundle(input: Parameters<typeof installSkillBundleInScope>[0]
+  & {hostScope?: SkillInstallationHostScope}): Promise<InstallReceipt> {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => installSkillBundleInScope(captured.input));
+}
+async function installSkillBundleInScope(input: {
   bundle: SkillBundle;
   sourceDirectory: string;
   nativeSkillDirectory: string;
@@ -889,7 +925,12 @@ export async function installSkillBundle(input: {
   return receipt;
 }
 
-export async function rollbackUnconfirmedSkillBundle(input: {
+export async function rollbackUnconfirmedSkillBundle(input: Parameters<typeof rollbackUnconfirmedSkillBundleInScope>[0]
+  & {hostScope?: SkillInstallationHostScope}) {
+  const captured = captureInstallationInput(input);
+  return withInstallationAdmission(captured.scope, () => rollbackUnconfirmedSkillBundleInScope(captured.input));
+}
+async function rollbackUnconfirmedSkillBundleInScope(input: {
   nativeSkillDirectory: string;
   workspaceId: string;
   receipt: InstallReceipt;
