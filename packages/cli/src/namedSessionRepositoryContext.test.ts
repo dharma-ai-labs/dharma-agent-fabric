@@ -71,6 +71,7 @@ async function fixture(options: { report?: string; reportPath?: string; foreignM
     }
   }
   await cp(join(active, 'dharma-agent-fabric'), native, { recursive: true });
+  await cp(join(active, 'dharma-agent-fabric'), join(workspaceRoot, '.agents/skills/dharma-agent-fabric'), { recursive: true });
   await writeFile(join(native, '.dharma-agent-fabric.json'), '{}');
   const unsigned: Omit<SkillBundle, 'signature' | 'bundleHash'> = { schema: 'dharma.skill-bundle/v2', bundleId: uuid(7),
     organizationId: scope.organizationId, version: 'fixture-v1', operation: 'install', skills: [{ skillId: 'dharma-agent-fabric',
@@ -270,7 +271,7 @@ test('fresh verified envelopes with unchanged effective authority admit reposito
     assert.equal(f.calls(), 2);
     assert.equal(context.sourceReceiptId, f.source.receiptId);
     assert.deepEqual(context.files.map((file: { path: string }) => file.path),
-      ['.agents/skills/job-review/SKILL.md', 'reports/repair.md']);
+      ['.agents/skills/dharma-agent-fabric/skills/source/.agents/skills/job-review/SKILL.md', '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md']);
     assert.equal(JSON.stringify(context).includes('serverAuthorization'), false);
     assert.equal(JSON.stringify(context).includes('synthetic_verified_content'), false);
   } finally { await f.dispose(); }
@@ -337,7 +338,7 @@ for (const failure of ['revision', 'exclusions', 'content-limit', 'commands', 'w
 test('fresh verified envelopes cannot hide workspace bytes changed during refresh', async () => {
   let workspaceRoot: string;
   const f = await refreshedAuthorizationFixture(async (_policy, _source, second) => {
-    if (second) await writeFile(join(workspaceRoot, 'reports/repair.md'), 'Unsigned later change.');
+    if (second) await writeFile(join(workspaceRoot, '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md'), 'Unsigned later change.');
   });
   workspaceRoot = f.workspaceRoot;
   try { await assert.rejects(readNamedSessionRepositoryContext(f.input)); }
@@ -368,13 +369,23 @@ for (const failure of ['expired', 'tampered'] as const) {
   });
 }
 
+test('distributed signed report does not require the publishers original output file', async () => {
+  const f = await fixture();
+  try {
+    await rm(join(f.workspaceRoot, 'reports/repair.md'));
+    const context = JSON.parse(await readNamedSessionRepositoryContext(f.input));
+    assert.equal(context.files[1].path, '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md');
+    assert.equal(context.files[1].sha256, digest('# Report\nRestart-memory limitation observed.\n'));
+  } finally { await f.dispose(); }
+});
+
 test('only upstream-verified signed source skills and approved reports enter task context', async () => {
   const f = await fixture();
   try {
     const context = JSON.parse(await readNamedSessionRepositoryContext(f.input));
     assert.equal(context.authority, 'untrusted_repository_data');
     assert.equal(context.sourceReceiptId, f.source.receiptId);
-    assert.deepEqual(context.files.map((file: { path: string }) => file.path), ['.agents/skills/job-review/SKILL.md', 'reports/repair.md']);
+    assert.deepEqual(context.files.map((file: { path: string }) => file.path), ['.agents/skills/dharma-agent-fabric/skills/source/.agents/skills/job-review/SKILL.md', '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md']);
     assert.equal(context.files[1].contentDisposition, 'verified_workspace_reference');
     assert.equal(context.files[1].sha256, digest('# Report\nRestart-memory limitation observed.\n'));
     assert.equal(context.files[1].content, undefined);
@@ -431,7 +442,7 @@ test('large approved reports use full hash-verified workspace references without
     const raw = await readNamedSessionRepositoryContext(f.input);
     const context = JSON.parse(raw);
     assert(Buffer.byteLength(raw) < 8000);
-    assert.deepEqual(context.files[1], { path: 'reports/repair.md', role: 'knowledge', sha256: digest(report),
+    assert.deepEqual(context.files[1], { path: '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md', role: 'knowledge', sha256: digest(report),
       sizeBytes: Buffer.byteLength(report), contentDisposition: 'verified_workspace_reference' });
     assert.equal(raw.includes('Independent later observation'), false);
   } finally { await f.dispose(); }
@@ -441,7 +452,7 @@ for (const failure of ['missing', 'changed', 'symlink', 'directory-symlink', 'ch
   test(`workspace references reject ${failure} before context admission`, async () => {
     const f = await fixture();
     try {
-      const path = join(f.workspaceRoot, 'reports/repair.md');
+      const path = join(f.workspaceRoot, '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md');
       if (failure === 'missing') await rm(path);
       if (failure === 'changed') await writeFile(path, 'Unsigned change.');
       if (failure === 'symlink') {
