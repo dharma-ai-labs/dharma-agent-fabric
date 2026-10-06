@@ -8,6 +8,8 @@ import { types } from 'node:util';
 import { canonicalize, sha256, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
+export {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
 
 const BLOB_VERSION = 1;
 
@@ -89,6 +91,15 @@ const SETUP_JOURNAL_SCHEMA = `create table if not exists codex_setup_operations 
   ciphertext blob,
   check ((state = 'running' and nonce is null and tag is null and ciphertext is null)
     or (state = 'terminal' and nonce is not null and tag is not null and ciphertext is not null))
+);`;
+const SETUP_READINESS_SCHEMA = `create table if not exists codex_setup_readiness (
+  receipt_id text primary key,
+  operation_id text not null unique,
+  intent_digest text not null,
+  observation_hash text not null,
+  nonce blob not null,
+  tag blob not null,
+  ciphertext blob not null
 );`;
 
 export interface ScopedCodexSetupJournal {
@@ -429,6 +440,7 @@ export class LocalVault {
         primary key (binding_id, work_key)
       );
       ${SETUP_JOURNAL_SCHEMA}
+      ${SETUP_READINESS_SCHEMA}
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -816,6 +828,69 @@ export class LocalVault {
       if (!current || current.state !== 'terminal'
         || canonicalize(this.#decodeCodexSetupResult(current)) !== canonicalize(accepted)) throw new Error('setup_operation_conflict');
     }
+  }
+
+  getCodexSetupReadiness(receiptId: string, operationId: string, intentDigest: string): LocalCodexSetupReadinessReceipt | null {
+    if (typeof receiptId !== 'string' || !setupId.test(receiptId)
+      || typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) {
+      throw new Error('setup_readiness_invalid');
+    }
+    const row = this.#database.prepare('select * from codex_setup_readiness where receipt_id = ?').get(receiptId) as {
+      receipt_id: string; operation_id: string; intent_digest: string; observation_hash: string;
+      nonce: Uint8Array; tag: Uint8Array; ciphertext: Uint8Array;
+    } | undefined;
+    if (!row) return null;
+    if (row.operation_id !== operationId || row.intent_digest !== intentDigest) throw new Error('setup_readiness_scope_mismatch');
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.nonce);
+      decipher.setAAD(Buffer.from(canonicalize({receiptId, operationId, intentDigest, observationHash: row.observation_hash})));
+      decipher.setAuthTag(row.tag);
+      const plaintext = Buffer.concat([decipher.update(row.ciphertext), decipher.final()]);
+      const observation = parseLocalCodexSetupReadiness(JSON.parse(plaintext.toString('utf8')));
+      if (observation.operationId !== operationId || `sha256:${createHash('sha256').update(canonicalize(observation)).digest('hex')}` !== row.observation_hash) {
+        throw new Error();
+      }
+      return {receiptId, intentDigest, observationHash: row.observation_hash, observation};
+    } catch {throw new Error('setup_readiness_integrity_failed');}
+  }
+
+  /** Only the original running lease may persist an immutable observation.
+   * Persistence establishes provenance/durability, not native runtime safety. */
+  recordCodexSetupReadiness(leaseId: string, intentDigest: string,
+    value: LocalCodexSetupReadiness): LocalCodexSetupReadinessReceipt {
+    const observation = parseLocalCodexSetupReadiness(value);
+    if (typeof leaseId !== 'string' || !setupId.test(leaseId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_readiness_invalid');
+    this.#assertSetupJournalDurability();
+    const now = Date.now(), verified = Date.parse(observation.verifiedAt);
+    if (verified > now || now - verified > 60_000 || now >= Date.parse(observation.expiresAt)) {
+      throw new Error('setup_readiness_stale');
+    }
+    const leaseHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const operation = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+      .get(observation.operationId) as unknown as CodexSetupRow | undefined;
+    if (!operation || operation.state !== 'running' || operation.lease_hash !== leaseHash || operation.intent_digest !== intentDigest) {
+      throw new Error('setup_operation_conflict');
+    }
+    const plaintext = canonicalize(observation), observationHash = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
+    const receiptId = randomUUID(), nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    cipher.setAAD(Buffer.from(canonicalize({receiptId, operationId: observation.operationId, intentDigest, observationHash})));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    this.#database.prepare(`insert into codex_setup_readiness
+      (receipt_id, operation_id, intent_digest, observation_hash, nonce, tag, ciphertext)
+      select ?, ?, ?, ?, ?, ?, ? from codex_setup_operations
+      where operation_id = ? and lease_hash = ? and intent_digest = ? and state = 'running'
+      on conflict(operation_id) do nothing`)
+      .run(receiptId, observation.operationId, intentDigest, observationHash, nonce, cipher.getAuthTag(), ciphertext,
+        observation.operationId, leaseHash, intentDigest);
+    const persisted = this.#database.prepare('select receipt_id from codex_setup_readiness where operation_id = ?')
+      .get(observation.operationId) as {receipt_id: string} | undefined;
+    if (!persisted) throw new Error('setup_operation_conflict');
+    const receipt = this.getCodexSetupReadiness(persisted.receipt_id, observation.operationId, intentDigest);
+    if (!receipt || receipt.observationHash !== observationHash) throw new Error('setup_readiness_conflict');
+    return receipt;
   }
 
   #readProviderSessionBinding(bindingId: string): LocalProviderSessionBinding | null {

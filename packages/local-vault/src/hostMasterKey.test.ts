@@ -33,13 +33,15 @@ test('malformed supplied vault-key scopes are sanitized before store or environm
   }
 });
 
-test('vault-key fence snapshots scope fields without trusting function bind properties', async () => {
+test('vault-key fence denies accessor scopes and snapshots data fields without trusting function bind properties', async () => {
   const f = fixture(); let signals = 0, callbacks = 0;
   const current = async () => true;
   Object.defineProperty(current, 'bind', {get() {throw new Error('private-bind-canary');}});
   const scope = {get signal() {signals++; return f.scope.signal;}, get current() {callbacks++; return current;}};
-  assert.deepEqual(await load(f.store, scope), Buffer.alloc(32, 1));
-  assert.equal(signals, 1); assert.equal(callbacks, 1); assert.deepEqual(f.calls, ['get']);
+  await assert.rejects(load(f.store, scope), {message: 'vault_key_scope_unavailable'});
+  assert.equal(signals, 0); assert.equal(callbacks, 0); assert.deepEqual(f.calls, []);
+  assert.deepEqual(await load(f.store, {signal: f.scope.signal, current}), Buffer.alloc(32, 1));
+  assert.deepEqual(f.calls, ['get']);
 });
 
 test('scoped vault key refuses cancellation or revocation before touching protected storage', async () => {

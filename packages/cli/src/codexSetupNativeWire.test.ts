@@ -6,9 +6,11 @@ import {resolve} from 'node:path';
 import test from 'node:test';
 import {openCodexAppServerTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import type {SecureSecretStore} from '@dharma-ai-labs/agent-fabric-secure-store';
+import {LocalVault, type LocalCodexSetupReadiness, type ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
 import {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 import {bootstrapFromCodexSetup, loadAgentFabricOnboardingContract} from './index.js';
 import * as cli from './index.js';
 
@@ -61,6 +63,8 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
   const store: SecureSecretStore = {backend: 'linux-secret-service', get: async () => key,
     put: async () => {throw new Error('unexpected fixture key write');}, delete: async () => {throw new Error('unexpected fixture key deletion');}};
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined, unsubscribe = () => {};
+  let vault: ScopedLocalVault | undefined;
+  let readiness: ReturnType<typeof createCodexSetupReadinessOwner> | undefined;
   let timer: NodeJS.Timeout | undefined;
   try {
     transport = await openCodexAppServerTransport({command: process.execPath, argv: ['-e', server], cwd: root,
@@ -74,25 +78,49 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
         if (event.method === 'fixture/disposition') done(event.params);
       });
     });
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const observation: LocalCodexSetupReadiness = {schema: 'dharma.local-codex-setup-readiness/v1',
+      operationId: id(1), organizationId: 'org_demo', membershipId: id(3), deviceId: id(5), workspaceId: id(6),
+      repositoryBindingId: id(7), repositoryAgentId: id(8), endpointId: id(9), sessionBindingId: id(10), sessionId: 'synthetic_thread',
+      repositoryFingerprint: prepared.intent.repositoryFingerprint, policyRevision: prepared.intent.policyRevision,
+      policyHash: digest, manifestHash: digest, catalogHash: digest, bundleId: id(11), bundleHash: digest,
+      activeReceiptHash: digest, roleRevision: 1, roleProfileHash: digest, nativeSkillHash: digest,
+      contractDigest: prepared.intent.contractDigest, cliVersion: '0.2.153', relayPid: 123,
+      relayPolledAt: new Date(now - 500).toISOString(), startupBackend: 'systemd-user', firstLearning: 'no_eligible_history',
+      verifiedAt: new Date(now).toISOString(), expiresAt: prepared.intent.expiresAt};
     await run({transport, workspace, name: 'implementer', intent: prepared.intent,
-      openJournal: scope => openCodexSetupVaultJournal({root: resolve(root, 'vault'), scope, store}),
+      openJournal: async scope => {
+        vault = await LocalVault.open({root: resolve(root, 'vault'), masterKey: Buffer.from(key, 'base64')}, scope);
+        readiness = createCodexSetupReadinessOwner({intent: prepared.intent, workspace, scope, vault,
+          observe: async () => ({...observation})});
+        return openCodexSetupVaultJournal({root: resolve(root, 'vault'), scope, store});
+      },
       signal: prepared.scope.signal, current: () => prepared.scope.current(), maximumProviderCostCents: 25,
-      reserve: async () => true, execute: async () => ({state: 'completed', readinessReceiptId: id(6)}),
-      verifyReadiness: async receipt => receipt === id(6)}, disposition);
+      reserve: async () => true, execute: async (_intent, _signal, _current, lease) => {
+        if (!readiness) throw new Error('fixture_readiness_owner_missing');
+        return readiness.record(lease);
+      },
+      verifyReadiness: async (...args) => readiness ? readiness.verify(...args) : false}, disposition);
   } finally {
     if (timer) clearTimeout(timer); unsubscribe(); prepared.scope.close();
-    try {await transport?.close();} finally {await rm(root, {recursive: true, force: true});}
+    try {await transport?.close();} finally {
+      try {await vault?.close();} finally {await rm(root, {recursive: true, force: true});}
+    }
   }
 }
 
-test('native registration, encrypted journal and early-call binding compose over actual owned stdio', async () => {
+test('native registration, encrypted readiness/journal and early-call binding compose over actual owned stdio', async () => {
   await fixture(async (input, disposition) => {
-    let executed = 0; input.execute = async () => {executed++; return {state: 'completed', readinessReceiptId: id(6)};};
+    let executed = 0; const execute = input.execute;
+    input.execute = async (...args) => {executed++; return execute(...args);};
     const host = await startCodexSetupNativeHost(input);
     try {
       const result = await disposition as {success: boolean; contentItems: Array<{text: string}>};
       assert.equal(result.success, true);
-      assert.deepEqual(JSON.parse(result.contentItems[0]!.text), {operationId: id(1), state: 'completed', readinessReceiptId: id(6)});
+      const completed = JSON.parse(result.contentItems[0]!.text) as Record<string, unknown>;
+      assert.equal(completed.operationId, id(1)); assert.equal(completed.state, 'completed');
+      assert.match(String(completed.readinessReceiptId), /^[a-f0-9-]{36}$/);
+      assert.deepEqual(Object.keys(completed).sort(), ['operationId', 'readinessReceiptId', 'state']);
       await host.settled; assert.equal(executed, 1);
     } finally {await host.close();}
   });
@@ -114,6 +142,20 @@ test('actual CLI bootstrap guard remains unconfirmed through native registration
       const observed = bootstrap as Record<string, unknown>;
       assert.equal(observed.code, 'codex_setup_host_execution_unqualified');
       assert.equal(observed.grantRedeemed, false); assert.equal(observed.effects, false);
+    } finally {await host.close();}
+  });
+});
+
+test('an invented receipt UUID cannot pass the persisted native readiness verifier', async () => {
+  await fixture(async (input, disposition) => {
+    input.execute = async () => ({state: 'completed', readinessReceiptId: id(99)});
+    const host = await startCodexSetupNativeHost(input);
+    try {
+      const result = await disposition as {success: boolean; contentItems: Array<{text: string}>};
+      assert.equal(result.success, false);
+      assert.equal(JSON.parse(result.contentItems[0]!.text).code, 'codex_setup_execution_unconfirmed');
+      assert.equal(JSON.stringify(result).includes(id(99)), false);
+      await host.settled;
     } finally {await host.close();}
   });
 });

@@ -107,6 +107,7 @@ import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapH
 // Trusted runtime composition only; these exports do not enable effectful setup.
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
+export {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';

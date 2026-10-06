@@ -77,6 +77,28 @@ test('completion requires independent readiness verification; repeated operation
   assert.equal(JSON.stringify(result).includes('readinessReceiptId'), false);
 });
 
+test('the original lease and native-bound digest reach only trusted execution and readiness verification', async () => {
+  const f = fixture(); let executionDigest = '', verificationDigest = '';
+  const input = {...f.input,
+    execute: async (_intent: Readonly<CodexSetupIntent>, _signal: AbortSignal, current: () => Promise<boolean>,
+      lease: {readonly leaseId: string; readonly intentDigest: string}) => {
+      assert.equal(await current(), true); assert.equal(Object.isFrozen(lease), true);
+      assert.equal(lease.leaseId, id(5));
+      assert.deepEqual(Object.keys(lease).sort(), ['intentDigest', 'leaseId']);
+      executionDigest = lease.intentDigest;
+      return {state: 'completed', readinessReceiptId: id(7)};
+    },
+    verifyReadiness: async (_receipt: string, _intent: Readonly<CodexSetupIntent>, intentDigest: string) => {
+      verificationDigest = intentDigest; return true;
+    }};
+  const owner = createCodexSetupAdmission(input);
+  const result = await owner.handler(f.params, {signal: f.signal.signal});
+  assert.equal(result.success, true); assert.equal(executionDigest, owner.intentDigest);
+  assert.equal(verificationDigest, owner.intentDigest); assert.notEqual(owner.intentDigest, intent.scopeDigest);
+  assert.equal(JSON.stringify(result).includes(id(5)), false);
+  assert.equal(JSON.stringify(result).includes(owner.intentDigest), false);
+});
+
 test('raw runtime errors and unexpected output never cross the tool boundary', async () => {
   for (const runtime of [async () => {throw new Error('vendor-secret-canary');},
     async () => ({state: 'completed', readinessReceiptId: id(7), token: 'vendor-secret-canary'})]) {
