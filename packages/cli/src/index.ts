@@ -1594,8 +1594,19 @@ async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
 }
 
 async function gitValue(workspace: string, argv: string[]) {
-  try { return (await execFileAsync('git', ['-C', workspace, ...argv], { timeout: 10_000 })).stdout.trim() || null; }
-  catch { return null; }
+  const scope = currentBootstrapHostScope(), args = ['-C', workspace, ...argv];
+  const operation = () => execFileAsync('git', args, scope ? {
+    timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal: scope.signal,
+    env: providerProcessEnvironment(process.env),
+  } : {timeout: 10_000});
+  try {
+    const result = scope ? await scope.step(operation) : await operation();
+    return result.stdout.trim() || null;
+  } catch {
+    // An optional Git value may be absent; withdrawn setup authority may not.
+    await scope?.assert();
+    return null;
+  }
 }
 
 async function client() {
