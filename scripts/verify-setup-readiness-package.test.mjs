@@ -7,7 +7,7 @@ import {promisify} from 'node:util';
 import test from 'node:test';
 
 const execute = promisify(execFile);
-for (const defect of ['pin', 'missing-export', 'wrong-export']) {
+for (const defect of ['pin', 'missing-export', 'wrong-export', 'missing-session-export', 'wrong-session-export']) {
   test(`packed readiness verifier rejects ${defect} before packing or importing`, async () => {
     const parent = await realpath(tmpdir()), root = await mkdtemp(resolve(parent, 'dharma-readiness-verifier-'));
     try {
@@ -15,10 +15,13 @@ for (const defect of ['pin', 'missing-export', 'wrong-export']) {
       await mkdir(resolve(root, 'packages/local-vault'), {recursive: true});
       await mkdir(resolve(root, 'packages/cli'), {recursive: true});
       const name = '@dharma-ai-labs/agent-fabric-local-vault';
-      const manifest = {name, version: '0.1.27', exports: {'./setup-readiness': './dist/setupReadiness.js'}};
+      const manifest = {name, version: '0.1.27', exports: {'./setup-readiness': './dist/setupReadiness.js',
+        './setup-session': './dist/setupSessionHandoff.js'}};
       const cli = {dependencies: {[name]: defect === 'pin' ? '0.1.26' : '0.1.27'}};
       if (defect === 'missing-export') delete manifest.exports;
       if (defect === 'wrong-export') manifest.exports['./setup-readiness'] = './dist/index.js';
+      if (defect === 'missing-session-export') delete manifest.exports['./setup-session'];
+      if (defect === 'wrong-session-export') manifest.exports['./setup-session'] = './dist/index.js';
       await writeFile(resolve(root, 'packages/local-vault/package.json'), JSON.stringify(manifest));
       await writeFile(resolve(root, 'packages/cli/package.json'), JSON.stringify(cli));
       const source = await readFile(new URL('./verify-setup-readiness-package.mjs', import.meta.url));

@@ -1,8 +1,9 @@
 import {types} from 'node:util';
 import type {ChildProcess} from 'node:child_process';
 import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
-import {parseLocalCodexSetupSessionRequest, type LocalVault, type LocalCodexSetupSessionRequest}
-  from '@dharma-ai-labs/agent-fabric-local-vault';
+import type {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
+import {parseLocalCodexSetupSessionRequest, type LocalCodexSetupSessionRequest}
+  from '@dharma-ai-labs/agent-fabric-local-vault/setup-session';
 import type {AcceptedSetupSessionScope} from './codexSetupSessionHandoff.js';
 import type {NamedSessionChildOwner} from './namedSessionChildOwner.js';
 

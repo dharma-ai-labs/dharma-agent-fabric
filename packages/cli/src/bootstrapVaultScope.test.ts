@@ -41,7 +41,7 @@ test('actual CLI full-vault callsites all use the single scoped owner', async ()
     ts.forEachChild(node, child => visit(child, owner));
   }
   visit(ast); assert.deepEqual(unscoped, []);
-  assert.deepEqual(owned, ['startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'evidenceSync',
+  assert.deepEqual(owned, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'evidenceSync',
     'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);

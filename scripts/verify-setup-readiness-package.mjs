@@ -11,7 +11,8 @@ if (!npm) throw new Error('npm_execpath is required for package verification.');
 const manifest = JSON.parse(await readFile(resolve(root, 'packages/local-vault/package.json'), 'utf8'));
 const cli = JSON.parse(await readFile(resolve(root, 'packages/cli/package.json'), 'utf8'));
 if (cli.dependencies[manifest.name] !== manifest.version
-  || manifest.exports?.['./setup-readiness'] !== './dist/setupReadiness.js') throw new Error('setup_readiness_package_pin_invalid');
+  || manifest.exports?.['./setup-readiness'] !== './dist/setupReadiness.js'
+  || manifest.exports?.['./setup-session'] !== './dist/setupSessionHandoff.js') throw new Error('setup_readiness_package_pin_invalid');
 const parent = await realpath(tmpdir()), temporary = await mkdtemp(resolve(parent, 'dharma-readiness-pack-'));
 try {
   const {stdout} = await execute(process.execPath, [npm, 'pack', '--workspace', 'packages/local-vault',
@@ -22,7 +23,8 @@ try {
     throw new Error('setup_readiness_package_identity_invalid');
   }
   const paths = new Set(packed[0].files.map(file => file.path));
-  for (const path of ['package.json', 'dist/setupReadiness.js', 'dist/setupReadiness.d.ts']) {
+  for (const path of ['package.json', 'dist/setupReadiness.js', 'dist/setupReadiness.d.ts',
+    'dist/setupSessionHandoff.js', 'dist/setupSessionHandoff.d.ts']) {
     if (!paths.has(path)) throw new Error('setup_readiness_package_export_missing');
   }
   const target = resolve(temporary, 'node_modules', '@dharma-ai-labs', 'agent-fabric-local-vault');
@@ -32,16 +34,23 @@ try {
   if (integrity !== packed[0].integrity) throw new Error('setup_readiness_package_integrity_invalid');
   // Extract only reviewed public files needed for the pure subpath consumer.
   await execute('tar', ['-xf', resolve(temporary, packed[0].filename), '-C', target, '--strip-components', '1',
-    'package/package.json', 'package/dist/setupReadiness.js', 'package/dist/setupReadiness.d.ts'],
+    'package/package.json', 'package/dist/setupReadiness.js', 'package/dist/setupReadiness.d.ts',
+    'package/dist/setupSessionHandoff.js', 'package/dist/setupSessionHandoff.d.ts'],
   {cwd: temporary, timeout: 30_000, maxBuffer: 1024 * 1024});
   const consumer = `import assert from 'node:assert/strict';
     import {parseLocalCodexSetupReadiness} from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
+    import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult}
+      from '@dharma-ai-labs/agent-fabric-local-vault/setup-session';
     assert.equal(typeof parseLocalCodexSetupReadiness, 'function');
     assert.throws(() => parseLocalCodexSetupReadiness({}), {message: 'setup_readiness_invalid'});
-    process.stdout.write('pure-readiness-export-ok');`;
+    assert.equal(typeof parseLocalCodexSetupSessionRequest, 'function');
+    assert.equal(typeof parseLocalCodexSetupSessionResult, 'function');
+    assert.throws(() => parseLocalCodexSetupSessionRequest({}), {message: 'setup_session_invalid'});
+    assert.throws(() => parseLocalCodexSetupSessionResult({}), {message: 'setup_session_invalid'});
+    process.stdout.write('pure-readiness-and-session-exports-ok');`;
   const result = await execute(process.execPath, ['--input-type=module', '-e', consumer],
     {cwd: temporary, timeout: 30_000, maxBuffer: 1024 * 1024});
-  if (result.stdout !== 'pure-readiness-export-ok' || result.stderr !== '') throw new Error('setup_readiness_package_import_unclean');
+  if (result.stdout !== 'pure-readiness-and-session-exports-ok' || result.stderr !== '') throw new Error('setup_readiness_package_import_unclean');
   process.stdout.write(`${JSON.stringify({ok: true, package: manifest.name, version: manifest.version,
     integrity, tarballSha256: createHash('sha256').update(tarball).digest('hex'),
     isolatedConsumer: true, monorepoLink: false, stderrClean: true, published: false})}\n`);

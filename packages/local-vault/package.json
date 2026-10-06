@@ -9,7 +9,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "repository": { "type": "git", "url": "git+https://github.com/dharma-ai-labs/dharma-agent-fabric.git", "directory": "packages/local-vault" },
-  "exports": { ".": "./dist/index.js", "./setup-readiness": "./dist/setupReadiness.js" },
+  "exports": { ".": "./dist/index.js", "./setup-readiness": "./dist/setupReadiness.js", "./setup-session": "./dist/setupSessionHandoff.js" },
   "files": ["dist", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
   "scripts": { "test": "node --test dist/*.test.js" },

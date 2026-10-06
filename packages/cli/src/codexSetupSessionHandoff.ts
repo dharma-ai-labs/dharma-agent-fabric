@@ -1,8 +1,9 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
+import type {LocalVault, ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult,
-  type LocalVault, type ScopedLocalVault, type LocalCodexSetupSessionRequest,
-  type LocalCodexSetupSessionResult} from '@dharma-ai-labs/agent-fabric-local-vault';
+  type LocalCodexSetupSessionRequest, type LocalCodexSetupSessionResult}
+  from '@dharma-ai-labs/agent-fabric-local-vault/setup-session';
 import {currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {assertCodexSetupExecutionLease, type CodexSetupExecutionLease, type CodexSetupIntent} from './codexSetupAdmission.js';
 import {currentNamedSessionChildOwner, type NamedSessionChildOwner} from './namedSessionChildOwner.js';
