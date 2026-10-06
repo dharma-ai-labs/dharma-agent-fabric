@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {resolve} from 'node:path';
 import {validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
-import {createCodexSetupAdmission, type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
+import {assertCodexSetupExecutionLease, createCodexSetupAdmission, type CodexSetupExecutionLease,
+  type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
 import {CODEX_PEER_TOOLS} from './codexPeerTools.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
@@ -106,6 +107,45 @@ test('raw runtime errors and unexpected output never cross the tool boundary', a
     const result = await createCodexSetupAdmission(input).handler(f.params, {signal: f.signal.signal});
     assert.equal(result.success, false); assert.equal(JSON.stringify(result).includes('vendor-secret-canary'), false);
   }
+});
+
+test('only the original admitted in-process lease authorizes its exact intent while execution is active', async () => {
+  const f = fixture(); let retained: Readonly<CodexSetupExecutionLease> | undefined;
+  const owner = createCodexSetupAdmission({...f.input, execute: async (accepted, _signal, _current, lease) => {
+    retained = lease;
+    await assertCodexSetupExecutionLease(lease, accepted);
+    for (const copied of [{...lease}, new Proxy(lease, {})]) {
+      await assert.rejects(assertCodexSetupExecutionLease(copied, accepted), /execution_lease_unavailable/);
+    }
+    await assert.rejects(assertCodexSetupExecutionLease(lease, {...accepted, policyRevision: 'foreign'}),
+      /execution_lease_unavailable/);
+    let getters = 0;
+    await assert.rejects(assertCodexSetupExecutionLease(lease, {...accepted,
+      get policyRevision() {getters++; return accepted.policyRevision;}}), /execution_lease_unavailable/);
+    assert.equal(getters, 0);
+    return {state: 'completed', readinessReceiptId: id(7)};
+  }});
+  assert.equal((await owner.handler(f.params, {signal: f.signal.signal})).success, true);
+  assert.ok(retained);
+  await assert.rejects(assertCodexSetupExecutionLease(retained, intent), /execution_lease_unavailable/);
+});
+
+test('execution lease loses authority after cancellation, even during asynchronous qualification', async () => {
+  const f = fixture(); let delayed = false, entered!: () => void, release!: () => void;
+  const started = new Promise<void>(done => {entered = done;});
+  const finish = new Promise<void>(done => {release = done;});
+  const owner = createCodexSetupAdmission({...f.input, responseWaitMs: 10,
+    qualifyHost: async () => {if (delayed) {entered(); await finish;} return true;},
+    execute: async (accepted, _signal, _current, lease) => {
+      delayed = true;
+      await assert.rejects(assertCodexSetupExecutionLease(lease, accepted), /execution_lease_unavailable/);
+      return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+    }});
+  const operation = owner.handler(f.params, {signal: f.signal.signal});
+  try {
+    await started; owner.close(); release();
+    assert.equal((await operation).success, false); await owner.settled;
+  } finally {owner.close(); release(); await owner.settled;}
 });
 
 test('authority lost during operation withholds output without forgetting terminal effects', async () => {

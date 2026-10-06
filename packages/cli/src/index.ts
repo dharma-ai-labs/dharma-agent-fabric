@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { constants as fsConstants, realpathSync } from 'node:fs';
 import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
@@ -44,7 +44,7 @@ import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegi
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
-import { runOwnedContainerEntrypoint } from './containerRelayLifecycle.js';
+import { runOwnedContainerEntrypoint, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
@@ -108,7 +108,11 @@ import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapH
 // Trusted runtime composition only; these exports do not enable effectful setup.
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
+import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 export {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
+import {assertCodexSetupExecutionLease, type CodexSetupExecutionLease, type CodexSetupIntent} from './codexSetupAdmission.js';
+import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness} from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
+import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
@@ -2367,6 +2371,193 @@ export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope): P
     try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
     throw new Error(code);
   }
+}
+
+type CodexCompletionVault = Pick<ScopedLocalVault, 'recordCodexSetupReadiness' | 'getCodexSetupReadiness'
+  | 'getProviderSessionBinding'>;
+
+async function readBootstrapRuntimeJson(path: string, scope: BootstrapHostScope) {
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const before = await scope.step(() => lstat(path, {bigint: true}));
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 32_768n
+      || before.uid !== BigInt(process.getuid!()) || (before.mode & 0o077n) !== 0n) {
+      throw new Error('setup_runtime_state_unconfirmed');
+    }
+    await scope.step(async () => {file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);});
+    const opened = await scope.step(() => file!.stat({bigint: true}));
+    const bytes = Buffer.alloc(Number(before.size) + 1);
+    const read = await scope.step(() => file!.read(bytes, 0, bytes.length, 0));
+    const after = await scope.step(() => file!.stat({bigint: true}));
+    const current = await scope.step(() => lstat(path, {bigint: true}));
+    if (read.bytesRead !== Number(before.size) || [opened, after, current].some(value => !value.isFile()
+      || value.nlink !== 1n || value.dev !== before.dev || value.ino !== before.ino || value.size !== before.size
+      || value.mtimeNs !== before.mtimeNs || value.ctimeNs !== before.ctimeNs || value.mode !== before.mode
+      || value.uid !== before.uid || value.gid !== before.gid)) {
+      throw new Error('setup_runtime_state_unconfirmed');
+    }
+    return JSON.parse(bytes.subarray(0, read.bytesRead).toString('utf8')) as unknown;
+  } finally {await file?.close();}
+}
+
+/** Actual scoped runtime readback. No callback-supplied ready flag or receipt ID. */
+async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope; intent: Readonly<CodexSetupIntent>;
+  flags: Map<string, string | boolean>}, vault: CodexCompletionVault, firstLearning: LocalCodexSetupReadiness['firstLearning']) {
+  const {scope, intent} = prepared, workspace = String(prepared.flags.get('workspace'));
+  const step = <T>(operation: () => Promise<T>) => scope.step(operation);
+  await scope.assert();
+  if (process.platform !== 'linux') throw new Error('setup_runtime_route_unqualified');
+  const source = await step(() => preflightBootstrapWorkspaceIdentity(workspace));
+  await assertBootstrapHostSource(workspace, source.fingerprint);
+  const contract = await step(() => loadAgentFabricOnboardingContract());
+  if (`sha256:${contract.sha256}` !== intent.contractDigest) throw new Error('setup_runtime_contract_changed');
+  const config = await step(() => readDeviceConfig());
+  if (!config || config.organizationId !== intent.organizationId || normalizeHqUrl(config.hqUrl) !== intent.origin) {
+    throw new Error('setup_runtime_identity_unconfirmed');
+  }
+  const enrollment = await step(() => loadDeviceEnrollmentAnchor({config, hostScope: scope}));
+  const device = await step(() => enrolledDeviceIdentity(config));
+  if (device.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) throw new Error('setup_runtime_identity_unconfirmed');
+  const rows = (await step(() => registry())).filter(row => row.path === workspace
+    && row.organizationId === intent.organizationId && row.repositoryRemoteHash === intent.repositoryFingerprint && row.status === 'active');
+  if (rows.length !== 1 || !rows[0]!.repositoryRole) throw new Error('setup_runtime_repository_unconfirmed');
+  const item = rows[0]!, roleScope = repositoryRoleScope(item);
+  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
+  const policy = await step(() => loadVerifiedWorkspacePolicy(policyPath, item.workspaceId));
+  verifyServerAuthorizedPolicy({policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: intent.organizationId, workspaceId: item.workspaceId});
+  await step(() => assertWorkspaceAuthorizationCurrent(item.workspaceId, policy.serverAuthorization!));
+  if (policy.revision !== intent.policyRevision) throw new Error('setup_runtime_policy_changed');
+  const signed = await step(() => activeSkillAuthorization('codex', item.workspaceId, roleScope.repositoryAgentId, config));
+  const anchor = await step(() => loadActiveSkillAuthorizationAnchor({config, workspaceId: item.workspaceId,
+    organizationAgentId: roleScope.repositoryAgentId, provider: 'codex', fresh: true, hostScope: scope}));
+  if (!signed || !anchor || signed.bundleId !== anchor.bundleId) throw new Error('setup_runtime_package_unconfirmed');
+  const installation = await step(() => verifyAgentFabricSkillInstallation({provider: 'codex', workspace}));
+  const content = await step(() => readNamedSessionPackageContent(installation, true));
+  if (!installation.ready || content.bundleId !== signed.bundleId || content.bundleHash !== signed.bundleHash) {
+    throw new Error('setup_runtime_package_unconfirmed');
+  }
+  const fabric = await step(() => client());
+  const roles = await step(() => discoverRepositoryRoleMetadata(fabric, roleScope));
+  const peers = roles.discovery?.peers as Array<Record<string, unknown>> | undefined;
+  const own = peers?.filter(peer => peer.endpointId === roleScope.endpointId && peer.workspaceId === item.workspaceId);
+  if (own?.length !== 1 || own[0]!.provider !== 'codex' || own[0]!.revision !== item.repositoryRole!.revision
+    || sha256(canonicalize({roleName: own[0]!.roleName, description: own[0]!.description,
+      questionCategories: own[0]!.questionCategories})) !== item.repositoryRole!.profileHash) {
+    throw new Error('setup_runtime_role_unconfirmed');
+  }
+  const name = `codex-${item.workspaceId.slice(0, 8)}`;
+  const session = await step(() => readNamedSession(dharmaHome(), name));
+  if (!session?.enabled || session.identity.membershipId !== intent.recipientMembershipId
+    || session.identity.deviceId !== config.deviceId || session.identity.organizationId !== intent.organizationId
+    || session.identity.workspaceId !== item.workspaceId || session.identity.endpointId !== roleScope.endpointId
+    || session.identity.repositoryBindingId !== roleScope.repositoryBindingId) throw new Error('setup_runtime_session_unconfirmed');
+  const binding = await step(() => vault.getProviderSessionBinding(session.bindingId, session.identity));
+  if (!binding || binding.owner !== 'dharma_bridge' || binding.workspaceRoot !== workspace
+    || binding.bindingId !== session.bindingId || Object.entries(session.identity).some(([key, value]) =>
+      binding[key as keyof typeof binding] !== value)
+    || Date.parse(binding.expiresAt) <= Date.now()) throw new Error('setup_runtime_session_unconfirmed');
+  const remote = await step(() => fabric.signedPost('/agent-fabric/provider-sessions', {
+    schema: 'dharma.provider-session-registration/v1', action: 'inspect', provider: 'codex', mode: 'bridge_owned',
+    workspaceId: item.workspaceId, endpointId: roleScope.endpointId, repositoryBindingId: roleScope.repositoryBindingId,
+    bindingId: session.bindingId, expectedRevision: 0, leaseSeconds: 60,
+  }));
+  if (!isNamedSessionOwnerReceipt(remote, session.bindingId, session.identity)) throw new Error('setup_runtime_session_unconfirmed');
+  const native = await step(() => namedSessionCommand('readiness', new Map<string, string | boolean>([
+    ['name', name], ['workspace-id', item.workspaceId],
+  ]))) as Record<string, unknown>;
+  const nativeSkill = parseNamedCodexSkillObservation(native.nativeSkill);
+  if (native.ok !== true || native.name !== name || native.bindingId !== binding.bindingId || native.sessionId !== binding.sessionId
+    || Object.entries(session.identity).some(([key, value]) => native[key] !== value)
+    || (Object.keys(content) as Array<keyof typeof content>).some(key => nativeSkill[key] !== content[key])) {
+    throw new Error('setup_runtime_session_unconfirmed');
+  }
+  const startup = await step(() => inspectOwnedRelayAutostart({home: dharmaHome()}));
+  const startupState = await step(() => relayAutostartStatus({home: dharmaHome()}));
+  if (!['systemd-user', 'container-entrypoint'].includes(startup.backend) || startupState.state !== 'enabled'
+    || startupState.backend !== startup.backend || startup.version !== VERSION || startupState.version !== VERSION
+    || startup.workspace !== workspace || startup.policy !== policyPath || startup.launcher !== resolve(workspace, '.dharma', 'bin', 'dharma')
+    || startup.backend === 'container-entrypoint' && startupState.lifecycle !== 'running') {
+    throw new Error('setup_runtime_startup_unconfirmed');
+  }
+  const pidFrom = async (path: string) => {
+    const value = await readBootstrapRuntimeJson(path, scope);
+    if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 2147483647) {
+      throw new Error('setup_runtime_process_unconfirmed');
+    }
+    return Number(value);
+  };
+  const home = dharmaHome(), entry = fileURLToPath(import.meta.url);
+  const supervisorPid = await pidFrom(resolve(home, 'relay', 'supervisor.pid'));
+  const relayPid = await pidFrom(resolve(home, 'relay', 'relay.pid'));
+  const sessionPid = await pidFrom(resolve(namedSessionPaths(home, name).root, 'service.lock'));
+  const processes = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
+  const argv = [[process.execPath, entry, 'relay', 'supervise', '--policy', policyPath],
+    [process.execPath, entry, 'relay', 'start', '--policy', policyPath],
+    [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
+  if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
+    || canonicalize(value.argv) !== canonicalize(argv[i])) || processes[1]!.parentPid !== supervisorPid) {
+    throw new Error('setup_runtime_process_unconfirmed');
+  }
+  const supervisor = await readBootstrapRuntimeJson(resolve(home, 'relay', 'supervisor-workspace.json'), scope) as Record<string, unknown>;
+  if (supervisor.pid !== supervisorPid || supervisor.organizationId !== intent.organizationId || supervisor.deviceId !== config.deviceId
+    || supervisor.policyPath !== policyPath || supervisor.version !== VERSION || supervisor.standardRepositories !== true) {
+    throw new Error('setup_runtime_process_unconfirmed');
+  }
+  const poll = await readBootstrapRuntimeJson(resolve(home, 'relay', 'repositories', item.workspaceId,
+    'last-successful-poll.json'), scope) as Record<string, unknown>;
+  if (!repositoryRelayObservationReady({observation: poll, workspaceId: item.workspaceId, version: VERSION, pid: relayPid})) {
+    throw new Error('setup_runtime_poll_unconfirmed');
+  }
+  const currentContent = await step(async () => readNamedSessionPackageContent(
+    await verifyAgentFabricSkillInstallation({provider: 'codex', workspace}), true));
+  if ((Object.keys(content) as Array<keyof typeof content>).some(key => currentContent[key] !== content[key])) {
+    throw new Error('setup_runtime_package_changed');
+  }
+  const currentProcesses = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
+  if (processes.some((value, i) => canonicalize(value) !== canonicalize(currentProcesses[i]))) throw new Error('setup_runtime_process_changed');
+  await step(() => assertWorkspaceAuthorizationCurrent(item.workspaceId, policy.serverAuthorization!));
+  return parseLocalCodexSetupReadiness({schema: 'dharma.local-codex-setup-readiness/v1',
+    operationId: intent.operationId, organizationId: intent.organizationId, membershipId: session.identity.membershipId,
+    deviceId: config.deviceId, workspaceId: item.workspaceId, repositoryBindingId: roleScope.repositoryBindingId,
+    repositoryAgentId: roleScope.repositoryAgentId, endpointId: roleScope.endpointId, sessionBindingId: binding.bindingId,
+    sessionId: binding.sessionId, repositoryFingerprint: intent.repositoryFingerprint, policyRevision: policy.revision,
+    policyHash: sha256(canonicalize(policy)), manifestHash: content.manifestHash, catalogHash: content.catalogHash,
+    bundleId: content.bundleId, bundleHash: content.bundleHash, activeReceiptHash: anchor.receiptHash,
+    roleRevision: item.repositoryRole!.revision, roleProfileHash: item.repositoryRole!.profileHash, nativeSkillHash: content.skillsHash,
+    contractDigest: intent.contractDigest, cliVersion: VERSION, relayPid, relayPolledAt: poll.at,
+    startupBackend: startup.backend, firstLearning, verifiedAt: new Date().toISOString(),
+    expiresAt: new Date(Math.min(Date.parse(intent.expiresAt), Date.parse(policy.serverAuthorization!.expiresAt),
+      Date.parse(binding.expiresAt), signed.expiresAt ? Date.parse(signed.expiresAt) : Infinity)).toISOString()});
+}
+
+/** Trusted native host composition, not an MCP/model/peer tool. */
+export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostScope, vault: CodexCompletionVault) {
+  const prepared = await runCodexBootstrapHostScope(scope, async value => value);
+  let firstLearning: LocalCodexSetupReadiness['firstLearning'] | undefined;
+  const readiness = createCodexSetupReadinessOwner({intent: prepared.intent,
+    workspace: String(prepared.flags.get('workspace')), scope, vault,
+    observe: async (_intent, _scope, retained) => {
+      const disposition = firstLearning ?? retained?.firstLearning;
+      if (!disposition) throw new Error('setup_runtime_first_learning_unconfirmed');
+      // Keep the original execution's disposition; reobserve all live state.
+      return runCodexBootstrapHostScope(scope, current => observeCodexBootstrapRuntime(current, vault, disposition));
+    }});
+  return Object.freeze({
+    execute: async (lease: Readonly<CodexSetupExecutionLease>) => {
+      await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
+      const result = await bootstrapFromCodexSetupScope(scope) as Record<string, unknown>;
+      await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
+      const workflow = result.workflowReadiness as Record<string, unknown> | undefined;
+      if (result.ok !== true || result.stage !== 'complete' || !workflow
+        || !['synchronized', 'no_eligible_history', 'denied_disclosure'].includes(String(workflow.firstLearning))) {
+        return {state: 'unconfirmed' as const, code: 'setup_execution_unconfirmed' as const};
+      }
+      firstLearning = workflow.firstLearning as LocalCodexSetupReadiness['firstLearning'];
+      return readiness.record(lease);
+    },
+    verify: readiness.verify,
+  });
 }
 
 async function bootstrap(flags: Map<string, string | boolean>, hostScope?: BootstrapHostScope): Promise<Output> {

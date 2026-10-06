@@ -13,6 +13,7 @@ async function fixture(run: (f: {
   owner: ReturnType<typeof createCodexSetupReadinessOwner>; intent: ReturnType<typeof prepareCodexBootstrapHost>['intent'];
   lease: {leaseId: string; intentDigest: string}; scope: ReturnType<typeof prepareCodexBootstrapHost>['scope'];
   value: LocalCodexSetupReadiness; observations(): number;
+  retained(): Readonly<LocalCodexSetupReadiness> | undefined;
 }) => Promise<void>) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-readiness-owner-')), now = Date.now();
   const prepared = prepareCodexBootstrapHost({workspace: root, signal: new AbortController().signal, current: async () => true,
@@ -32,11 +33,11 @@ async function fixture(run: (f: {
   try {
     const claim = await vault.claimCodexSetupOperation(id(1), hash);
     if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
-    let observations = 0;
+    let observations = 0, retained: Readonly<LocalCodexSetupReadiness> | undefined;
     const owner = createCodexSetupReadinessOwner({intent: prepared.intent, workspace: root, scope: prepared.scope, vault,
-      observe: async () => {observations++; return {...value};}});
+      observe: async (_intent, _scope, historical) => {observations++; retained = historical; return {...value};}});
     await run({owner, intent: prepared.intent, lease: {leaseId: claim.leaseId, intentDigest: hash}, scope: prepared.scope,
-      value, observations: () => observations});
+      value, observations: () => observations, retained: () => retained});
   } finally {prepared.scope.close(); await vault.close(); await rm(root, {recursive: true, force: true});}
 }
 
@@ -44,8 +45,11 @@ test('owner persists a real receipt and verifies it by a separate fresh observat
   await fixture(async f => {
     const result = await f.owner.record(f.lease);
     assert.equal(result.state, 'completed'); assert.equal(f.observations(), 1);
+    assert.equal(f.retained(), undefined);
     assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), true);
     assert.equal(f.observations(), 2);
+    assert.equal(Object.isFrozen(f.retained()), true);
+    assert.equal(f.retained()!.firstLearning, 'no_eligible_history');
     assert.equal(await f.owner.verify(id(99), f.intent, hash), false);
     assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, `sha256:${'b'.repeat(64)}`), false);
   });
@@ -115,6 +119,7 @@ test('historical receipt requires fresh current state, not a newly written recei
     assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), false);
     Object.assign(f.value, {verifiedAt: new Date().toISOString(), relayPolledAt: new Date().toISOString()});
     assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), true);
+    assert.notEqual(f.retained()!.verifiedAt, f.value.verifiedAt);
     // The original durable receipt is unchanged and idempotently reused.
     t.mock.timers.tick(510_000);
     Object.assign(f.value, {verifiedAt: new Date().toISOString(), relayPolledAt: new Date().toISOString()});

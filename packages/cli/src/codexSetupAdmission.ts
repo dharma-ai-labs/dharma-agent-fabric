@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {types} from 'node:util';
 import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
 import type {CodexToolHandler, CodexToolResult} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 
@@ -23,6 +24,22 @@ export interface CodexSetupExecutionLease {
   readonly leaseId: string;
   /** Includes the original connection/thread/turn, not just the public intent. */
   readonly intentDigest: string;
+}
+
+const admittedExecutions = new WeakMap<Readonly<CodexSetupExecutionLease>, {
+  intent: Readonly<CodexSetupIntent>; signal: AbortSignal; current(): Promise<boolean>;
+}>();
+
+/** Original in-process admission only; serialized lease fields are not authority. */
+export async function assertCodexSetupExecutionLease(lease: Readonly<CodexSetupExecutionLease>, intent: Readonly<CodexSetupIntent>) {
+  const admission = admittedExecutions.get(lease);
+  const candidate = types.isProxy(intent) ? null : record(intent);
+  if (!admission || !candidate || !exact(candidate, Object.keys(admission.intent))
+    || Object.entries(admission.intent).some(([key, value]) => candidate[key] !== value)
+    || admission.signal.aborted || !await admission.current()
+    || admission.signal.aborted || admittedExecutions.get(lease) !== admission) {
+    throw new Error('codex_setup_execution_lease_unavailable');
+  }
 }
 type Binding = {connectionId: string; threadId: string; turnId: string; hostContextId: string};
 interface Input extends Binding {
@@ -154,8 +171,11 @@ export function createCodexSetupAdmission(input: Input) {
         if (!await authorized(executionSignal)) return deny('codex_setup_not_authorized');
         let result: PublicDisposition = {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
         const current = async () => {try {return await qualified(executionSignal);} catch {return false;}};
-        try {result = disposition(await input.execute(intent, executionSignal, current,
-          Object.freeze({leaseId: claim.leaseId, intentDigest: digest}))) ?? result;} catch { /* Never reflect runtime errors. */ }
+        const lease = Object.freeze({leaseId: claim.leaseId, intentDigest: digest});
+        admittedExecutions.set(lease, {intent, signal: executionSignal, current});
+        try {result = disposition(await input.execute(intent, executionSignal, current, lease)) ?? result;}
+        catch { /* Never reflect runtime errors. */ }
+        finally {admittedExecutions.delete(lease);}
         await input.journal.finish(claim.leaseId, digest, result);
         return await expose(result, executionSignal);
       } finally {pending = false;}

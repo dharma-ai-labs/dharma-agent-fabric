@@ -143,11 +143,12 @@ test('lifetime renewal requires the exact owner inspect receipt, not an HTTP suc
   const { schema: _schema, owner: _owner, sessionId: _session, workspaceRoot: _root, createdAt: _created,
     expiresAt: _expiry, maximumProviderCostCents: _cost, organizationId, ...identity } = f.binding;
   const receipt = { ok: true, organizationId, correlationId: uuid(90), registration: { ...identity,
-    mode: 'bridge_owned', revision: 5, state: 'attached', leaseUntil: f.now().toISOString(), replay: false } };
+    mode: 'bridge_owned', revision: 5, state: 'attached', leaseUntil: new Date(f.now().getTime() + 60_000).toISOString(), replay: false } };
   try {
     assert.equal(isNamedSessionOwnerReceipt(receipt, f.binding.bindingId, { ...identity, organizationId }), true);
     for (const change of [{ membershipId: uuid(99) }, { deviceId: uuid(99) }, { repositoryBindingId: uuid(99) },
       { state: 'detached' }, { mode: 'cooperative' }, { replay: true }, { revision: 0 }, { leaseUntil: 'invalid' },
+      { leaseUntil: f.now().toISOString() }, { leaseUntil: new Date(f.now().getTime() - 1).toISOString() },
       { leaseUntil: new Date(Date.now() + 86400000).toISOString() }, { extra: true }]) {
       assert.equal(isNamedSessionOwnerReceipt({ ...receipt, registration: { ...receipt.registration, ...change } },
         f.binding.bindingId, { ...identity, organizationId }), false);

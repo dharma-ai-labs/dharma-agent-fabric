@@ -13,7 +13,8 @@ type Store = Pick<ScopedLocalVault, 'recordCodexSetupReadiness' | 'getCodexSetup
  * read the signed package, protected identity and actual native runtime. */
 export function createCodexSetupReadinessOwner(input: {
   intent: CodexSetupIntent; workspace: string; scope: BootstrapHostScope; vault: Store;
-  observe(intent: Readonly<CodexSetupIntent>, scope: BootstrapHostScope): Promise<LocalCodexSetupReadiness>;
+  observe(intent: Readonly<CodexSetupIntent>, scope: BootstrapHostScope,
+    retained?: Readonly<LocalCodexSetupReadiness>): Promise<LocalCodexSetupReadiness>;
 }) {
   const {scope, vault, observe} = input;
   const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace: input.workspace,
@@ -67,7 +68,7 @@ export function createCodexSetupReadinessOwner(input: {
         // A durable receipt is historical evidence. Its age is not current
         // liveness; only the separately observed runtime must be recent.
         const retained = bound(receipt.observation, false);
-        const current = await scope.step(async () => bound(await observe(intent, scope), true));
+        const current = await scope.step(async () => bound(await observe(intent, scope, retained), true));
         return stable(retained) === stable(current) && await scope.current();
       } catch {return false;}
     },

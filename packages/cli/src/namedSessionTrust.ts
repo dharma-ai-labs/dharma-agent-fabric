@@ -17,7 +17,8 @@ export function isNamedSessionOwnerReceipt(response: Record<string, unknown>, bi
     && value!.bindingId === bindingId && value!.mode === 'bridge_owned' && value!.state === 'attached'
     && value!.replay === false && Number.isInteger(value!.revision) && Number(value!.revision) >= 1
     && Number(value!.revision) <= 2147483647 && typeof value!.leaseUntil === 'string' && Number.isFinite(Date.parse(value!.leaseUntil))
-    && Number.isFinite(now.getTime()) && Date.parse(value!.leaseUntil) <= now.getTime() + 120000
+    && Number.isFinite(now.getTime()) && Date.parse(value!.leaseUntil) > now.getTime()
+    && Date.parse(value!.leaseUntil) <= now.getTime() + 120000
     && Object.entries(identity).filter(([key]) => key !== 'organizationId').every(([key, expected]) => value![key] === expected);
 }
 
