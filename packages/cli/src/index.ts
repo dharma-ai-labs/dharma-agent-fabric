@@ -109,9 +109,10 @@ import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupS
   originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {receiveCodexSetupChildStart, runCodexSetupChildStartup, sendCodexSetupChildStart,
   type CodexSetupChildMessage, type CodexSetupChildScope} from './codexSetupChildStartup.js';
-import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, prepareCodexBootstrapHost, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 // Trusted runtime composition only; these exports do not enable effectful setup.
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+import {openCodexSetupOwnedConnection} from './codexSetupOwnedConnection.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
@@ -2730,6 +2731,54 @@ export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostSc
     },
     verify: readiness.verify,
   });
+}
+
+/** Controller entry: owns the official connection and never accepts a peer transport. */
+export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof startCodexBootstrapNativeHost>[0],
+  'transport' | 'additionalFilesystemRules'> & {expectedAccountEmail: string}) {
+  if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
+  const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail} = input;
+  if (!/^[a-z][a-z0-9-]{0,47}$/.test(name) || typeof reserve !== 'function'
+    || !Number.isInteger(maximumProviderCostCents) || maximumProviderCostCents < 1 || maximumProviderCostCents > 10_000) {
+    throw new Error('codex_setup_owned_input_invalid');
+  }
+  const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace, signal, current});
+  let connection: Awaited<ReturnType<typeof openCodexSetupOwnedConnection>> | undefined;
+  let host: Awaited<ReturnType<typeof startCodexBootstrapNativeHost>> | undefined;
+  try {
+    await prepared.scope.assert();
+    const source = await preflightBootstrapWorkspaceIdentity(workspace);
+    const contract = await loadAgentFabricOnboardingContract();
+    if (source.fingerprint !== prepared.intent.repositoryFingerprint || `sha256:${contract.sha256}` !== prepared.intent.contractDigest) {
+      throw new Error('codex_setup_owned_source_unconfirmed');
+    }
+    await prepared.scope.assert();
+    connection = await openCodexSetupOwnedConnection({workspace, deviceHome: dharmaHome(),
+      expectedAccountEmail, signal, current});
+    await prepared.scope.assert();
+    host = await startCodexBootstrapNativeHost({workspace, name,
+      intent: prepared.intent, signal, maximumProviderCostCents,
+      reserve, current: connection.current, transport: connection.transport,
+      additionalFilesystemRules: connection.additionalFilesystemRules});
+    await prepared.scope.assert();
+    const ownedHost = host, ownedConnection = connection;
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= (async () => {
+      try {await ownedHost.close();} finally {await ownedConnection.close();}
+    })();
+    // A terminal native turn must also release its owned transport.
+    const settled = ownedHost.settled.then(close, async () => {
+      try {await close();} finally {throw new Error('codex_setup_owned_completion_unconfirmed');}
+    });
+    void settled.catch(() => {});
+    return Object.freeze({threadId: host.threadId, turnId: host.turnId, close, settled});
+  } catch {
+    let cleanupFailed = false;
+    try {await host?.close();} catch {cleanupFailed = true;}
+    try {await connection?.close();} catch {cleanupFailed = true;}
+    if (cleanupFailed) throw new Error('codex_setup_owned_close_unconfirmed');
+    throw new Error('codex_setup_owned_start_unqualified');
+  } finally {prepared.scope.close();}
 }
 
 /** Official native-host composition. The caller supplies its already owned
