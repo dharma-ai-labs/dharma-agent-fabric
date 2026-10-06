@@ -2799,10 +2799,13 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     if (required(flags, 'setup-contract-digest') !== `sha256:${installedContract.sha256}`) {
       throw new Error('setup_claim_contract_mismatch: the portal setup must match this published client operating contract.');
     }
-    // Claim cancellation alone does not guard onboarding's later filesystem,
-    // startup, relay and session effects. Never consume authority on that basis.
-    if (hostScope && !flags.has('dry-run')) return {ok: false, stage: 'host_setup_unavailable',
-      code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};
+    // A prepared scope alone is not execution admission. Only the original
+    // native turn's still-live private lease may enter this continuation.
+    if (hostScope && !flags.has('dry-run')) {
+      try {await originalCodexSetupSessionSender(hostScope);}
+      catch {return {ok: false, stage: 'host_setup_unavailable',
+        code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};}
+    }
     if (flags.has('dry-run')) return { ok: true, stage: 'plan', setupTransport: 'public_claim_v1',
       organizationId, portalUrl: hqUrl, setupReference: required(flags, 'setup-reference'),
       requires: ['workspace-qualified coding harness', 'protected device store', 'exact recipient browser approval', 'signed startup readiness'],
@@ -2824,7 +2827,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     repositorySelection = joinedBindingId
       ? { workspace: resolve(dharmaHome(), 'joined-repositories', joinedBindingId), selection: 'existing_organization_binding' }
       : typeof selectedRemote === 'string'
-      ? await resolveBootstrapRepositoryWorkspace({
+      ? await step(() => resolveBootstrapRepositoryWorkspace({
         workspace: String(flags.get('workspace') || '.'),
         selectedRemoteBase64url: selectedRemote,
         organizationId,
@@ -2832,8 +2835,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         normalizeRemote: normalizeGitRemoteIdentity,
         withLock: (path) => acquirePidLock(path, 30_000,
           'repository_checkout_busy: another setup is selecting this repository; retry after it finishes.'),
-      })
-      : { workspace: await realpath(String(flags.get('workspace') || '.')), selection: 'provided' };
+      }))
+      : { workspace: await step(() => realpath(String(flags.get('workspace') || '.'))), selection: 'provided' };
   } catch (error) {
     const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
       ? error.message : '';
@@ -2848,19 +2851,19 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   const policyRevision = required(flags, 'policy-revision');
   const repositoryIdentity = joinedBindingId
     ? { fingerprint: joinedFingerprint! }
-    : await preflightBootstrapWorkspaceIdentity(
+    : await step(() => preflightBootstrapWorkspaceIdentity(
       workspace,
       typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
-    );
+    ));
   const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
   await assertBootstrapHostSource(workspace, repositoryIdentity.fingerprint);
   const provider = requestedProvider === 'auto'
-    ? await detectBootstrapProvider(joinedBindingId ? String(flags.get('workspace') || '.') : workspace)
+    ? await step(() => detectBootstrapProvider(joinedBindingId ? String(flags.get('workspace') || '.') : workspace))
     : requestedProvider;
   if (!isLocalProviderId(provider)) {
     throw new Error('Bootstrap provider must be auto, codex, claude, agy, or hermes.');
   }
-  let existing = await readDeviceConfig();
+  let existing = await step(() => readDeviceConfig());
   const enrollmentMismatch = Boolean(existing
     && (existing.organizationId !== organizationId || normalizeHqUrl(existing.hqUrl) !== hqUrl));
   if (resuming) assertBootstrapResumeAuthority({ flags, existing, organizationId, hqUrl });
@@ -2880,13 +2883,15 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   if (resuming) {
     config = existing!;
   } else if (grantMode === 'reference') {
-    const result = await claimSetupReference({ hqUrl, organizationId,
+    const claimPlatform = await step(() => platform());
+    const claimInstallationId = existing?.installationId ?? await step(() => loadOrCreateInstallationId());
+    const result = await step(() => claimSetupReference({ hqUrl, organizationId,
       setupReference: required(flags, 'setup-reference'),
       recipientMembershipId: required(flags, 'setup-recipient-membership-id'),
       repositoryFingerprint: repositoryIdentity.fingerprint, policyRevision,
       scopeDigest: required(flags, 'setup-scope-digest'), contractDigest: required(flags, 'setup-contract-digest'),
       name: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
-      platform: await platform(), installationId: existing?.installationId ?? await loadOrCreateInstallationId(),
+      platform: claimPlatform, installationId: claimInstallationId,
       existingConfig: existing, configPath: configPath(),
       hostScope,
       onFailureDiagnostic: diagnostic => {
@@ -2898,7 +2903,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         await hostScope?.assert();
         process.stderr.write(`Approve this exact device in the authenticated portal before ${approval.expiresAt}: ${approval.url}\n`);
       },
-    });
+    }));
     config = result.config; scopes = result.scopes;
   } else {
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
@@ -2980,10 +2985,10 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   let organizationApiTokenStored = false;
   let credentialFailure: 'organization_api_credentials_required' | 'organization_api_credential_store_unavailable' | null = null;
   try {
-    organizationApiTokenStored = Boolean(await loadOrganizationApiToken({
+    organizationApiTokenStored = Boolean(await step(() => loadOrganizationApiToken({
       hqUrl, organizationId, installationId: config.installationId,
       hostScope: currentBootstrapHostScope(),
-    }));
+    })));
     if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(process.env.DHARMA_ORG_API_TOKEN || '').trim())) {
       credentialFailure = 'organization_api_credentials_required';
     }
@@ -3014,9 +3019,9 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
   onboardFlags.set('provider', provider);
-  const onboarded = await retryBootstrapOnboarding(async () => joinedBindingId
-    ? await joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!) as Record<string, unknown>
-    : await onboard(onboardFlags) as Record<string, unknown>);
+  const onboarded = await step(() => retryBootstrapOnboarding(async () => joinedBindingId
+    ? await step(() => joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!)) as Record<string, unknown>
+    : await step(() => onboard(onboardFlags)) as Record<string, unknown>));
   if (onboarded.ok !== true || onboarded.stage === 'approve_device') {
     return {
       ok: onboarded.ok === true,
@@ -3036,40 +3041,40 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       repository: onboarded,
     };
   }
-  const launcher = await installStableRepositoryLauncher(workspace);
+  const launcher = await step(() => installStableRepositoryLauncher(workspace));
   const autostart = flags.has('no-relay-daemon')
     ? { state: 'disabled' as const, backend: null }
-    : await withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
+    : await step(() => withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
         + (joinedBindingId ? ` --join-repository-binding-id ${joinedBindingId} --join-source-fingerprint ${joinedFingerprint}` : ''),
       () => withRelayStartupMutation(async () => {
         const home = dharmaHome();
-        const existing = await relayAutostartStatus({ home });
+        const existing = await step(() => relayAutostartStatus({ home }));
         if (existing.backend !== null || existing.state !== 'disabled') {
-          const anchor = await inspectOwnedRelayAutostart({ home });
+          const anchor = await step(() => inspectOwnedRelayAutostart({ home }));
           if (anchor.policy !== null) {
-            const current = await readDeviceConfig();
+            const current = await step(() => readDeviceConfig());
             if (!current || current.organizationId !== organizationId || current.deviceId !== config.deviceId) {
               throw new Error('relay_workspace_conflict: startup enrollment changed.');
             }
-            const selected = selectDeviceWorkspace(await registry(), { organizationId,
+            const selected = selectDeviceWorkspace(await step(() => registry()), { organizationId,
               deviceId: config.deviceId, path: anchor.workspace });
             if (!selected) throw new Error('relay_workspace_conflict: startup anchor is not registered to this device.');
             if (anchor.policy !== resolve(anchor.workspace, '.dharma', 'approved-policy.json')) {
               throw new Error('relay_workspace_conflict: startup policy is not canonical.');
             }
-            const authorized = await loadOrganizationPolicy(anchor.policy);
-            const canonical = (await registry()).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
+            const authorized = await step(() => loadOrganizationPolicy(anchor.policy!));
+            const canonical = (await step(() => registry())).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
               && row.organizationId === organizationId && row.path === anchor.workspace
               && row.routeHash === selected.routeHash && row.repositoryRemoteHash === selected.repositoryRemoteHash);
             if (canonical.length !== 1) throw new Error('relay_workspace_conflict: startup policy route changed.');
-            await loadVerifiedWorkspacePolicy(anchor.policy, authorized.serverAuthorization?.workspaceId ?? '');
+            await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? ''));
           }
         }
-        return enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
+        return step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
-          version: VERSION, preserveStandardAnchor: true });
-      }));
+          version: VERSION, preserveStandardAnchor: true }));
+      })));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
@@ -3094,7 +3099,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     };
   }
 
-  const skill = await verifyAgentFabricSkillInstallation({ provider, workspace });
+  const skill = await step(() => verifyAgentFabricSkillInstallation({ provider, workspace }));
   if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
   const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
   const firstLearning = (onboarded as Record<string, unknown>).firstLearningEvidence as Record<string, unknown> | undefined;
@@ -3102,14 +3107,14 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     || joinedBindingId !== null && firstLearning?.state === 'shared_package_inherited';
   const relay = flags.has('no-relay-daemon')
     ? { started: false, ...(await waitForRelayReadiness()) }
-    : await startRelayDaemon(policyPath);
+    : await step(() => startRelayDaemon(policyPath));
   let repositoryReadiness: RepositoryReadinessResult | null = null;
   if (!sharedRepositoryReady && relay.state === 'running') {
     const workspaceId = String(onboarded.workspaceId || '');
     const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision} --provider ${provider}`;
-    repositoryReadiness = await withOnboardingStage('readiness', workspaceId, resumeCommand,
+    repositoryReadiness = await step(() => withOnboardingStage('readiness', workspaceId, resumeCommand,
       () => waitForRepositoryReadiness(async () => {
-        const current = (await registry()).find(item => item.workspaceId === workspaceId
+        const current = (await step(() => registry())).find(item => item.workspaceId === workspaceId
           && item.organizationId === organizationId && item.path === workspace);
         if (!current) throw new Error('Enrolled repository workspace disappeared during publication.');
         return {
@@ -3117,20 +3122,20 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
           ready: await repositorySharedReady(current),
           candidateId: current.repositoryPackage?.candidateId || null,
         };
-      }));
+      })));
     sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
   }
   const apiFlags = new Map<string, string | boolean>([
     ['organization-id', organizationId], ['portal-url', hqUrl],
   ]);
   const [organization, agents, experiments, failures, remediations, skills, usage] = await Promise.all([
-    runOrganizationCommand('organization', 'status', apiFlags),
-    runOrganizationCommand('agents', 'list', apiFlags),
-    runOrganizationCommand('experiments', 'list', apiFlags),
-    runOrganizationCommand('failures', 'list', apiFlags),
-    runOrganizationCommand('remediations', 'list', apiFlags),
-    runOrganizationCommand('skills', 'list', apiFlags),
-    runOrganizationCommand('usage', 'list', apiFlags),
+    step(() => runOrganizationCommand('organization', 'status', apiFlags)),
+    step(() => runOrganizationCommand('agents', 'list', apiFlags)),
+    step(() => runOrganizationCommand('experiments', 'list', apiFlags)),
+    step(() => runOrganizationCommand('failures', 'list', apiFlags)),
+    step(() => runOrganizationCommand('remediations', 'list', apiFlags)),
+    step(() => runOrganizationCommand('skills', 'list', apiFlags)),
+    step(() => runOrganizationCommand('usage', 'list', apiFlags)),
   ]);
   const organizationApi = summarizeBootstrapOrganizationApi({
     organizationId,
@@ -3142,24 +3147,24 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     skills,
     usage,
   });
-  const operatingContract = await loadAgentFabricOnboardingContract();
+  const operatingContract = await step(() => loadAgentFabricOnboardingContract());
   let namedSession = !joinedBindingId && provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
-    ? await withOnboardingStage('named_session', String(onboarded.workspaceId),
+    ? await step(() => withOnboardingStage('named_session', String(onboarded.workspaceId),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
       () => namedSessionCommand('start', new Map<string, string | boolean>([
       ['name', String(flags.get('session-name') || `codex-${String(onboarded.workspaceId).slice(0, 8)}`)],
       ['workspace-id', String(onboarded.workspaceId)], ['apply', true],
       ...(typeof flags.get('session-budget-cents') === 'string'
         ? [['session-budget-cents', String(flags.get('session-budget-cents'))] as [string, string]] : []),
-    ]))) as Record<string, unknown>
+    ])))) as Record<string, unknown>
     : null;
   if (namedSession) {
-    const native = await withOnboardingStage('readiness', String(onboarded.workspaceId),
+    const native = await step(() => withOnboardingStage('readiness', String(onboarded.workspaceId),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
       () => namedSessionCommand('readiness', new Map<string, string | boolean>([
         ['name', String(flags.get('session-name') || `codex-${String(onboarded.workspaceId).slice(0, 8)}`)],
         ['workspace-id', String(onboarded.workspaceId)],
-      ]))) as Record<string, unknown>;
+      ])))) as Record<string, unknown>;
     if (['name', 'bindingId', 'sessionId', 'organizationId', 'repositoryBindingId', 'workspaceId',
       'endpointId', 'membershipId', 'deviceId', 'provider'].some(key => native[key] !== namedSession![key])) {
       throw new Error('named_session_readiness_scope_mismatch');
@@ -3174,7 +3179,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
   const observedAutostart = autostart.backend === 'container-entrypoint'
-    ? await relayAutostartStatus({ home: dharmaHome() }) : autostart;
+    ? await step(() => relayAutostartStatus({ home: dharmaHome() })) : autostart;
   const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform)
     || observedAutostart.state === 'enabled'
       && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running');

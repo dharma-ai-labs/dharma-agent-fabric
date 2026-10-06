@@ -12,7 +12,7 @@ import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness}
   from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
-import {currentBootstrapHostScope, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
+import {assertBootstrapHostSource, currentBootstrapHostScope, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {assertCodexSetupExecutionLease, createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 import {isNamedSessionOwnerReceipt} from './namedSessionTrust.js';
@@ -22,7 +22,7 @@ import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract} from './index.js';
-import {withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
+import {originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -322,6 +322,125 @@ test('actual completion composition denies copied leases and retains the incompl
     assert.equal(f.calls.length, 0);
   } finally {owner.close(); await owner.settled;}
 });
+
+for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
+  ...['source', 'device-config', 'claim', 'credentials', 'onboard', 'launcher', 'startup', 'skill', 'relay', 'api', 'named']
+    .map(stage => `withdrawn-${stage}`)] as const) {
+  test(`actual bootstrap composition admits only the original lease (${disposition})`, async t => {
+    const f = await fixture(t); f.enableHandoff();
+    let claims = 0, onboards = 0, starts = 0, completionDigest = '';
+    const effects: string[] = [];
+    const effect = <T>(stage: string, value: T): T => {
+      effects.push(stage); if (disposition === `withdrawn-${stage}`) f.prepared.scope.close(); return value;
+    };
+    const config = {organizationId: f.row.organizationId, deviceId: f.row.deviceId,
+      hqUrl: f.prepared.intent.origin, installationId: id(80), setupClaimReference: id(2)};
+    const source = {fingerprint: f.prepared.intent.repositoryFingerprint};
+    const bootstrap = await declaration('bootstrap', {
+      ...f.dependencies, originalCodexSetupSessionSender, assertBootstrapHostSource,
+      currentBootstrapHostScope, UUID_PATTERN: /^[0-9a-f-]{36}$/,
+      portalUrl: (flags: Map<string, unknown>) => flags.get('portal-url'),
+      required: (flags: Map<string, unknown>, key: string) => {
+        const value = flags.get(key); assert.equal(typeof value, 'string'); return value;
+      },
+      bootstrapGrantMode: () => 'reference', realpath: async (path: string) => path,
+      readDeviceConfig: async () => effect('device-config', config),
+      preflightBootstrapWorkspaceIdentity: async () => effect('source', source),
+      isLocalProviderId: (provider: string) => provider === 'codex',
+      process: {platform: 'linux', env: {}, stderr: {write() {throw new Error('fixture_unexpected_output');}}},
+      configPath: () => 'synthetic-config', platform: async () => 'linux',
+      claimSetupReference: async (input: Record<string, unknown>) => {
+        claims++; assert.equal(input.hostScope, f.prepared.scope);
+        assert.equal(input.recipientMembershipId, f.prepared.intent.recipientMembershipId);
+        assert.equal(input.repositoryFingerprint, source.fingerprint);
+        assert.equal(input.setupReference, f.prepared.intent.setupReference);
+        return effect('claim', {config, scopes: ['fabric:tasks']});
+      },
+      loadOrganizationApiToken: async () => effect('credentials', 'synthetic-not-a-real-credential'),
+      retryBootstrapOnboarding: async (operation: () => Promise<unknown>) => operation(),
+      onboard: async (flags: Map<string, unknown>) => {
+        onboards++; assert.equal(currentBootstrapHostScope(), f.prepared.scope);
+        for (const key of ['grant', 'grant-prompt', 'setup-reference', 'setup-recipient-membership-id']) {
+          assert.equal(flags.has(key), false);
+        }
+        return effect('onboard', {ok: true, stage: 'complete', workspaceId: f.row.workspaceId,
+          sharedRepositoryReady: disposition !== 'package-pending', repositoryRole: f.profile,
+          firstLearningEvidence: {state: 'synchronized', discovered: 0, disclosureReady: true}});
+      },
+      installStableRepositoryLauncher: async () => effect('launcher', {shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd'}),
+      withOnboardingStage: async (_stage: string, _workspace: string, _command: string, operation: () => Promise<unknown>) => operation(),
+      withRelayStartupMutation: async (operation: () => Promise<unknown>) => operation(),
+      relayAutostartStatus: async () => ({state: 'disabled', backend: null}),
+      enableRelayAutostart: async () => effect('startup', {state: 'enabled', backend: 'systemd-user'}),
+      verifyAgentFabricSkillInstallation: async () => effect('skill', {ready: true}),
+      startRelayDaemon: async () => effect('relay', {state: 'running', probe: {connected: true}}),
+      waitForRepositoryReadiness: async () => ({outcome: 'blocked'}),
+      runOrganizationCommand: async () => effect('api', {organizationId: f.row.organizationId}),
+      summarizeBootstrapOrganizationApi: () => ({ready: true}),
+      namedSessionCommand: async (action: string) => {
+        if (action === 'start') starts++;
+        return effect('named', {...f.native, state: 'running'});
+      },
+    }) as (flags: Map<string, string | boolean>, scope: typeof f.prepared.scope) => Promise<unknown>;
+    const vault = {...f.vault, ...f.providerVault,
+      readCodexSetupSession: async (operation: string, digest: string) => {
+        assert.equal(operation, f.prepared.intent.operationId); assert.equal(digest, completionDigest);
+        return f.handoff;
+      }};
+    if (disposition === 'foreign-recipient') f.binding.membershipId = id(99);
+    const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
+      runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
+      observeCodexBootstrapRuntime: f.observe,
+      bootstrapFromCodexSetupScope: (scope: typeof f.prepared.scope) =>
+        runCodexBootstrapHostScope(scope, prepared => bootstrap(prepared.flags, scope)),
+    }) as (scope: typeof f.prepared.scope, suppliedVault: typeof vault) => Promise<{
+      execute: (lease: {leaseId: string; intentDigest: string}) => Promise<unknown>;
+      verify: ReturnType<typeof createCodexSetupReadinessOwner>['verify'];
+    }>;
+    const completion = await compose(f.prepared.scope, vault);
+    const active = {connectionId: id(20), threadId: 'synthetic_thread', turnId: 'synthetic_turn', hostContextId: id(4)};
+    const admission = createCodexSetupAdmission({...active, intent: f.prepared.intent,
+      current: async () => ({...active, mode: 'setup'}), qualifyHost: async () => true,
+      journal: {claim: async (operation, digest) => f.vault.claimCodexSetupOperation(operation, digest),
+        read: async (operation, digest) => f.vault.readCodexSetupOperation(operation, digest),
+        finish: async (lease, digest, result) => f.vault.finishCodexSetupOperation(lease, digest, result)},
+      execute: (_intent, _signal, _current, lease) => {
+        completionDigest = lease.intentDigest; return completion.execute(lease);
+      }, verifyReadiness: completion.verify});
+    try {
+      const response = await admission.handler({threadId: active.threadId, turnId: active.turnId,
+        callId: 'original_bootstrap', tool: 'dharma_setup_reference', namespace: null,
+        arguments: {operationId: id(1), setupReference: id(2)}}, {signal: new AbortController().signal});
+      await admission.settled;
+      assert.equal(claims, ['withdrawn-source', 'withdrawn-device-config'].includes(disposition) ? 0 : 1,
+        'the actual bootstrap must reach only a still-admitted bound claim');
+      assert.equal(onboards, effects.filter(stage => stage === 'onboard').length);
+      if (disposition === 'package-pending') assert.equal(starts, 0);
+      if (disposition.startsWith('withdrawn-')) {
+        const withdrawn = disposition.slice('withdrawn-'.length);
+        assert.equal(effects.at(-1), withdrawn, 'no later boundary may run after withdrawal');
+        assert.equal(await f.prepared.scope.current(), false);
+        await assert.rejects(f.vault.readCodexSetupOperation(id(1), completionDigest), /vault_scope_unavailable/);
+      }
+      assert.equal(response.success, disposition === 'complete');
+      if (disposition === 'complete') {
+        const saved = await f.vault.readCodexSetupOperation(id(1), completionDigest);
+        assert.equal(saved?.state, 'terminal');
+        if (saved?.state !== 'terminal') throw new Error('fixture_terminal_missing');
+        assert.equal((saved.result as {state: string}).state, 'completed');
+        assert.equal(JSON.parse(response.contentItems[0]!.text).readinessReceiptId,
+          (saved.result as {readinessReceiptId: string}).readinessReceiptId);
+        const reconciled = await admission.handler({threadId: active.threadId, turnId: active.turnId,
+          callId: 'reconcile_bootstrap', tool: 'dharma_setup_reference', namespace: null,
+          arguments: {operationId: id(1), setupReference: id(2)}}, {signal: new AbortController().signal});
+        await admission.settled;
+        assert.equal(reconciled.success, true); assert.equal(claims, 1); assert.equal(onboards, 1); assert.equal(starts, 1);
+        assert.equal(JSON.parse(reconciled.contentItems[0]!.text).readinessReceiptId,
+          (saved.result as {readinessReceiptId: string}).readinessReceiptId);
+      } else assert.equal(JSON.stringify(response).includes('readinessReceiptId'), false);
+    } finally {admission.close(); await admission.settled;}
+  });
+}
 
 test('actual runtime-state reader enforces ownership, private mode, bounds and unchanged descriptor identity', async t => {
   const f = await fixture(t), bytes = Buffer.from('{"pid":102}\n');
