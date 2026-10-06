@@ -10,6 +10,7 @@ function contains(parent: string, child: string): boolean {
 // Sandbox children need the installed public provider code, never its private home.
 export async function namedCodexFilesystem(input: {
   environment: NodeJS.ProcessEnv; workspace: string; privateRoots: string[]; writeRoots: string[];
+  nodeExecutable?: string;
 }): Promise<{ peer: string; work: string; runtimeRoots: string[];
   additionalFilesystemRules: Readonly<Record<string, 'read' | 'deny'>> }> {
   // A child denial is already covered by its parent. Materializing both can
@@ -55,6 +56,17 @@ export async function namedCodexFilesystem(input: {
       directory = parent;
     }
     if (!runtimeRoots.length) runtimeRoots.push(executable);
+    // The minimal profile hides per-user runtimes. Expose the running trusted
+    // Node file, not its directory, so tools cannot silently select system Node.
+    const nodeExecutable = input.nodeExecutable ?? process.execPath;
+    let node: string;
+    try {
+      if (!isAbsolute(nodeExecutable)) throw new Error('relative_runtime');
+      node = await realpath(nodeExecutable);
+      if (!(await stat(node)).isFile()) throw new Error('runtime_not_file');
+      await access(node, constants.X_OK);
+    } catch { throw new Error('named_session_node_runtime_invalid'); }
+    if (!runtimeRoots.some(root => contains(root, node))) runtimeRoots.push(node);
   }
   for (const root of runtimeRoots) {
     if (contains(input.workspace, root) || denied.some(privateRoot => contains(root, privateRoot) || contains(privateRoot, root))) {
