@@ -24,6 +24,8 @@ export async function openCodexAppServerTransport(input: {
   environment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
   toolCallTimeoutMs?: number;
+  /** Only the fixed native setup tool may wait for recipient browser approval. */
+  setupApprovalTimeoutMs?: number;
   maximumFrameBytes?: number;
   experimentalApi?: boolean;
 }): Promise<CodexStdioTransport> {
@@ -35,6 +37,8 @@ export async function openCodexAppServerTransport(input: {
     || (input.experimentalApi !== undefined && typeof input.experimentalApi !== 'boolean')
     || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000
     || !Number.isInteger(toolCallTimeoutMs) || toolCallTimeoutMs < 1 || toolCallTimeoutMs > 60_000
+    || (input.setupApprovalTimeoutMs !== undefined && (input.experimentalApi !== true
+      || !Number.isInteger(input.setupApprovalTimeoutMs) || input.setupApprovalTimeoutMs < 1 || input.setupApprovalTimeoutMs > 900_000))
     || !Number.isInteger(maximumFrameBytes) || maximumFrameBytes < 1_024 || maximumFrameBytes > 5_000_000) {
     throw new Error('codex_app_server_launch_invalid');
   }
@@ -116,6 +120,8 @@ export async function openCodexAppServerTransport(input: {
       }
       serverIds.add(key); handlingTool = true;
       const handler = toolHandler;
+      const callbackTimeoutMs = (value.params as Record<string, unknown>).tool === 'dharma_setup_reference'
+        ? input.setupApprovalTimeoutMs ?? toolCallTimeoutMs : toolCallTimeoutMs;
       const admission = new AbortController();
       activeTool = admission;
       let timer: NodeJS.Timeout | undefined;
@@ -131,7 +137,7 @@ export async function openCodexAppServerTransport(input: {
         Promise.resolve().then(() => handler(value.params as Record<string, unknown>, { signal: admission.signal })).catch(() => unavailable),
         new Promise<never>((_, reject) => { timer = setTimeout(() => {
           admission.abort(); reject(new Error('timeout'));
-        }, toolCallTimeoutMs); }),
+        }, callbackTimeoutMs); }),
       ]).then(result => {
         if (stopped || admission.signal.aborted) return;
         if (typeof result?.success !== 'boolean' || !Array.isArray(result.contentItems)

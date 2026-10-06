@@ -130,7 +130,10 @@ export async function startCodexSetupNativeHost(input: Input) {
       turnId = turn.id; terminalObserved = completions.has(turnId);
     });
     const binding = Object.freeze({connectionId, threadId, turnId, hostContextId: intent.hostContextId});
+    // Keep this setup-only tool pending for browser approval. An early preview
+    // lets the model end its original turn and correctly withdraw the lease.
     admission = createCodexSetupAdmission({...binding, intent, journal: journal!,
+      responseWaitMs: Math.max(1, Math.min(900_000, Date.parse(intent.expiresAt) - Date.now())),
       execute: async (requested, signal, current, lease) => {
         const cancel = () => scope.close();
         signal.addEventListener('abort', cancel, {once: true});

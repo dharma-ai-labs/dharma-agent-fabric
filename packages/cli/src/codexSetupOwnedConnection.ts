@@ -27,7 +27,7 @@ export async function openCodexSetupOwnedConnection(input: {
   const filesystem = await namedCodexFilesystem({environment, workspace: input.workspace, privateRoots, writeRoots: []});
   await assert();
   const transport = await openCodexAppServerTransport({command: 'codex', cwd: input.workspace,
-    environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
+    environment, experimentalApi: true, toolCallTimeoutMs: 60_000, setupApprovalTimeoutMs: 900_000,
     argv: ['-c', 'apps._default.enabled=false', '-c', 'default_permissions="dharma_bridge"',
       '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
       '-c', 'permissions.dharma_bridge.network={enabled=false}', 'app-server']});
