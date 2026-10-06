@@ -1,9 +1,10 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { types } from 'node:util';
 import { canonicalize, sha256, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
@@ -15,6 +16,18 @@ export interface VaultOptions {
   masterKey: Buffer;
   rawLocalDays?: number;
 }
+
+type AsyncVaultMethods = {[K in keyof LocalVault as K extends 'root' | 'close' ? never : K]:
+  LocalVault[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never};
+export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'getCapsule' | 'getTaskCompletionRecovery' | 'listPendingCapsuleSyncs'> & {
+  readonly root: string;
+  close(): Promise<void>;
+  getLatestCapsule<T = Record<string, unknown>>(trajectoryId: string): Promise<T>;
+  getCapsule<T = Record<string, unknown>>(trajectoryId: string, revision: number): Promise<T>;
+  getTaskCompletionRecovery<T = Record<string, unknown>>(taskId: string): Promise<T | null>;
+  listPendingCapsuleSyncs<T = Record<string, unknown>>(limit?: number, offset?: number):
+    Promise<Array<{trajectoryId: string; revision: number; capsule: T}>>;
+};
 
 export interface VaultCaptureInput {
   raw: { plaintext: Uint8Array; kind: string; expectedContentId: string };
@@ -156,11 +169,15 @@ export class LocalVault {
   readonly #databaseHandle: DatabaseSync;
   #closed = false;
   #databaseClosed = false;
+  readonly #fence: ReturnType<typeof createVaultEffectFence>;
+  readonly #ownedLeases = new Set<() => void>();
 
-  private constructor(options: VaultOptions, database: DatabaseSync) {
+  private constructor(options: VaultOptions, database: DatabaseSync,
+    fence = createVaultEffectFence(undefined, 'vault')) {
     this.root = options.root;
     this.#masterKey = options.masterKey;
     this.#databaseHandle = database;
+    this.#fence = fence;
   }
 
   #assertOpen(): void {
@@ -168,8 +185,72 @@ export class LocalVault {
   }
 
   get #database(): DatabaseSync {
+    this.#fence.assertSync();
     this.#assertOpen();
     return this.#databaseHandle;
+  }
+
+  async #effect<T>(operation: () => Promise<T>): Promise<T> {
+    this.#assertOpen();
+    return this.#fence.scoped ? this.#fence.step(operation) : operation();
+  }
+
+  async #writeTemporary(path: string, bytes: Uint8Array): Promise<{dev: bigint; ino: bigint}> {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await this.#effect(async () => {handle = await open(path, 'wx', 0o600);});
+      const identity = await this.#effect(() => handle!.stat({bigint: true}));
+      await this.#effect(() => handle!.writeFile(bytes));
+      await this.#effect(() => handle!.sync());
+      return {dev: identity.dev, ino: identity.ino};
+    } finally {
+      try {await handle?.close();} catch {throw new Error('vault_cleanup_unconfirmed');}
+    }
+  }
+
+  async #removeOwnedTemporary(path: string, identity: {dev: bigint; ino: bigint}): Promise<void> {
+    // Withdrawal preserves encrypted interruption evidence. No path-based cleanup then.
+    try {await this.#fence.assert();} catch {return;}
+    const current = await this.#effect(() => lstat(path, {bigint: true}));
+    if (!current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino) {
+      throw new Error('vault_cleanup_unconfirmed');
+    }
+    await this.#effect(() => rm(path));
+  }
+
+  #scoped(): ScopedLocalVault {
+    let tail = Promise.resolve(), closing: Promise<void> | undefined;
+    const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+      const work = tail.then(() => this.#fence.step(operation));
+      tail = work.then(() => undefined, () => undefined);
+      return work;
+    };
+    const close = (): Promise<void> => closing ??= (async () => {
+      this.#fence.close();
+      await tail;
+      try {this.close();} catch {closing = undefined; throw new Error('vault_cleanup_unconfirmed');}
+    })();
+    const facade: Record<string, unknown> = {root: this.root, close};
+    for (const name of Object.getOwnPropertyNames(LocalVault.prototype)) {
+      if (name === 'constructor' || name === 'close') continue;
+      const method = Object.getOwnPropertyDescriptor(LocalVault.prototype, name)?.value;
+      if (typeof method !== 'function') throw new Error('vault_api_unavailable');
+      facade[name] = (...args: unknown[]) => {
+        let snapshot: unknown[];
+        try {this.#fence.assertSync(); snapshot = snapshotVaultInput(args);}
+        catch (error) {
+          return Promise.reject(new Error(vaultErrorCode(error) === 'vault_scope_unavailable'
+            ? 'vault_scope_unavailable' : 'vault_input_invalid'));
+        }
+        return enqueue(async () => {
+          const result = await Reflect.apply(method, this, snapshot);
+          if (name !== 'tryAcquireProviderSessionLease' || result === null) return result;
+          const lease = result as LocalProviderSessionLease;
+          return Object.freeze({assertHeld: () => enqueue(() => lease.assertHeld()), release: lease.release});
+        });
+      };
+    }
+    return Object.freeze(facade) as ScopedLocalVault;
   }
 
   /** Open only the existing encrypted setup ledger; no capture or retention work. */
@@ -214,7 +295,10 @@ export class LocalVault {
     } catch (error) {close(); throw error;}
   }
 
-  static async open(options: VaultOptions): Promise<LocalVault> {
+  static open(options: VaultOptions): Promise<LocalVault>;
+  static open(options: VaultOptions, scope: VaultOperationScope): Promise<ScopedLocalVault>;
+  static async open(options: VaultOptions, scope?: VaultOperationScope): Promise<LocalVault | ScopedLocalVault> {
+    const fence = createVaultEffectFence(scope, 'vault');
     const suppliedKey = options.masterKey;
     if (!Buffer.isBuffer(suppliedKey) || suppliedKey.length !== 32) {
       throw new Error('Vault master key must contain exactly 32 bytes.');
@@ -223,9 +307,10 @@ export class LocalVault {
     options = {root, rawLocalDays, masterKey: Buffer.from(suppliedKey)};
     let database: DatabaseSync | undefined, vault: LocalVault | undefined;
     try {
-      await mkdir(resolve(options.root, 'blobs'), { recursive: true, mode: 0o700 });
-      database = new DatabaseSync(resolve(options.root, 'vault.sqlite'));
-      database.exec(`
+      await fence.step(() => mkdir(resolve(options.root, 'blobs'), { recursive: true, mode: 0o700 }));
+      await fence.step(async () => {database = new DatabaseSync(resolve(options.root, 'vault.sqlite'));});
+      await fence.assert();
+      database!.exec(`
       pragma journal_mode = WAL;
       create table if not exists blobs (
         content_id text primary key,
@@ -337,19 +422,20 @@ export class LocalVault {
       create index if not exists capsule_content_refs_lookup_idx
         on capsule_content_refs(content_id, available_locally, trajectory_id, revision);
     `);
-      database.exec('begin immediate');
+      database!.exec('begin immediate');
       try {
-        const columns = database.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
+        const columns = database!.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
         if (!columns.some(column => column.name === 'receipt_hash')) {
-          database.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
+          database!.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
         }
-        database.exec('commit');
-      } catch (error) { database.exec('rollback'); throw error; }
-      vault = new LocalVault(options, database);
+        database!.exec('commit');
+      } catch (error) { database!.exec('rollback'); throw error; }
+      vault = new LocalVault(options, database!, fence);
       await vault.#recoverRetentionQuarantine();
       await vault.#backfillCapsuleContentRefs();
       await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
-      return vault;
+      await fence.assert();
+      return scope === undefined ? vault : vault.#scoped();
     } catch (error) {
       let cleanupConfirmed = true;
       try {
@@ -358,6 +444,8 @@ export class LocalVault {
       } catch {cleanupConfirmed = false;}
       finally {options.masterKey.fill(0);}
       if (!cleanupConfirmed) throw new Error('vault_open_cleanup_unconfirmed');
+      await fence.assert();
+      if (scope !== undefined) throw new Error('vault_storage_unavailable');
       throw error;
     }
   }
@@ -370,7 +458,7 @@ export class LocalVault {
     const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
     if (existing) return { contentId, created: false };
 
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await this.#effect(() => mkdir(dirname(path), { recursive: true, mode: 0o700 }));
     this.#assertOpen();
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
@@ -378,8 +466,10 @@ export class LocalVault {
     const tag = cipher.getAuthTag();
     const envelope = Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, tag, ciphertext]);
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
-    let started = false;
+    let identity: {dev: bigint; ino: bigint} | undefined;
+    if (this.#fence.scoped) identity = await this.#writeTemporary(temporary, envelope);
+    else await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
+    let started = false, published = false;
     try {
       // Publish under the SQLite write fence without yielding between metadata
       // insertion and rename. A failed INSERT never creates an unindexed final blob.
@@ -388,16 +478,22 @@ export class LocalVault {
         'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?) on conflict(content_id) do nothing',
       ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
       const created = Number(result.changes) === 1;
-      if (created) renameSync(temporary, path);
+      if (created) {
+        this.#fence.assertSync(); renameSync(temporary, path); published = true;
+      }
       this.#database.exec('release vault_blob_write'); started = false;
       return { contentId, created };
     } catch (error) {
       if (started) {
-        try { this.#database.exec('rollback to vault_blob_write; release vault_blob_write'); } catch {}
+        try { this.#databaseHandle.exec('rollback to vault_blob_write; release vault_blob_write'); } catch {}
       }
       // The final address may already belong to a committed writer. Never unlink it.
       throw error;
-    } finally { await rm(temporary, { force: true }); }
+    } finally {
+      if (this.#fence.scoped) {
+        if (!published && identity) await this.#removeOwnedTemporary(temporary, identity);
+      } else await rm(temporary, { force: true });
+    }
   }
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
@@ -576,52 +672,61 @@ export class LocalVault {
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
     this.#assertOpen();
-    const source = await stat(sourcePath);
+    const source = await this.#effect(() => stat(sourcePath));
     this.#assertOpen();
     if (!source.isFile() || source.size < 1) throw new Error('Vault source must be a non-empty file.');
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
     const hash = createHash('sha256');
     const incoming = resolve(this.root, 'blobs', `.incoming-${process.pid}-${randomBytes(8).toString('hex')}`);
-    const destination = await open(incoming, 'wx', 0o600);
+    let destination: Awaited<ReturnType<typeof open>> | undefined;
+    let identity: {dev: bigint; ino: bigint} | undefined;
+    let sourceStream: ReturnType<typeof createReadStream> | undefined;
+    let published = false;
     try {
+      await this.#effect(async () => {destination = await open(incoming, 'wx', 0o600);});
+      identity = await this.#effect(() => destination!.stat({bigint: true}));
       this.#assertOpen();
-      await destination.write(Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, Buffer.alloc(16)]));
-      for await (const value of createReadStream(sourcePath, { highWaterMark: 1_048_576 })) {
+      await this.#effect(() => destination!.write(Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, Buffer.alloc(16)])));
+      await this.#fence.assert();
+      sourceStream = createReadStream(sourcePath, {highWaterMark: 1_048_576, signal: this.#fence.signal});
+      for await (const value of sourceStream) {
+        await this.#fence.assert();
         this.#assertOpen();
         const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
         hash.update(chunk);
         const encrypted = cipher.update(chunk);
-        if (encrypted.length) await destination.write(encrypted);
+        if (encrypted.length) await this.#effect(() => destination!.write(encrypted));
       }
       const final = cipher.final();
-      if (final.length) await destination.write(final);
-      await destination.write(cipher.getAuthTag(), 0, 16, 13);
-    } catch (error) {
-      await destination.close().catch(() => undefined);
-      await rm(incoming, { force: true });
-      throw error;
-    }
-    await destination.close();
+      if (final.length) await this.#effect(() => destination!.write(final));
+      await this.#effect(() => destination!.write(cipher.getAuthTag(), 0, 16, 13));
+      await this.#effect(() => destination!.sync());
+      await destination!.close(); destination = undefined;
 
-    const contentId = `sha256:${hash.digest('hex')}`;
-    const path = this.#blobPath(contentId);
-    const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
-    if (existing) {
-      await rm(incoming, { force: true });
+      const contentId = `sha256:${hash.digest('hex')}`;
+      const path = this.#blobPath(contentId);
+      const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
+      if (existing) return { contentId, bytes: source.size };
+      await this.#effect(() => mkdir(dirname(path), { recursive: true, mode: 0o700 }));
+      await this.#effect(async () => {await rename(incoming, path); published = true;});
+      this.#database.prepare(
+        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
+      ).run(contentId, source.size, kind, new Date().toISOString());
       return { contentId, bytes: source.size };
+    } finally {
+      sourceStream?.destroy();
+      try {await destination?.close();} catch {throw new Error('vault_cleanup_unconfirmed');}
+      if (!published) {
+        if (this.#fence.scoped) {if (identity) await this.#removeOwnedTemporary(incoming, identity);}
+        else await rm(incoming, {force: true});
+      }
     }
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await rename(incoming, path);
-    this.#database.prepare(
-      'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
-    ).run(contentId, source.size, kind, new Date().toISOString());
-    return { contentId, bytes: source.size };
   }
 
   async getBlob(contentId: string): Promise<Buffer> {
     this.#assertOpen();
-    const envelope = await readFile(this.#blobPath(contentId));
+    const envelope = await this.#effect(() => readFile(this.#blobPath(contentId)));
     this.#assertOpen();
     if (envelope[0] !== BLOB_VERSION || envelope.length < 29) throw new Error('Unsupported or corrupt vault blob.');
     const nonce = envelope.subarray(1, 13);
@@ -789,7 +894,7 @@ export class LocalVault {
       }
       const lease = this.#database.prepare('select host_name, owner_pid from provider_session_leases where binding_id = ?')
         .get(bindingId) as { host_name: string; owner_pid: number } | undefined;
-      if (lease && (lease.host_name !== hostname() || (lease.owner_pid !== process.pid && processIsAlive(lease.owner_pid)))) {
+      if (lease && (lease.host_name !== hostname() || (lease.owner_pid !== process.pid && this.#processIsAlive(lease.owner_pid)))) {
         throw new Error('provider_session_lease_unavailable');
       }
       const next = { ...record, expiresAt }; assertLocalProviderSessionBinding(next);
@@ -824,7 +929,7 @@ export class LocalVault {
       const prior = this.#database.prepare(`
         select host_name, owner_pid from provider_session_leases where binding_id = ?
       `).get(bindingId) as { host_name: string; owner_pid: number } | undefined;
-      if (prior && (prior.host_name !== currentHost || processIsAlive(prior.owner_pid))) {
+      if (prior && (prior.host_name !== currentHost || this.#processIsAlive(prior.owner_pid))) {
         this.#database.exec('commit');
         return null;
       }
@@ -840,21 +945,25 @@ export class LocalVault {
       try { this.#database.exec('rollback'); } catch {}
       throw error;
     }
-    return {
-      assertHeld: async () => {
+    const release = () => {
+      if (this.#databaseClosed || !this.#ownedLeases.has(release)) return;
+      // Cooperative cleanup can remove only the row acquired by this handle.
+      this.#databaseHandle.prepare(`delete from provider_session_leases where binding_id = ? and holder_id = ?`)
+        .run(bindingId, holderId);
+      this.#ownedLeases.delete(release);
+    };
+    this.#ownedLeases.add(release);
+    return Object.freeze({
+      assertHeld: () => this.#effect(async () => {
         const active = this.getProviderSessionBinding(bindingId, expected);
         if (!active || Date.now() >= Date.parse(active.expiresAt)) return false;
         const row = this.#database.prepare(`
           select holder_id, host_name, owner_pid from provider_session_leases where binding_id = ?
         `).get(bindingId) as { holder_id: string; host_name: string; owner_pid: number } | undefined;
         return row?.holder_id === holderId && row.host_name === currentHost && row.owner_pid === process.pid;
-      },
-      release: () => {
-        this.#database.prepare(`
-          delete from provider_session_leases where binding_id = ? and holder_id = ?
-        `).run(bindingId, holderId);
-      },
-    };
+      }),
+      release,
+    });
   }
 
   recordSession(input: {
@@ -943,8 +1052,9 @@ export class LocalVault {
       this.#database.exec('commit');
       return { rawContentId: raw.contentId, capsuleContentId: capsule.contentId };
     } catch (error) {
-      try { this.#database.exec('rollback'); } catch {}
-      await Promise.all([...created].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
+      try { this.#databaseHandle.exec('rollback'); }
+      catch {if (this.#fence.scoped) throw new Error('vault_cleanup_unconfirmed');}
+      if (!this.#fence.scoped) await Promise.all([...created].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
       throw error;
     }
   }
@@ -998,7 +1108,7 @@ export class LocalVault {
       if (referenced) continue;
       this.#database.prepare('delete from blobs where content_id = ? and kind = ?')
         .run(row.blob_content_id, 'trajectory-capsule');
-      await rm(this.#blobPath(row.blob_content_id), { force: true });
+      await this.#effect(() => rm(this.#blobPath(row.blob_content_id), { force: true }));
     }
     return rows.length;
   }
@@ -1100,7 +1210,7 @@ export class LocalVault {
       `).run(taskId, blob.contentId, new Date().toISOString());
       return blob.contentId;
     } catch (error) {
-      if (blob.created) {
+      if (blob.created && !this.#fence.scoped) {
         await rm(this.#blobPath(blob.contentId), { force: true });
         this.#database.prepare('delete from blobs where content_id = ?').run(blob.contentId);
       }
@@ -1149,7 +1259,7 @@ export class LocalVault {
       try { this.#database.exec('rollback'); } catch {}
       throw error;
     }
-    if (deletedBlob) await rm(this.#blobPath(record.blob_content_id), { force: true });
+    if (deletedBlob) await this.#effect(() => rm(this.#blobPath(record.blob_content_id), { force: true }));
   }
 
   listSessions(): unknown[] {
@@ -1210,6 +1320,7 @@ export class LocalVault {
     this.#closed = true;
     try {
       if (!this.#databaseClosed) {
+        for (const release of this.#ownedLeases) release();
         this.#databaseHandle.close();
         this.#databaseClosed = true;
       }
@@ -1222,16 +1333,24 @@ export class LocalVault {
     return resolve(this.root, 'blobs', digest.slice(0, 2), `${digest}.blob`);
   }
 
+  #processIsAlive(pid: number): boolean {
+    this.#fence.assertSync();
+    return processIsAlive(pid);
+  }
+
   async #expireRawEvidenceBatch(contentIds: string[], createdAt: string): Promise<void> {
     const quarantined: Array<{ original: string; quarantine: string }> = [];
     const createdCapsuleIds = new Set<string>();
+    let committed = false;
     this.#database.exec('begin immediate');
     try {
       for (const contentId of contentIds) {
         const original = this.#blobPath(contentId);
         const quarantine = `${original}.expired-${process.pid}-${randomBytes(4).toString('hex')}`;
-        await rename(original, quarantine);
-        quarantined.push({ original, quarantine });
+        await this.#effect(async () => {
+          await rename(original, quarantine);
+          quarantined.push({ original, quarantine });
+        });
 
         const capsuleRows = this.#database.prepare(`
           select c.trajectory_id, c.revision, c.capsule_hash, c.blob_content_id
@@ -1295,13 +1414,20 @@ export class LocalVault {
         if (result.changes !== 1) throw new Error('Raw evidence changed during retention enforcement.');
       }
       this.#database.exec('commit');
-      await Promise.all(quarantined.map((entry) => rm(entry.quarantine, { force: true })));
+      committed = true;
+      for (const entry of quarantined) await this.#effect(() => rm(entry.quarantine, { force: true }));
     } catch (error) {
-      try { this.#database.exec('rollback'); } catch {}
-      await Promise.all([...createdCapsuleIds].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
-      await Promise.all(quarantined.map(async (entry) => {
-        try { await rename(entry.quarantine, entry.original); } catch {}
-      }));
+      if (!committed) {
+        try { this.#databaseHandle.exec('rollback'); }
+        catch {if (this.#fence.scoped) throw new Error('vault_cleanup_unconfirmed');}
+        // Scoped interruption leaves encrypted files for the existing recovery contract.
+        if (!this.#fence.scoped) {
+          await Promise.all([...createdCapsuleIds].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
+          await Promise.all(quarantined.map(async (entry) => {
+            try { await rename(entry.quarantine, entry.original); } catch {}
+          }));
+        }
+      }
       throw error;
     }
   }
@@ -1340,16 +1466,17 @@ export class LocalVault {
 
   async #recoverUnindexedBlobs(): Promise<void> {
     const blobsRoot = resolve(this.root, 'blobs');
-    for (const prefix of await readdir(blobsRoot, { withFileTypes: true })) {
+    for (const prefix of await this.#effect(() => readdir(blobsRoot, { withFileTypes: true }))) {
       if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
       const directory = resolve(blobsRoot, prefix.name);
-      for (const entry of await readdir(directory, { withFileTypes: true })) {
+      for (const entry of await this.#effect(() => readdir(directory, { withFileTypes: true }))) {
         const final = /^([a-f0-9]{64})\.blob$/.exec(entry.name);
         const temporary = /^([a-f0-9]{64})\.blob\.([1-9][0-9]*)\.[a-f0-9]{8}\.tmp$/.exec(entry.name);
         if (!entry.isFile() || (!final && !temporary)) continue;
         const digest = (final ?? temporary)![1]!;
         if (digest.slice(0, 2) !== prefix.name) continue;
-        if (temporary && processIsAlive(Number(temporary[2]))) continue;
+        await this.#fence.assert();
+        if (temporary && this.#processIsAlive(Number(temporary[2]))) continue;
         const path = resolve(directory, entry.name);
         // Final publication uses this same SQLite write fence. Recheck metadata
         // and unlink without yielding so a concurrent commit cannot lose its blob.
@@ -1357,22 +1484,25 @@ export class LocalVault {
         try {
           const retained = final && this.#database.prepare('select 1 from blobs where content_id = ?').get(`sha256:${digest}`);
           if (!retained) {
-            try { if (lstatSync(path).isFile()) unlinkSync(path); }
+            try {
+              this.#fence.assertSync();
+              if (lstatSync(path).isFile()) {this.#fence.assertSync(); unlinkSync(path);}
+            }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
           }
           this.#database.exec('commit');
-        } catch (error) { this.#database.exec('rollback'); throw error; }
+        } catch (error) { this.#databaseHandle.exec('rollback'); throw error; }
       }
     }
   }
 
   async #recoverRetentionQuarantine(): Promise<void> {
     const blobsRoot = resolve(this.root, 'blobs');
-    const prefixes = await readdir(blobsRoot, { withFileTypes: true });
+    const prefixes = await this.#effect(() => readdir(blobsRoot, { withFileTypes: true }));
     for (const prefix of prefixes) {
       if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
       const directory = resolve(blobsRoot, prefix.name);
-      const entries = await readdir(directory, { withFileTypes: true });
+      const entries = await this.#effect(() => readdir(directory, { withFileTypes: true }));
       for (const entry of entries) {
         if (!entry.isFile() || !/^[a-f0-9]{64}\.blob\.expired-/.test(entry.name)) continue;
         const quarantine = resolve(directory, entry.name);
@@ -1381,13 +1511,14 @@ export class LocalVault {
         const contentId = `sha256:${digest}`;
         const retained = this.#database.prepare('select 1 from blobs where content_id = ?').get(contentId);
         if (retained) {
-          try { await rename(quarantine, original); }
+          try { await this.#effect(() => rename(quarantine, original)); }
           catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'EEXIST') await rm(quarantine, { force: true });
+            await this.#fence.assert();
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') await this.#effect(() => rm(quarantine, { force: true }));
             else throw error;
           }
         } else {
-          await rm(quarantine, { force: true });
+          await this.#effect(() => rm(quarantine, { force: true }));
         }
       }
     }
@@ -1409,17 +1540,69 @@ export interface VaultOperationScope {
 }
 export type VaultKeyOperationScope = VaultOperationScope;
 
+function vaultErrorCode(error: unknown): string | undefined {
+  try {
+    if (!error || typeof error !== 'object') return undefined;
+    const message = Object.getOwnPropertyDescriptor(error, 'message');
+    return message && Object.hasOwn(message, 'value') && typeof message.value === 'string' ? message.value : undefined;
+  } catch {return undefined;}
+}
+
+// Snapshot data before any async qualification without running payload accessors.
+function snapshotVaultInput<T>(input: T): T {
+  const seen = new Map<object, unknown>();
+  let entries = 0;
+  const copy = (value: unknown, depth: number): unknown => {
+    if (depth > 256 || ++entries > 1_000_000) throw new Error('vault_input_invalid');
+    if (value === null || ['undefined', 'string', 'number', 'boolean', 'bigint'].includes(typeof value)) return value;
+    if (typeof value !== 'object') throw new Error('vault_input_invalid');
+    const object = value as object;
+    if (types.isProxy(object)) throw new Error('vault_input_invalid');
+    if (seen.has(object)) return seen.get(object);
+    if (types.isUint8Array(object)) {
+      const length = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length')!.get!.call(object);
+      const bytes = new Uint8Array(length);
+      Uint8Array.prototype.set.call(bytes, object);
+      seen.set(object, bytes); return bytes;
+    }
+    if (types.isDate(object)) return new Date(Date.prototype.getTime.call(object));
+    const prototype = Object.getPrototypeOf(object);
+    const constructor = prototype && Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value;
+    const name = typeof constructor === 'function' ? Object.getOwnPropertyDescriptor(constructor, 'name')?.value : undefined;
+    const array = Array.isArray(object);
+    if (!array && prototype !== null && (name !== 'Object' || Object.getPrototypeOf(prototype) !== null)) {
+      throw new Error('vault_input_invalid');
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(object);
+    const result: Record<string, unknown> | unknown[] = array ? [] : Object.create(null);
+    seen.set(object, result);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== 'string') throw new Error('vault_input_invalid');
+      const descriptor = descriptors[key];
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error('vault_input_invalid');
+      if (array && key === 'length') {Object.defineProperty(result, key, {value: descriptor.value}); continue;}
+      Object.defineProperty(result, key, {value: copy(descriptor.value, depth + 1), enumerable: descriptor.enumerable,
+        writable: true, configurable: true});
+    }
+    return result;
+  };
+  return copy(input, 0) as T;
+}
+
 function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: string) {
   let signal: AbortSignal | undefined, qualify: (() => Promise<boolean>) | undefined;
   if (scope !== undefined) {
     try {
       if (!scope || typeof scope !== 'object') throw new Error();
-      const suppliedSignal = scope.signal, current = scope.current;
+      const descriptors = Object.getOwnPropertyDescriptors(scope);
+      const suppliedSignal = descriptors.signal?.value, current = descriptors.current?.value;
+      if (!descriptors.signal || !descriptors.current || !Object.hasOwn(descriptors.signal, 'value')
+        || !Object.hasOwn(descriptors.current, 'value')) throw new Error();
       if (!(suppliedSignal instanceof AbortSignal) || typeof current !== 'function') throw new Error();
       signal = suppliedSignal; qualify = () => Reflect.apply(current, scope, []);
     } catch {throw new Error(`${prefix}_scope_unavailable`);}
   }
-  let withdrawn = false;
+  let withdrawn = false, admitted = false;
   const assertCurrent = async () => {
     if (scope === undefined) return;
     let current = false;
@@ -1427,22 +1610,31 @@ function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: 
       try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
     }
     if (withdrawn || !current || signal?.aborted) {withdrawn = true; throw new Error(`${prefix}_scope_unavailable`);}
+    admitted = true;
   };
   const step = async <T>(operation: () => Promise<T>): Promise<T> => {
     await assertCurrent();
     try {const result = await operation(); await assertCurrent(); return result;}
     catch (error) {
+      const code = vaultErrorCode(error);
+      if (scope !== undefined && prefix === 'vault'
+        && (code === 'vault_cleanup_unconfirmed' || code === 'vault_open_cleanup_unconfirmed')) throw new Error(code);
       await assertCurrent();
       if (scope !== undefined) {
         const safe = new Set(['setup_operation_invalid', 'setup_operation_conflict', 'setup_operation_integrity_failed',
           'setup_operation_transaction_active', 'setup_operation_durability_unqualified']);
-        if (prefix === 'vault_setup_journal' && error instanceof Error && safe.has(error.message)) throw new Error(error.message);
+        if (prefix === 'vault_setup_journal' && code !== undefined && safe.has(code)) throw new Error(code);
         throw new Error(`${prefix}_storage_unavailable`);
       }
       throw error;
     }
   };
-  return {assert: assertCurrent, step, close: () => {withdrawn = true;}};
+  const assertSync = () => {
+    if (scope !== undefined && (withdrawn || !admitted || signal?.aborted)) {
+      withdrawn = true; throw new Error(`${prefix}_scope_unavailable`);
+    }
+  };
+  return {assert: assertCurrent, assertSync, step, signal, scoped: scope !== undefined, close: () => {withdrawn = true;}};
 }
 
 /** Cooperative effect admission, not proof that an OS adapter child has stopped. */

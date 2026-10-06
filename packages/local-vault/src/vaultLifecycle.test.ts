@@ -5,6 +5,7 @@ import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
+import * as util from 'node:util';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
@@ -33,6 +34,7 @@ async function module(overrides: {fs?: Record<string, unknown>; crypto?: Record<
       if (name === 'node:os') return os;
       if (name === 'node:path') return path;
       if (name === 'node:sqlite') return {DatabaseSync: overrides.database ?? DatabaseSync};
+      if (name === 'node:util') return util;
       if (name === '@dharma-ai-labs/agent-fabric-contracts') return contracts;
       if (name === '@dharma-ai-labs/agent-fabric-evidence-reduction') return evidence;
       if (name === '@dharma-ai-labs/agent-fabric-secure-store') return {
