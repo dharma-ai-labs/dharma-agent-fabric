@@ -16,6 +16,7 @@ import {assertBootstrapHostSource, inspectCodexBootstrapHostPreparation, prepare
 import {assertCodexSetupExecutionLease, createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {watchOwnedChild} from './ownedChildLifecycle.js';
+import {sendCodexSetupChildStart} from './codexSetupChildStartup.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -30,7 +31,7 @@ async function declaration(name: string, dependencies: Record<string, unknown>) 
   const output = ts.transpileModule(functions[0]!.getText(ast), {compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});
   assert.equal(output.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
-  return compileFunction(output.outputText + `\nreturn ${name};`, ['exports', ...Object.keys(dependencies)])(
+  return compileFunction(output.outputText.replaceAll('import.meta.url', '"file:///synthetic/index.js"') + `\nreturn ${name};`, ['exports', ...Object.keys(dependencies)])(
     {}, ...Object.values(dependencies));
 }
 
@@ -63,7 +64,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, managedCleanup
     loadVerifiedWorkspacePolicy: async () => policy, verifyServerAuthorizedPolicy: () => {},
     assertWorkspaceAuthorizationCurrent: async () => {}, client: async () => ({}),
     fetchRepositorySourceAuthorization: async () => ({}), readNamedSession: async () => null, dharmaHome: () => root};
-  const qualify = () => declaration('qualifyCodexSetupSessionRequest', dependencies) as Promise<(request: LocalCodexSetupSessionRequest) => Promise<boolean>>;
+  const qualify = async () => declaration('qualifyCodexSetupSessionRequest', {...dependencies,
+    qualifyCodexSetupSessionSource: await declaration('qualifyCodexSetupSessionSource', dependencies)}) as Promise<(request: LocalCodexSetupSessionRequest) => Promise<boolean>>;
   return {root, request, config, row, sender, policy, dependencies, qualify};
 }
 
@@ -74,6 +76,27 @@ test('actual standing receiver qualifies the bound source and process context on
     assert.equal(await qualify(f.request), true);
   });
 });
+
+for (const change of ['none', 'parent-uid', 'parent-argv', 'backend', 'version', 'source', 'parent-unavailable'] as const) {
+  test(`actual child startup verifies source and its own IPC parent (${change})`, async t => {
+    const f = await fixture(t), parentPid = process.pid + 1;
+    const startup = {backend: 'container-entrypoint', version: '0.2.153', policy: resolve(f.root, '.dharma', 'approved-policy.json')};
+    const parent = {uid: 1000, argv: [process.execPath, '/synthetic/index.js', 'relay', 'supervise', '--policy', startup.policy]};
+    if (change === 'parent-uid') parent.uid = 999;
+    if (change === 'parent-argv') parent.argv.push('--foreign');
+    if (change === 'backend') startup.backend = 'foreign';
+    if (change === 'version') startup.version = '0.2.1';
+    if (change === 'source') f.config.setupClaimReference = uuid(99);
+    const qualify = await declaration('qualifyCodexSetupChildRequest', {...f.dependencies,
+      qualifyCodexSetupSessionSource: await declaration('qualifyCodexSetupSessionSource', f.dependencies),
+      process: {platform: 'linux', ppid: parentPid, execPath: process.execPath, getuid: () => 1000}, VERSION: '0.2.153',
+      fileURLToPath: () => '/synthetic/index.js', inspectOwnedRelayAutostart: async () => startup,
+      readContainerProcessIdentity: async (pid: number) => {
+        assert.equal(pid, parentPid); if (change === 'parent-unavailable') throw new Error('synthetic-parent-missing'); return parent;
+      }});
+    assert.equal(await qualify(f.request), change === 'none');
+  });
+}
 
 for (const change of ['claim', 'device', 'organization', 'origin', 'fingerprint', 'sender-uid', 'sender-creation',
   'workspace', 'inactive', 'duplicate', 'name', 'role', 'source', 'canonical-path', 'contract', 'device-key',
@@ -144,6 +167,63 @@ test('actual supervisor consumes an encrypted pending request and drains only it
   const observed = sender.readCodexSetupSession(f.request.operationId, digest);
   assert.equal(observed?.state, 'accepted'); assert.equal(observed?.result?.state, 'started');
   assert.deepEqual(sender.listPendingCodexSetupSessions(), []);
+});
+
+test('actual accepted session caller sends public handoff IDs only to its fresh IPC child', async t => {
+  const f = await fixture(t, true), key = randomBytes(32), controller = new AbortController();
+  const vault = await LocalVault.open({root: resolve(f.root, 'vault'), masterKey: key});
+  let child: ChildProcess | undefined, statusCalls = 0, observed: unknown;
+  const launches: Array<{argv: string[]; options: Record<string, unknown>}> = [];
+  let received!: () => void;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const receipt = new Promise<void>((done, fail) => {received = () => {clearTimeout(timer); done();};
+    timer = setTimeout(() => fail(new Error('synthetic_ipc_receipt_timeout')), 5000);});
+  void receipt.catch(() => {});
+  t.after(async () => {clearTimeout(timer); controller.abort(); if (child) await watchOwnedChild(child).stop({graceMs: 1000});
+    vault.close(); key.fill(0); await rm(f.root, {recursive: true, force: true});});
+  const claim = vault.claimCodexSetupOperation(f.request.operationId, digest);
+  assert.equal(claim.state, 'acquired'); if (claim.state !== 'acquired') throw new Error('synthetic_claim_missing');
+  vault.stageCodexSetupSession(claim.leaseId, digest, f.request);
+  const session = await declaration('namedSessionCommand', {...f.dependencies,
+    currentBootstrapHostScope: () => undefined, currentAcceptedSetupSessionScope, assertBootstrapHostSource,
+    namedSessionPaths: () => ({root: resolve(f.root, 'sessions')}), sendCodexSetupChildStart,
+    required: (flags: Map<string, unknown>, name: string) => flags.get(name),
+    process: {platform: 'linux', execPath: process.execPath, env: {}}, fileURLToPath: () => '/synthetic/index.js',
+    verifyAgentFabricSkillInstallation: async () => ({}), repositorySharedReady: async () => true,
+    verifyNamedSessionVisibleSkill: async () => {}, setTimeout,
+    spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
+      launches.push({argv, options});
+      child = spawn(process.execPath, ['-e', 'process.on("message", value => process.send(value));'],
+        {cwd: f.root, stdio: ['ignore', 'ignore', 'ignore', 'ipc']});
+      child.once('message', value => {observed = value; received();});
+      return child;
+    }, namedSessionRequest: async () => {
+      if (++statusCalls === 1) throw new Error('synthetic-not-running');
+      await receipt;
+      return {ok: true, ...f.request, bindingId: uuid(40), sessionId: 'synthetic-session'};
+    }});
+  const owner = createNamedSessionChildOwner(controller.signal);
+  await owner.run(async () => {
+    await consumeCodexSetupSessions({vault, owner, signal: controller.signal, authorize: async () => true,
+      start: async scope => {
+        const result = await session('start', new Map<string, string | boolean>([
+          ['name', scope.request.name], ['workspace-id', scope.request.workspaceId], ['apply', true]]));
+        assert.equal(result.ok, true);
+        assert.equal(owner.ownedPid(scope.request.name), child?.pid);
+        return {state: 'started', bindingId: uuid(40), sessionId: 'synthetic-session', sessionPid: child!.pid!,
+          supervisorPid: process.pid, sessionStartTicks: '30', supervisorStartTicks: '20'};
+      }});
+    assert.deepEqual(observed, {schema: 'dharma.codex-setup-child-start/v1',
+      operationId: f.request.operationId, intentDigest: digest});
+    assert.equal(launches.length, 1);
+    assert.deepEqual(launches[0]!.argv, ['/synthetic/index.js', 'sessions', 'serve', '--name', f.request.name,
+      '--workspace-id', f.request.workspaceId, '--apply', '--setup-handoff']);
+    assert.equal(launches[0]!.options.detached, false);
+    assert.deepEqual(launches[0]!.options.stdio, ['ignore', 'ignore', 'ignore', 'ipc']);
+    assert.equal(child!.exitCode, null);
+  });
+  assert.ok(child!.exitCode !== null || child!.signalCode !== null);
+  assert.equal(vault.readCodexSetupSession(f.request.operationId, digest)?.result?.state, 'started');
 });
 
 test('actual original sender stages and verifies the standing result without reentering context or spawning a child', async t => {

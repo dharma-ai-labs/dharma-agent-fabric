@@ -9,6 +9,7 @@ const owners = new WeakMap<ChildProcess, NamedSessionChildOwner>();
 export interface NamedSessionChildOwner {
   run<T>(operation: () => Promise<T>): Promise<T>;
   assert(): void;
+  assertCaptured(name: string, child: ChildProcess): void;
   ownedPid(name: string): number | null;
   checkpoint(name: string): Readonly<{stopFresh(): Promise<void>}>;
   spawn(name: string, operation: () => ChildProcess): Promise<ChildProcess>;
@@ -32,6 +33,12 @@ export function createNamedSessionChildOwner(signal: AbortSignal): NamedSessionC
   };
   const owner: NamedSessionChildOwner = {
     assert: assertDispatch,
+    assertCaptured(name, child) {
+      assertDispatch();
+      const entry = children.get(name);
+      if (!entry || entry.child !== child || owners.get(child) !== owner || entry.lifecycle.stopped
+        || entry.lifecycle.failed || entry.stopping) throw new Error('named_session_child_owner_unavailable');
+    },
     checkpoint(name) {
       assertDispatch();
       if (!/^[a-z][a-z0-9-]{0,47}$/.test(name)) throw new Error('named_session_child_owner_conflict');

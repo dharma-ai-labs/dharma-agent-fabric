@@ -135,10 +135,49 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   };
   const observe = await declaration('observeCodexBootstrapRuntime', dependencies) as (
     p: typeof prepared, v: {getProviderSessionBinding(): Promise<typeof binding | null>},
-    first: LocalCodexSetupReadiness['firstLearning']) => Promise<LocalCodexSetupReadiness>;
-  const providerVault = {getProviderSessionBinding: async () => binding};
+    first: LocalCodexSetupReadiness['firstLearning'], intentDigest?: string) => Promise<LocalCodexSetupReadiness>;
+  let handoffEnabled = false;
+  const handoff = {state: 'accepted', request: {...identity, setupReference: prepared.intent.setupReference,
+    workspaceRoot: root, name, repositoryFingerprint: hash, policyRevision: policy.revision,
+    scopeDigest: hash, contractDigest: hash}, result: {state: 'started', bindingId: binding.bindingId,
+    sessionId: binding.sessionId, sessionPid: 103, supervisorPid: 101, sessionStartTicks: '30', supervisorStartTicks: '10'}};
+  const providerVault = {getProviderSessionBinding: async () => binding,
+    readCodexSetupSession: async (operation: string, digest: string) => {
+      assert.equal(operation, prepared.intent.operationId); assert.equal(digest, hash);
+      return handoffEnabled ? handoff : null;
+    }};
   return {prepared, vault, observe, providerVault, calls, paths, mutations, row, profile, binding, native, remote,
-    content, startup, startupState, policy, supervisor, poll, processes, dependencies};
+    content, startup, startupState, policy, supervisor, poll, processes, dependencies, handoff,
+    enableHandoff: () => {handoffEnabled = true; processes[2]!.argv.push('--setup-handoff');}};
+}
+
+test('actual CLI producer joins the IPC-started child to its exact encrypted handoff result', async t => {
+  const f = await fixture(t); f.enableHandoff();
+  assert.equal((await f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash)).sessionId, f.binding.sessionId);
+});
+
+for (const change of ['absent', 'digest', 'member', 'device', 'repository', 'endpoint', 'source', 'scope', 'contract',
+  'binding', 'session', 'child', 'child-creation', 'supervisor', 'supervisor-creation', 'result', 'args'] as const) {
+  test(`actual CLI producer rejects IPC handoff ${change}`, async t => {
+    const f = await fixture(t); if (change !== 'absent') f.enableHandoff();
+    if (change === 'member') f.handoff.request.membershipId = id(99);
+    if (change === 'device') f.handoff.request.deviceId = id(99);
+    if (change === 'repository') f.handoff.request.repositoryBindingId = id(99);
+    if (change === 'endpoint') f.handoff.request.endpointId = id(99);
+    if (change === 'source') f.handoff.request.repositoryFingerprint = `sha256:${'b'.repeat(64)}`;
+    if (change === 'scope') f.handoff.request.scopeDigest = `sha256:${'b'.repeat(64)}`;
+    if (change === 'contract') f.handoff.request.contractDigest = `sha256:${'b'.repeat(64)}`;
+    if (change === 'binding') f.handoff.result.bindingId = id(99);
+    if (change === 'session') f.handoff.result.sessionId = 'foreign-session';
+    if (change === 'child') f.handoff.result.sessionPid = 999;
+    if (change === 'child-creation') f.handoff.result.sessionStartTicks = '31';
+    if (change === 'supervisor') f.handoff.result.supervisorPid = 999;
+    if (change === 'supervisor-creation') f.handoff.result.supervisorStartTicks = '11';
+    if (change === 'result') f.handoff.result.state = 'unconfirmed';
+    if (change === 'args') f.processes[2]!.argv.push('--arbitrary');
+    await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history', change === 'digest' ? undefined : hash),
+      /setup_runtime_(?:session|process)_unconfirmed/);
+  });
 }
 
 async function siblingAnchor(f: Awaited<ReturnType<typeof fixture>>) {

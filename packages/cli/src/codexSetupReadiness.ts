@@ -14,7 +14,7 @@ type Store = Pick<ScopedLocalVault, 'recordCodexSetupReadiness' | 'getCodexSetup
 export function createCodexSetupReadinessOwner(input: {
   intent: CodexSetupIntent; workspace: string; scope: BootstrapHostScope; vault: Store;
   observe(intent: Readonly<CodexSetupIntent>, scope: BootstrapHostScope,
-    retained?: Readonly<LocalCodexSetupReadiness>): Promise<LocalCodexSetupReadiness>;
+    retained?: Readonly<LocalCodexSetupReadiness>, intentDigest?: string): Promise<LocalCodexSetupReadiness>;
 }) {
   const {scope, vault, observe} = input;
   const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace: input.workspace,
@@ -51,7 +51,7 @@ export function createCodexSetupReadinessOwner(input: {
         throw new Error('setup_readiness_lease_invalid');
       }
       const leaseId = fields.leaseId!.value as string, intentDigest = fields.intentDigest!.value as string;
-      const observation = await scope.step(async () => bound(await observe(intent, scope), true));
+      const observation = await scope.step(async () => bound(await observe(intent, scope, undefined, intentDigest), true));
       const receipt = await scope.step(() => vault.recordCodexSetupReadiness(leaseId, intentDigest, observation));
       // Do not acknowledge a write solely from its return value.
       const persisted = await scope.step(() => vault.getCodexSetupReadiness(receipt.receiptId, intent.operationId, intentDigest));
@@ -68,7 +68,7 @@ export function createCodexSetupReadinessOwner(input: {
         // A durable receipt is historical evidence. Its age is not current
         // liveness; only the separately observed runtime must be recent.
         const retained = bound(receipt.observation, false);
-        const current = await scope.step(async () => bound(await observe(intent, scope, retained), true));
+        const current = await scope.step(async () => bound(await observe(intent, scope, retained, intentDigest), true));
         return stable(retained) === stable(current) && await scope.current();
       } catch {return false;}
     },

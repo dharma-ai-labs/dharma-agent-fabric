@@ -14,6 +14,7 @@ async function fixture(run: (f: {
   lease: {leaseId: string; intentDigest: string}; scope: ReturnType<typeof prepareCodexBootstrapHost>['scope'];
   value: LocalCodexSetupReadiness; observations(): number;
   retained(): Readonly<LocalCodexSetupReadiness> | undefined;
+  observedDigests(): Array<string | undefined>;
 }) => Promise<void>) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-readiness-owner-')), now = Date.now();
   const prepared = prepareCodexBootstrapHost({workspace: root, signal: new AbortController().signal, current: async () => true,
@@ -34,10 +35,11 @@ async function fixture(run: (f: {
     const claim = await vault.claimCodexSetupOperation(id(1), hash);
     if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
     let observations = 0, retained: Readonly<LocalCodexSetupReadiness> | undefined;
+    const observedDigests: Array<string | undefined> = [];
     const owner = createCodexSetupReadinessOwner({intent: prepared.intent, workspace: root, scope: prepared.scope, vault,
-      observe: async (_intent, _scope, historical) => {observations++; retained = historical; return {...value};}});
+      observe: async (_intent, _scope, historical, digest) => {observations++; retained = historical; observedDigests.push(digest); return {...value};}});
     await run({owner, intent: prepared.intent, lease: {leaseId: claim.leaseId, intentDigest: hash}, scope: prepared.scope,
-      value, observations: () => observations, retained: () => retained});
+      value, observations: () => observations, retained: () => retained, observedDigests: () => [...observedDigests]});
   } finally {prepared.scope.close(); await vault.close(); await rm(root, {recursive: true, force: true});}
 }
 
@@ -52,6 +54,14 @@ test('owner persists a real receipt and verifies it by a separate fresh observat
     assert.equal(f.retained()!.firstLearning, 'no_eligible_history');
     assert.equal(await f.owner.verify(id(99), f.intent, hash), false);
     assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, `sha256:${'b'.repeat(64)}`), false);
+  });
+});
+
+test('readiness observer receives the exact original digest on record and independent verification', async () => {
+  await fixture(async f => {
+    const result = await f.owner.record(f.lease);
+    assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), true);
+    assert.deepEqual(f.observedDigests(), [hash, hash]);
   });
 });
 

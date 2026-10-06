@@ -107,6 +107,8 @@ import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
   originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
+import {receiveCodexSetupChildStart, runCodexSetupChildStartup, sendCodexSetupChildStart,
+  type CodexSetupChildMessage, type CodexSetupChildScope} from './codexSetupChildStartup.js';
 import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
 // Trusted runtime composition only; these exports do not enable effectful setup.
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
@@ -2277,10 +2279,14 @@ async function superviseNamedSessions(signal: AbortSignal) {
 /** Standing owner rechecks the exact approved source/device without adopting
  * a caller PID, changing enrollment or contacting another member's device. */
 async function qualifyCodexSetupSessionRequest(request: Readonly<LocalCodexSetupSessionRequest>): Promise<boolean> {
+  const owner = currentNamedSessionChildOwner(); if (!owner) return false;
+  try {owner.assert(); const qualified = await qualifyCodexSetupSessionSource(request); owner.assert(); return qualified;}
+  catch {return false;}
+}
+
+async function qualifyCodexSetupSessionSource(request: Readonly<LocalCodexSetupSessionRequest>): Promise<boolean> {
   try {
     if (process.platform !== 'linux' || request.maximumCostCents !== 1000 || request.maximumTurnCostCents !== 25) return false;
-    const owner = currentNamedSessionChildOwner(); if (!owner) return false;
-    owner.assert();
     const config = await readDeviceConfig();
     if (!config || config.deviceId !== request.deviceId || config.organizationId !== request.organizationId
       || normalizeHqUrl(config.hqUrl) !== request.origin || config.setupClaimReference !== request.setupReference
@@ -2310,8 +2316,18 @@ async function qualifyCodexSetupSessionRequest(request: Readonly<LocalCodexSetup
     if (existing && (existing.identity.membershipId !== request.membershipId || existing.identity.deviceId !== request.deviceId
       || existing.identity.organizationId !== request.organizationId || existing.identity.workspaceId !== request.workspaceId
       || existing.identity.repositoryBindingId !== request.repositoryBindingId || existing.identity.endpointId !== request.endpointId)) return false;
-    owner.assert();
     return Date.parse(request.issuedAt) <= Date.now() && Date.now() < Date.parse(request.expiresAt);
+  } catch {return false;}
+}
+
+async function qualifyCodexSetupChildRequest(request: Readonly<LocalCodexSetupSessionRequest>) {
+  try {
+    if (!await qualifyCodexSetupSessionSource(request)) return false;
+    const startup = await inspectOwnedRelayAutostart({home: dharmaHome()});
+    const parent = await readContainerProcessIdentity(process.ppid);
+    return ['systemd-user', 'container-entrypoint'].includes(startup.backend) && startup.version === VERSION
+      && parent.uid === process.getuid!() && canonicalize(parent.argv) === canonicalize([
+        process.execPath, fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', startup.policy]);
   } catch {return false;}
 }
 
@@ -2501,7 +2517,7 @@ async function readBootstrapRuntimeJson(path: string, scope: BootstrapHostScope)
 
 /** Actual scoped runtime readback. No callback-supplied ready flag or receipt ID. */
 async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope; intent: Readonly<CodexSetupIntent>;
-  flags: Map<string, string | boolean>}, vault: CodexCompletionVault, firstLearning: LocalCodexSetupReadiness['firstLearning']) {
+  flags: Map<string, string | boolean>}, vault: CodexCompletionVault, firstLearning: LocalCodexSetupReadiness['firstLearning'], intentDigest?: string) {
   const {scope, intent} = prepared, workspace = String(prepared.flags.get('workspace'));
   const step = <T>(operation: () => Promise<T>) => scope.step(operation);
   await scope.assert();
@@ -2613,9 +2629,25 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     [process.execPath, entry, 'relay', 'start', '--policy', startup.policy],
     [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
   if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
-    || canonicalize(value.argv) !== canonicalize(argv[i])) || processes[1]!.parentPid !== supervisorPid
+    || canonicalize(value.argv) !== canonicalize(argv[i])
+      && (i !== 2 || canonicalize(value.argv) !== canonicalize([...argv[i]!, '--setup-handoff']))) || processes[1]!.parentPid !== supervisorPid
     || processes[2]!.parentPid !== supervisorPid) {
     throw new Error('setup_runtime_process_unconfirmed');
+  }
+  if (intentDigest !== undefined || processes[2]!.argv.includes('--setup-handoff')) {
+    if (!intentDigest || !/^sha256:[a-f0-9]{64}$(?![\s\S])/.test(intentDigest)) throw new Error('setup_runtime_session_unconfirmed');
+    const handoff = await step(() => vault.readCodexSetupSession(intent.operationId, intentDigest));
+    const request = handoff?.request, result = handoff?.result;
+    if (handoff?.state !== 'accepted' || !request || result?.state !== 'started'
+      || request.setupReference !== intent.setupReference || request.membershipId !== intent.recipientMembershipId
+      || request.organizationId !== intent.organizationId || request.deviceId !== config.deviceId
+      || request.workspaceId !== item.workspaceId || request.workspaceRoot !== workspace || request.name !== name
+      || request.repositoryBindingId !== roleScope.repositoryBindingId || request.endpointId !== roleScope.endpointId
+      || request.repositoryFingerprint !== intent.repositoryFingerprint || request.policyRevision !== intent.policyRevision
+      || request.scopeDigest !== intent.scopeDigest || request.contractDigest !== intent.contractDigest
+      || result.bindingId !== binding.bindingId || result.sessionId !== binding.sessionId || result.sessionPid !== sessionPid
+      || result.supervisorPid !== supervisorPid || result.sessionStartTicks !== processes[2]!.startTicks
+      || result.supervisorStartTicks !== processes[0]!.startTicks) throw new Error('setup_runtime_session_unconfirmed');
   }
   const supervisor = await readBootstrapRuntimeJson(resolve(home, 'relay', 'supervisor-workspace.json'), scope) as Record<string, unknown>;
   if (supervisor.pid !== supervisorPid || supervisor.organizationId !== intent.organizationId || supervisor.deviceId !== config.deviceId
@@ -2670,11 +2702,11 @@ export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostSc
   let firstLearning: LocalCodexSetupReadiness['firstLearning'] | undefined;
   const readiness = createCodexSetupReadinessOwner({intent: prepared.intent,
     workspace: String(prepared.flags.get('workspace')), scope, vault,
-    observe: async (_intent, _scope, retained) => {
+    observe: async (_intent, _scope, retained, intentDigest) => {
       const disposition = firstLearning ?? retained?.firstLearning;
       if (!disposition) throw new Error('setup_runtime_first_learning_unconfirmed');
       // Keep the original execution's disposition; reobserve all live state.
-      return runCodexBootstrapHostScope(scope, current => observeCodexBootstrapRuntime(current, vault, disposition));
+      return runCodexBootstrapHostScope(scope, current => observeCodexBootstrapRuntime(current, vault, disposition, intentDigest));
     }});
   return Object.freeze({
     execute: async (lease: Readonly<CodexSetupExecutionLease>) => {
@@ -4518,6 +4550,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   const paths = namedSessionPaths(dharmaHome(), name);
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
   const workspaceId = required(flags, 'workspace-id');
+  let childMessage: Readonly<CodexSetupChildMessage> | undefined;
+  if (flags.has('setup-handoff')) {
+    if (action !== 'serve' || flags.get('setup-handoff') !== true
+      || [...flags.keys()].some(key => !['name', 'workspace-id', 'apply', 'setup-handoff'].includes(key))) {
+      throw new Error('setup_child_unavailable');
+    }
+    childMessage = await receiveCodexSetupChildStart({process, signal: new AbortController().signal});
+  }
   const item = (await step(() => registry())).find(row => row.workspaceId === workspaceId);
   const config = await step(() => readDeviceConfig());
   if (!item || !config || item.organizationId !== config.organizationId) throw new Error('named_session_scope_mismatch');
@@ -4566,39 +4606,52 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Start an owned worker below. */ }
     const args = [fileURLToPath(import.meta.url), 'sessions', 'serve', '--name', name,
       '--workspace-id', workspaceId, '--apply'];
+    if (setupSessionScope) args.push('--setup-handoff');
     for (const key of ['session-budget-cents', 'turn-budget-cents']) {
       if (flags.has(key)) args.push(`--${key}`, required(flags, key));
     }
     await step(async () => {
-      const start = () => spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner, stdio: 'ignore', env: process.env });
-      if (supervisorOwner) {await supervisorOwner.spawn(name, start); return;}
+      const start = () => spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
+        stdio: setupSessionScope ? ['ignore', 'ignore', 'ignore', 'ipc'] : 'ignore', env: process.env });
+      if (supervisorOwner) {
+        const child = await supervisorOwner.spawn(name, start);
+        if (setupSessionScope) await sendCodexSetupChildStart({owner: supervisorOwner, child, scope: setupSessionScope});
+        return;
+      }
       const child = start();
       if (hostScope) captureBootstrapHostChild(hostScope, child);
       else {child.on('error', () => {}); child.unref();}
     });
     for (let attempt = 0; attempt < 80; attempt++) {
-      await new Promise(resolveWait => setTimeout(resolveWait, 250));
+      await step(() => new Promise<void>(resolveWait => setTimeout(resolveWait, 250)));
       await hostScope?.assert();
       try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Await service initialization. */ }
     }
     throw new Error('named_session_startup_failed');
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
-  const releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
   const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
+  let releaseLock: (() => Promise<void>) | undefined;
   const controller = new AbortController(), stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  if (childMessage) process.once('disconnect', stop);
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
   try {
-    const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json'),
-      hostScope: currentBootstrapHostScope() });
+    releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
+    const startProvider = async (childScope?: CodexSetupChildScope) => {
+    const startupStep = <T>(operation: () => Promise<T>) => childScope ? childScope.step(operation) : operation();
+    if (childScope && existing && existing.identity.membershipId !== childScope.request.membershipId) {
+      throw new Error('setup_child_unavailable');
+    }
+    const fabric = await startupStep(() => AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json'),
+      hostScope: currentBootstrapHostScope() }));
     if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
       || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
     const trust = createNamedSessionTrust({ configPath: configPath(), identity: fabric.config });
-    await trust.refresh();
-    await fabric.openSession(VERSION);
+    await startupStep(() => trust.refresh());
+    await startupStep(() => fabric.openSession(VERSION));
     const policyPath = resolve(item.path, '.dharma', 'approved-policy.json');
-    const policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
+    const policy = await startupStep(() => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric));
     const writeRoots = policy.tasks.writePaths.filter(path => /^[a-zA-Z0-9_-]+\/\*\*$/.test(path))
       .map(path => path.slice(0, -3));
     if (!writeRoots.length) throw new Error('named_session_workspace_write_not_authorized');
@@ -4606,7 +4659,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const privateRoots = [dharmaHome(), resolve(environment.CODEX_HOME || resolve(homedir(), '.codex'))];
     if (environment.XDG_RUNTIME_DIR) privateRoots.push(environment.XDG_RUNTIME_DIR);
     if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
-    const filesystem = await namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots });
+    const filesystem = await startupStep(() => namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots }));
+    await startupStep(async () => {
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
       environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
       argv: ['-c', 'default_permissions="dharma_bridge"',
@@ -4614,38 +4668,47 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         '-c', 'permissions.dharma_bridge.network={enabled=false}',
         '-c', `permissions.dharma_work.filesystem=${filesystem.work}`,
         '-c', 'permissions.dharma_work.network={enabled=false}', 'app-server'] });
-    const account = await transport.request('account/read', { refreshToken: false }) as { account?: unknown };
+    return transport;
+    });
+    const account = await startupStep(() => transport!.request('account/read', { refreshToken: false })) as { account?: unknown };
     if (!account.account) throw new Error('named_session_provider_authentication_required');
     let registration = existing;
     if (!registration) {
       const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
       const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
-      const threadId = await startNamedCodexThread(transport, item.path, name);
       const bindingId = randomUUID();
-      const response = await fabric.signedPost('/agent-fabric/provider-sessions', {
+      const response = await startupStep(() => fabric.signedPost('/agent-fabric/provider-sessions', {
         schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
         workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
         bindingId, expectedRevision: 0, leaseSeconds: 60,
-      });
+      }));
       const remote = response.registration as Record<string, unknown> | undefined;
       if (response.ok !== true || response.organizationId !== config.organizationId || !remote
         || remote.bindingId !== bindingId || remote.workspaceId !== workspaceId || remote.endpointId !== scope.endpointId
         || remote.repositoryBindingId !== scope.repositoryBindingId || remote.deviceId !== config.deviceId
-        || !UUID_PATTERN.test(String(remote.membershipId)) || remote.provider !== 'codex'
+        || !UUID_PATTERN.test(String(remote.membershipId)) || childScope && remote.membershipId !== childScope.request.membershipId
+        || remote.provider !== 'codex'
         || remote.mode !== 'bridge_owned' || remote.state !== 'attached' || remote.revision !== 1) {
         throw new Error('named_session_registration_invalid');
       }
       const identity = { organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
         workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
         provider: 'codex' as const };
-      await vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
+      const threadId = await startupStep(() => startNamedCodexThread(transport!, item.path, name));
+      await startupStep(async () => vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
         bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
-        maximumProviderCostCents: maximumTurnCostCents });
+        maximumProviderCostCents: maximumTurnCostCents }));
       registration = { schema: 'dharma.named-session/v1', name, bindingId, identity,
         maximumCostCents, maximumTurnCostCents, enabled: true };
-      await saveNamedSession(dharmaHome(), registration);
+      await startupStep(async () => saveNamedSession(dharmaHome(), registration!));
     }
+    return {registration: registration!, filesystem, fabric, trust, policyPath, writeRoots};
+    };
+    const {registration, filesystem, fabric, trust, policyPath, writeRoots} = childMessage
+      ? await runCodexSetupChildStartup({vault: vault as LocalVault, message: childMessage, name, workspaceId,
+        signal: controller.signal, authorize: qualifyCodexSetupChildRequest}, startProvider)
+      : await startProvider();
     const authorizeLifetime = async () => {
       const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
       if (!writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`))) return false;
@@ -4783,7 +4846,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     try { if (transport) await transport.close(); }
     finally {
       try {await vault.close();}
-      finally {await releaseLock(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);}
+      finally {await releaseLock?.(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
+        if (childMessage) process.removeListener('disconnect', stop);}
     }
   }
 }
