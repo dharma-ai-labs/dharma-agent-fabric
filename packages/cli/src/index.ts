@@ -2781,6 +2781,57 @@ export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof
   } finally {prepared.scope.close();}
 }
 
+/** Prepared controller ingress for the portal's public command, never a shell evaluator. */
+export async function openCodexBootstrapFromPortalCommand(input: Parameters<typeof openCodexBootstrapNativeHost>[0]
+  & {portalArgs: readonly string[]}) {
+  if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
+  const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail} = input;
+  if (!Array.isArray(input.portalArgs) || input.portalArgs.length > 64) {
+    throw new Error('codex_setup_portal_command_mismatch');
+  }
+  const args = [...input.portalArgs];
+  if (args.some(value => typeof value !== 'string' || value.length > 4096 || /[\u0000-\u001f\u007f]/.test(value))) {
+    throw new Error('codex_setup_portal_command_mismatch');
+  }
+  const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace, signal, current});
+  try {
+    const parsed = parseCliOptions(args);
+    const expected = prepared.flags;
+    const allowed = new Set([...expected.keys(), 'repository-url-base64url']);
+    if (parsed.positional.length !== 1 || parsed.positional[0] !== 'bootstrap'
+      || [...parsed.flags.keys()].some(key => !allowed.has(key))
+      || [...parsed.repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('codex_setup_portal_command_mismatch');
+    }
+    for (const [key, value] of expected) {
+      const supplied = parsed.flags.get(key);
+      if (key === 'workspace') {
+        if (supplied !== undefined && (typeof supplied !== 'string' || resolve(workspace, supplied) !== workspace)) {
+          throw new Error('codex_setup_portal_command_mismatch');
+        }
+      } else if (key === 'provider') {
+        if (supplied !== undefined && supplied !== 'auto' && supplied !== 'codex') throw new Error('codex_setup_portal_command_mismatch');
+      } else if (supplied !== value) throw new Error('codex_setup_portal_command_mismatch');
+    }
+    const selected = parsed.flags.get('repository-url-base64url');
+    if (selected !== undefined) {
+      if (typeof selected !== 'string' || !/^[A-Za-z0-9_-]+$/.test(selected)) throw new Error('codex_setup_portal_command_mismatch');
+      const bytes = Buffer.from(selected, 'base64url'), decoded = bytes.toString('utf8');
+      let url: URL, fingerprint: string;
+      try {url = new URL(decoded); fingerprint = sourceRepositoryFingerprint(decoded).fingerprint;}
+      catch {throw new Error('codex_setup_portal_command_mismatch');}
+      if (bytes.toString('base64url') !== selected || !Buffer.from(decoded, 'utf8').equals(bytes)
+        || /[\u0000-\u0020\u007f]/.test(decoded) || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+        || fingerprint !== prepared.intent.repositoryFingerprint) {
+        throw new Error('codex_setup_portal_command_mismatch');
+      }
+    }
+    await prepared.scope.assert();
+    return await openCodexBootstrapNativeHost({workspace, name, signal, current, reserve, maximumProviderCostCents,
+      expectedAccountEmail, intent: prepared.intent});
+  } finally {prepared.scope.close();}
+}
+
 /** Official native-host composition. The caller supplies its already owned
  * transport and qualification, never a vault, executor or readiness callback. */
 export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeof startCodexSetupNativeHost>[0],
