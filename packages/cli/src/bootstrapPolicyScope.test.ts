@@ -41,7 +41,11 @@ async function callers(root: string, overrides: Record<string, unknown> = {}) {
   assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${output.outputText}\n({${names.join(',')}})`, {...fs, dirname, resolve, createHash, randomUUID,
     Buffer, process, Date, setTimeout, structuredClone, exports: {}, currentBootstrapHostScope,
-    writeBootstrapHostJson, pathExistsOrThrow, assertPolicy, loadOrganizationPolicy, applyServerEvidencePolicy,
+    // VM literals belong to another realm; production callers and the writer
+    // share a realm. Bridge fixture values without replacing actual file IO.
+    writeBootstrapHostJson: (path: string, value: unknown, scope: Parameters<typeof writeBootstrapHostJson>[2]) =>
+      writeBootstrapHostJson(path, structuredClone(value), scope),
+    pathExistsOrThrow, assertPolicy, loadOrganizationPolicy, applyServerEvidencePolicy,
     dharmaHome: () => root, evidenceUploadLedgerPath: () => resolve(root, 'relay', 'evidence-upload-ledger.json'),
     ...overrides}, {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as Record<string, (...args: any[]) => Promise<any>>;
 }
@@ -219,7 +223,7 @@ test('policy activation scope preserves partial replay evidence but denies the n
   const original = await fs.readFile(f.policyPath, 'utf8');
   await assert.rejects(runCodexBootstrapHost(f.input, async ({scope}) => {
     const bound = await callers(f.root, {writeBootstrapHostJson: async (...args: Parameters<typeof writeBootstrapHostJson>) => {
-      await writeBootstrapHostJson(...args);
+      await writeBootstrapHostJson(args[0], structuredClone(args[1]), args[2]);
       if (args[0].includes('workspace-authorizations')) scope.close();
     }});
     await bound.materializeWorkspacePolicy!({workspace: f.root, organizationId: 'org_demo', revision: 'local',

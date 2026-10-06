@@ -19,7 +19,7 @@ async function fixture(run: (f: {
     intent: {schema: 'dharma.codex-setup-intent/v1', operationId: id(1), setupReference: id(2),
       organizationId: 'org_demo', recipientMembershipId: id(3), origin: 'https://hq.example',
       repositoryFingerprint: hash, policyRevision: 'policy-v1', scopeDigest: hash, contractDigest: hash,
-      hostContextId: id(4), issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()}});
+      hostContextId: id(4), issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 600_000).toISOString()}});
   const value: LocalCodexSetupReadiness = {schema: 'dharma.local-codex-setup-readiness/v1',
     operationId: id(1), organizationId: 'org_demo', membershipId: id(3), deviceId: id(5), workspaceId: id(6),
     repositoryBindingId: id(7), repositoryAgentId: id(8), endpointId: id(9), sessionBindingId: id(10), sessionId: 'synthetic_session',
@@ -103,5 +103,36 @@ test('lease accessors are denied before observation or secret-bearing serializat
     await assert.rejects(f.owner.record({get leaseId() {getters++; return f.lease.leaseId;}, intentDigest: hash}),
       /setup_readiness_lease_invalid/);
     assert.equal(getters, 0); assert.equal(f.observations(), 0);
+  });
+});
+
+test('historical receipt requires fresh current state, not a newly written receipt', async t => {
+  t.mock.timers.enable({apis: ['Date'], now: Date.now()});
+  await fixture(async f => {
+    const result = await f.owner.record(f.lease);
+    t.mock.timers.tick(90_000);
+    // Stale current observation is still denied, even with a genuine receipt.
+    assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), false);
+    Object.assign(f.value, {verifiedAt: new Date().toISOString(), relayPolledAt: new Date().toISOString()});
+    assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), true);
+    // The original durable receipt is unchanged and idempotently reused.
+    t.mock.timers.tick(510_000);
+    Object.assign(f.value, {verifiedAt: new Date().toISOString(), relayPolledAt: new Date().toISOString()});
+    assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), false);
+  });
+});
+
+test('historical receipt never admits a changed current binding after recovery delay', async t => {
+  t.mock.timers.enable({apis: ['Date'], now: Date.now()});
+  await fixture(async f => {
+    const result = await f.owner.record(f.lease), original = {...f.value};
+    t.mock.timers.tick(90_000);
+    for (const delta of [{deviceId: id(30)}, {sessionId: 'foreign_session'}, {relayPid: 456},
+      {manifestHash: `sha256:${'b'.repeat(64)}`}, {catalogHash: `sha256:${'b'.repeat(64)}`}, {roleRevision: 2}]) {
+      Object.assign(f.value, original, delta, {verifiedAt: new Date().toISOString(), relayPolledAt: new Date().toISOString()});
+      assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), false);
+    }
+    Object.assign(f.value, original, {verifiedAt: new Date().toISOString(), relayPolledAt: new Date().toISOString()});
+    assert.equal(await f.owner.verify(result.readinessReceiptId, f.intent, hash), true);
   });
 });

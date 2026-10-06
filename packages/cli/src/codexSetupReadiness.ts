@@ -22,13 +22,13 @@ export function createCodexSetupReadinessOwner(input: {
   // no independent operation or authority.
   prepared.scope.close();
   const sameIntent = (value: Readonly<CodexSetupIntent>) => canonicalize(value) === canonicalize(intent);
-  const fresh = (raw: unknown) => {
+  const bound = (raw: unknown, requireRecent: boolean) => {
     const value = parseLocalCodexSetupReadiness(raw), now = Date.now();
     if (value.operationId !== intent.operationId || value.organizationId !== intent.organizationId
       || value.membershipId !== intent.recipientMembershipId || value.repositoryFingerprint !== intent.repositoryFingerprint
       || value.policyRevision !== intent.policyRevision || value.contractDigest !== intent.contractDigest
       || Date.parse(value.verifiedAt) < Date.parse(intent.issuedAt)
-      || Date.parse(value.verifiedAt) > now || now - Date.parse(value.verifiedAt) > 60_000
+      || Date.parse(value.verifiedAt) > now || requireRecent && now - Date.parse(value.verifiedAt) > 60_000
       || Date.parse(value.expiresAt) > Date.parse(intent.expiresAt) || now >= Date.parse(value.expiresAt)) {
       throw new Error('setup_readiness_context_unconfirmed');
     }
@@ -49,7 +49,7 @@ export function createCodexSetupReadinessOwner(input: {
         throw new Error('setup_readiness_lease_invalid');
       }
       const leaseId = fields.leaseId!.value as string, intentDigest = fields.intentDigest!.value as string;
-      const observation = fresh(await scope.step(() => observe(intent, scope)));
+      const observation = await scope.step(async () => bound(await observe(intent, scope), true));
       const receipt = await scope.step(() => vault.recordCodexSetupReadiness(leaseId, intentDigest, observation));
       // Do not acknowledge a write solely from its return value.
       const persisted = await scope.step(() => vault.getCodexSetupReadiness(receipt.receiptId, intent.operationId, intentDigest));
@@ -63,8 +63,10 @@ export function createCodexSetupReadinessOwner(input: {
         if (!sameIntent(requested)) return false;
         const receipt = await scope.step(() => vault.getCodexSetupReadiness(receiptId, intent.operationId, intentDigest));
         if (!receipt) return false;
-        const retained = fresh(receipt.observation);
-        const current = fresh(await scope.step(() => observe(intent, scope)));
+        // A durable receipt is historical evidence. Its age is not current
+        // liveness; only the separately observed runtime must be recent.
+        const retained = bound(receipt.observation, false);
+        const current = await scope.step(async () => bound(await observe(intent, scope), true));
         return stable(retained) === stable(current) && await scope.current();
       } catch {return false;}
     },
