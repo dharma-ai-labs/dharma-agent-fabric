@@ -8,6 +8,9 @@ const owners = new WeakMap<ChildProcess, NamedSessionChildOwner>();
 
 export interface NamedSessionChildOwner {
   run<T>(operation: () => Promise<T>): Promise<T>;
+  assert(): void;
+  ownedPid(name: string): number | null;
+  checkpoint(name: string): Readonly<{stopFresh(): Promise<void>}>;
   spawn(name: string, operation: () => ChildProcess): Promise<ChildProcess>;
   close(): Promise<void>;
 }
@@ -28,6 +31,24 @@ export function createNamedSessionChildOwner(signal: AbortSignal): NamedSessionC
     }
   };
   const owner: NamedSessionChildOwner = {
+    assert: assertDispatch,
+    checkpoint(name) {
+      assertDispatch();
+      if (!/^[a-z][a-z0-9-]{0,47}$/.test(name)) throw new Error('named_session_child_owner_conflict');
+      const previous = children.get(name);
+      return Object.freeze({async stopFresh() {
+        const entry = children.get(name);
+        // Limited cooperative cleanup uses captured handles, never PID lookup.
+        // Preserve any child that preceded this request and all sibling names.
+        if (entry && entry !== previous) await stop(entry);
+      }});
+    },
+    ownedPid(name) {
+      assertDispatch();
+      const entry = children.get(name);
+      return entry && !entry.lifecycle.stopped && !entry.lifecycle.failed && !entry.stopping
+        && Number.isSafeInteger(entry.child.pid) ? entry.child.pid! : null;
+    },
     async run(operation) {
       if (context.getStore() || borrowed || !active || signal.aborted) throw new Error('named_session_child_owner_unavailable');
       borrowed = true;

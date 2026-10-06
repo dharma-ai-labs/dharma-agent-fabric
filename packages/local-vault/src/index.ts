@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
@@ -10,6 +10,11 @@ import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-red
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
 export {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
+import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult,
+  type LocalCodexSetupSessionRequest, type LocalCodexSetupSessionResult, type LocalCodexSetupSessionObservation,
+  type LocalCodexSetupSessionSubmission, type ScopedCodexSetupSessionSubmission, type LocalCodexSetupSessionAcceptance,
+  type ScopedCodexSetupSessionAcceptance} from './setupSessionHandoff.js';
+export * from './setupSessionHandoff.js';
 
 const BLOB_VERSION = 1;
 
@@ -21,7 +26,7 @@ export interface VaultOptions {
 
 type AsyncVaultMethods = {[K in keyof LocalVault as K extends 'root' | 'close' ? never : K]:
   LocalVault[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never};
-export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'getCapsule' | 'getTaskCompletionRecovery' | 'listPendingCapsuleSyncs' | 'tryAcquireProviderSessionLease'> & {
+export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'getCapsule' | 'getTaskCompletionRecovery' | 'listPendingCapsuleSyncs' | 'tryAcquireProviderSessionLease' | 'stageCodexSetupSession' | 'acceptCodexSetupSession'> & {
   readonly root: string;
   close(): Promise<void>;
   getLatestCapsule<T = Record<string, unknown>>(trajectoryId: string): Promise<T>;
@@ -30,6 +35,8 @@ export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'get
   listPendingCapsuleSyncs<T = Record<string, unknown>>(limit?: number, offset?: number):
     Promise<Array<{trajectoryId: string; revision: number; capsule: T}>>;
   tryAcquireProviderSessionLease(bindingId: string, expected: LocalProviderSessionIdentity): Promise<ScopedLocalProviderSessionLease | null>;
+  stageCodexSetupSession(leaseId: string, intentDigest: string, request: LocalCodexSetupSessionRequest): Promise<ScopedCodexSetupSessionSubmission>;
+  acceptCodexSetupSession(operationId: string, intentDigest: string, requestHash: string): Promise<ScopedCodexSetupSessionAcceptance | null>;
 };
 
 export interface VaultCaptureInput {
@@ -102,6 +109,26 @@ const SETUP_READINESS_SCHEMA = `create table if not exists codex_setup_readiness
   tag blob not null,
   ciphertext blob not null
 );`;
+const SETUP_SESSION_SCHEMA = `create table if not exists codex_setup_sessions (
+  operation_id text primary key,
+  intent_digest text not null,
+  sender_hash text not null,
+  request_hash text not null,
+  expires_at text not null,
+  state text not null check (state in ('pending', 'accepted', 'withdrawn')),
+  state_mac text not null,
+  acceptance_hash text,
+  request_nonce blob not null, request_tag blob not null, request_ciphertext blob not null,
+  result_nonce blob, result_tag blob, result_ciphertext blob,
+  check ((result_nonce is null and result_tag is null and result_ciphertext is null)
+    or (state = 'accepted' and result_nonce is not null and result_tag is not null and result_ciphertext is not null))
+);`;
+interface CodexSetupSessionRow {
+  operation_id: string; intent_digest: string; sender_hash: string; request_hash: string; expires_at: string;
+  state: 'pending' | 'accepted' | 'withdrawn'; state_mac: string; acceptance_hash: string | null;
+  request_nonce: Uint8Array; request_tag: Uint8Array; request_ciphertext: Uint8Array;
+  result_nonce: Uint8Array | null; result_tag: Uint8Array | null; result_ciphertext: Uint8Array | null;
+}
 
 export interface ScopedCodexSetupJournal {
   claimCodexSetupOperation(operationId: string, intentDigest: string): Promise<LocalCodexSetupClaim>;
@@ -269,6 +296,18 @@ export class LocalVault {
         }
         return enqueue(async () => {
           const result = await Reflect.apply(method, this, snapshot);
+          if (name === 'stageCodexSetupSession') {
+            const submission = result as LocalCodexSetupSessionSubmission;
+            return Object.freeze({withdraw: () => enqueueCleanup(submission.withdraw)});
+          }
+          if (name === 'acceptCodexSetupSession' && result !== null) {
+            const acceptance = result as LocalCodexSetupSessionAcceptance;
+            return Object.freeze({request: acceptance.request, record: (value: LocalCodexSetupSessionResult) => {
+              let captured: LocalCodexSetupSessionResult;
+              try {captured = snapshotVaultInput(value);} catch {return Promise.reject(new Error('vault_input_invalid'));}
+              return enqueue(async () => acceptance.record(captured));
+            }});
+          }
           if (name !== 'tryAcquireProviderSessionLease' || result === null) return result;
           const lease = result as LocalProviderSessionLease;
           return Object.freeze({assertHeld: () => enqueue(() => lease.assertHeld()),
@@ -445,6 +484,7 @@ export class LocalVault {
       );
       ${SETUP_JOURNAL_SCHEMA}
       ${SETUP_READINESS_SCHEMA}
+      ${SETUP_SESSION_SCHEMA}
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
@@ -845,6 +885,161 @@ export class LocalVault {
       if (!current || current.state !== 'terminal'
         || canonicalize(this.#decodeCodexSetupResult(current)) !== canonicalize(accepted)) throw new Error('setup_operation_conflict');
     }
+  }
+
+  stageCodexSetupSession(leaseId: string, intentDigest: string,
+    value: LocalCodexSetupSessionRequest): LocalCodexSetupSessionSubmission {
+    const request = parseLocalCodexSetupSessionRequest(value), now = Date.now();
+    if (typeof leaseId !== 'string' || !setupId.test(leaseId) || typeof intentDigest !== 'string'
+      || !setupDigest.test(intentDigest) || request.intentDigest !== intentDigest
+      || Date.parse(request.issuedAt) > now || Date.parse(request.expiresAt) <= now) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    const senderHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const operation = this.#database.prepare('select * from codex_setup_operations where lease_hash = ? and intent_digest = ?')
+      .get(senderHash, intentDigest) as unknown as CodexSetupRow | undefined;
+    if (!operation || operation.operation_id !== request.operationId || operation.state !== 'running') throw new Error('setup_operation_conflict');
+    const requestHash = sha256(canonicalize(request));
+    const withdraw = () => {
+      if (this.#databaseClosed || !this.#ownedLeases.has(withdraw)) return;
+      if (this.#databaseHandle.isTransaction) throw new Error('vault_cleanup_unconfirmed');
+      // Capture exact sender cleanup before the write; never undo acceptance.
+      const row = this.#databaseHandle.prepare(`select * from codex_setup_sessions
+        where operation_id = ? and intent_digest = ? and sender_hash = ? and request_hash = ?`)
+        .get(request.operationId, intentDigest, senderHash, requestHash) as unknown as CodexSetupSessionRow | undefined;
+      if (row) {
+        this.#decodeSetupSession(row);
+        if (row.state === 'pending') this.#databaseHandle.prepare(`update codex_setup_sessions set state = 'withdrawn', state_mac = ?
+          where operation_id = ? and intent_digest = ? and sender_hash = ? and request_hash = ? and state = 'pending' and state_mac = ?`)
+          .run(this.#setupSessionStateMac({...row, state: 'withdrawn'}), request.operationId, intentDigest, senderHash, requestHash, row.state_mac);
+      }
+      this.#ownedLeases.delete(withdraw); this.#fence.signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {try {withdraw();} catch { /* Retain exact cleanup ownership for close retry. */ }};
+    this.#ownedLeases.add(withdraw); this.#fence.signal?.addEventListener('abort', abort, {once: true});
+    if (this.#fence.signal?.aborted) withdraw();
+    this.#fence.assertSync();
+    const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    cipher.setAAD(Buffer.from(`setup-session-request:${request.operationId}:${intentDigest}:${requestHash}`));
+    const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(request))), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const stateMac = this.#setupSessionStateMac({operation_id: request.operationId, intent_digest: intentDigest,
+      sender_hash: senderHash, request_hash: requestHash, expires_at: request.expiresAt, state: 'pending', acceptance_hash: null,
+      request_nonce: nonce, request_tag: tag, request_ciphertext: ciphertext,
+      result_nonce: null, result_tag: null, result_ciphertext: null});
+    this.#database.prepare(`insert into codex_setup_sessions
+      (operation_id, intent_digest, sender_hash, request_hash, expires_at, state, state_mac, request_nonce, request_tag, request_ciphertext)
+      values (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?) on conflict(operation_id) do nothing`)
+      .run(request.operationId, intentDigest, senderHash, requestHash, request.expiresAt, stateMac, nonce, tag, ciphertext);
+    const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+      .get(request.operationId) as unknown as CodexSetupSessionRow;
+    if (row.intent_digest !== intentDigest || row.sender_hash !== senderHash || row.request_hash !== requestHash) {
+      throw new Error('setup_operation_conflict');
+    }
+    this.#decodeSetupSession(row);
+    this.#fence.assertSync();
+    return Object.freeze({withdraw});
+  }
+
+  #setupSessionStateMac(row: Omit<CodexSetupSessionRow, 'state_mac'>): string {
+    const bytes = createHash('sha256');
+    for (const value of [row.request_nonce, row.request_tag, row.request_ciphertext,
+      row.result_nonce, row.result_tag, row.result_ciphertext]) {
+      bytes.update(`${value?.byteLength ?? -1}:`); if (value) bytes.update(value);
+    }
+    return createHmac('sha256', this.#masterKey).update(canonicalize({schema: 'dharma.local-setup-session-state/v1',
+      operationId: row.operation_id, intentDigest: row.intent_digest, senderHash: row.sender_hash,
+      requestHash: row.request_hash, expiresAt: row.expires_at, state: row.state,
+      acceptanceHash: row.acceptance_hash, ciphertextHash: bytes.digest('hex')})).digest('hex');
+  }
+
+  #decodeSetupSession(row: CodexSetupSessionRow): LocalCodexSetupSessionObservation {
+    try {
+      if (typeof row.state_mac !== 'string' || !/^[a-f0-9]{64}$(?![\s\S])/.test(row.state_mac)
+        || !timingSafeEqual(Buffer.from(row.state_mac, 'hex'), Buffer.from(this.#setupSessionStateMac(row), 'hex'))) throw new Error();
+      if (row.state === 'accepted' ? typeof row.acceptance_hash !== 'string' || !setupDigest.test(row.acceptance_hash)
+        : row.acceptance_hash !== null) throw new Error();
+      const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.request_nonce);
+      decipher.setAuthTag(row.request_tag);
+      decipher.setAAD(Buffer.from(`setup-session-request:${row.operation_id}:${row.intent_digest}:${row.request_hash}`));
+      const request = parseLocalCodexSetupSessionRequest(JSON.parse(Buffer.concat([
+        decipher.update(row.request_ciphertext), decipher.final()]).toString('utf8')));
+      if (request.operationId !== row.operation_id || request.intentDigest !== row.intent_digest
+        || request.expiresAt !== row.expires_at || sha256(canonicalize(request)) !== row.request_hash) throw new Error();
+      let result: Readonly<LocalCodexSetupSessionResult> | null = null;
+      if (row.result_ciphertext) {
+        if (!row.result_nonce || !row.result_tag || row.state !== 'accepted') throw new Error();
+        const outcome = createDecipheriv('aes-256-gcm', this.#masterKey, row.result_nonce);
+        outcome.setAuthTag(row.result_tag);
+        outcome.setAAD(Buffer.from(`setup-session-result:${row.operation_id}:${row.intent_digest}:${row.request_hash}`));
+        result = parseLocalCodexSetupSessionResult(JSON.parse(Buffer.concat([
+          outcome.update(row.result_ciphertext), outcome.final()]).toString('utf8')));
+      }
+      if (!['pending', 'accepted', 'withdrawn'].includes(row.state)) throw new Error();
+      return {state: row.state, request, result};
+    } catch {throw new Error('setup_operation_integrity_failed');}
+  }
+
+  readCodexSetupSession(operationId: string, intentDigest: string): LocalCodexSetupSessionObservation | null {
+    if (typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+    if (!row) return null;
+    if (row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    return this.#decodeSetupSession(row);
+  }
+
+  listPendingCodexSetupSessions(limit = 50): Array<{operationId: string; intentDigest: string}> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    return (this.#database.prepare(`select operation_id, intent_digest from codex_setup_sessions
+      where state = 'pending' and expires_at > ? order by operation_id limit ?`)
+      .all(new Date().toISOString(), limit) as Array<{operation_id: string; intent_digest: string}>)
+      .map(row => ({operationId: row.operation_id, intentDigest: row.intent_digest}));
+  }
+
+  acceptCodexSetupSession(operationId: string, intentDigest: string, requestHash: string): LocalCodexSetupSessionAcceptance | null {
+    if (typeof operationId !== 'string' || !setupId.test(operationId) || typeof intentDigest !== 'string'
+      || !setupDigest.test(intentDigest) || typeof requestHash !== 'string' || !setupDigest.test(requestHash)) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+    if (!row) return null;
+    if (row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    const observation = this.#decodeSetupSession(row);
+    if (observation.state !== 'pending' || sha256(canonicalize(observation.request)) !== requestHash
+      || Date.parse(observation.request.expiresAt) <= Date.now()) return null;
+    const token = randomUUID(), tokenHash = sha256(token);
+    const accepted = this.#database.prepare(`update codex_setup_sessions set state = 'accepted', acceptance_hash = ?, state_mac = ?
+      where operation_id = ? and intent_digest = ? and request_hash = ? and state = 'pending' and expires_at > ? and state_mac = ?
+      and exists (select 1 from codex_setup_operations where operation_id = ? and intent_digest = ? and state = 'running')`)
+      .run(tokenHash, this.#setupSessionStateMac({...row, state: 'accepted', acceptance_hash: tokenHash}),
+        operationId, intentDigest, requestHash, new Date().toISOString(), row.state_mac, operationId, intentDigest);
+    if (accepted.changes !== 1) return null;
+    return Object.freeze({request: observation.request, record: (value: LocalCodexSetupSessionResult) => {
+      const result = parseLocalCodexSetupSessionResult(value);
+      this.#assertSetupJournalDurability();
+      const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+        .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+      if (!row || row.intent_digest !== intentDigest || row.acceptance_hash !== tokenHash || row.state !== 'accepted') {
+        throw new Error('setup_operation_conflict');
+      }
+      const current = this.#decodeSetupSession(row);
+      if (current.result) {
+        if (canonicalize(current.result) !== canonicalize(result)) throw new Error('setup_operation_conflict');
+        return;
+      }
+      const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+      cipher.setAAD(Buffer.from(`setup-session-result:${operationId}:${intentDigest}:${requestHash}`));
+      const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(result))), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const committed = this.#database.prepare(`update codex_setup_sessions set result_nonce = ?, result_tag = ?, result_ciphertext = ?, state_mac = ?
+        where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted' and result_ciphertext is null and state_mac = ?`)
+        .run(nonce, tag, ciphertext, this.#setupSessionStateMac({...row, result_nonce: nonce, result_tag: tag, result_ciphertext: ciphertext}),
+          operationId, intentDigest, tokenHash, row.state_mac);
+      if (committed.changes !== 1) throw new Error('setup_operation_conflict');
+    }});
   }
 
   getCodexSetupReadiness(receiptId: string, operationId: string, intentDigest: string): LocalCodexSetupReadinessReceipt | null {

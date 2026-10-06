@@ -12,6 +12,7 @@ import ts from 'typescript';
 import * as contracts from '@dharma-ai-labs/agent-fabric-contracts';
 import * as evidence from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import * as setupReadiness from './setupReadiness.js';
+import * as setupSessionHandoff from './setupSessionHandoff.js';
 
 async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dharma-vault-lifecycle-'));
@@ -39,6 +40,7 @@ async function module(overrides: {fs?: Record<string, unknown>; crypto?: Record<
       if (name === '@dharma-ai-labs/agent-fabric-contracts') return contracts;
       if (name === '@dharma-ai-labs/agent-fabric-evidence-reduction') return evidence;
       if (name === './setupReadiness.js') return setupReadiness;
+      if (name === './setupSessionHandoff.js') return setupSessionHandoff;
       if (name === '@dharma-ai-labs/agent-fabric-secure-store') return {
         createSystemSecureStore: async () => {throw new Error('no real credential access in fixture');},
       };

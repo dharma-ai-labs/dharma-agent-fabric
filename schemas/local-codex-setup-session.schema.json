@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-codex-setup-session/v1",
+  "title": "Encrypted local setup-to-standing-session request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "operationId", "intentDigest", "organizationId", "membershipId", "deviceId", "workspaceId", "repositoryBindingId", "endpointId", "provider", "origin", "repositoryFingerprint", "policyRevision", "policyHash", "scopeDigest", "contractDigest", "name", "workspaceRoot", "maximumCostCents", "maximumTurnCostCents", "issuedAt", "expiresAt"],
+  "properties": {
+    "schema": {"const": "dharma.local-codex-setup-session/v1"},
+    "operationId": {"$ref": "#/$defs/uuid"},
+    "intentDigest": {"$ref": "#/$defs/hash"},
+    "organizationId": {"type": "string", "maxLength": 200, "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+    "membershipId": {"$ref": "#/$defs/uuid"},
+    "deviceId": {"$ref": "#/$defs/uuid"},
+    "workspaceId": {"$ref": "#/$defs/uuid"},
+    "repositoryBindingId": {"$ref": "#/$defs/uuid"},
+    "endpointId": {"$ref": "#/$defs/uuid"},
+    "provider": {"const": "codex"},
+    "origin": {"type": "string", "format": "uri", "maxLength": 2048, "pattern": "^https://[^/?#@]+$(?![\\s\\S])"},
+    "repositoryFingerprint": {"$ref": "#/$defs/hash"},
+    "policyRevision": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$(?![\\s\\S])"},
+    "policyHash": {"$ref": "#/$defs/hash"},
+    "scopeDigest": {"$ref": "#/$defs/hash"},
+    "contractDigest": {"$ref": "#/$defs/hash"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}$(?![\\s\\S])"},
+    "workspaceRoot": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?:/|[A-Za-z]:\\\\|\\\\\\\\)[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"},
+    "maximumCostCents": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "maximumTurnCostCents": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"}
+  }
+}
