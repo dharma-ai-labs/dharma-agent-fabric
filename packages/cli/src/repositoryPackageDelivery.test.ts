@@ -839,6 +839,23 @@ test('filesystem integration: delivered five-file package installs through the p
     }
     assert.equal(JSON.stringify(nativeObserved).includes(installation.nativeSkillPath), false);
     assert.equal(nativeRequests, 1);
+    const withGlobalBootstrap = {...nativeTransport, request: async () => {
+      const response = nativeResponse();
+      response.data[0]!.skills.push({name: 'dharma-agent-fabric', enabled: true,
+        path: resolve(owned, 'global-bootstrap', 'SKILL.md'), description: 'Retained bootstrap', scope: 'user'});
+      return response;
+    }};
+    const workspaceObserved = await observeNamedCodexSkill(withGlobalBootstrap,
+      {workspace: source, installation, sharedRepositoryReady: true});
+    assert.equal(workspaceObserved.bundleHash, packageContent.bundleHash);
+    const disabledWorkspaceWithGlobal = {...withGlobalBootstrap, request: async () => {
+      const response = await withGlobalBootstrap.request();
+      response.data[0]!.skills[0]!.enabled = false;
+      return response;
+    }};
+    await assert.rejects(observeNamedCodexSkill(disabledWorkspaceWithGlobal,
+      {workspace: source, installation, sharedRepositoryReady: true}),
+      {message: 'named_session_native_skill_unavailable'});
     for (const failure of ['disabled', 'foreign_path', 'foreign_workspace', 'duplicate', 'errors', 'unsupported']) {
       const failing = {...nativeTransport, request: async () => {
         if (failure === 'unsupported') throw new Error('RAW_NATIVE_PRIVATE_DIAGNOSTIC');

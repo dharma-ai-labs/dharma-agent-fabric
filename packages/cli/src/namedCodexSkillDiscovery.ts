@@ -75,9 +75,10 @@ export async function observeNamedCodexSkill(transport: Pick<CodexStdioTransport
     const entry = data(entries[0]);
     if (entry.cwd !== workspace || list(entry.errors, 256).length !== 0) throw new Error();
     const skills = list(entry.skills, 1024).map(data);
-    const matches = skills.filter(skill => skill.name === 'dharma-agent-fabric');
-    if (matches.length !== 1 || matches[0]!.enabled !== true
-      || matches[0]!.path !== installation.nativeSkillPath) throw new Error();
+    // A retained global bootstrap can have the same name as the repository skill.
+    const matches = skills.filter(skill => skill.name === 'dharma-agent-fabric'
+      && skill.path === installation.nativeSkillPath);
+    if (matches.length !== 1 || matches[0]!.enabled !== true) throw new Error();
     const after = await readNamedSessionPackageContent(installation, sharedRepositoryReady);
     if (transport.signal.aborted || (Object.keys(before) as Array<keyof NamedSessionPackageContent>)
       .some(key => before[key] !== after[key])) throw new Error();
