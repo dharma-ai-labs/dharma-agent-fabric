@@ -36,7 +36,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
   const heldLease = lease;
   let transport: CodexStdioTransport;
   try { transport = await input.openTransport(); }
-  catch (error) { lease.release(); throw error; }
+  catch (error) { await lease.release(); throw error; }
   let running = false;
   let closing = false;
   let closed = false;
@@ -49,7 +49,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
     shutdown = (async () => {
       // Never release the fence while a provider child could still accept turns.
       await transport.close();
-      heldLease.release();
+      await heldLease.release();
       closed = true;
     })();
     try { await shutdown; }

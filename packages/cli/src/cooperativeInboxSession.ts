@@ -25,9 +25,14 @@ export async function openCooperativeInboxSession(input: {
   const lease = await input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
   if (!lease) throw new Error('cooperative_session_lease_unavailable');
   let stopped = false, running = false, released = false;
+  let releaseResult: Promise<void> | null = null;
   let settle: (() => void) | null = null, activeRun: Promise<void> | null = null;
   let pulse: Promise<void> | null = null;
-  function release() { if (!released) { lease!.release(); released = true; } }
+  function release(): Promise<void> {
+    if (released) return Promise.resolve();
+    return releaseResult ??= Promise.resolve().then(() => lease!.release()).then(() => {released = true;})
+      .finally(() => {releaseResult = null;});
+  }
   async function assertOwner() {
     if (stopped || !await lease!.assertHeld()) return false;
     const context = await input.currentSession();
@@ -51,12 +56,13 @@ export async function openCooperativeInboxSession(input: {
     if (!inspected.ok) throw new Error(`cooperative_session_${inspected.reason}`);
   }
   try { await requireOwner(); await channel.reconnect(); }
-  catch (error) { stopped = true; release(); throw error; }
+  catch (error) { stopped = true; await release(); throw error; }
   const timer = setInterval(() => {
     if (stopped || pulse) return;
     pulse = channel.heartbeat().then(() => undefined).catch(() => {
       stopped = true; clearInterval(timer);
-      if (!running) release();
+      // Failed cooperative cleanup remains retryable by close; never claim it settled.
+      if (!running) void release().catch(() => undefined);
     }).finally(() => { pulse = null; });
   }, 20_000);
   timer.unref();
@@ -65,7 +71,7 @@ export async function openCooperativeInboxSession(input: {
     stop();
     if (pulse) await pulse;
     if (activeRun) await activeRun;
-    release();
+    await release();
     return { serverDetached: false, consumerClosed: true as const };
   }
   return {
@@ -77,7 +83,7 @@ export async function openCooperativeInboxSession(input: {
       finally {
         stop(); if (pulse) await pulse;
         try {await input.vault.revokeProviderSessionBinding(input.bindingId, input.identity);}
-        finally {release();}
+        finally {await release();}
       }
       return { serverDetached, consumerClosed: true as const };
     },
@@ -149,7 +155,7 @@ export async function openCooperativeInboxSession(input: {
       } catch (error) { stop(); throw error; }
       finally {
         running = false; settle?.(); settle = null; activeRun = null;
-        if (stopped) release();
+        if (stopped) await release();
       }
     },
   };

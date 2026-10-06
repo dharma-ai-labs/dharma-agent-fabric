@@ -58,6 +58,104 @@ function capture() {
       sourceLocator: 'synthetic-local-reference', status: 'observed', observedAt: new Date().toISOString()}};
 }
 
+function binding(root: string, number = 6) {
+  const id = (n: number) => `40000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  return {schema: 'dharma.local-provider-session-binding/v1', owner: 'dharma_bridge',
+    organizationId: 'org_synthetic', repositoryBindingId: id(1), workspaceId: id(2), endpointId: id(3),
+    membershipId: id(4), deviceId: id(5), bindingId: id(number), provider: 'codex', sessionId: `synthetic-thread-${number}`,
+    workspaceRoot: path.join(root, 'repo'), createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString(), maximumProviderCostCents: 25};
+}
+
+for (const rollback of [true, false]) {
+  test(`full scoped lease release waits for ${rollback ? 'rolled-back' : 'committed'} capture before durable exact-holder cleanup`, async t => {
+    const f = await fixture(t); let armed = false, ready!: () => void, finish!: () => void;
+    const entered = new Promise<void>(resolve => {ready = resolve;}), pending = new Promise<void>(resolve => {finish = resolve;});
+    const api = await module({fs: {open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (!armed || !String(args[0]).endsWith('.tmp')) return handle;
+      return {stat: handle.stat.bind(handle), sync: handle.sync.bind(handle), close: handle.close.bind(handle),
+        writeFile: async (bytes: Uint8Array) => {await handle.writeFile(bytes); ready(); await pending;}};
+    }}});
+    const vault = await api.open({root: f.root, masterKey: f.key}, f.scope), record = binding(f.root);
+    await vault.saveProviderSessionBinding(record);
+    const lease = await vault.tryAcquireProviderSessionLease(record.bindingId, record); assert.ok(lease);
+    armed = true;
+    const work = vault.commitCapture(capture()); work.catch(() => undefined);
+    await entered;
+    const released = lease.release(), duplicate = lease.release();
+    if (rollback) f.withdraw();
+    try {
+      finish();
+      if (rollback) await assert.rejects(work, {message: 'vault_scope_unavailable'}); else await work;
+      await released; await duplicate;
+    } finally {finish(); await work.catch(() => undefined); await vault.close();}
+    const db = new DatabaseSync(path.join(f.root, 'vault.sqlite'), {readOnly: true});
+    try {assert.equal(db.prepare('select count(*) as n from provider_session_leases').get()!.n, 0);}
+    finally {db.close();}
+    const reopened = await api.open({root: f.root, masterKey: f.key},
+      {signal: new AbortController().signal, current: async () => true});
+    try {
+      const next = await reopened.tryAcquireProviderSessionLease(record.bindingId, record);
+      assert.ok(next); await next.release();
+    } finally {await reopened.close();}
+  });
+}
+
+test('full scoped failed lease release retains exact-holder ownership for close retry without touching a sibling', async t => {
+  const f = await fixture(t); let fail = false, failures = 0;
+  class OwnedDatabase extends DatabaseSync {
+    prepare(sql: string) {
+      const statement = super.prepare(sql), run = statement.run.bind(statement);
+      if (sql.startsWith('delete from provider_session_leases')) {
+        statement.run = ((...args: any[]) => {
+          if (fail) {failures++; throw new Error('private lease delete canary');}
+          return Reflect.apply(run, statement, args);
+        }) as typeof statement.run;
+      }
+      return statement;
+    }
+  }
+  const api = await module({database: OwnedDatabase}), vault = await api.open({root: f.root, masterKey: f.key}, f.scope);
+  const own = binding(f.root), sibling = binding(f.root, 7);
+  await vault.saveProviderSessionBinding(own);
+  const other = await api.open({root: f.root, masterKey: f.key}); other.saveProviderSessionBinding(sibling);
+  const lease = await vault.tryAcquireProviderSessionLease(own.bindingId, own), peer = other.tryAcquireProviderSessionLease(sibling.bindingId, sibling);
+  assert.ok(lease); assert.ok(peer);
+  try {
+    fail = true;
+    await assert.rejects(async () => lease.release(), {message: 'vault_cleanup_unconfirmed'});
+    fail = false; f.withdraw(); await vault.close();
+    assert.equal(await peer.assertHeld(), true); assert.equal(failures, 1);
+    const db = new DatabaseSync(path.join(f.root, 'vault.sqlite'), {readOnly: true});
+    try {assert.equal(db.prepare('select count(*) as n from provider_session_leases where binding_id = ?').get(own.bindingId)!.n, 0);}
+    finally {db.close();}
+  } finally {fail = false; await vault.close(); peer.release(); other.close();}
+});
+
+test('full legacy lease refuses transaction-local release and retains ownership through rollback', async t => {
+  const f = await fixture(t); let armed = false, ready!: () => void, finish!: () => void;
+  const entered = new Promise<void>(resolve => {ready = resolve;}), pending = new Promise<void>(resolve => {finish = resolve;});
+  const api = await module({fs: {writeFile: async (...args: Parameters<typeof fs.writeFile>) => {
+    const result = await fs.writeFile(...args);
+    if (armed && String(args[0]).endsWith('.tmp')) {ready(); await pending;}
+    return result;
+  }}});
+  const vault = await api.open({root: f.root, masterKey: f.key}), record = binding(f.root);
+  vault.saveProviderSessionBinding(record);
+  const lease = vault.tryAcquireProviderSessionLease(record.bindingId, record); assert.ok(lease);
+  const payload = capture(); payload.raw.expectedContentId = contracts.sha256('synthetic different bytes');
+  armed = true; const work = vault.commitCapture(payload); work.catch(() => undefined);
+  await entered;
+  try {
+    assert.throws(() => lease.release(), {message: 'vault_cleanup_unconfirmed'});
+    finish(); await assert.rejects(work, /Raw evidence content hash changed/);
+  } finally {finish(); await work.catch(() => undefined); vault.close();}
+  const db = new DatabaseSync(path.join(f.root, 'vault.sqlite'), {readOnly: true});
+  try {assert.equal(db.prepare('select count(*) as n from provider_session_leases').get()!.n, 0);}
+  finally {db.close();}
+});
+
 test('full scoped vault rejects proxy input without invoking traps and ignores byte-array species', async t => {
   const f = await fixture(t), api = await module(), vault = await api.open({root: f.root, masterKey: f.key}, f.scope);
   let traps = 0, species = 0;

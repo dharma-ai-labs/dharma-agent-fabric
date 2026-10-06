@@ -19,7 +19,7 @@ export interface VaultOptions {
 
 type AsyncVaultMethods = {[K in keyof LocalVault as K extends 'root' | 'close' ? never : K]:
   LocalVault[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never};
-export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'getCapsule' | 'getTaskCompletionRecovery' | 'listPendingCapsuleSyncs'> & {
+export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'getCapsule' | 'getTaskCompletionRecovery' | 'listPendingCapsuleSyncs' | 'tryAcquireProviderSessionLease'> & {
   readonly root: string;
   close(): Promise<void>;
   getLatestCapsule<T = Record<string, unknown>>(trajectoryId: string): Promise<T>;
@@ -27,6 +27,7 @@ export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'get
   getTaskCompletionRecovery<T = Record<string, unknown>>(taskId: string): Promise<T | null>;
   listPendingCapsuleSyncs<T = Record<string, unknown>>(limit?: number, offset?: number):
     Promise<Array<{trajectoryId: string; revision: number; capsule: T}>>;
+  tryAcquireProviderSessionLease(bindingId: string, expected: LocalProviderSessionIdentity): Promise<ScopedLocalProviderSessionLease | null>;
 };
 
 export interface VaultCaptureInput {
@@ -62,6 +63,9 @@ export type LocalProviderSessionIdentity = Pick<SessionBindingScope,
 export interface LocalProviderSessionLease {
   assertHeld(): Promise<boolean>;
   release(): void;
+}
+export interface ScopedLocalProviderSessionLease extends Omit<LocalProviderSessionLease, 'release'> {
+  release(): Promise<void>;
 }
 
 export type LocalCodexSetupResult = {state: 'completed'; readinessReceiptId: string}
@@ -225,6 +229,14 @@ export class LocalVault {
       tail = work.then(() => undefined, () => undefined);
       return work;
     };
+    const enqueueCleanup = (operation: () => void): Promise<void> => {
+      // An exact-holder release must commit after any pending transaction settles.
+      const work = tail.then(() => {
+        try {operation();} catch {throw new Error('vault_cleanup_unconfirmed');}
+      });
+      tail = work.then(() => undefined, () => undefined);
+      return work;
+    };
     const close = (): Promise<void> => closing ??= (async () => {
       this.#fence.close();
       await tail;
@@ -246,7 +258,8 @@ export class LocalVault {
           const result = await Reflect.apply(method, this, snapshot);
           if (name !== 'tryAcquireProviderSessionLease' || result === null) return result;
           const lease = result as LocalProviderSessionLease;
-          return Object.freeze({assertHeld: () => enqueue(() => lease.assertHeld()), release: lease.release});
+          return Object.freeze({assertHeld: () => enqueue(() => lease.assertHeld()),
+            release: () => enqueueCleanup(lease.release)});
         });
       };
     }
@@ -947,6 +960,8 @@ export class LocalVault {
     }
     const release = () => {
       if (this.#databaseClosed || !this.#ownedLeases.has(release)) return;
+      // Never forget ownership for a DELETE that could still be rolled back.
+      if (this.#databaseHandle.isTransaction) throw new Error('vault_cleanup_unconfirmed');
       // Cooperative cleanup can remove only the row acquired by this handle.
       this.#databaseHandle.prepare(`delete from provider_session_leases where binding_id = ? and holder_id = ?`)
         .run(bindingId, holderId);
