@@ -58,6 +58,8 @@ function fixture() {
     },
   };
   const journal: CodexSetupJournal = {
+    async read(_operation, next) {return !claimed ? null : result
+      ? {state: 'terminal', intentDigest: digest, result} : {state: 'running', intentDigest: next};},
     async claim(_operation, next) {claims++; if (claimed) return result
       ? {state: 'terminal', intentDigest: digest, result} : {state: 'running', intentDigest: digest};
       claimed = true; digest = next; return {state: 'acquired', intentDigest: next, leaseId: id(5)};},
@@ -225,7 +227,8 @@ test('journal opening receives the native owning scope and closes a post-acquisi
   const f = fixture(); let closes = 0;
   f.input.openJournal = async scope => {
     assert.equal(await scope.current(), true); f.client.abort();
-    return {claim: async () => {throw new Error('unexpected claim');}, finish: async () => {throw new Error('unexpected finish');},
+    return {claim: async () => {throw new Error('unexpected claim');}, read: async () => {throw new Error('unexpected read');},
+      finish: async () => {throw new Error('unexpected finish');},
       close() {closes++;}};
   };
   await assert.rejects(open(f.input), {message: 'codex_setup_host_scope_unavailable'});

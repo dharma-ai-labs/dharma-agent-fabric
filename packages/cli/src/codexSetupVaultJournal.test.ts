@@ -34,7 +34,7 @@ for (const lostJournalAck of [false, true]) test(`admission reconciles reopened 
     }
     const first = createCodexSetupAdmission({...common, journal});
     const result = await first.handler(request, {signal});
-    assert.equal(result.success, !lostJournalAck);
+    assert.equal(result.success, true, 'committed outcome must be read back even when its acknowledgement is lost');
     assert.equal(JSON.stringify(result).includes('synthetic-lost-ack-canary'), false);
     first.close(); vault.close();
     vault = await LocalVault.open({root, masterKey: key});

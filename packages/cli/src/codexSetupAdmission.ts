@@ -18,6 +18,9 @@ export interface CodexSetupJournal {
   /** Atomically deny changed payload/context; do not recycle an interrupted lease. */
   claim(operationId: string, digest: string): Promise<{state: 'acquired'; leaseId: string; intentDigest: string}
     | {state: 'running'; intentDigest: string} | {state: 'terminal'; result: unknown; intentDigest: string}>;
+  /** Same bound context, no writes or replacement lease on an absent row. */
+  read(operationId: string, digest: string): Promise<null | {state: 'running'; intentDigest: string}
+    | {state: 'terminal'; result: unknown; intentDigest: string}>;
   finish(leaseId: string, digest: string, result: PublicDisposition): Promise<void>;
 }
 export interface CodexSetupExecutionLease {
@@ -91,6 +94,7 @@ export function createCodexSetupAdmission(input: Input) {
   const now = input.now ?? Date.now;
   const responseWaitMs = input.responseWaitMs ?? 250;
   const invalid = (): never => {throw new Error('codex_setup_intent_invalid');};
+  if (!input.journal || typeof input.journal.read !== 'function') return invalid();
   const value = record(input.intent); if (!value) return invalid();
   const keys = ['schema', 'operationId', 'setupReference', 'organizationId', 'recipientMembershipId', 'origin',
     'repositoryFingerprint', 'policyRevision', 'scopeDigest', 'contractDigest', 'hostContextId', 'issuedAt', 'expiresAt'];
@@ -136,6 +140,15 @@ export function createCodexSetupAdmission(input: Input) {
     return {success: true, contentItems: [{type: 'inputText', text: JSON.stringify({
       operationId: intent.operationId, state: result.state, readinessReceiptId: result.readinessReceiptId})}]};
   };
+  const readBack = async (expected: unknown, signal: AbortSignal): Promise<CodexToolResult> => {
+    const accepted = disposition(expected);
+    if (!accepted || !await qualified(signal)) return deny('codex_setup_execution_unconfirmed');
+    const persisted = await input.journal.read(intent.operationId, digest);
+    const recovered = persisted?.state === 'terminal' ? disposition(persisted.result) : null;
+    if (!persisted || persisted.intentDigest !== digest || !recovered
+      || canonicalize(recovered) !== canonicalize(accepted)) return deny('codex_setup_execution_unconfirmed');
+    return expose(recovered, signal);
+  };
   const handler: CodexToolHandler = async (rawParams, context) => {
     const params = record(rawParams); if (!params) return deny('codex_setup_not_authorized');
     const args = record(params.arguments);
@@ -160,7 +173,7 @@ export function createCodexSetupAdmission(input: Input) {
         const claim = await input.journal.claim(intent.operationId, digest);
         if (claim.intentDigest !== digest || !await authorized(signal)) return deny('codex_setup_not_authorized');
         if (claim.state === 'running') return deny('codex_setup_in_progress');
-        if (claim.state === 'terminal') return await expose(claim.result, signal);
+        if (claim.state === 'terminal') return await readBack(claim.result, signal);
         if (typeof claim.leaseId !== 'string' || !uuid.test(claim.leaseId)
           || !await qualified(signal)) {
           return deny('codex_setup_not_authorized');
@@ -176,8 +189,9 @@ export function createCodexSetupAdmission(input: Input) {
         try {result = disposition(await input.execute(intent, executionSignal, current, lease)) ?? result;}
         catch { /* Never reflect runtime errors. */ }
         finally {admittedExecutions.delete(lease);}
-        await input.journal.finish(claim.leaseId, digest, result);
-        return await expose(result, executionSignal);
+        try {await input.journal.finish(claim.leaseId, digest, result);}
+        catch { /* A lost reply alone proves neither commit nor rollback. */ }
+        return await readBack(result, executionSignal);
       } finally {pending = false;}
     } catch {return deny('codex_setup_execution_unconfirmed');}};
     const owned = run(); callbacks.add(owned);

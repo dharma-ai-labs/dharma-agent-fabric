@@ -4,9 +4,10 @@ import type {BootstrapHostScope} from './bootstrapHostScope.js';
 import type {CodexSetupJournal} from './codexSetupAdmission.js';
 
 export function createCodexSetupVaultJournal(vault: Pick<LocalVault,
-  'claimCodexSetupOperation' | 'finishCodexSetupOperation'> | ScopedCodexSetupJournal): CodexSetupJournal {
+  'claimCodexSetupOperation' | 'readCodexSetupOperation' | 'finishCodexSetupOperation'> | ScopedCodexSetupJournal): CodexSetupJournal {
   return {
     claim: async (operationId, intentDigest) => vault.claimCodexSetupOperation(operationId, intentDigest),
+    read: async (operationId, intentDigest) => vault.readCodexSetupOperation(operationId, intentDigest),
     finish: async (leaseId, intentDigest, result) => vault.finishCodexSetupOperation(leaseId, intentDigest, result),
   };
 }

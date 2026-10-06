@@ -2635,6 +2635,7 @@ export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeo
         ownerScope = scope;
         return Object.freeze({
           claim: (operationId: string, intentDigest: string) => vault!.claimCodexSetupOperation(operationId, intentDigest),
+          read: (operationId: string, intentDigest: string) => vault!.readCodexSetupOperation(operationId, intentDigest),
           finish: (leaseId: string, intentDigest: string,
             result: Parameters<ScopedLocalVault['finishCodexSetupOperation']>[2]) =>
             vault!.finishCodexSetupOperation(leaseId, intentDigest, result),

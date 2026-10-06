@@ -10,6 +10,11 @@ import {LocalVault} from './index.js';
 const operation = '40000000-1111-4111-8111-111111111111';
 const receipt = '50000000-1111-4111-8111-111111111111';
 const digest = `sha256:${'a'.repeat(64)}`;
+function reader(vault: LocalVault) {
+  const method = (vault as unknown as {readCodexSetupOperation?: (operationId: string, intentDigest: string) => unknown}).readCodexSetupOperation;
+  assert.equal(typeof method, 'function', 'durable readback must not acquire a replacement lease');
+  return (operationId = operation, intentDigest = digest) => method!.call(vault, operationId, intentDigest);
+}
 async function fixture() {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-setup-journal-'));
   const key = randomBytes(32);
@@ -32,6 +37,20 @@ test('setup operation journal preserves a running fence across reopen and reject
   } finally {vault.close(); await f.cleanup();}
 });
 
+test('read-only setup observation does not create a missing operation or replace its lease', async () => {
+  const f = await fixture();
+  try {
+    const read = reader(f.vault);
+    assert.equal(read(), null);
+    const database = new DatabaseSync(resolve(f.root, 'vault.sqlite'));
+    try {assert.equal(database.prepare('select count(*) as count from codex_setup_operations').get()!.count, 0);}
+    finally {database.close();}
+    const claim = f.vault.claimCodexSetupOperation(operation, digest); assert.equal(claim.state, 'acquired');
+    assert.deepEqual(read(), {state: 'running', intentDigest: digest});
+    assert.deepEqual(f.vault.claimCodexSetupOperation(operation, digest), {state: 'running', intentDigest: digest});
+  } finally {f.vault.close(); await f.cleanup();}
+});
+
 test('terminal setup receipt is encrypted, survives reopen and cannot be overwritten', async () => {
   const f = await fixture(); let vault = f.vault;
   try {
@@ -44,6 +63,8 @@ test('terminal setup receipt is encrypted, survives reopen and cannot be overwri
       {state: 'completed', readinessReceiptId: '60000000-1111-4111-8111-111111111111'}), /setup_operation_conflict/);
     vault.close(); vault = await LocalVault.open({root: f.root, masterKey: f.key});
     assert.deepEqual(vault.claimCodexSetupOperation(operation, digest), {state: 'terminal', intentDigest: digest, result});
+    assert.deepEqual(reader(vault)(), {state: 'terminal', intentDigest: digest, result});
+    assert.throws(() => reader(vault)(operation, `sha256:${'b'.repeat(64)}`), /setup_operation_conflict/);
     assert.equal((await readFile(resolve(f.root, 'vault.sqlite'))).includes(Buffer.from(receipt)), false);
     assert.equal((await readFile(resolve(f.root, 'vault.sqlite'))).includes(Buffer.from(claim.leaseId)), false);
   } finally {vault.close(); await f.cleanup();}
@@ -81,6 +102,7 @@ test('wrong vault key cannot disclose a terminal setup receipt', async () => {
     vault.finishCodexSetupOperation(claim.leaseId, digest, {state: 'completed', readinessReceiptId: receipt});
     vault.close(); vault = await LocalVault.open({root: f.root, masterKey: randomBytes(32)});
     assert.throws(() => vault.claimCodexSetupOperation(operation, digest), /^Error: setup_operation_integrity_failed$/);
+    assert.throws(() => reader(vault)(), /^Error: setup_operation_integrity_failed$/);
   } finally {vault.close(); await f.cleanup();}
 });
 
@@ -98,6 +120,7 @@ test('authenticated setup result cannot be transplanted to another operation row
       ciphertext = (select ciphertext from codex_setup_operations where operation_id = ?)
       where operation_id = ?`).run(operation, operation, operation, otherId);
     assert.throws(() => f.vault.claimCodexSetupOperation(otherId, digest), /^Error: setup_operation_integrity_failed$/);
+    assert.throws(() => reader(f.vault)(otherId), /^Error: setup_operation_integrity_failed$/);
     assert.equal(f.vault.claimCodexSetupOperation(operation, digest).state, 'terminal');
   } finally {db.close(); f.vault.close(); await f.cleanup();}
 });
@@ -144,6 +167,7 @@ test('journal rejects non-durable SQLite settings before acquiring or completing
       /^Error: setup_operation_durability_unqualified$/);
     assert.throws(() => f.vault.finishCodexSetupOperation(claim.leaseId, digest,
       {state: 'completed', readinessReceiptId: receipt}), /^Error: setup_operation_durability_unqualified$/);
+    assert.throws(() => reader(f.vault)(), /^Error: setup_operation_durability_unqualified$/);
     report.mock.restore();
     assert.deepEqual(f.vault.claimCodexSetupOperation(operation, digest), {state: 'running', intentDigest: digest});
     assert.equal(f.vault.claimCodexSetupOperation('90000000-1111-4111-8111-111111111111', digest).state, 'acquired');
@@ -164,6 +188,7 @@ test('journal denies claim inside a public capture transaction and admits it dur
   try {
     capture = rejectedCapture(vault);
     assert.throws(() => vault.claimCodexSetupOperation(operation, digest), /^Error: setup_operation_transaction_active$/);
+    assert.throws(() => reader(vault)(), /^Error: setup_operation_transaction_active$/);
     await capture;
     const claim = vault.claimCodexSetupOperation(operation, digest);
     if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');

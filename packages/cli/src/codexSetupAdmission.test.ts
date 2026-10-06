@@ -18,11 +18,15 @@ function fixture() {
   let time = Date.parse('2026-10-05T18:01:00.000Z');
   let mode: 'setup' | 'work' | 'peer' = 'setup'; let qualified = true; let calls = 0; let claims = 0;
   let state: 'new' | 'running' | 'terminal' = 'new'; let disposition: unknown;
-  const journal: CodexSetupJournal = {
-    claim: async (_operation, intentDigest) => { claims++; if (state === 'new') {state = 'running'; return {state: 'acquired', leaseId: id(5), intentDigest};}
-      return state === 'running' ? {state: 'running', intentDigest} : {state: 'terminal', result: disposition, intentDigest}; },
-    finish: async (_lease, _digest, result) => { state = 'terminal'; disposition = result; },
-  };
+  const journal: CodexSetupJournal = Object.assign({
+    claim: async (_operation: string, intentDigest: string) => { claims++; if (state === 'new') {state = 'running'; return {state: 'acquired' as const, leaseId: id(5), intentDigest};}
+      return state === 'running' ? {state: 'running' as const, intentDigest} : {state: 'terminal' as const, result: disposition, intentDigest}; },
+    finish: async (_lease: string, _digest: string, result: unknown) => { state = 'terminal'; disposition = result; },
+  }, {
+    read: async (_operation: string, intentDigest: string) => state === 'new' ? null
+      : state === 'running' ? {state: 'running' as const, intentDigest}
+      : {state: 'terminal' as const, intentDigest, result: disposition},
+  });
   const active = {connectionId: id(6), threadId: 'synthetic_thread', turnId: 'synthetic_turn', hostContextId: id(4)};
   const input = {intent, ...active, now: () => time,
     current: async () => ({...active, mode}), qualifyHost: async () => qualified,
@@ -35,6 +39,14 @@ function fixture() {
     mode: (value: typeof mode) => {mode = value;}, qualify: (value: boolean) => {qualified = value;},
     time: (value: number) => {time = value;}};
 }
+
+test('a journal without durable readback cannot claim or execute setup', () => {
+  const f = fixture();
+  const journal = {claim: f.input.journal.claim, finish: f.input.journal.finish};
+  assert.throws(() => createCodexSetupAdmission({...f.input, journal: journal as CodexSetupJournal}),
+    /^Error: codex_setup_intent_invalid$/);
+  assert.equal(f.claims, 0); assert.equal(f.calls, 0);
+});
 
 test('setup admission denies foreign context, peer/work turns and model-selected authority', async () => {
   const variations = [
@@ -207,6 +219,65 @@ test('lost journal acknowledgement leaves the operation unconfirmed and does not
   assert.equal((await owner.handler({...f.params, callId: 'lost_ack'}, {signal: f.signal.signal})).success, false);
   assert.equal(f.calls, 1);
 });
+
+test('lost acknowledgement after durable completion recovers the same result without a second execution', async () => {
+  const f = fixture(), finish = f.input.journal.finish;
+  f.input.journal.finish = async (...args) => {await finish(...args); throw new Error('journal-secret-canary');};
+  const owner = createCodexSetupAdmission(f.input);
+  const result = await owner.handler(f.params, {signal: f.signal.signal});
+  assert.equal(result.success, true);
+  assert.deepEqual(JSON.parse(result.contentItems[0]!.text!), {operationId: id(1), state: 'completed', readinessReceiptId: id(7)});
+  assert.equal(f.calls, 1); assert.equal(f.claims, 1);
+  const again = await owner.handler({...f.params, callId: 'durable_readback'}, {signal: f.signal.signal});
+  assert.equal(again.success, true); assert.equal(f.calls, 1);
+  assert.equal(JSON.stringify([result, again]).includes('journal-secret-canary'), false);
+});
+
+for (const state of ['absent', 'running', 'foreign-digest', 'foreign-receipt', 'private-field', 'unreadable'] as const) {
+  test(`durable completion readback withholds ${state} without replaying execution`, async () => {
+    const f = fixture();
+    f.input.journal.read = async (_operation, intentDigest) => {
+      if (state === 'unreadable') throw new Error('readback-private-canary');
+      if (state === 'absent') return null;
+      if (state === 'running') return {state: 'running', intentDigest};
+      return {state: 'terminal', intentDigest: state === 'foreign-digest' ? digest : intentDigest,
+        result: {state: 'completed', readinessReceiptId: state === 'foreign-receipt' ? id(8) : id(7),
+          ...(state === 'private-field' ? {token: 'readback-private-canary'} : {})}};
+    };
+    const owner = createCodexSetupAdmission(f.input);
+    try {
+      const first = await owner.handler(f.params, {signal: f.signal.signal});
+      const repeated = await owner.handler({...f.params, callId: 'readback_retry'}, {signal: f.signal.signal});
+      for (const result of [first, repeated]) {
+        assert.equal(result.success, false);
+        assert.equal(JSON.stringify(result).includes('readinessReceiptId'), false);
+        assert.equal(JSON.stringify(result).includes('readback-private-canary'), false);
+      }
+      assert.equal(f.calls, 1);
+    } finally {owner.close(); await owner.settled;}
+  });
+}
+
+for (const change of ['abort', 'peer', 'expiry', 'policy'] as const) {
+  test(`authority lost during durable readback withholds completion after ${change}`, async () => {
+    const f = fixture(), read = f.input.journal.read;
+    f.input.journal.read = async (...args) => {
+      const result = await read(...args);
+      if (change === 'abort') f.signal.abort();
+      if (change === 'peer') f.mode('peer');
+      if (change === 'expiry') f.time(Date.parse(intent.expiresAt));
+      if (change === 'policy') f.qualify(false);
+      return result;
+    };
+    const owner = createCodexSetupAdmission(f.input);
+    try {
+      const result = await owner.handler(f.params, {signal: f.signal.signal});
+      assert.equal(result.success, false);
+      assert.equal(JSON.stringify(result).includes('readinessReceiptId'), false);
+      assert.equal(f.calls, 1);
+    } finally {owner.close(); await owner.settled;}
+  });
+}
 
 test('same operation with changed admitted policy cannot reuse another context journal', async () => {
   const f = fixture(); let admitted: string | undefined;

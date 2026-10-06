@@ -69,6 +69,40 @@ function binding(root: string, number = 6) {
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(), maximumProviderCostCents: 25};
 }
 
+for (const boundary of ['before-read', 'after-read'] as const) {
+  test(`full scoped completion readback withholds ${boundary} withdrawal without acquiring another lease`, async t => {
+    const f = await fixture(t); let armed = false, reads = 0;
+    class ReadbackDatabase extends DatabaseSync {
+      prepare(sql: string) {
+        const statement = super.prepare(sql), get = statement.get.bind(statement);
+        if (sql === 'select * from codex_setup_operations where operation_id = ?') {
+          statement.get = ((...args: any[]) => {
+            const result = Reflect.apply(get, statement, args);
+            if (armed) {reads++; if (boundary === 'after-read') f.withdraw();}
+            return result;
+          }) as typeof statement.get;
+        }
+        return statement;
+      }
+    }
+    const api = await module({database: ReadbackDatabase});
+    const vault = await api.open({root: f.root, masterKey: f.key}, f.scope);
+    const operation = '11111111-1111-4111-8111-111111111111', digest = `sha256:${'a'.repeat(64)}`;
+    const result = {state: 'completed', readinessReceiptId: '22222222-2222-4222-8222-222222222222'};
+    try {
+      const lease = await vault.claimCodexSetupOperation(operation, digest);
+      assert.equal(lease.state, 'acquired'); await vault.finishCodexSetupOperation(lease.leaseId, digest, result);
+      armed = true; if (boundary === 'before-read') f.withdraw();
+      await assert.rejects(vault.readCodexSetupOperation(operation, digest), {message: 'vault_scope_unavailable'});
+      assert.equal(reads, boundary === 'before-read' ? 0 : 1);
+    } finally {await vault.close();}
+    const reopened = await api.open({root: f.root, masterKey: f.key});
+    try {assert.deepEqual(JSON.parse(JSON.stringify(await reopened.readCodexSetupOperation(operation, digest))),
+      {state: 'terminal', intentDigest: digest, result});}
+    finally {await reopened.close();}
+  });
+}
+
 for (const rollback of [true, false]) {
   test(`full scoped lease release waits for ${rollback ? 'rolled-back' : 'committed'} capture before durable exact-holder cleanup`, async t => {
     const f = await fixture(t); let armed = false, ready!: () => void, finish!: () => void;

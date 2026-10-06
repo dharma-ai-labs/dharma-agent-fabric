@@ -128,6 +128,32 @@ test('native registration, encrypted readiness/journal and early-call binding co
   });
 });
 
+test('native stdio completion recovers an actual encrypted commit after its acknowledgement is lost', async () => {
+  await fixture(async (input, disposition) => {
+    const openJournal = input.openJournal, execute = input.execute;
+    let executed = 0, committed = 0, reads = 0;
+    input.openJournal = async scope => {
+      const journal = await openJournal(scope);
+      return {...journal,
+        finish: async (...args) => {await journal.finish(...args); committed++; throw new Error('lost-ack-private-canary');},
+        read: async (...args) => {reads++; return journal.read(...args);}};
+    };
+    input.execute = async (...args) => {executed++; return execute(...args);};
+    const host = await startCodexSetupNativeHost(input);
+    try {
+      const result = await disposition as {success: boolean; contentItems: Array<{text: string}>};
+      assert.equal(result.success, true);
+      const completed = JSON.parse(result.contentItems[0]!.text) as Record<string, unknown>;
+      assert.equal(completed.operationId, id(1)); assert.equal(completed.state, 'completed');
+      assert.match(String(completed.readinessReceiptId), /^[a-f0-9-]{36}$/);
+      assert.deepEqual(Object.keys(completed).sort(), ['operationId', 'readinessReceiptId', 'state']);
+      assert.equal(JSON.stringify(result).includes('lost-ack-private-canary'), false);
+      await host.settled;
+      assert.equal(executed, 1); assert.equal(committed, 1); assert.equal(reads, 1);
+    } finally {await host.close();}
+  });
+});
+
 test('actual CLI bootstrap guard remains unconfirmed through native registration without consuming a claim', async () => {
   await fixture(async (input, disposition) => {
     let bootstrap: unknown;

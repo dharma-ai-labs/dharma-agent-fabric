@@ -5,10 +5,11 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import test from 'node:test';
-import {LocalVault, type LocalCodexSetupClaim, type LocalCodexSetupResult} from './index.js';
+import {LocalVault, type LocalCodexSetupClaim, type LocalCodexSetupResult, type LocalCodexSetupObservation} from './index.js';
 
 type Scope = {signal: AbortSignal; current(): Promise<boolean>};
 type Journal = {claimCodexSetupOperation(id: string, digest: string): Promise<LocalCodexSetupClaim>;
+  readCodexSetupOperation(id: string, digest: string): Promise<LocalCodexSetupObservation | null>;
   finishCodexSetupOperation(lease: string, digest: string, result: LocalCodexSetupResult): Promise<void>; close(): void};
 const id = '11111111-1111-4111-8111-111111111111', digest = `sha256:${'a'.repeat(64)}`;
 const receiptId = '22222222-2222-4222-8222-222222222222';
@@ -51,7 +52,7 @@ test('setup journal persists encrypted completion and rejects changed payload af
   await fixture(async (root, key) => {
     let journal = await open(root, key, currentScope());
     try {
-      assert.deepEqual(Object.keys(journal).sort(), ['claimCodexSetupOperation', 'close', 'finishCodexSetupOperation']);
+      assert.deepEqual(Object.keys(journal).sort(), ['claimCodexSetupOperation', 'close', 'finishCodexSetupOperation', 'readCodexSetupOperation']);
       assert.equal(Object.isFrozen(journal), true);
       const acquired = await journal.claimCodexSetupOperation(id, digest); assert.equal(acquired.state, 'acquired');
       if (acquired.state !== 'acquired') throw new Error('fixture lease missing');
@@ -62,9 +63,11 @@ test('setup journal persists encrypted completion and rejects changed payload af
       assert.equal((await readFile(resolve(root, 'vault.sqlite'))).includes(Buffer.from(receiptId)), false);
       journal = await open(root, key, currentScope());
       assert.deepEqual(await journal.claimCodexSetupOperation(id, digest), {state: 'terminal', intentDigest: digest, result});
+      assert.deepEqual(await journal.readCodexSetupOperation(id, digest), {state: 'terminal', intentDigest: digest, result});
       await assert.rejects(journal.claimCodexSetupOperation(id, `sha256:${'b'.repeat(64)}`), {message: 'setup_operation_conflict'});
     } finally {journal.close();}
     await assert.rejects(journal.claimCodexSetupOperation(id, digest), {message: 'vault_setup_journal_scope_unavailable'});
+    await assert.rejects(journal.readCodexSetupOperation(id, digest), {message: 'vault_setup_journal_scope_unavailable'});
   });
 });
 
@@ -120,18 +123,19 @@ test('setup journal snapshots root and key and exposes no capture or history cap
   });
 });
 
-test('closing a setup journal during qualification prevents even a database-access attempt', async t => {
+for (const method of ['claimCodexSetupOperation', 'readCodexSetupOperation'] as const) {
+test(`closing a setup journal during ${method} qualification prevents even a database-access attempt`, async t => {
   await fixture(async (root, key) => {
     let qualify = async () => true, release!: (value: boolean) => void, started!: () => void;
     const pending = new Promise<boolean>(done => {release = done;});
     const requested = new Promise<void>(done => {started = done;});
     const journal = await open(root, key, {signal: new AbortController().signal, current: () => qualify()});
-    let databaseAccesses = 0; const original = LocalVault.prototype.claimCodexSetupOperation;
-    t.mock.method(LocalVault.prototype, 'claimCodexSetupOperation', function (this: LocalVault, operationId: string, intentDigest: string) {
+    let databaseAccesses = 0; const original = LocalVault.prototype[method];
+    t.mock.method(LocalVault.prototype, method, function (this: LocalVault, operationId: string, intentDigest: string) {
       databaseAccesses++; return original.call(this, operationId, intentDigest);
     });
     qualify = async () => {started(); return pending;};
-    const result = journal.claimCodexSetupOperation(id, digest);
+    const result = journal[method](id, digest);
     const rejection = assert.rejects(result, {message: 'vault_setup_journal_scope_unavailable'});
     try {
       await requested; journal.close(); release(true); await rejection;
@@ -139,3 +143,4 @@ test('closing a setup journal during qualification prevents even a database-acce
     } finally {release(false); await Promise.allSettled([result]); journal.close();}
   });
 });
+}

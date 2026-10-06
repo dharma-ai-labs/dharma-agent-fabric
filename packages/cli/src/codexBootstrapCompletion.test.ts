@@ -259,6 +259,7 @@ test('actual completion composition denies copied leases and retains the incompl
   const owner = createCodexSetupAdmission({...active, intent: f.prepared.intent,
     current: async () => ({...active, mode: 'setup'}), qualifyHost: async () => true,
     journal: {claim: async (operation, digest) => f.vault.claimCodexSetupOperation(operation, digest),
+      read: async (operation, digest) => f.vault.readCodexSetupOperation(operation, digest),
       finish: async (lease, digest, result) => f.vault.finishCodexSetupOperation(lease, digest, result)},
     execute: (_intent, _signal, _current, lease) => completion.execute(lease), verifyReadiness: completion.verify});
   try {

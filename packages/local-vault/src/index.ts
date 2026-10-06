@@ -75,6 +75,7 @@ export type LocalCodexSetupResult = {state: 'completed'; readinessReceiptId: str
 export type LocalCodexSetupClaim = {state: 'acquired'; leaseId: string; intentDigest: string}
   | {state: 'running'; intentDigest: string}
   | {state: 'terminal'; intentDigest: string; result: LocalCodexSetupResult};
+export type LocalCodexSetupObservation = Exclude<LocalCodexSetupClaim, {state: 'acquired'}>;
 interface CodexSetupRow {
   operation_id: string; intent_digest: string; lease_hash: string; state: 'running' | 'terminal';
   nonce: Uint8Array | null; tag: Uint8Array | null; ciphertext: Uint8Array | null;
@@ -104,6 +105,7 @@ const SETUP_READINESS_SCHEMA = `create table if not exists codex_setup_readiness
 
 export interface ScopedCodexSetupJournal {
   claimCodexSetupOperation(operationId: string, intentDigest: string): Promise<LocalCodexSetupClaim>;
+  readCodexSetupOperation(operationId: string, intentDigest: string): Promise<LocalCodexSetupObservation | null>;
   finishCodexSetupOperation(leaseId: string, intentDigest: string, result: LocalCodexSetupResult): Promise<void>;
   close(): void;
 }
@@ -305,6 +307,8 @@ export class LocalVault {
       return Object.freeze({
         claimCodexSetupOperation: (operationId: string, intentDigest: string) =>
           fence.step(async () => vault.claimCodexSetupOperation(operationId, intentDigest)),
+        readCodexSetupOperation: (operationId: string, intentDigest: string) =>
+          fence.step(async () => vault.readCodexSetupOperation(operationId, intentDigest)),
         finishCodexSetupOperation: async (leaseId: string, intentDigest: string, result: LocalCodexSetupResult) => {
           let accepted: LocalCodexSetupResult;
           try {accepted = parseCodexSetupResult(result);}
@@ -799,6 +803,19 @@ export class LocalVault {
     const row = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
       .get(operationId) as unknown as CodexSetupRow | undefined;
     if (!row || row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    if (row.state === 'running') return {state: 'running', intentDigest};
+    return {state: 'terminal', intentDigest, result: this.#decodeCodexSetupResult(row)};
+  }
+
+  /** Read the durable original outcome without acquiring or recycling a lease. */
+  readCodexSetupOperation(operationId: string, intentDigest: string): LocalCodexSetupObservation | null {
+    if (typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_operation_invalid');
+    this.#assertSetupJournalDurability();
+    const row = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupRow | undefined;
+    if (!row) return null;
+    if (row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
     if (row.state === 'running') return {state: 'running', intentDigest};
     return {state: 'terminal', intentDigest, result: this.#decodeCodexSetupResult(row)};
   }
