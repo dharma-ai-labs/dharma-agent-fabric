@@ -2049,7 +2049,7 @@ async function startRelayDaemon(policyPath: string) {
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
   if (supervisorState === 'stopped') {
     if ((await relayAutostartStatus({ home: dharmaHome() })).backend === 'container-entrypoint') {
-      await startRelayAutostart({ home: dharmaHome() });
+      await step(() => startRelayAutostart({ home: dharmaHome() }));
     } else {
       await step(async () => {
         const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {

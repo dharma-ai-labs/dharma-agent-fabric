@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import {spawn, type ChildProcess} from 'node:child_process';
+import {execFile, spawn, type ChildProcess} from 'node:child_process';
 import {mkdtemp, readFile, realpath, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, resolve} from 'node:path';
 import test from 'node:test';
 import {compileFunction} from 'node:vm';
+import {promisify} from 'node:util';
 import ts from 'typescript';
 import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope,
   drainBootstrapHostChildren, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
@@ -26,6 +27,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const item = {path: workspace, workspaceId: id(5), organizationId: 'org_demo', repositoryRemoteHash: hash};
   const children: ChildProcess[] = [], effects: string[] = [], spawnCalls: Array<{argv: string[]; options: Record<string, unknown>}> = [];
   let running = false, preexisting = false, withdrawInSpawn = false, withdrawInStatus = false;
+  let container = false, withdrawInBackend = false, withdrawInContainerStart = false;
   t.after(async () => {
     await drainBootstrapHostChildren(prepared.scope);
     for (const child of children) await watchOwnedChild(child).stop({graceMs: 1000});
@@ -41,8 +43,14 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     loadOrganizationPolicy: async () => ({serverAuthorization: {workspaceId: item.workspaceId}}),
     relayProcessState: async () => running || preexisting ? 'running' : 'stopped',
     relaySupervisorProcessState: async () => running || preexisting ? 'running' : 'stopped',
-    relayAutostartStatus: async () => ({backend: 'systemd-user'}),
-    startRelayAutostart: async () => {throw new Error('not this scoped spawn route');},
+    relayAutostartStatus: async () => {
+      if (withdrawInBackend) prepared.scope.close();
+      return {backend: container ? 'container-entrypoint' : 'systemd-user'};
+    },
+    startRelayAutostart: async () => {
+      assert.equal(container, true); effects.push('container_start'); running = true;
+      if (withdrawInContainerStart) prepared.scope.close();
+    },
     spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
       spawnCalls.push({argv, options}); effects.push('spawn');
       const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {cwd: workspace, stdio: 'ignore'});
@@ -72,7 +80,11 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
       return {ok: true, state: 'running'};
     },
   };
-  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const baseline = process.env.DHARMA_RELAY_CALLER_BASELINE_SHA;
+  if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('relay_caller_baseline_invalid');
+  const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`],
+    {cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 4 * 1024 * 1024})).stdout
+    : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   async function declaration(name: string) {
     const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
@@ -89,8 +101,29 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     : session('start', new Map<string, string | boolean>([['name', 'implementer'], ['workspace-id', item.workspaceId], ['apply', true]])));
   return {prepared, call, session, children, effects, spawnCalls, item, workspace, entry, policyPath,
     preexisting: () => {preexisting = true;}, cancelInSpawn: () => {withdrawInSpawn = true;},
-    cancelInStatus: () => {withdrawInStatus = true;}};
+    cancelInStatus: () => {withdrawInStatus = true;}, useContainer: () => {container = true;},
+    cancelInBackend: () => {withdrawInBackend = true;},
+    cancelInContainerStart: () => {withdrawInContainerStart = true;}};
 }
+
+test('actual relay caller refuses container start after setup withdrawal during backend discovery', async t => {
+  const f = await fixture(t); f.useContainer(); f.cancelInBackend();
+  await assert.rejects(f.call('relay'), /codex_setup_host_scope_unavailable/);
+  assert.equal(f.effects.includes('container_start'), false);
+  assert.equal(f.children.length, 0);
+});
+
+test('actual relay caller withholds readiness after withdrawal inside admitted container start', async t => {
+  const f = await fixture(t); f.useContainer(); f.cancelInContainerStart();
+  await assert.rejects(f.call('relay'), /codex_setup_host_scope_unavailable/);
+  assert.equal(f.effects.filter(effect => effect === 'container_start').length, 1);
+  assert.equal(f.children.length, 0, 'a startup request is not adoption of the standing controller');
+});
+
+test('actual relay caller preserves an already running container-owned service without a start request', async t => {
+  const f = await fixture(t); f.useContainer(); f.preexisting(); await f.call('relay');
+  assert.equal(f.effects.includes('container_start'), false); assert.equal(f.children.length, 0);
+});
 
 for (const kind of ['relay', 'session'] as const) {
   test(`actual ${kind} caller captures only its scoped attached child and drains it on owner withdrawal`, async t => {
