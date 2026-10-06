@@ -10,6 +10,7 @@ import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {LocalVault, type LocalCodexSetupSessionRequest} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {runCodexSetupChildStartup, type CodexSetupChildScope} from './codexSetupChildStartup.js';
 import {isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt} from './namedSessionTrust.js';
+import {namedCodexNodeOutputArguments} from './namedCodexNodeOutput.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -47,9 +48,14 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     configPath: () => 'synthetic-config-path', currentBootstrapHostScope: () => undefined,
     createNamedSessionTrust: () => ({refresh: async () => {effects.push('trust');}}),
     refreshVerifiedWorkspacePolicyForTransmission: async () => ({tasks: {writePaths: ['src/**']}}),
-    namedCodexEnvironment: () => ({}), dharmaHome: () => resolve(root, 'dharma'), homedir: () => resolve(root, 'home'),
+    namedCodexEnvironment: () => ({}), namedCodexNodeOutputArguments,
+    dharmaHome: () => resolve(root, 'dharma'), homedir: () => resolve(root, 'home'),
     namedCodexFilesystem: async () => ({peer: 'synthetic-peer', work: 'synthetic-work'}),
-    openCodexAppServerTransport: async () => {effects.push('transport'); mutations.transport?.(); return {close: async () => {effects.push('close-transport');}, request: async () => {
+    openCodexAppServerTransport: async (options: {argv: string[]}) => {
+      assert.deepEqual(options.argv.slice(0, namedCodexNodeOutputArguments().length), namedCodexNodeOutputArguments());
+      assert.ok(options.argv.includes('permissions.dharma_bridge.network={enabled=false}'));
+      assert.ok(options.argv.includes('permissions.dharma_work.network={enabled=false}'));
+      effects.push('transport'); mutations.transport?.(); return {close: async () => {effects.push('close-transport');}, request: async () => {
       effects.push('account-read'); mutations.account?.(); return {account: {type: 'synthetic'}};
     }};}, flags: new Map(), boundedInteger: (_raw: unknown, fallback: number) => fallback,
     randomUUID: () => uuid(40), UUID_PATTERN: /^[0-9a-f-]{36}$/, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, startNamedCodexThread: async () => {
