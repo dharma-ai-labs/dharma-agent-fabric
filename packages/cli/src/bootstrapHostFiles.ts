@@ -50,8 +50,17 @@ function captureJson(value: unknown): string {
 
 /** Lifetime fence, not a replacement for the caller's approved path policy. */
 export async function writeBootstrapHostJson(path: string, value: unknown, scope: BootstrapHostScope) {
+  return writeFrozenBootstrapHostFile(path, Buffer.from(captureJson(value)), scope, 0o600);
+}
+
+export async function writeBootstrapHostText(path: string, value: string, scope: BootstrapHostScope, mode: 0o600 | 0o700) {
+  if (typeof value !== 'string' || Buffer.byteLength(value) > 2 * 1024 * 1024 || value.includes('\0')
+    || ![0o600, 0o700].includes(mode)) throw new Error('codex_setup_host_state_invalid');
+  return writeFrozenBootstrapHostFile(path, Buffer.from(value), scope, mode);
+}
+
+async function writeFrozenBootstrapHostFile(path: string, bytes: Buffer, scope: BootstrapHostScope, mode: number) {
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error('codex_setup_host_state_path_invalid');
-  const bytes = Buffer.from(captureJson(value));
   await scope.assert();
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await scope.step(() => mkdir(dirname(path), {recursive: true, mode: 0o700}));
@@ -59,7 +68,7 @@ export async function writeBootstrapHostJson(path: string, value: unknown, scope
   let identity: BigIntStats | undefined;
   const matches = (a: BigIntStats, b: BigIntStats) => a.isFile() && a.nlink === 1n
     && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.birthtimeNs === b.birthtimeNs
-    && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+    && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs && a.mode === b.mode && a.uid === b.uid && a.gid === b.gid;
   const verifyOwned = async () => {
     if (!identity) throw new Error('codex_setup_host_state_ownership_unconfirmed');
     let reader: Awaited<ReturnType<typeof open>> | undefined;
@@ -84,7 +93,7 @@ export async function writeBootstrapHostJson(path: string, value: unknown, scope
   };
   try {
     await scope.step(async () => {handle = await open(temporary, constants.O_CREAT | constants.O_EXCL
-      | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);});
+      | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), mode);});
     await scope.step(() => handle!.writeFile(bytes));
     await scope.step(() => handle!.sync());
     identity = await scope.step(() => handle!.stat({bigint: true}));

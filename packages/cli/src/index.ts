@@ -109,7 +109,7 @@ import {assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapH
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 export {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
-import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
+import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
@@ -1863,15 +1863,34 @@ export function stableRepositoryLauncherContents(version = VERSION,
 }
 
 async function installStableRepositoryLauncher(workspace: string) {
+  const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
-  await mkdir(launcherRoot, { recursive: true, mode: 0o700 });
   const shellPath = resolve(launcherRoot, 'dharma');
   const cmdPath = resolve(launcherRoot, 'dharma.cmd');
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath) });
-  await writeFile(shellPath, contents.shell, { mode: 0o700 });
-  await chmod(shellPath, 0o700);
-  await writeFile(cmdPath, contents.windows, { mode: 0o600 });
+  if (scope) {
+    await scope.assert();
+    if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
+    for (const directory of [resolve(workspace, '.dharma'), launcherRoot]) {
+      await scope.step(async () => {
+        try {await mkdir(directory, {mode: 0o700});}
+        catch (error) {if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;}
+      });
+      const entry = await scope.step(() => lstat(directory));
+      if (!entry.isDirectory() || entry.isSymbolicLink() || await scope.step(() => realpath(directory)) !== directory
+        || process.platform !== 'win32' && (entry.uid !== process.getuid!() || (entry.mode & 0o022))) {
+        throw new Error('codex_setup_host_launcher_path_invalid');
+      }
+    }
+    await writeBootstrapHostText(shellPath, contents.shell, scope, 0o700);
+    await writeBootstrapHostText(cmdPath, contents.windows, scope, 0o600);
+  } else {
+    await mkdir(launcherRoot, { recursive: true, mode: 0o700 });
+    await writeFile(shellPath, contents.shell, { mode: 0o700 });
+    await chmod(shellPath, 0o700);
+    await writeFile(cmdPath, contents.windows, { mode: 0o600 });
+  }
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
 }
 

@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
-import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
+import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFiles.js';
 
 async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-bootstrap-host-json-'));
@@ -119,5 +119,16 @@ test('non-data and oversized JSON is refused before creating state', async t => 
     cycle, new Proxy({}, {get() {throw new Error('private-canary');}}), Object.create({foreign: true})]) {
     await assert.rejects(writeBootstrapHostJson(f.path, value, f.scope), /codex_setup_host_state_invalid/);
   }
+  assert.deepEqual(await readdir(f.root), []);
+});
+
+test('launcher text rejects unsafe modes and non-text input before any filesystem effect', async t => {
+  const f = await fixture(t);
+  for (const value of [null, {}, Buffer.from('canary'), 'x'.repeat(2 * 1024 * 1024 + 1), 'text\0tail']) {
+    await assert.rejects(writeBootstrapHostText(f.path, value as string, f.scope, 0o700),
+      {message: 'codex_setup_host_state_invalid'});
+  }
+  await assert.rejects(writeBootstrapHostText(f.path, 'text', f.scope, 0o777 as 0o700),
+    {message: 'codex_setup_host_state_invalid'});
   assert.deepEqual(await readdir(f.root), []);
 });
