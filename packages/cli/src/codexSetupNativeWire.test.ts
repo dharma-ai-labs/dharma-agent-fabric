@@ -35,7 +35,8 @@ lines.on('line', line => {
     if (value.params.permissions !== 'dharma_bridge' || value.params.dynamicTools.at(-1).name !== 'dharma_setup_reference') process.exit(3);
     cwd = value.params.cwd; respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   } else if (value.method === 'thread/name/set') {name = value.params.name; respond({});}
-  else if (value.method === 'thread/read') respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
+  else if (value.method === 'thread/archive') respond({});
+  else if (['thread/read', 'thread/unarchive', 'thread/resume'].includes(value.method)) respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   else if (value.method === 'turn/start') {
     send({id: 'fixture_call', method: 'item/tool/call', params: {threadId: 'synthetic_thread', turnId: 'synthetic_turn',
       callId: 'fixture_call', tool: 'dharma_setup_reference', namespace: null,
