@@ -4816,7 +4816,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     }
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
       environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
-      argv: ['-c', 'default_permissions="dharma_bridge"',
+      argv: ['-c', 'allow_login_shell=false', '-c', 'default_permissions="dharma_bridge"',
         '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
         '-c', 'permissions.dharma_bridge.network={enabled=false}',
         '-c', `permissions.dharma_work.filesystem=${filesystem.work}`,

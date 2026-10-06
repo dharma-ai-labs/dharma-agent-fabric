@@ -54,6 +54,7 @@ test('owning connection uses fixed official readonly launch and denies private r
   assert.equal(f.launch.environment.SYNTHETIC_SECRET, undefined);
   assert.deepEqual(f.filesystem.writeRoots, []); assert.ok(f.filesystem.privateRoots.includes(f.input.deviceHome));
   assert.ok(f.launch.argv.includes('apps._default.enabled=false'));
+  assert.ok(f.launch.argv.includes('allow_login_shell=false'));
   assert.ok(f.launch.argv.includes('permissions.dharma_bridge.network={enabled=false}'));
   assert.equal(await connection.current(), true);
   f.setAccount('foreign@example.test'); assert.equal(await connection.current(), false);
