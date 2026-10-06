@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { pinnedRollbackControllerMatches } from './containerRelayRecovery.js';
 import { watchOwnedChild, type OwnedChildLifecycle } from './ownedChildLifecycle.js';
+import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
 export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number; processGroupId?: number; sessionId?: number }
 export interface ContainerChildIdentity { pid: number; uid: number; parentPid: number; startTicks: string }
@@ -278,24 +279,29 @@ function registrationHash(home: string, registration: ContainerRelayRegistration
 }
 
 async function writePrivateJson(options: ContainerLifecycleOptions, name: string, value: unknown) {
-  await privateDirectory(options);
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
+  await step(() => privateDirectory(options));
   // Refuse a substituted/symlink/world-accessible receipt before replacing it.
-  await privateJson(options, name);
+  await step(() => privateJson(options, name));
   const destination = privatePath(options.home, name);
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, JSON.stringify(value) + '\n', { mode: 0o600, flag: 'wx' });
-    await rename(temporary, destination);
+    await step(() => writeFile(temporary, JSON.stringify(value) + '\n', { mode: 0o600, flag: 'wx' }));
+    await step(() => rename(temporary, destination));
+    // Temporary cleanup never reverses an admitted control rename.
   } finally { await rm(temporary, { force: true }); }
 }
 
 export async function containerStartupControl(options: ContainerLifecycleOptions,
   registration: ContainerRelayRegistration, running: boolean) {
-  if (!await containerEntrypointAvailable(options)) throw unavailable();
-  await writePrivateJson(options, 'container-control.json', {
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
+  if (!await step(() => containerEntrypointAvailable(options))) throw unavailable();
+  await step(() => writePrivateJson(options, 'container-control.json', {
     schema: 'dharma.container-relay-control/v1', home: options.home,
     registrationHash: registrationHash(options.home, registration), running,
-  } satisfies Control);
+  } satisfies Control));
 }
 
 export async function containerStartupState(options: ContainerLifecycleOptions, registration: ContainerRelayRegistration) {
