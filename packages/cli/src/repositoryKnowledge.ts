@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants, readFileSync } from 'node:fs';
+import { constants, readFileSync, type BigIntStats } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -464,22 +464,53 @@ export async function initializeRepositoryKnowledge(input: RepositoryKnowledgeIn
     const parent = await checkedPath(workspace, SKILL_ROOT);
     if (!parent) throw new Error('Unmanaged repository skill root.');
     let handle: Awaited<ReturnType<typeof open>> | undefined, closeResult: Promise<void> | undefined;
-    let identity: {dev: bigint; ino: bigint} | undefined;
+    let identity: BigIntStats | undefined, linked = false;
+    const intended = Buffer.from(`${canonical(catalog)}\n`);
+    const handleStat = () => knowledgeEffect(scope, () => handle!.stat({bigint: true}));
     const finishOwned = () => closeResult ??= closeOwned(handle, scope);
+    const verifyStaging = async () => {
+      if (!identity) throw new Error('repository_knowledge_cleanup_unconfirmed');
+      await checkedPath(workspace, SKILL_ROOT);
+      let reader: Awaited<ReturnType<typeof open>> | undefined;
+      const matches = (actual: typeof identity, original: typeof identity, links: bigint, checkChangeTime: boolean) =>
+        !!actual && !!original && actual.isFile() && actual.nlink === links
+        && actual.dev === original.dev && actual.ino === original.ino && actual.size === original.size
+        && actual.birthtimeNs === original.birthtimeNs && actual.mtimeNs === original.mtimeNs
+        && (!checkChangeTime || actual.ctimeNs === original.ctimeNs);
+      try {
+        await knowledgeEffect(scope, async () => {
+          reader = await open(resolve(workspace, staging), constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+        });
+        const before = await knowledgeEffect(scope, () => reader!.stat({bigint: true}));
+        // Publishing our known hard link changes ctime and link count, not contents or birth time.
+        const links = linked ? 2n : 1n;
+        if (!matches(before, identity, links, !linked) || before.size !== BigInt(intended.length)) throw new Error('repository_knowledge_cleanup_unconfirmed');
+        const bytes = Buffer.alloc(intended.length + 1); let count = 0;
+        while (count < bytes.length) {
+          const result = await knowledgeEffect(scope, () => reader!.read(bytes, count, bytes.length - count, count));
+          if (!result.bytesRead) break;
+          count += result.bytesRead;
+        }
+        const after = await knowledgeEffect(scope, () => reader!.stat({bigint: true}));
+        const current = await knowledgeEffect(scope, () => lstat(resolve(workspace, staging), {bigint: true}));
+        if (count !== intended.length || !bytes.subarray(0, count).equals(intended)
+          || !matches(after, before, links, true) || !matches(current, after, links, true)) throw new Error('repository_knowledge_cleanup_unconfirmed');
+      } finally {await closeOwned(reader, scope);}
+    };
     try {
       await knowledgeEffect(scope, async () => {
         handle = await open(resolve(workspace, staging), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
       });
-      if (scope) {
-        const metadata = await knowledgeEffect(scope, () => handle!.stat({bigint: true}));
-        identity = {dev: metadata.dev, ino: metadata.ino};
-      }
-      await knowledgeEffect(scope, () => handle!.writeFile(`${canonical(catalog)}\n`, 'utf8'));
+      await knowledgeEffect(scope, () => handle!.writeFile(intended));
       await knowledgeEffect(scope, () => handle!.sync());
+      identity = await handleStat();
       await finishOwned();
       await checkedPath(workspace, staging);
       await checkedPath(workspace, SKILL_ROOT);
-      try { await knowledgeEffect(scope, () => link(resolve(workspace, staging), resolve(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH))); }
+      await verifyStaging();
+      try { await knowledgeEffect(scope, async () => {
+        await link(resolve(workspace, staging), resolve(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH)); linked = true;
+      }); }
       catch (error) {await scope?.assert(); if (errorCode(error) !== 'EEXIST') throw error;}
       await syncDirectory(parent);
       intentBytes = await readOptional(workspace, REPOSITORY_KNOWLEDGE_INIT_PATH);
@@ -488,18 +519,8 @@ export async function initializeRepositoryKnowledge(input: RepositoryKnowledgeIn
     } finally {
       if (handle) await finishOwned();
       if (handle && (!scope || await scope.current())) {
-        if (scope) {
-          try {
-            if (!identity) throw new Error('repository_knowledge_cleanup_unconfirmed');
-            const current = await knowledgeEffect(scope, () => lstat(resolve(workspace, staging), {bigint: true}));
-            if (!current.isFile() || current.nlink < 1n || current.nlink > 2n
-              || current.dev !== identity.dev || current.ino !== identity.ino) throw new Error('repository_knowledge_cleanup_unconfirmed');
-            await knowledgeEffect(scope, () => unlink(resolve(workspace, staging)));
-          } catch {await scope.assert(); throw new Error('repository_knowledge_cleanup_unconfirmed');}
-        } else {
-          const target = await checkedPath(workspace, staging);
-          if (target) await unlink(target);
-        }
+        try {await verifyStaging(); await knowledgeEffect(scope, () => unlink(resolve(workspace, staging)));}
+        catch {await scope?.assert(); throw new Error('repository_knowledge_cleanup_unconfirmed');}
       }
     }
   }

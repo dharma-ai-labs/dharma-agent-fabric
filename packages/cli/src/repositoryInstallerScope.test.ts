@@ -76,6 +76,76 @@ async function actualEntry(overrides: Record<string, unknown> = {}, loadContract
 function connection(workspace: string) {
   return {workspace, hqUrl: 'https://hq.example', organizationId: 'org_demo', workspaceId: 'synthetic', policyRevision: 'policy-v1'};
 }
+
+for (const scoped of [true, false]) for (const cleanup of [true, false]) {
+  test(`installer preserves replaced staging despite reused dev/ino (${scoped ? 'scoped' : 'legacy'}, ${cleanup ? 'cleanup' : 'publication'})`, async t => {
+    const f = await fixture(t); let staging = '', acquired: syncFs.BigIntStats | undefined, unlinks = 0, renames = 0;
+    const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (!(Number(args[1]) & syncFs.constants.O_CREAT)) return handle;
+      staging = String(args[0]); const close = handle.close.bind(handle);
+      handle.close = async () => {
+        acquired = await handle.stat({bigint: true}); await close();
+        await fs.unlink(staging); await fs.writeFile(staging, 'intruder!');
+      };
+      return handle;
+    }, lstat: async (name: Parameters<typeof fs.lstat>[0], options?: any) => {
+      const actual = await fs.lstat(name, options);
+      if (String(name) !== staging || !acquired || !options?.bigint) return actual;
+      // Model inode reuse only; content and all other replacement metadata stay real.
+      return Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, {dev: acquired.dev, ino: acquired.ino});
+    }, unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);},
+    rename: async (...args: Parameters<typeof fs.rename>) => {renames++; return fs.rename(...args);}});
+    const operation = () => api.writeRepositoryInstallerFile(f.root, '.dharma/agent-fabric.json', 'candidate',
+      cleanup ? Buffer.from('not previous') : undefined);
+    const error = await (scoped ? runCodexBootstrapHost(input(f.root), operation) : operation()).then(() => null, (failure: Error) => failure);
+    assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+    assert.equal(await fs.readFile(staging, 'utf8'), 'intruder!');
+    assert.equal(unlinks, 0); assert.equal(renames, 0);
+    assert.equal(error?.message, 'repository_installer_cleanup_unconfirmed');
+  });
+}
+
+test('installer verifies content even when an in-place edit reports unchanged metadata', async t => {
+  const f = await fixture(t); let staging = '', acquired: syncFs.BigIntStats | undefined, unlinks = 0, renames = 0;
+  const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    if (Number(args[1]) & syncFs.constants.O_CREAT) {
+      staging = String(args[0]); const close = handle.close.bind(handle);
+      handle.close = async () => {acquired = await handle.stat({bigint: true}); await close(); await fs.writeFile(staging, 'intruder!');};
+    } else if (String(args[0]) === staging) {
+      handle.stat = (async () => acquired!) as typeof handle.stat;
+    }
+    return handle;
+  }, lstat: async (name: Parameters<typeof fs.lstat>[0], options?: any) =>
+    String(name) === staging && acquired && options?.bigint ? acquired : fs.lstat(name, options),
+  unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);},
+  rename: async (...args: Parameters<typeof fs.rename>) => {renames++; return fs.rename(...args);}});
+  await assert.rejects(runCodexBootstrapHost(input(f.root), () => api.writeRepositoryInstallerFile(f.root, '.dharma/agent-fabric.json', 'candidate')),
+    {message: 'repository_installer_cleanup_unconfirmed'});
+  assert.equal(await fs.readFile(staging, 'utf8'), 'intruder!'); assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+  assert.equal(unlinks, 0); assert.equal(renames, 0);
+});
+
+test('installer closes its staging reader after read withdrawal without publication or cleanup', async t => {
+  const f = await fixture(t); let staging = '', readersClosed = 0, unlinks = 0, renames = 0;
+  await assert.rejects(runCodexBootstrapHost(input(f.root), async ({scope}) => {
+    const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (Number(args[1]) & syncFs.constants.O_CREAT) staging = String(args[0]);
+      else if (String(args[0]) === staging) {
+        const read = handle.read.bind(handle), close = handle.close.bind(handle);
+        handle.read = (async (...values: any[]) => {const result = await Reflect.apply(read, handle, values); scope.close(); return result;}) as typeof handle.read;
+        handle.close = async () => {readersClosed++; return close();};
+      }
+      return handle;
+    }, unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);},
+    rename: async (...args: Parameters<typeof fs.rename>) => {renames++; return fs.rename(...args);}});
+    await api.writeRepositoryInstallerFile(f.root, '.dharma/agent-fabric.json', 'candidate');
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(readersClosed, 1); assert.equal(unlinks, 0); assert.equal(renames, 0);
+  assert.equal(await fs.readFile(staging, 'utf8'), 'candidate'); assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
+});
 test('installer scope refuses path inspection before any filesystem access', async t => {
   const f = await fixture(t); let stats = 0;
   const api = await module({lstat: async (...args: Parameters<typeof fs.lstat>) => {stats++; return fs.lstat(...args);}});
@@ -217,16 +287,17 @@ test('installer scope refuses an unmanaged existing skill without creating a mar
 });
 
 test('installer scope removes only its acquired staging inode after failed publication', async t => {
-  const f = await fixture(t); let closes = 0, unlinks = 0;
+  const f = await fixture(t); let unlinks = 0; const closes: number[] = [];
   const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
     const handle = await fs.open(...args), close = handle.close.bind(handle);
-    handle.close = async () => {closes++; return close();}; return handle;
+    const index = closes.push(0) - 1;
+    handle.close = async () => {closes[index]!++; return close();}; return handle;
   }, rename: async () => {throw new Error('private rename canary');},
   unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);}});
   await assert.rejects(runCodexBootstrapHost(input(f.root), () =>
     api.writeRepositoryInstallerFile(f.root, '.dharma/agent-fabric.json', 'candidate')),
   {message: 'repository_installer_storage_unavailable'});
-  assert.equal(closes, 1); assert.equal(unlinks, 1);
+  assert.deepEqual(closes, [1, 1, 1]); assert.equal(unlinks, 1);
   assert.deepEqual(await fs.readdir(path.dirname(f.target)), ['agent-fabric.json']);
   assert.equal(await fs.readFile(f.target, 'utf8'), 'previous');
 });

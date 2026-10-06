@@ -387,13 +387,15 @@ test('package writer refuses foreign lock candidate before acquiring it or start
   await assert.rejects(fs.stat(path.join(f.workspace, generated, 'COPY-JOURNAL.json')), {code: 'ENOENT'});
 });
 test('package writer retains a published journal after rename withdrawal without installing a copy', async t => {
-  const f = await writeFixture(t), journal = path.join(f.workspace, generated, 'COPY-JOURNAL.json');
+  const f = await writeFixture(t), workspace = await fs.realpath(f.workspace);
+  const journal = path.join(workspace, generated, 'COPY-JOURNAL.json'); let withdrawals = 0;
   await assert.rejects(runCodexBootstrapHost(host(f.workspace), async ({scope}) => {
     const api = await module({rename: async (...args: Parameters<typeof fs.rename>) => {
-      await fs.rename(...args); if (String(args[1]) === journal) scope.close();
+      await fs.rename(...args); if (String(args[1]) === journal) {withdrawals++; scope.close();}
     }}, true);
     await api.writeRepositoryPackageSnapshot(f);
   }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(withdrawals, 1);
   assert.equal(JSON.parse(await fs.readFile(journal, 'utf8')).desired.snapshotHash, f.snapshot.manifest.snapshotHash);
   await assert.rejects(fs.stat(path.join(f.workspace, generated, 'COPY-LOCK.json')), {code: 'ENOENT'});
   await assert.rejects(fs.stat(path.join(f.workspace, generated, 'skills/source/.agents/skills/example/SKILL.md')), {code: 'ENOENT'});

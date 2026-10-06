@@ -49,6 +49,77 @@ async function module(overrides: Record<string, unknown> = {}) {
   return exports;
 }
 
+for (const scoped of [true, false]) for (const cleanup of [true, false]) {
+  test(`knowledge preserves replaced staging despite reused dev/ino (${scoped ? 'scoped' : 'legacy'}, ${cleanup ? 'cleanup' : 'publication'})`, async t => {
+    const f = await fixture(t); let staging = '', foreign = '', acquired: syncFs.BigIntStats | undefined, unlinks = 0, links = 0;
+    const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (!(Number(args[1]) & syncFs.constants.O_CREAT)) return handle;
+      staging = String(args[0]); const close = handle.close.bind(handle);
+      handle.close = async () => {
+        acquired = await handle.stat({bigint: true}); await close();
+        const original = await fs.readFile(staging); foreign = 'x'.repeat(original.length);
+        await fs.unlink(staging); await fs.writeFile(staging, foreign);
+      };
+      return handle;
+    }, lstat: async (name: Parameters<typeof fs.lstat>[0], options?: any) => {
+      const actual = await fs.lstat(name, options);
+      if (String(name) !== staging || !acquired || !options?.bigint) return actual;
+      return Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, {dev: acquired.dev, ino: acquired.ino});
+    }, unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);},
+    link: async (...args: Parameters<typeof fs.link>) => {
+      links++; if (cleanup) throw new Error('fixture link failure'); return fs.link(...args);
+    }});
+    const operation = () => api.initializeRepositoryKnowledge(f);
+    const error = await (scoped ? runCodexBootstrapHost(input(f.workspace), operation) : operation()).then(() => null, (failure: Error) => failure);
+    assert.equal(await fs.readFile(staging, 'utf8'), foreign);
+    assert.equal(unlinks, 0); assert.equal(links, 0);
+    await assert.rejects(fs.stat(path.join(f.workspace, skill, '.repository-knowledge-init.json')), {code: 'ENOENT'});
+    assert.equal(error?.message, 'repository_knowledge_cleanup_unconfirmed');
+  });
+}
+
+test('knowledge verifies content even when an in-place edit reports unchanged metadata', async t => {
+  const f = await fixture(t); let staging = '', foreign = '', acquired: syncFs.BigIntStats | undefined, unlinks = 0, links = 0;
+  const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    if (Number(args[1]) & syncFs.constants.O_CREAT) {
+      staging = String(args[0]); const close = handle.close.bind(handle);
+      handle.close = async () => {
+        acquired = await handle.stat({bigint: true}); await close();
+        foreign = 'x'.repeat(Number(acquired.size)); await fs.writeFile(staging, foreign);
+      };
+    } else if (String(args[0]) === staging) handle.stat = (async () => acquired!) as typeof handle.stat;
+    return handle;
+  }, lstat: async (name: Parameters<typeof fs.lstat>[0], options?: any) =>
+    String(name) === staging && acquired && options?.bigint ? acquired : fs.lstat(name, options),
+  unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);},
+  link: async (...args: Parameters<typeof fs.link>) => {links++; return fs.link(...args);}});
+  await assert.rejects(runCodexBootstrapHost(input(f.workspace), () => api.initializeRepositoryKnowledge(f)),
+    {message: 'repository_knowledge_cleanup_unconfirmed'});
+  assert.equal(await fs.readFile(staging, 'utf8'), foreign); assert.equal(unlinks, 0); assert.equal(links, 0);
+});
+
+test('knowledge closes its staging reader after read withdrawal without publication or cleanup', async t => {
+  const f = await fixture(t); let staging = '', readersClosed = 0, unlinks = 0, links = 0;
+  await assert.rejects(runCodexBootstrapHost(input(f.workspace), async ({scope}) => {
+    const api = await module({open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (Number(args[1]) & syncFs.constants.O_CREAT) staging = String(args[0]);
+      else if (String(args[0]) === staging) {
+        const read = handle.read.bind(handle), close = handle.close.bind(handle);
+        handle.read = (async (...values: any[]) => {const result = await Reflect.apply(read, handle, values); scope.close(); return result;}) as typeof handle.read;
+        handle.close = async () => {readersClosed++; return close();};
+      }
+      return handle;
+    }, unlink: async (...args: Parameters<typeof fs.unlink>) => {unlinks++; return fs.unlink(...args);},
+    link: async (...args: Parameters<typeof fs.link>) => {links++; return fs.link(...args);}});
+    await api.initializeRepositoryKnowledge(f);
+  }), {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(readersClosed, 1); assert.equal(unlinks, 0); assert.equal(links, 0);
+  assert.equal(JSON.parse(await fs.readFile(staging, 'utf8')).organizationId, 'org_demo');
+});
+
 test('knowledge scope refuses workspace metadata before IO when original host is closed', async t => {
   const f = await fixture(t); let stats = 0;
   const api = await module({lstat: async (...args: Parameters<typeof fs.lstat>) => {stats++; return fs.lstat(...args);}});

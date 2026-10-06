@@ -45,19 +45,28 @@ test('vault key access carries the closed owning context without opening a store
 test('every CLI vault-key caller explicitly forwards the owning host scope', async () => {
   const text = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  let callers = 0;
-  const visit = (node: ts.Node) => {
+  let callers = 0, opened = 0, captures = 0;
+  const visit = (node: ts.Node, owner = '') => {
+    if (ts.isFunctionDeclaration(node)) owner = node.name?.text ?? owner;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
       && node.expression.text === 'loadOrCreateVaultMasterKey') {
+      assert.equal(owner, 'openBootstrapVault', 'direct key callers must not bypass the scoped vault owner');
       callers++; assert.equal(node.arguments.length, 2);
       const store = node.arguments[0], scope = node.arguments[1];
       assert.ok(store && ts.isIdentifier(store) && store.text === 'undefined');
-      assert.ok(scope && ts.isCallExpression(scope) && ts.isIdentifier(scope.expression)
-        && scope.expression.text === 'currentBootstrapHostScope' && scope.arguments.length === 0);
+      assert.ok(scope && ts.isIdentifier(scope) && scope.text === 'scope');
     }
-    ts.forEachChild(node, visit);
+    if (ts.isVariableDeclaration(node) && owner === 'openBootstrapVault' && ts.isIdentifier(node.name)
+      && node.name.text === 'scope') {
+      captures++;
+      const value = node.initializer;
+      assert.ok(value && ts.isCallExpression(value) && ts.isIdentifier(value.expression)
+        && value.expression.text === 'currentBootstrapHostScope' && value.arguments.length === 0);
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'openBootstrapVault') opened++;
+    ts.forEachChild(node, child => visit(child, owner));
   };
-  visit(source); assert.equal(callers, 11);
+  visit(source); assert.equal(callers, 1); assert.equal(captures, 1); assert.equal(opened, 11);
 });
 
 test('receiver readiness forwards the owning scope into its journal self-test', async () => {

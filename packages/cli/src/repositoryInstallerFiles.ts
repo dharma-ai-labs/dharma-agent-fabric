@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
@@ -180,6 +180,7 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
 // Replace owned generated leaves atomically; never truncate an existing inode.
 export async function writeRepositoryInstallerFile(workspace: string, path: InstallerFile, content: string, expectedContent?: Buffer) {
   const scope = currentBootstrapHostScope();
+  const intended = Buffer.from(content);
   expectedContent = expectedContent === undefined ? undefined : Buffer.from(expectedContent);
   await scope?.assert();
   if (!(FILES as readonly string[]).includes(path)) throw new Error('Unsupported repository installer file.');
@@ -188,48 +189,63 @@ export async function writeRepositoryInstallerFile(workspace: string, path: Inst
   await checkedPath(workspace, target, 'file', scope);
   const temporary = `${target}.staging-${randomUUID()}`;
   let handle: Awaited<ReturnType<typeof open>> | undefined, closeResult: Promise<void> | undefined;
-  let identity: {dev: bigint; ino: bigint} | undefined, published = false;
+  let identity: BigIntStats | undefined, published = false;
   const closeOwned = (): Promise<void> => closeResult ??= (async () => {
     try {await handle?.close();}
     catch (error) {if (scope) throw new Error('repository_installer_cleanup_unconfirmed'); throw error;}
   })();
+  const matches = (actual: BigIntStats, original: BigIntStats) => actual.isFile() && actual.nlink === 1n
+    && actual.dev === original.dev && actual.ino === original.ino && actual.size === original.size
+    && actual.birthtimeNs === original.birthtimeNs && actual.mtimeNs === original.mtimeNs && actual.ctimeNs === original.ctimeNs;
+  // An inode number can be reused after close; verify the acquired file's bytes too.
+  const verifyStaging = async () => {
+    if (!identity) throw new Error('repository_installer_cleanup_unconfirmed');
+    await checkedPath(workspace, dirname(temporary), 'directory', scope);
+    let reader: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await installerEffect(scope, async () => {
+        reader = await open(temporary, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+      });
+      const before = await installerEffect(scope, () => reader!.stat({bigint: true}));
+      if (!matches(before, identity) || before.size !== BigInt(intended.length)) throw new Error('repository_installer_cleanup_unconfirmed');
+      const bytes = Buffer.alloc(intended.length + 1); let count = 0;
+      while (count < bytes.length) {
+        const result = await installerEffect(scope, () => reader!.read(bytes, count, bytes.length - count, count));
+        if (!result.bytesRead) break;
+        count += result.bytesRead;
+      }
+      const after = await installerEffect(scope, () => reader!.stat({bigint: true}));
+      const current = await installerEffect(scope, () => lstat(temporary, {bigint: true}));
+      if (count !== intended.length || !bytes.subarray(0, count).equals(intended)
+        || !matches(after, before) || !matches(current, after)) throw new Error('repository_installer_cleanup_unconfirmed');
+    } finally {
+      try {await reader?.close();} catch {throw new Error('repository_installer_cleanup_unconfirmed');}
+    }
+  };
   try {
     await installerEffect(scope, async () => {
       handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
         | (constants.O_NOFOLLOW || 0), 0o600);
     });
-    if (scope) {
-      const metadata = await installerEffect(scope, () => handle!.stat({bigint: true}));
-      identity = {dev: metadata.dev, ino: metadata.ino};
-    }
-    await installerEffect(scope, () => handle!.writeFile(content));
+    await installerEffect(scope, () => handle!.writeFile(intended));
     await installerEffect(scope, () => handle!.sync());
+    identity = await installerEffect(scope, () => handle!.stat({bigint: true}));
     await closeOwned();
     await checkedPath(workspace, dirname(target), 'directory', scope);
     await checkedPath(workspace, target, 'file', scope);
     if (expectedContent && !(await installerEffect(scope, () => readFile(target))).equals(expectedContent)) {
       throw new Error('Repository installer destination changed before replacement.');
     }
+    await verifyStaging();
     await installerEffect(scope, async () => {await rename(temporary, target); published = true;});
   } finally {
     if (handle) await closeOwned();
     if (!published && handle) {
-      if (scope) {
-        // Withdrawn authority keeps staging evidence; cleanup cannot target a reused name.
-        if (await scope.current()) {
-          if (!identity) throw new Error('repository_installer_cleanup_unconfirmed');
-          try {
-            const current = await installerEffect(scope, () => lstat(temporary, {bigint: true}));
-            if (!current.isFile() || current.nlink !== 1n || current.dev !== identity.dev || current.ino !== identity.ino) {
-              throw new Error('repository_installer_cleanup_unconfirmed');
-            }
-            await installerEffect(scope, () => unlink(temporary));
-          } catch {
-            await scope.assert();
-            throw new Error('repository_installer_cleanup_unconfirmed');
-          }
-        }
-      } else if (await checkedPath(workspace, temporary, 'file')) await unlink(temporary);
+      // Withdrawn authority keeps evidence; legacy callers get the same ownership checks.
+      if (!scope || await scope.current()) {
+        try {await verifyStaging(); await installerEffect(scope, () => unlink(temporary));}
+        catch {await scope?.assert(); throw new Error('repository_installer_cleanup_unconfirmed');}
+      }
     }
   }
 }
