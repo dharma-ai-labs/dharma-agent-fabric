@@ -102,6 +102,24 @@ test('native setup host registers only fixed tools and binds execution to verifi
   } finally {await host.close();}
 });
 
+test('setup ingress keeps asynchronous tool execution in the original turn until a terminal result', async () => {
+  const f = fixture(), host = await open(f.input);
+  try {
+    const start = f.calls.find(call => call.method === 'turn/start')!;
+    const content = start.params.input as Array<{type: string; text: string}>;
+    assert.equal(content.length, 1);
+    const text = content[0]!.text;
+    assert.match(text, /functions\.exec.*running cell/);
+    assert.match(text, /functions\.wait.*terminal result/);
+    assert.match(text, /Do not end this turn.*pending/);
+    assert.match(text, /Never terminate or restart the setup operation/);
+    assert.match(text, /Browser approval remains required for the intended recipient/);
+    assert.match(text, /Do not run setup shell commands, read private storage/);
+    assert.equal((await f.tool()).success, true);
+    f.complete(); await host.settled;
+  } finally {await host.close();}
+});
+
 test('early native tool waits for the verified turn/start response rather than guessing turn identity', async () => {
   const f = fixture(), request = f.transport.request;
   let resolveTurn!: (value: unknown) => void, early!: ReturnType<CodexToolHandler>;

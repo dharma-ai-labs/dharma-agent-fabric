@@ -122,7 +122,7 @@ export async function startCodexSetupNativeHost(input: Input) {
     await scope.step(async () => {
       const started = record(await transport.request('turn/start', {
         threadId, cwd: workspace, approvalPolicy: 'never', permissions: 'dharma_bridge',
-        input: [{type: 'text', text: `Perform the recipient-bound Agent Fabric setup using dharma_setup_reference with operationId ${intent.operationId} and setupReference ${intent.setupReference}. Browser approval remains required for the intended recipient. In-progress is not readiness. Do not run setup shell commands, read private storage, request broader permissions or use peer tools during setup.`}],
+        input: [{type: 'text', text: `Perform the recipient-bound Agent Fabric setup using dharma_setup_reference with operationId ${intent.operationId} and setupReference ${intent.setupReference}. Browser approval remains required for the intended recipient. In-progress is not readiness. If functions.exec returns a running cell, use functions.wait on that same cell until the setup tool returns a terminal result or the approved operation expires. Prefer 120000ms waits instead of rapid polling. Do not end this turn or send a final answer while the setup tool is pending: ending the original turn cancels setup, even when browser approval is still pending. Never terminate or restart the setup operation merely to report that approval is needed. Do not run setup shell commands, read private storage, request broader permissions or use peer tools during setup.`}],
       }));
       const turn = record(started?.turn);
       if (typeof turn?.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(turn.id)) throw new Error('codex_setup_native_start_failed');
