@@ -2178,10 +2178,15 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
     return { ok: true, stopped: true, ...standardResult, demo: demoResult };
   } finally {
     controller.abort();
-    await Promise.allSettled(services);
+    const settled = await Promise.allSettled(services);
     await health.drain();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
+    // Preserve ownership records when an owned child may still be running.
+    if (settled.some(result => result.status === 'rejected'
+      && result.reason instanceof Error && result.reason.message === 'owned_child_stop_unconfirmed')) {
+      throw new Error('relay_supervisor_child_stop_unconfirmed');
+    }
     const binding = await readFile(bindingPath, 'utf8')
       .then(value => JSON.parse(value) as { pid: number }).catch(() => null);
     if (binding?.pid === process.pid) await rm(bindingPath, { force: true });
