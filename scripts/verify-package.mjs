@@ -63,6 +63,11 @@ for (const packageName of [
 }
 
 const cli = workspaceManifests.get('@dharma-ai-labs/agent-fabric');
+const localVault = workspaceManifests.get('@dharma-ai-labs/agent-fabric-local-vault');
+if (cli?.dependencies?.[localVault?.name] !== localVault?.version
+  || localVault?.exports?.['./setup-readiness'] !== './dist/setupReadiness.js') {
+  throw new Error('CLI must pin the qualified local-vault readiness export.');
+}
 const skillManager = workspaceManifests.get('@dharma-ai-labs/agent-fabric-skill-manager');
 const pinnedSkillManager = cli?.dependencies?.['@dharma-ai-labs/agent-fabric-skill-manager'];
 if (pinnedSkillManager !== skillManager?.version) {
@@ -98,6 +103,8 @@ for (const workspace of workspaceDirectories) {
   if (workspace === 'packages/provider-adapters' && !packedPaths.has('dist/knowledge-server.js')) {
     throw new Error(`${manifest.name} tarball does not contain the task knowledge server.`);
   }
+  if (workspace === 'packages/local-vault' && (!packedPaths.has('dist/setupReadiness.js')
+    || !packedPaths.has('dist/setupReadiness.d.ts'))) throw new Error('Local-vault readiness export is absent from its tarball.');
 }
 
 const reference = JSON.parse(await readFile(resolve(root, 'packages/lifecycle-adapter/package.json'), 'utf8'));

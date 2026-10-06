@@ -26,6 +26,7 @@
     "test": "npm run schema:validate && npm run build && npm run test:unit",
     "test:unit": "node scripts/run-workspace-tests.mjs",
     "pack:verify": "node scripts/verify-package.mjs",
+    "pack:setup-readiness": "node --test scripts/verify-setup-readiness-package.test.mjs && node scripts/verify-setup-readiness-package.mjs",
     "mcp:catalog:verify": "node scripts/verify-mcp-catalog.mjs",
     "openapi:verify": "node scripts/verify-agent-fabric-openapi.mjs",
     "load:relay": "npm run build && node scripts/load-relay.mjs",
@@ -35,7 +36,7 @@
     "proof:relay": "node scripts/proof-live-relay.mjs",
     "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
     "public:content:check": "node scripts/check-public-content.mjs",
-    "check": "npm run public:content:check && npm run vendor:verify && npm test && npm run pack:verify && npm run mcp:catalog:verify && npm run openapi:verify"
+    "check": "npm run public:content:check && npm run vendor:verify && npm test && npm run pack:verify && npm run pack:setup-readiness && npm run mcp:catalog:verify && npm run openapi:verify"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",
