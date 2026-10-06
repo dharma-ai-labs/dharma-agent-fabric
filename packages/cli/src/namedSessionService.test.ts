@@ -65,10 +65,12 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 300000).toISOString(),
       nonce: randomUUID(), signerKeyVersion: 'test-v1' };
     const question = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
+    const lifetime = new AbortController();
     const transport = {
+      signal: lifetime.signal,
       onToolCall() { return () => {}; },
       onNotification(listener: (value: unknown) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-      async close() { closed = true; },
+      async close() { lifetime.abort(); closed = true; },
       async request(method: string, params: Record<string, unknown>): Promise<unknown> {
         if (method === 'permissionProfile/list') return { data: ['dharma_bridge', 'dharma_work'].map(id => ({ id, allowed: true })) };
         if (method === 'config/read') return { config: { permissions: {
@@ -123,10 +125,18 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
     };
     let boundaryWorkId: string | null = null;
     const retainedWorkIds: string[] = [];
-    let exportSyncs = 0;
+    let exportSyncs = 0, nativeReads = 0, nativeUnavailable = false;
+    const nativeSkill = {schema: 'dharma.named-codex-skill-observation/v1' as const, nativeDiscovered: true as const,
+      bundleId: randomUUID(), bundleHash: `sha256:${'a'.repeat(64)}`, catalogHash: `sha256:${'b'.repeat(64)}`,
+      manifestHash: `sha256:${'c'.repeat(64)}`, skillsHash: `sha256:${'d'.repeat(64)}`, observedAt: new Date().toISOString()};
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
       authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => true,
+      observeNativeSkill: async () => {
+        assert.equal(active, 0); assert.equal(boundaryWorkId, null); nativeReads++;
+        if (nativeUnavailable) throw new Error('PRIVATE_NATIVE_DIAGNOSTIC');
+        return {...nativeSkill, observedAt: new Date().toISOString()};
+      },
       syncTaskExports: async () => {
         assert.equal(active, 0); assert.equal(boundaryWorkId, null); exportSyncs++;
         if (queueFailure) throw new Error('PRIVATE_EXPORT_SYNC_DIAGNOSTIC_MUST_NOT_LEAK');
@@ -181,6 +191,21 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       assert.equal(exports.pending, queueFailure ? null : 0);
       assert.equal(exports.acceptedLearningObservation, false);
       assert.equal(JSON.stringify(idleHealth).includes('PRIVATE_EXPORT_SYNC'), false);
+      const beforeReadinessBudget = idleHealth.budget;
+      const readiness = await namedSessionRequest(home, 'implementer', {action: 'readiness'});
+      assert.equal(readiness.schema, 'dharma.named-session-readiness/v1');
+      assert.equal(readiness.bindingId, binding.bindingId); assert.equal(readiness.sessionId, binding.sessionId);
+      for (const key of Object.keys(identity) as Array<keyof typeof identity>) assert.equal(readiness[key], identity[key]);
+      assert.equal((readiness.nativeSkill as typeof nativeSkill).bundleHash, nativeSkill.bundleHash);
+      assert.equal(nativeReads, 1); assert.equal(turns.length, 0);
+      assert.deepEqual((await namedSessionRequest(home, 'implementer', {action: 'status'})).budget, beforeReadinessBudget);
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action: 'readiness', prompt: 'foreign authority'}),
+        /named_session_readiness_unavailable/);
+      assert.equal(nativeReads, 1);
+      nativeUnavailable = true;
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action: 'readiness'}),
+        {message: 'named_session_readiness_unavailable'});
+      nativeUnavailable = false;
       const workId = randomUUID();
       const putBlob = vault.putBlob.bind(vault);
       let secretPersisted = false;

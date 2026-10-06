@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { constants as fsConstants, realpathSync } from 'node:fs';
 import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
@@ -17,7 +17,7 @@ import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, refer
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
-  AgentFabricClient, beginEnrollment, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
+  AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
@@ -44,7 +44,7 @@ import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegi
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
-import { runOwnedContainerEntrypoint } from './containerRelayLifecycle.js';
+import { runOwnedContainerEntrypoint, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
@@ -57,7 +57,8 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
-import { assertRepositoryInstallerOwnership, writeRepositoryInstallerFile } from './repositoryInstallerFiles.js';
+import { captureRepositoryInstallerInput, prepareRepositoryInstallerWorkspace, writeRepositoryInstallerFile,
+  type RepositoryInstallerInput } from './repositoryInstallerFiles.js';
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
@@ -100,12 +101,31 @@ import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provid
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
+import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
+import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
+import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
+  originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
+import {receiveCodexSetupChildStart, runCodexSetupChildStartup, sendCodexSetupChildStart,
+  type CodexSetupChildMessage, type CodexSetupChildScope} from './codexSetupChildStartup.js';
+import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, prepareCodexBootstrapHost, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
+// Trusted runtime composition only; these exports do not enable effectful setup.
+import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+import {openCodexSetupOwnedConnection} from './codexSetupOwnedConnection.js';
+export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
+import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
+export {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
+import {assertCodexSetupExecutionLease, type CodexSetupExecutionLease, type CodexSetupIntent} from './codexSetupAdmission.js';
+import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness} from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
+import type {LocalVault, LocalCodexSetupSessionRequest, ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
+import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
+export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.153';
+const VERSION = '0.2.154';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -227,6 +247,31 @@ async function loadVaultModule() {
   }
 }
 
+async function openBootstrapVault(options: {root: string; rawLocalDays?: number}): Promise<
+  import('@dharma-ai-labs/agent-fabric-local-vault').LocalVault
+  | import('@dharma-ai-labs/agent-fabric-local-vault').ScopedLocalVault> {
+  const scope = currentBootstrapHostScope(), snapshot = {root: options.root, rawLocalDays: options.rawLocalDays};
+  let key: Buffer | undefined;
+  let vault: import('@dharma-ai-labs/agent-fabric-local-vault').LocalVault
+    | import('@dharma-ai-labs/agent-fabric-local-vault').ScopedLocalVault | undefined;
+  try {
+    await scope?.assert();
+    const {LocalVault, loadOrCreateVaultMasterKey} = scope
+      ? await scope.step(() => loadVaultModule()) : await loadVaultModule();
+    key = await loadOrCreateVaultMasterKey(undefined, scope);
+    await scope?.assert();
+    vault = scope ? await LocalVault.open({...snapshot, masterKey: key}, scope)
+      : await LocalVault.open({...snapshot, masterKey: key});
+    await scope?.assert();
+    return vault;
+  } catch (error) {
+    if (vault) {
+      try {await vault.close();} catch {throw new Error('vault_cleanup_unconfirmed');}
+    }
+    throw error;
+  } finally {key?.fill(0);}
+}
+
 export function isDirectExecution(argvPath: string | undefined, moduleUrl: string): boolean {
   if (!argvPath) return false;
   try {
@@ -246,39 +291,49 @@ function evidenceUploadLedgerPath() { return resolve(dharmaHome(), 'relay', 'evi
 function evidenceRequestReceiptPath(requestId: string) { return resolve(dharmaHome(), 'relay', 'evidence-requests', `${requestId}.json`); }
 
 export async function loadOrCreateInstallationId(path = installationIdentityPath()): Promise<string> {
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
   const readExisting = async (): Promise<string> => {
-    const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    const value = JSON.parse(await step(() => readFile(path, 'utf8'))) as Record<string, unknown>;
     if (value.schema !== 'dharma.installation-identity/v1'
       || typeof value.installationId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.installationId)) {
       throw new Error('Installation identity is invalid. Preserve the file and re-enroll this installation.');
     }
+    await scope?.assert();
     return value.installationId;
   };
   try {
-    return await readExisting();
+    try {
+      return await readExisting();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await step(() => mkdir(dirname(path), { recursive: true, mode: 0o700 }));
+    const installationId = randomUUID();
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      // Capture ownership before the post-acquisition fence can refuse continuation.
+      await step(async () => {handle = await open(path, 'wx', 0o600);});
+      await step(() => handle!.writeFile(`${JSON.stringify({
+        schema: 'dharma.installation-identity/v1',
+        installationId,
+        createdAt: new Date().toISOString(),
+      }, null, 2)}\n`));
+      await step(() => handle!.sync());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      return await readExisting();
+    } finally {
+      await handle?.close();
+    }
+    await scope?.assert();
+    return installationId;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('codex_setup_host_installation_failed');
   }
-
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const installationId = randomUUID();
-  let handle;
-  try {
-    handle = await open(path, 'wx', 0o600);
-    await handle.writeFile(`${JSON.stringify({
-      schema: 'dharma.installation-identity/v1',
-      installationId,
-      createdAt: new Date().toISOString(),
-    }, null, 2)}\n`);
-    await handle.sync();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    return await readExisting();
-  } finally {
-    await handle?.close();
-  }
-  return installationId;
 }
 
 type EvidenceUploadLedger = {
@@ -385,8 +440,8 @@ export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retentio
 export async function syncPendingRetentionCapsules(
   vault: {
     listPendingCapsuleSyncs<T>(limit?: number, offset?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
-    markCapsuleSynced(trajectoryId: string, revision: number): void;
-    discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void;
+    markCapsuleSynced(trajectoryId: string, revision: number): void | Promise<void>;
+    discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void | Promise<void>;
   },
   fabric: AgentFabricClient,
   policy: OrganizationPolicy,
@@ -411,12 +466,12 @@ export async function syncPendingRetentionCapsules(
       try {
         assertCapsuleIntegrity(item.capsule);
       } catch {
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
         continue;
       }
       if (item.capsule.organizationId === fabric.config.organizationId
         && item.capsule.deviceId !== fabric.config.deviceId) {
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'device_binding_changed');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'device_binding_changed');
         if (!warnedPreviousDevice) {
           process.stderr.write('Queued trajectory capsules from a previous device were preserved locally and excluded from upload. Recapture eligible provider sessions under the current device.\n');
           warnedPreviousDevice = true;
@@ -432,7 +487,7 @@ export async function syncPendingRetentionCapsules(
         assertPolicy(policy);
         // A successfully refreshed policy is authoritative. Retire only the
         // superseded capsule so it cannot permanently block later valid work.
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
         continue;
       }
       const oversized = Buffer.byteLength(canonicalize(item.capsule)) > policy.evidence.maximumCapsuleBytes;
@@ -443,7 +498,7 @@ export async function syncPendingRetentionCapsules(
         }), item.trajectoryId);
         if (serverHead && serverHead.revision === item.revision
           && serverHead.capsuleHash === item.capsule.capsuleHash) {
-          vault.markCapsuleSynced(item.trajectoryId, item.revision);
+          await vault.markCapsuleSynced(item.trajectoryId, item.revision);
           synced += 1;
           continue;
         }
@@ -452,7 +507,7 @@ export async function syncPendingRetentionCapsules(
           : item.revision !== 1 || item.capsule.previousRevisionHash !== null) {
           throw new Error('Rejected pending trajectory revision conflicts with the accepted server head.');
         }
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision,
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision,
           containsLocalPath ? 'local_path_disclosure_superseded' : 'capsule_size_limit_superseded');
         process.stderr.write(containsLocalPath
           ? 'An unsent trajectory capsule containing a local path was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n'
@@ -464,10 +519,10 @@ export async function syncPendingRetentionCapsules(
         await fabric.syncTrajectory(item.capsule);
       } catch (error) {
         if (!isDefinitiveSecretDisclosureRejection(error)) throw error;
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'secret_disclosure_forbidden');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'secret_disclosure_forbidden');
         continue;
       }
-      vault.markCapsuleSynced(item.trajectoryId, item.revision);
+      await vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
     if (matched === 0) {
@@ -704,120 +759,185 @@ export function assertCapsuleAuthorizedByCurrentPolicy(capsule: Record<string, u
 }
 
 async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessage: string): Promise<() => Promise<void>> {
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
+  type OwnedPath = {dev: bigint; ino: bigint; directory: boolean};
+  const owned = new Map<string, OwnedPath | null>();
+  const recordOwned = async (path: string) => {
+    if (!scope) return;
+    owned.set(path, null);
+    // Metadata for cooperative cleanup is captured even if creation withdrew authority.
+    const metadata = await lstat(path, {bigint: true});
+    if (metadata.isSymbolicLink() || !metadata.isFile() && !metadata.isDirectory()) {
+      throw new Error('codex_setup_host_lock_cleanup_unconfirmed');
+    }
+    owned.set(path, {dev: metadata.dev, ino: metadata.ino, directory: metadata.isDirectory()});
+  };
+  const cleanupOwned = async (path: string, directory = false) => {
+    if (!scope) {
+      if (directory) await rm(path, {recursive: true, force: true});
+      else await unlink(path).catch(() => undefined);
+      return;
+    }
+    if (!owned.has(path)) return;
     try {
-      await writeFile(candidate, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
-      await link(candidate, lockPath);
-      await unlink(candidate);
-      return async () => { await unlink(lockPath).catch(() => undefined); };
-    } catch (error) {
-      await unlink(candidate).catch(() => undefined);
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const recoveryPath = `${lockPath}.recovery`;
-      const recoveryCandidate = `${recoveryPath}.${process.pid}.${randomUUID()}.candidate`;
-      let windowsRecoveryOwner: number | undefined;
+      const expected = owned.get(path);
+      if (!expected) throw new Error();
+      const metadata = await lstat(path, {bigint: true}).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error;
+      });
+      if (metadata) {
+        if (metadata.isSymbolicLink() || metadata.dev !== expected.dev || metadata.ino !== expected.ino
+          || metadata.isDirectory() !== expected.directory || !expected.directory && !metadata.isFile()) throw new Error();
+        if (expected.directory) await rm(path, {recursive: true, force: true});
+        else await unlink(path);
+      }
+      owned.delete(path);
+    } catch {throw new Error('codex_setup_host_lock_cleanup_unconfirmed');}
+  };
+  try {
+    await step(() => mkdir(dirname(lockPath), { recursive: true, mode: 0o700 }));
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
       try {
-        await mkdir(recoveryCandidate);
-        await writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 });
-        for (;;) {
-          try { await rename(recoveryCandidate, recoveryPath); break; }
-          catch (renameError) {
-            if (process.platform !== 'win32' || (renameError as NodeJS.ErrnoException).code !== 'EPERM') throw renameError;
-            // Windows uses EPERM for an existing destination. Its owner can
-            // finish during inspection; retry publication, never ignore denial.
+        await step(async () => {
+          await writeFile(candidate, `${process.pid}\n`, { mode: 0o600, flag: 'wx' });
+          await recordOwned(candidate);
+        });
+        await step(async () => {
+          await link(candidate, lockPath);
+          if (scope) owned.set(lockPath, owned.get(candidate)!);
+        });
+        await step(() => cleanupOwned(candidate));
+      let release: Promise<void> | undefined;
+      return () => release ??= cleanupOwned(lockPath);
+      } catch (error) {
+        await cleanupOwned(candidate);
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const recoveryPath = `${lockPath}.recovery`;
+        const recoveryCandidate = `${recoveryPath}.${process.pid}.${randomUUID()}.candidate`;
+        let windowsRecoveryOwner: number | undefined;
+        try {
+          await step(async () => {await mkdir(recoveryCandidate); await recordOwned(recoveryCandidate);});
+          await step(() => writeFile(resolve(recoveryCandidate, 'owner'), `${process.pid}\n`, { mode: 0o600 }));
+          for (;;) {
             try {
-              const directory = await lstat(recoveryPath);
-              const ownerPath = resolve(recoveryPath, 'owner');
-              const ownerFile = await lstat(ownerPath);
-              const ownerText = (await readFile(ownerPath, 'utf8')).trim();
-              const owner = Number(ownerText);
-              if (!directory.isDirectory() || directory.isSymbolicLink()
-                || !ownerFile.isFile() || ownerFile.isSymbolicLink()
-                || !/^[1-9][0-9]*$/.test(ownerText) || !Number.isSafeInteger(owner)) throw renameError;
-              windowsRecoveryOwner = owner;
-            } catch (inspectionError) {
-              let disappeared = (inspectionError as NodeJS.ErrnoException).code === 'ENOENT';
-              if (!disappeared && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
-                // Windows can deny owner reads while its directory is being
-                // deleted. Retry only when fresh metadata confirms absence.
-                try { await lstat(recoveryPath); }
-                catch (readbackError) { disappeared = (readbackError as NodeJS.ErrnoException).code === 'ENOENT'; }
-              }
-              if (disappeared && Date.now() < deadline) {
-                await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-                continue;
+              await step(async () => {
+                await rename(recoveryCandidate, recoveryPath);
+                if (scope) {owned.set(recoveryPath, owned.get(recoveryCandidate)!); owned.delete(recoveryCandidate);}
+              });
+              break;
+            }
+            catch (renameError) {
+              if (process.platform !== 'win32' || (renameError as NodeJS.ErrnoException).code !== 'EPERM') throw renameError;
+              // Windows uses EPERM for an existing destination. Its owner can
+              // finish during inspection; retry publication, never ignore denial.
+              try {
+                const directory = await step(() => lstat(recoveryPath));
+                const ownerPath = resolve(recoveryPath, 'owner');
+                const ownerFile = await step(() => lstat(ownerPath));
+                const ownerText = (await step(() => readFile(ownerPath, 'utf8'))).trim();
+                const owner = Number(ownerText);
+                if (!directory.isDirectory() || directory.isSymbolicLink()
+                  || !ownerFile.isFile() || ownerFile.isSymbolicLink()
+                  || !/^[1-9][0-9]*$/.test(ownerText) || !Number.isSafeInteger(owner)) throw renameError;
+                windowsRecoveryOwner = owner;
+              } catch (inspectionError) {
+                let disappeared = (inspectionError as NodeJS.ErrnoException).code === 'ENOENT';
+                if (!disappeared && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
+                  // Windows can deny owner reads while its directory is being
+                  // deleted. Retry only when fresh metadata confirms absence.
+                  try { await step(() => lstat(recoveryPath)); }
+                  catch (readbackError) { disappeared = (readbackError as NodeJS.ErrnoException).code === 'ENOENT'; }
+                }
+                if (disappeared && Date.now() < deadline) {
+                  await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
+                  continue;
+                }
+                throw renameError;
               }
               throw renameError;
             }
-            throw renameError;
           }
-        }
-        try {
-          let ownerPid = 0;
-          try { ownerPid = Number((await readFile(lockPath, 'utf8')).trim()); }
-          catch (readError) {
-            if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          }
-          let ownerAlive = Number.isSafeInteger(ownerPid) && ownerPid > 0;
-          if (ownerAlive) {
-            try { process.kill(ownerPid, 0); }
-            catch (killError) { ownerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
-          }
-          if (!ownerAlive) {
-            const quarantine = `${lockPath}.dead.${randomUUID()}`;
-            try {
-              await rename(lockPath, quarantine);
-              await unlink(quarantine);
-              continue;
-            } catch (renameError) {
-              if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+          try {
+            let ownerPid = 0;
+            try { ownerPid = Number((await step(() => readFile(lockPath, 'utf8'))).trim()); }
+            catch (readError) {
+              if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
             }
+            let ownerAlive = Number.isSafeInteger(ownerPid) && ownerPid > 0;
+            if (ownerAlive) {
+              try { await step(async () => {process.kill(ownerPid, 0);}); }
+              catch (killError) { ownerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+            }
+            if (!ownerAlive) {
+              const quarantine = `${lockPath}.dead.${randomUUID()}`;
+              try {
+                await step(() => rename(lockPath, quarantine));
+                await step(() => unlink(quarantine));
+                continue;
+              } catch (renameError) {
+                if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+              }
+            }
+          } finally {
+            await cleanupOwned(recoveryPath, true);
           }
-        } finally {
-          await rm(recoveryPath, { recursive: true, force: true });
+        } catch (recoveryError) {
+          await cleanupOwned(recoveryCandidate, true);
+          const recoveryCode = (recoveryError as NodeJS.ErrnoException).code || '';
+          let recoveryOwner = 0;
+          if (process.platform === 'win32' && recoveryCode === 'EPERM') {
+            if (windowsRecoveryOwner === undefined) throw recoveryError;
+            recoveryOwner = windowsRecoveryOwner;
+          } else {
+            if (!['EEXIST', 'ENOTEMPTY'].includes(recoveryCode)) throw recoveryError;
+            try { recoveryOwner = Number((await step(() => readFile(resolve(recoveryPath, 'owner'), 'utf8'))).trim()); } catch {}
+          }
+          let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
+          if (recoveryOwnerAlive) {
+            try { await step(async () => {process.kill(recoveryOwner, 0);}); }
+            catch (killError) { recoveryOwnerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
+          }
+          if (!recoveryOwnerAlive) {
+            const quarantine = `${recoveryPath}.dead.${randomUUID()}`;
+            try {
+              await step(() => rename(recoveryPath, quarantine));
+              await step(() => rm(quarantine, { recursive: true, force: true }));
+            }
+            catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError; }
+          }
         }
-      } catch (recoveryError) {
-        await rm(recoveryCandidate, { recursive: true, force: true });
-        const recoveryCode = (recoveryError as NodeJS.ErrnoException).code || '';
-        let recoveryOwner = 0;
-        if (process.platform === 'win32' && recoveryCode === 'EPERM') {
-          if (windowsRecoveryOwner === undefined) throw recoveryError;
-          recoveryOwner = windowsRecoveryOwner;
-        } else {
-          if (!['EEXIST', 'ENOTEMPTY'].includes(recoveryCode)) throw recoveryError;
-          try { recoveryOwner = Number((await readFile(resolve(recoveryPath, 'owner'), 'utf8')).trim()); } catch {}
-        }
-        let recoveryOwnerAlive = Number.isSafeInteger(recoveryOwner) && recoveryOwner > 0;
-        if (recoveryOwnerAlive) {
-          try { process.kill(recoveryOwner, 0); }
-          catch (killError) { recoveryOwnerAlive = (killError as NodeJS.ErrnoException).code === 'EPERM'; }
-        }
-        if (!recoveryOwnerAlive) {
-          const quarantine = `${recoveryPath}.dead.${randomUUID()}`;
-          try { await rename(recoveryPath, quarantine); await rm(quarantine, { recursive: true, force: true }); }
-          catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError; }
-        }
+        if (Date.now() >= deadline) throw new Error(scope ? 'codex_setup_host_lock_timeout' : timeoutMessage);
+        await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
       }
-      if (Date.now() >= deadline) throw new Error(timeoutMessage);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
+  } catch (error) {
+    let cleanupFailed = false;
+    for (const path of owned.keys()) try {await cleanupOwned(path);} catch {cleanupFailed = true;}
+    if (cleanupFailed) throw new Error('codex_setup_host_lock_cleanup_unconfirmed');
+    if (!scope) throw error;
+    await scope.assert();
+    if (error instanceof Error && error.message === 'codex_setup_host_lock_timeout') throw error;
+    throw new Error('codex_setup_host_lock_failed');
   }
 }
 
 async function withEvidenceLedgerLock<T>(operation: () => Promise<T>): Promise<T> {
-  const release = await acquirePidLock(
-    `${evidenceUploadLedgerPath()}.lock`,
-    5_000,
-    'Timed out waiting for the evidence upload ledger lock.',
-  );
-  try { return await operation(); }
-  finally { await release(); }
+  const scope = currentBootstrapHostScope();
+  const step = <R>(effect: () => Promise<R>): Promise<R> => scope ? scope.step(effect) : effect();
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await step(async () => {release = await acquirePidLock(
+      `${evidenceUploadLedgerPath()}.lock`, 5_000, 'Timed out waiting for the evidence upload ledger lock.');});
+    return await step(operation);
+  } finally { await release?.(); }
 }
 
 async function writeJsonAtomic(path: string, value: unknown) {
+  const hostScope = currentBootstrapHostScope();
+  if (hostScope) return writeBootstrapHostJson(path, value, hostScope);
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
@@ -968,89 +1088,102 @@ export async function materializeWorkspacePolicy(input: {
   dryRun?: boolean;
   secureStore?: SecureSecretStore;
 }) {
-  const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
+  const scope = currentBootstrapHostScope();
+  const step = <T>(effect: () => Promise<T>): Promise<T> => scope ? scope.step(effect) : effect();
+  const exists = (path: string) => step(() => scope ? pathExistsOrThrow(path) : pathExists(path));
   try {
-    const packageJson = JSON.parse(await readFile(resolve(input.workspace, 'package.json'), 'utf8')) as {
-      scripts?: Record<string, unknown>;
+    if (scope) input = {...input, serverPolicyAuthorization: structuredClone(input.serverPolicyAuthorization)};
+    await scope?.assert();
+    const allowedCommands: OrganizationPolicy['tasks']['allowedCommands'] = {};
+    try {
+      const packageJson = JSON.parse(await step(() => readFile(resolve(input.workspace, 'package.json'), 'utf8'))) as {
+        scripts?: Record<string, unknown>;
+      };
+      const scripts = packageJson.scripts || {};
+      for (const [script, commandId, timeoutSeconds] of [
+        ['test', 'repo.test', 1_200],
+        ['lint', 'repo.lint', 600],
+        ['typecheck', 'repo.typecheck', 600],
+        ['type-check', 'repo.typecheck', 600],
+        ['build', 'repo.build', 1_200],
+      ] as const) {
+        if (typeof scripts[script] === 'string' && !allowedCommands[commandId]) {
+          allowedCommands[commandId] = { argv: ['npm', 'run', script], timeoutSeconds };
+        }
+      }
+    } catch { await scope?.assert(); }
+
+    const writePaths: string[] = [];
+    for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
+      if (await exists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
+    }
+    let policy: OrganizationPolicy = {
+      schema: 'dharma.organization-policy/v2',
+      organizationId: input.organizationId,
+      revision: input.revision,
+      evidence: {
+        defaultMode: 'deep',
+        automaticDisclosure: { mode: 'local_analysis' },
+        registeredWorkspaceOnly: true,
+        excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
+        maximumCapsuleBytes: 1_000_000,
+        maximumDailyUploadBytes: 50_000_000,
+        maximumExpansionBytes: 65_536,
+        pseudonymizeIdentity: true,
+      },
+      tasks: {
+        defaultNetwork: 'deny',
+        defaultGit: 'task_branch',
+        allowedCommands,
+        writePaths,
+        requireLocalConfirmationFor: ['network.allowlisted_domains', 'git.push', 'merge', 'deploy'],
+      },
+      skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
+      retention: { rawLocalDays: 30, capsuleServerDays: 90 },
+      budgets: { dailyAnalysisCents: 1_000 },
     };
-    const scripts = packageJson.scripts || {};
-    for (const [script, commandId, timeoutSeconds] of [
-      ['test', 'repo.test', 1_200],
-      ['lint', 'repo.lint', 600],
-      ['typecheck', 'repo.typecheck', 600],
-      ['type-check', 'repo.typecheck', 600],
-      ['build', 'repo.build', 1_200],
-    ] as const) {
-      if (typeof scripts[script] === 'string' && !allowedCommands[commandId]) {
-        allowedCommands[commandId] = { argv: ['npm', 'run', script], timeoutSeconds };
+    const existingPath = resolve(input.workspace, '.dharma', 'approved-policy.json');
+    if (await exists(existingPath)) {
+      const existing = await step(() => loadOrganizationPolicy(existingPath));
+      if (existing.organizationId === input.organizationId) policy = existing;
+    }
+    if (input.serverPolicyAuthorization !== undefined && input.serverPolicyAuthorization !== null) {
+      const workspaceId = input.workspaceId;
+      if (!input.serverPublicKeyEd25519 || !workspaceId) {
+        throw new Error('Server policy authorization requires the enrolled server key and workspace ID.');
+      }
+      policy = applyServerEvidencePolicy(
+        policy,
+        input.serverPolicyAuthorization,
+        input.serverPublicKeyEd25519,
+        input.organizationId,
+        workspaceId,
+      );
+      if (!input.dryRun) {
+        await step(() => applyWorkspaceAuthorizationAtomically({
+          workspaceId,
+          authorization: policy.serverAuthorization!,
+          policyPath: existingPath,
+          policy,
+          secureStore: input.secureStore,
+        }));
+      } else {
+        await step(() => assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!, false));
       }
     }
-  } catch {}
-
-  const writePaths: string[] = [];
-  for (const candidate of ['src', 'app', 'apps', 'lib', 'packages', 'test', 'tests', 'docs']) {
-    if (await pathExists(resolve(input.workspace, candidate))) writePaths.push(`${candidate}/**`);
-  }
-  let policy: OrganizationPolicy = {
-    schema: 'dharma.organization-policy/v2',
-    organizationId: input.organizationId,
-    revision: input.revision,
-    evidence: {
-      defaultMode: 'deep',
-      automaticDisclosure: { mode: 'local_analysis' },
-      registeredWorkspaceOnly: true,
-      excludePaths: ['.env', '.env.*', '.git/**', 'node_modules/**', 'dist/**', 'build/**', '**/*.pem', '**/*.key'],
-      maximumCapsuleBytes: 1_000_000,
-      maximumDailyUploadBytes: 50_000_000,
-      maximumExpansionBytes: 65_536,
-      pseudonymizeIdentity: true,
-    },
-    tasks: {
-      defaultNetwork: 'deny',
-      defaultGit: 'task_branch',
-      allowedCommands,
-      writePaths,
-      requireLocalConfirmationFor: ['network.allowlisted_domains', 'git.push', 'merge', 'deploy'],
-    },
-    skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
-    retention: { rawLocalDays: 30, capsuleServerDays: 90 },
-    budgets: { dailyAnalysisCents: 1_000 },
-  };
-  const existingPath = resolve(input.workspace, '.dharma', 'approved-policy.json');
-  if (await pathExists(existingPath)) {
-    const existing = await loadOrganizationPolicy(existingPath);
-    if (existing.organizationId === input.organizationId) policy = existing;
-  }
-  if (input.serverPolicyAuthorization !== undefined && input.serverPolicyAuthorization !== null) {
-    if (!input.serverPublicKeyEd25519 || !input.workspaceId) {
-      throw new Error('Server policy authorization requires the enrolled server key and workspace ID.');
+    assertPolicy(policy);
+    const relativePath = '.dharma/approved-policy.json';
+    if (!input.dryRun && !policy.serverAuthorization) {
+      await step(() => mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 }));
+      await step(() => writeJsonAtomic(resolve(input.workspace, relativePath), policy));
     }
-    policy = applyServerEvidencePolicy(
-      policy,
-      input.serverPolicyAuthorization,
-      input.serverPublicKeyEd25519,
-      input.organizationId,
-      input.workspaceId,
-    );
-    if (!input.dryRun) {
-      await applyWorkspaceAuthorizationAtomically({
-        workspaceId: input.workspaceId,
-        authorization: policy.serverAuthorization!,
-        policyPath: existingPath,
-        policy,
-        secureStore: input.secureStore,
-      });
-    } else {
-      await assertWorkspaceAuthorizationCurrent(input.workspaceId, policy.serverAuthorization!, false);
-    }
+    await scope?.assert();
+    return { relativePath, policy, applied: !input.dryRun };
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('workspace_policy_materialization_failed');
   }
-  assertPolicy(policy);
-  const relativePath = '.dharma/approved-policy.json';
-  if (!input.dryRun && !policy.serverAuthorization) {
-    await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
-    await writeJsonAtomic(resolve(input.workspace, relativePath), policy);
-  }
-  return { relativePath, policy, applied: !input.dryRun };
 }
 
 function workspaceAuthorizationStatePath(workspaceId: string) {
@@ -1062,16 +1195,24 @@ async function withFileLock<T>(
   operation: () => Promise<T>,
   timeoutMessage = 'Timed out waiting for the workspace authorization lock.',
 ): Promise<T> {
-  const release = await acquirePidLock(lockPath, 10_000, timeoutMessage);
-  try { return await operation(); }
-  finally { await release(); }
+  const scope = currentBootstrapHostScope();
+  const step = <R>(effect: () => Promise<R>): Promise<R> => scope ? scope.step(effect) : effect();
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await step(async () => {release = await acquirePidLock(lockPath, 10_000, timeoutMessage);});
+    return await step(operation);
+  } finally { await release?.(); }
 }
 
 export async function withRelayStartupMutation<T>(operation: () => Promise<T>, home = dharmaHome()): Promise<T> {
-  const release = await acquirePidLock(resolve(home, 'autostart-mutation.lock'), 30_000,
-    'demo_watch_startup_busy: another startup operation is still running.');
-  try { return await operation(); }
-  finally { await release(); }
+  const scope = currentBootstrapHostScope();
+  const step = <R>(effect: () => Promise<R>): Promise<R> => scope ? scope.step(effect) : effect();
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await step(async () => {release = await acquirePidLock(resolve(home, 'autostart-mutation.lock'), 30_000,
+      'demo_watch_startup_busy: another startup operation is still running.');});
+    return await step(operation);
+  } finally { await release?.(); }
 }
 
 export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
@@ -1104,32 +1245,48 @@ async function assertWorkspaceAuthorizationCurrent(
   authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
   requireExisting = true,
 ) {
-  const statePath = workspaceAuthorizationStatePath(workspaceId);
-  type AuthorizationState = { issuedAt: string; signature: string };
-  let previous: AuthorizationState | null = null;
+  const scope = currentBootstrapHostScope();
+  const step = <T>(effect: () => Promise<T>): Promise<T> => scope ? scope.step(effect) : effect();
   try {
-    const parsed: unknown = JSON.parse(await readFile(statePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-      || typeof (parsed as AuthorizationState).issuedAt !== 'string'
-      || !Number.isFinite(Date.parse((parsed as AuthorizationState).issuedAt))
-      || typeof (parsed as AuthorizationState).signature !== 'string'
-      || !(parsed as AuthorizationState).signature) {
-      throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+    if (scope) authorization = structuredClone(authorization);
+    await scope?.assert();
+    const statePath = workspaceAuthorizationStatePath(workspaceId);
+    type AuthorizationState = { issuedAt: string; signature: string };
+    let previous: AuthorizationState | null = null;
+    try {
+      const parsed: unknown = JSON.parse(await step(() => readFile(statePath, 'utf8')));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || typeof (parsed as AuthorizationState).issuedAt !== 'string'
+        || !Number.isFinite(Date.parse((parsed as AuthorizationState).issuedAt))
+        || typeof (parsed as AuthorizationState).signature !== 'string'
+        || !(parsed as AuthorizationState).signature) {
+        throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+      }
+      previous = parsed as AuthorizationState;
     }
-    previous = parsed as AuthorizationState;
-  }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
-    throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
-  }
-  if (previous) {
-    const incomingTime = Date.parse(authorization.issuedAt);
-    const previousTime = Date.parse(previous.issuedAt);
-    if (!Number.isFinite(previousTime)
-      || incomingTime < previousTime
-      || (incomingTime === previousTime && authorization.signature !== previous.signature)) {
-      throw new Error('Server workspace policy authorization is older than the last accepted authorization.');
+    catch (error) {
+      await scope?.assert();
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !requireExisting) return;
+      throw new Error(scope ? 'workspace_authorization_replay_state_invalid'
+        : 'Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
     }
+    if (previous) {
+      const incomingTime = Date.parse(authorization.issuedAt);
+      const previousTime = Date.parse(previous.issuedAt);
+      if (!Number.isFinite(previousTime)
+        || incomingTime < previousTime
+        || (incomingTime === previousTime && authorization.signature !== previous.signature)) {
+        throw new Error(scope ? 'workspace_authorization_replay_superseded'
+          : 'Server workspace policy authorization is older than the last accepted authorization.');
+      }
+    }
+    await scope?.assert();
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    if (error instanceof Error && ['workspace_authorization_replay_state_invalid',
+      'workspace_authorization_replay_superseded'].includes(error.message)) throw error;
+    throw new Error('workspace_authorization_replay_failed');
   }
 }
 
@@ -1140,36 +1297,48 @@ async function applyWorkspaceAuthorizationAtomically(input: {
   policy: OrganizationPolicy;
   secureStore?: SecureSecretStore;
 }) {
-  const statePath = workspaceAuthorizationStatePath(input.workspaceId);
-  await withFileLock(`${statePath}.lock`, async () => {
-    await assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false);
-    let previous: { contentLedgerInitialized?: boolean } | null = null;
-    try { previous = JSON.parse(await readFile(statePath, 'utf8')) as { contentLedgerInitialized?: boolean }; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+  const scope = currentBootstrapHostScope();
+  const step = <T>(effect: () => Promise<T>): Promise<T> => scope ? scope.step(effect) : effect();
+  try {
+    if (scope) input = {...input, authorization: structuredClone(input.authorization), policy: structuredClone(input.policy)};
+    await scope?.assert();
+    const statePath = workspaceAuthorizationStatePath(input.workspaceId);
+    await step(() => withFileLock(`${statePath}.lock`, async () => {
+      await step(() => assertWorkspaceAuthorizationCurrent(input.workspaceId, input.authorization, false));
+      let previous: { contentLedgerInitialized?: boolean } | null = null;
+      try { previous = JSON.parse(await step(() => readFile(statePath, 'utf8'))) as { contentLedgerInitialized?: boolean }; }
+      catch (error) {
+        await scope?.assert();
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error('Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+        }
       }
-    }
-    const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
-    const ledgerExists = await pathExists(evidenceUploadLedgerPath());
-    if (contentAuthorized && ledgerExists) {
-      const current = JSON.parse(await readFile(evidenceUploadLedgerPath(), 'utf8')) as unknown;
-      const ledger = evidenceLedgerForPolicyActivation(current, new Date().toISOString().slice(0, 10));
-      if (JSON.stringify(current) !== JSON.stringify(ledger)) {
-        await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
+      const contentAuthorized = input.policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content';
+      const ledgerExists = await step(() => scope ? pathExistsOrThrow(evidenceUploadLedgerPath()) : pathExists(evidenceUploadLedgerPath()));
+      if (contentAuthorized && ledgerExists) {
+        const current = JSON.parse(await step(() => readFile(evidenceUploadLedgerPath(), 'utf8'))) as unknown;
+        const ledger = evidenceLedgerForPolicyActivation(current, new Date().toISOString().slice(0, 10));
+        if (JSON.stringify(current) !== JSON.stringify(ledger)) {
+          await step(() => writeJsonAtomic(evidenceUploadLedgerPath(), ledger));
+        }
       }
-    }
-    if (contentAuthorized && !ledgerExists) {
-      const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
-      await writeJsonAtomic(evidenceUploadLedgerPath(), ledger);
-    }
-    await writeJsonAtomic(statePath, {
-      issuedAt: input.authorization.issuedAt,
-      signature: input.authorization.signature,
-      contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
-    });
-    await writeJsonAtomic(input.policyPath, input.policy);
-  });
+      if (contentAuthorized && !ledgerExists) {
+        const ledger = newEvidenceUploadLedger(new Date().toISOString().slice(0, 10));
+        await step(() => writeJsonAtomic(evidenceUploadLedgerPath(), ledger));
+      }
+      await step(() => writeJsonAtomic(statePath, {
+        issuedAt: input.authorization.issuedAt,
+        signature: input.authorization.signature,
+        contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
+      }));
+      await step(() => writeJsonAtomic(input.policyPath, input.policy));
+    }));
+    await scope?.assert();
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('workspace_policy_activation_failed');
+  }
 }
 
 export function applyServerEvidencePolicy(
@@ -1422,30 +1591,66 @@ async function registry(): Promise<WorkspaceRecord[]> {
 }
 
 async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
-  await mkdir(resolve(dharmaHome(), 'registry'), { recursive: true, mode: 0o700 });
-  await writeJsonAtomic(workspaceRegistryPath(), items);
+  const scope = currentBootstrapHostScope();
+  try {
+    await scope?.assert();
+    const snapshot = scope ? structuredClone(items) : items;
+    const directory = resolve(dharmaHome(), 'registry');
+    if (scope) await scope.step(() => mkdir(directory, {recursive: true, mode: 0o700}));
+    else await mkdir(directory, {recursive: true, mode: 0o700});
+    await writeJsonAtomic(workspaceRegistryPath(), snapshot);
+  } catch (error) {
+    if (!scope) throw error;
+    await scope.assert();
+    throw new Error('workspace_registry_write_failed');
+  }
 }
 
 async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
-  const release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
-    'Workspace registry is busy; preserve it for recovery.');
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
+  let release: (() => Promise<void>) | undefined;
   try {
-    const value = await readFile(workspaceRegistryPath(), 'utf8').catch(error => {
+    await scope?.assert();
+    const snapshot = scope ? structuredClone(entry) : entry;
+    await step(async () => {release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
+      'Workspace registry is busy; preserve it for recovery.');});
+    const value = await step(() => readFile(workspaceRegistryPath(), 'utf8')).catch(error => {
       if (error.code === 'ENOENT') return '[]'; throw error;
     });
     const items = JSON.parse(value) as WorkspaceRecord[];
     if (!Array.isArray(items)) throw new Error('Workspace registry is invalid; preserve it for recovery.');
-    await saveRegistry([...items.filter(item => item.workspaceId !== entry.workspaceId), entry]);
-  } finally { await release(); }
+    await saveRegistry([...items.filter(item => item.workspaceId !== snapshot.workspaceId), snapshot]);
+  } catch (error) {
+    if (!scope) throw error;
+    if (error instanceof Error && error.message === 'codex_setup_host_lock_cleanup_unconfirmed') throw error;
+    await scope.assert();
+    if (error instanceof Error && error.message === 'Workspace registry is invalid; preserve it for recovery.') {
+      throw new Error('workspace_registry_invalid');
+    }
+    throw new Error('workspace_registry_write_failed');
+  } finally { await release?.(); }
 }
 
 async function gitValue(workspace: string, argv: string[]) {
-  try { return (await execFileAsync('git', ['-C', workspace, ...argv], { timeout: 10_000 })).stdout.trim() || null; }
-  catch { return null; }
+  const scope = currentBootstrapHostScope(), args = ['-C', workspace, ...argv];
+  const operation = () => execFileAsync('git', args, scope ? {
+    timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal: scope.signal,
+    env: providerProcessEnvironment(process.env),
+  } : {timeout: 10_000});
+  try {
+    const result = scope ? await scope.step(operation) : await operation();
+    return result.stdout.trim() || null;
+  } catch {
+    // An optional Git value may be absent; withdrawn setup authority may not.
+    await scope?.assert();
+    return null;
+  }
 }
 
 async function client() {
-  const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath() });
+  const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope() });
   await instance.openSession(VERSION);
   return instance;
 }
@@ -1456,6 +1661,7 @@ export async function probeRelayConnection(
   openClient: () => Promise<RelayProbeClient> = async () => AgentFabricClient.open({
     configPath: configPath(),
     statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(),
   }),
 ) {
   const instance = await openClient();
@@ -1471,15 +1677,18 @@ export async function probeRelayConnection(
 }
 
 async function organizationApi(flags: Map<string, string | boolean>) {
+  const hostScope = currentBootstrapHostScope();
+  await hostScope?.assert();
   let enrolled: DeviceConfig | null = null;
   try { enrolled = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; } catch {}
   const organizationId = String(flags.get('organization-id') || enrolled?.organizationId || '').trim();
   if (!organizationId) throw new Error('Organization command requires --organization-id or an enrolled device.');
-  const token = String(process.env.DHARMA_ORG_API_TOKEN || '').trim()
+  const token = (hostScope ? '' : String(process.env.DHARMA_ORG_API_TOKEN || '').trim())
     || await loadOrganizationApiToken({
       hqUrl: enrolled?.hqUrl || portalUrl(flags),
       organizationId,
       installationId: enrolled?.installationId,
+      hostScope,
     }) || '';
   if (!token) throw new Error('Organization command requires a token in the OS credential store or DHARMA_ORG_API_TOKEN. Tokens are not accepted on the command line.');
   return new AgentFabricApiClient({
@@ -1665,15 +1874,34 @@ export function stableRepositoryLauncherContents(version = VERSION,
 }
 
 async function installStableRepositoryLauncher(workspace: string) {
+  const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
-  await mkdir(launcherRoot, { recursive: true, mode: 0o700 });
   const shellPath = resolve(launcherRoot, 'dharma');
   const cmdPath = resolve(launcherRoot, 'dharma.cmd');
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath) });
-  await writeFile(shellPath, contents.shell, { mode: 0o700 });
-  await chmod(shellPath, 0o700);
-  await writeFile(cmdPath, contents.windows, { mode: 0o600 });
+  if (scope) {
+    await scope.assert();
+    if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
+    for (const directory of [resolve(workspace, '.dharma'), launcherRoot]) {
+      await scope.step(async () => {
+        try {await mkdir(directory, {mode: 0o700});}
+        catch (error) {if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;}
+      });
+      const entry = await scope.step(() => lstat(directory));
+      if (!entry.isDirectory() || entry.isSymbolicLink() || await scope.step(() => realpath(directory)) !== directory
+        || process.platform !== 'win32' && (entry.uid !== process.getuid!() || (entry.mode & 0o022))) {
+        throw new Error('codex_setup_host_launcher_path_invalid');
+      }
+    }
+    await writeBootstrapHostText(shellPath, contents.shell, scope, 0o700);
+    await writeBootstrapHostText(cmdPath, contents.windows, scope, 0o600);
+  } else {
+    await mkdir(launcherRoot, { recursive: true, mode: 0o700 });
+    await writeFile(shellPath, contents.shell, { mode: 0o700 });
+    await chmod(shellPath, 0o700);
+    await writeFile(cmdPath, contents.windows, { mode: 0o600 });
+  }
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
 }
 
@@ -1810,6 +2038,9 @@ export async function waitForRelayReadiness(options: {
 }
 
 async function startRelayDaemon(policyPath: string) {
+  const hostScope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
+  await hostScope?.assert();
   const config = await readDeviceConfig();
   if (!config) throw new Error('Relay startup requires current device enrollment.');
   const policy = await loadOrganizationPolicy(policyPath);
@@ -1817,21 +2048,28 @@ async function startRelayDaemon(policyPath: string) {
   const selected = (await registry()).find(row => row.workspaceId === workspaceId
     && row.organizationId === config.organizationId && resolve(row.path, '.dharma', 'approved-policy.json') === policyPath);
   if (!selected) throw new Error('Relay policy must belong to this enrolled repository.');
+  await assertBootstrapHostSource(selected.path, String(selected.repositoryRemoteHash || ''));
   const alreadyRunning = await relayProcessState() === 'running';
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
   if (supervisorState === 'stopped') {
-    if ((await relayAutostartStatus({ home: dharmaHome() })).backend === 'container-entrypoint') {
-      await startRelayAutostart({ home: dharmaHome() });
+    const startupBackend = (await relayAutostartStatus({ home: dharmaHome() })).backend;
+    // A setup turn cannot own a supervisor intended to outlive that turn.
+    if (hostScope || startupBackend === 'container-entrypoint') {
+      await step(() => startRelayAutostart({ home: dharmaHome() }));
     } else {
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-        cwd: dirname(dirname(policyPath)), detached: true, stdio: 'ignore', env: process.env,
+      await step(async () => {
+        const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
+          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: process.env,
+        });
+        if (hostScope) captureBootstrapHostChild(hostScope, child);
+        else child.unref();
       });
-      child.unref();
     }
   }
   let supervisorReady = false;
   for (let attempt = 0; attempt < 80; attempt += 1) {
+    await hostScope?.assert();
     if (await relaySupervisorProcessState() === 'running') {
       const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
         .catch(() => '0')).trim());
@@ -1853,6 +2091,7 @@ async function startRelayDaemon(policyPath: string) {
   }
   if (!supervisorReady) throw new Error('The relay supervisor did not become ready after bootstrap.');
   const readiness = await waitForRelayReadiness({ expectedVersion: VERSION, attempts: 120, delayMs: 1000, processState: async () => {
+    await hostScope?.assert();
     if (await relayProcessState() !== 'running') return 'stopped';
     const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')).trim());
     const poll = await readFile(resolve(dharmaHome(), 'relay', 'repositories', selected.workspaceId,
@@ -1860,6 +2099,7 @@ async function startRelayDaemon(policyPath: string) {
     return repositoryRelayObservationReady({ observation: poll, workspaceId: selected.workspaceId,
       version: VERSION, pid }) ? 'running' : 'stopped';
   } });
+  await hostScope?.assert();
   return { started: !alreadyRunning, supervisor: 'running' as const, ...readiness };
 }
 
@@ -1956,10 +2196,15 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
     return { ok: true, stopped: true, ...standardResult, demo: demoResult };
   } finally {
     controller.abort();
-    await Promise.allSettled(services);
+    const settled = await Promise.allSettled(services);
     await health.drain();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
+    // Preserve ownership records when an owned child may still be running.
+    if (settled.some(result => result.status === 'rejected'
+      && result.reason instanceof Error && result.reason.message === 'owned_child_stop_unconfirmed')) {
+      throw new Error('relay_supervisor_child_stop_unconfirmed');
+    }
     const binding = await readFile(bindingPath, 'utf8')
       .then(value => JSON.parse(value) as { pid: number }).catch(() => null);
     if (binding?.pid === process.pid) await rm(bindingPath, { force: true });
@@ -1969,30 +2214,122 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
 
 async function superviseNamedSessions(signal: AbortSignal) {
   if (process.platform !== 'linux') return;
-  while (!signal.aborted) {
-    const root = resolve(dharmaHome(), 'sessions');
-    const entries = await readdir(root, { withFileTypes: true }).catch(error => {
-      if (error.code === 'ENOENT') return []; throw error;
-    });
-    for (const entry of entries.slice(0, 50)) {
-      if (signal.aborted) break;
-      if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,47}$/.test(entry.name)) continue;
+  const owner = createNamedSessionChildOwner(signal);
+  return owner.run(async () => {
+    let vault: LocalVault | undefined;
+    try {
+    while (!signal.aborted) {
       try {
-        const registration = await readNamedSession(dharmaHome(), entry.name);
-        if (!registration?.enabled) continue;
-        await namedSessionCommand('start', new Map<string, string | boolean>([
-          ['name', registration.name], ['workspace-id', registration.identity.workspaceId], ['apply', true],
-        ]));
+        // The original setup initializes the protected vault before staging.
+        // A missing/unavailable store is not permission for a plaintext fallback.
+        await access(resolve(dharmaHome(), 'vault', 'vault.sqlite'));
+        owner.assert();
+        vault ??= await openBootstrapVault({root: resolve(dharmaHome(), 'vault')}) as LocalVault;
+        owner.assert();
+        await consumeCodexSetupSessions({vault, owner, signal,
+          authorize: qualifyCodexSetupSessionRequest,
+          start: async scope => {
+            const request = scope.request;
+            const status = await namedSessionCommand('start', new Map<string, string | boolean>([
+              ['name', request.name], ['workspace-id', request.workspaceId], ['apply', true]])) as Record<string, unknown>;
+            const pid = owner.ownedPid(request.name);
+            if (!pid || status.ok !== true || status.membershipId !== request.membershipId
+              || status.deviceId !== request.deviceId || status.organizationId !== request.organizationId
+              || status.workspaceId !== request.workspaceId || status.repositoryBindingId !== request.repositoryBindingId
+              || status.endpointId !== request.endpointId || status.provider !== 'codex') {
+              throw new Error('setup_session_owner_unconfirmed');
+            }
+            const [child, supervisor] = await scope.step(() => Promise.all([
+              readContainerProcessIdentity(pid), readContainerProcessIdentity(process.pid)]));
+            if (child.parentPid !== process.pid || child.uid !== process.getuid!() || supervisor.uid !== process.getuid!()) {
+              throw new Error('setup_session_owner_unconfirmed');
+            }
+            return {state: 'started', bindingId: String(status.bindingId), sessionId: String(status.sessionId),
+              sessionPid: pid, supervisorPid: process.pid, sessionStartTicks: child.startTicks, supervisorStartTicks: supervisor.startTicks};
+          }});
       } catch {
-        process.stderr.write(`${JSON.stringify({ event: 'named_session_reconnect_pending', name: entry.name })}\n`);
+        if (!signal.aborted) process.stderr.write(`${JSON.stringify({event: 'named_session_setup_pending'})}\n`);
       }
+      const root = resolve(dharmaHome(), 'sessions');
+      const entries = await readdir(root, { withFileTypes: true }).catch(error => {
+        if (error.code === 'ENOENT') return []; throw error;
+      });
+      for (const entry of entries.slice(0, 50)) {
+        if (signal.aborted) break;
+        if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,47}$/.test(entry.name)) continue;
+        try {
+          const registration = await readNamedSession(dharmaHome(), entry.name);
+          if (!registration?.enabled) continue;
+          await namedSessionCommand('start', new Map<string, string | boolean>([
+            ['name', registration.name], ['workspace-id', registration.identity.workspaceId], ['apply', true],
+          ]));
+        } catch {
+          process.stderr.write(`${JSON.stringify({ event: 'named_session_reconnect_pending', name: entry.name })}\n`);
+        }
+      }
+      await new Promise<void>(resolveWait => {
+        const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolveWait(); };
+        const timer = setTimeout(finish, 10_000); signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) finish();
+      });
     }
-    await new Promise<void>(resolveWait => {
-      const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolveWait(); };
-      const timer = setTimeout(finish, 10_000); signal.addEventListener('abort', finish, { once: true });
-      if (signal.aborted) finish();
-    });
-  }
+    } finally {vault?.close();}
+  });
+}
+
+/** Standing owner rechecks the exact approved source/device without adopting
+ * a caller PID, changing enrollment or contacting another member's device. */
+async function qualifyCodexSetupSessionRequest(request: Readonly<LocalCodexSetupSessionRequest>): Promise<boolean> {
+  const owner = currentNamedSessionChildOwner(); if (!owner) return false;
+  try {owner.assert(); const qualified = await qualifyCodexSetupSessionSource(request); owner.assert(); return qualified;}
+  catch {return false;}
+}
+
+async function qualifyCodexSetupSessionSource(request: Readonly<LocalCodexSetupSessionRequest>): Promise<boolean> {
+  try {
+    if (process.platform !== 'linux' || request.maximumCostCents !== 1000 || request.maximumTurnCostCents !== 25) return false;
+    const config = await readDeviceConfig();
+    if (!config || config.deviceId !== request.deviceId || config.organizationId !== request.organizationId
+      || normalizeHqUrl(config.hqUrl) !== request.origin || config.setupClaimReference !== request.setupReference
+      || config.setupClaimRepositoryFingerprint !== request.repositoryFingerprint) return false;
+    const sender = await readContainerProcessIdentity(request.senderPid);
+    if (sender.uid !== process.getuid!() || sender.startTicks !== request.senderStartTicks) return false;
+    const rows = (await registry()).filter(row => row.path === request.workspaceRoot && row.workspaceId === request.workspaceId
+      && row.organizationId === request.organizationId && row.repositoryRemoteHash === request.repositoryFingerprint && row.status === 'active');
+    if (rows.length !== 1 || request.name !== `codex-${request.workspaceId.slice(0, 8)}`) return false;
+    const item = rows[0]!, role = repositoryRoleScope(item);
+    if (role.repositoryBindingId !== request.repositoryBindingId || role.endpointId !== request.endpointId) return false;
+    const source = await preflightBootstrapWorkspaceIdentity(request.workspaceRoot);
+    if (source.fingerprint !== request.repositoryFingerprint || await realpath(request.workspaceRoot) !== request.workspaceRoot) return false;
+    const contract = await loadAgentFabricOnboardingContract();
+    if (`sha256:${contract.sha256}` !== request.contractDigest) return false;
+    const enrollment = await loadDeviceEnrollmentAnchor({config});
+    const device = await enrolledDeviceIdentity(config);
+    if (device.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) return false;
+    const policy = await loadVerifiedWorkspacePolicy(resolve(request.workspaceRoot, '.dharma', 'approved-policy.json'), request.workspaceId);
+    verifyServerAuthorizedPolicy({policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+      organizationId: request.organizationId, workspaceId: request.workspaceId});
+    await assertWorkspaceAuthorizationCurrent(request.workspaceId, policy.serverAuthorization!);
+    if (policy.revision !== request.policyRevision || sha256(canonicalize(policy)) !== request.policyHash) return false;
+    const fabric = await client();
+    await fetchRepositorySourceAuthorization(fabric, role);
+    const existing = await readNamedSession(dharmaHome(), request.name);
+    if (existing && (existing.identity.membershipId !== request.membershipId || existing.identity.deviceId !== request.deviceId
+      || existing.identity.organizationId !== request.organizationId || existing.identity.workspaceId !== request.workspaceId
+      || existing.identity.repositoryBindingId !== request.repositoryBindingId || existing.identity.endpointId !== request.endpointId)) return false;
+    return Date.parse(request.issuedAt) <= Date.now() && Date.now() < Date.parse(request.expiresAt);
+  } catch {return false;}
+}
+
+async function qualifyCodexSetupChildRequest(request: Readonly<LocalCodexSetupSessionRequest>) {
+  try {
+    if (!await qualifyCodexSetupSessionSource(request)) return false;
+    const startup = await inspectOwnedRelayAutostart({home: dharmaHome()});
+    const parent = await readContainerProcessIdentity(process.ppid);
+    return ['systemd-user', 'container-entrypoint'].includes(startup.backend) && startup.version === VERSION
+      && parent.uid === process.getuid!() && canonicalize(parent.argv) === canonicalize([
+        process.execPath, fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', startup.policy]);
+  } catch {return false;}
 }
 
 async function relayStop(): Promise<Output> {
@@ -2128,7 +2465,418 @@ export function assertBootstrapResumeAuthority(input: {
   }
 }
 
-async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> {
+/** Planning-only trusted host entry. Effectful admission remains unavailable
+ * until the full continuation and native owner lifecycle are qualified. */
+export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): Promise<Output> {
+  try {return await runCodexBootstrapHost(input, prepared => bootstrap(prepared.flags, prepared.scope));}
+  catch (error) {
+    const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable', 'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch']);
+    let code = 'codex_setup_host_operation_failed';
+    try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
+    throw new Error(code);
+  }
+}
+
+/** Native-owner continuation: no caller-selected flags or replacement authority. */
+export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope): Promise<Output> {
+  try {return await runCodexBootstrapHostScope(scope, prepared => run(['bootstrap',
+    ...[...prepared.flags].flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)]),
+  ]));}
+  catch (error) {
+    if (error instanceof Error && error.message === 'setup_session_sender_unavailable') {
+      return {ok: false, stage: 'host_setup_unavailable',
+        code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};
+    }
+    const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable',
+      'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch', 'codex_setup_host_command_mismatch']);
+    let code = 'codex_setup_host_operation_failed';
+    try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
+    throw new Error(code);
+  }
+}
+
+type CodexCompletionVault = Pick<ScopedLocalVault, 'recordCodexSetupReadiness' | 'getCodexSetupReadiness'
+  | 'getProviderSessionBinding' | 'stageCodexSetupSession' | 'readCodexSetupSession'>;
+
+async function readBootstrapRuntimeJson(path: string, scope: BootstrapHostScope) {
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const before = await scope.step(() => lstat(path, {bigint: true}));
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 32_768n
+      || before.uid !== BigInt(process.getuid!()) || (before.mode & 0o077n) !== 0n) {
+      throw new Error('setup_runtime_state_unconfirmed');
+    }
+    await scope.step(async () => {file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);});
+    const opened = await scope.step(() => file!.stat({bigint: true}));
+    const bytes = Buffer.alloc(Number(before.size) + 1);
+    const read = await scope.step(() => file!.read(bytes, 0, bytes.length, 0));
+    const after = await scope.step(() => file!.stat({bigint: true}));
+    const current = await scope.step(() => lstat(path, {bigint: true}));
+    if (read.bytesRead !== Number(before.size) || [opened, after, current].some(value => !value.isFile()
+      || value.nlink !== 1n || value.dev !== before.dev || value.ino !== before.ino || value.size !== before.size
+      || value.mtimeNs !== before.mtimeNs || value.ctimeNs !== before.ctimeNs || value.mode !== before.mode
+      || value.uid !== before.uid || value.gid !== before.gid)) {
+      throw new Error('setup_runtime_state_unconfirmed');
+    }
+    return JSON.parse(bytes.subarray(0, read.bytesRead).toString('utf8')) as unknown;
+  } finally {await file?.close();}
+}
+
+/** Actual scoped runtime readback. No callback-supplied ready flag or receipt ID. */
+async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope; intent: Readonly<CodexSetupIntent>;
+  flags: Map<string, string | boolean>}, vault: CodexCompletionVault, firstLearning: LocalCodexSetupReadiness['firstLearning'], intentDigest?: string) {
+  const {scope, intent} = prepared, workspace = String(prepared.flags.get('workspace'));
+  const step = <T>(operation: () => Promise<T>) => scope.step(operation);
+  await scope.assert();
+  if (process.platform !== 'linux') throw new Error('setup_runtime_route_unqualified');
+  const source = await step(() => preflightBootstrapWorkspaceIdentity(workspace));
+  await assertBootstrapHostSource(workspace, source.fingerprint);
+  const contract = await step(() => loadAgentFabricOnboardingContract());
+  if (`sha256:${contract.sha256}` !== intent.contractDigest) throw new Error('setup_runtime_contract_changed');
+  const config = await step(() => readDeviceConfig());
+  if (!config || config.organizationId !== intent.organizationId || normalizeHqUrl(config.hqUrl) !== intent.origin) {
+    throw new Error('setup_runtime_identity_unconfirmed');
+  }
+  const enrollment = await step(() => loadDeviceEnrollmentAnchor({config, hostScope: scope}));
+  const device = await step(() => enrolledDeviceIdentity(config));
+  if (device.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) throw new Error('setup_runtime_identity_unconfirmed');
+  const rows = (await step(() => registry())).filter(row => row.path === workspace
+    && row.organizationId === intent.organizationId && row.repositoryRemoteHash === intent.repositoryFingerprint && row.status === 'active');
+  if (rows.length !== 1 || !rows[0]!.repositoryRole) throw new Error('setup_runtime_repository_unconfirmed');
+  const item = rows[0]!, roleScope = repositoryRoleScope(item);
+  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
+  const policy = await step(() => loadVerifiedWorkspacePolicy(policyPath, item.workspaceId));
+  verifyServerAuthorizedPolicy({policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: intent.organizationId, workspaceId: item.workspaceId});
+  await step(() => assertWorkspaceAuthorizationCurrent(item.workspaceId, policy.serverAuthorization!));
+  if (policy.revision !== intent.policyRevision) throw new Error('setup_runtime_policy_changed');
+  const signed = await step(() => activeSkillAuthorization('codex', item.workspaceId, roleScope.repositoryAgentId, config));
+  const anchor = await step(() => loadActiveSkillAuthorizationAnchor({config, workspaceId: item.workspaceId,
+    organizationAgentId: roleScope.repositoryAgentId, provider: 'codex', fresh: true, hostScope: scope}));
+  if (!signed || !anchor || signed.bundleId !== anchor.bundleId) throw new Error('setup_runtime_package_unconfirmed');
+  const installation = await step(() => verifyAgentFabricSkillInstallation({provider: 'codex', workspace}));
+  const content = await step(() => readNamedSessionPackageContent(installation, true));
+  if (!installation.ready || content.bundleId !== signed.bundleId || content.bundleHash !== signed.bundleHash) {
+    throw new Error('setup_runtime_package_unconfirmed');
+  }
+  const fabric = await step(() => client());
+  const roles = await step(() => discoverRepositoryRoleMetadata(fabric, roleScope));
+  const peers = roles.discovery?.peers as Array<Record<string, unknown>> | undefined;
+  const own = peers?.filter(peer => peer.endpointId === roleScope.endpointId && peer.workspaceId === item.workspaceId);
+  if (own?.length !== 1 || own[0]!.provider !== 'codex' || own[0]!.revision !== item.repositoryRole!.revision
+    || sha256(canonicalize({roleName: own[0]!.roleName, description: own[0]!.description,
+      questionCategories: own[0]!.questionCategories})) !== item.repositoryRole!.profileHash) {
+    throw new Error('setup_runtime_role_unconfirmed');
+  }
+  const name = `codex-${item.workspaceId.slice(0, 8)}`;
+  const session = await step(() => readNamedSession(dharmaHome(), name));
+  if (!session?.enabled || session.identity.membershipId !== intent.recipientMembershipId
+    || session.identity.deviceId !== config.deviceId || session.identity.organizationId !== intent.organizationId
+    || session.identity.workspaceId !== item.workspaceId || session.identity.endpointId !== roleScope.endpointId
+    || session.identity.repositoryBindingId !== roleScope.repositoryBindingId) throw new Error('setup_runtime_session_unconfirmed');
+  const binding = await step(() => vault.getProviderSessionBinding(session.bindingId, session.identity));
+  if (!binding || binding.owner !== 'dharma_bridge' || binding.workspaceRoot !== workspace
+    || binding.bindingId !== session.bindingId || Object.entries(session.identity).some(([key, value]) =>
+      binding[key as keyof typeof binding] !== value)
+    || Date.parse(binding.expiresAt) <= Date.now()) throw new Error('setup_runtime_session_unconfirmed');
+  const remote = await step(() => fabric.signedPost('/agent-fabric/provider-sessions', {
+    schema: 'dharma.provider-session-registration/v1', action: 'inspect', provider: 'codex', mode: 'bridge_owned',
+    workspaceId: item.workspaceId, endpointId: roleScope.endpointId, repositoryBindingId: roleScope.repositoryBindingId,
+    bindingId: session.bindingId, expectedRevision: 0, leaseSeconds: 60,
+  }));
+  if (!isNamedSessionOwnerReceipt(remote, session.bindingId, session.identity)) throw new Error('setup_runtime_session_unconfirmed');
+  const native = await step(() => namedSessionCommand('readiness', new Map<string, string | boolean>([
+    ['name', name], ['workspace-id', item.workspaceId],
+  ]))) as Record<string, unknown>;
+  const nativeSkill = parseNamedCodexSkillObservation(native.nativeSkill);
+  if (native.ok !== true || native.name !== name || native.bindingId !== binding.bindingId || native.sessionId !== binding.sessionId
+    || Object.entries(session.identity).some(([key, value]) => native[key] !== value)
+    || (Object.keys(content) as Array<keyof typeof content>).some(key => nativeSkill[key] !== content[key])) {
+    throw new Error('setup_runtime_session_unconfirmed');
+  }
+  const startup = await step(() => inspectOwnedRelayAutostart({home: dharmaHome()}));
+  const startupState = await step(() => relayAutostartStatus({home: dharmaHome()}));
+  if (!['systemd-user', 'container-entrypoint'].includes(startup.backend) || startupState.state !== 'enabled'
+    || startupState.backend !== startup.backend || startup.version !== VERSION || startupState.version !== VERSION
+    || resolve(startup.workspace) !== startup.workspace
+    || startup.policy !== resolve(startup.workspace, '.dharma', 'approved-policy.json')
+    || startup.launcher !== resolve(startup.workspace, '.dharma', 'bin', 'dharma')
+    || startup.backend === 'container-entrypoint' && startupState.lifecycle !== 'running') {
+    throw new Error('setup_runtime_startup_unconfirmed');
+  }
+  // A standard relay can retain another repository as its same-device anchor.
+  // Verify that anchor independently; selected-repository evidence stays scoped.
+  const anchorRows = await step(() => registry());
+  const startupItem = selectDeviceWorkspace(anchorRows, {organizationId: intent.organizationId,
+    deviceId: config.deviceId, path: startup.workspace});
+  if (!startupItem || startupItem.status !== 'active' || startupItem.routeHash !== sha256(startup.workspace)) {
+    throw new Error('setup_runtime_startup_unconfirmed');
+  }
+  const startupRoute = canonicalize({workspaceId: startupItem.workspaceId, path: startupItem.path,
+    routeHash: startupItem.routeHash, repositoryRemoteHash: startupItem.repositoryRemoteHash, status: startupItem.status});
+  const startupPolicy = await step(() => loadVerifiedWorkspacePolicy(startup.policy!, startupItem.workspaceId));
+  verifyServerAuthorizedPolicy({policy: startupPolicy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: intent.organizationId, workspaceId: startupItem.workspaceId});
+  await step(() => assertWorkspaceAuthorizationCurrent(startupItem.workspaceId, startupPolicy.serverAuthorization!));
+  const startupSnapshot = canonicalize(startup), startupStateSnapshot = canonicalize(startupState);
+  const startupPolicyHash = sha256(canonicalize(startupPolicy));
+  const pidFrom = async (path: string) => {
+    const value = await readBootstrapRuntimeJson(path, scope);
+    if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 2147483647) {
+      throw new Error('setup_runtime_process_unconfirmed');
+    }
+    return Number(value);
+  };
+  const home = dharmaHome(), entry = fileURLToPath(import.meta.url);
+  const supervisorPid = await pidFrom(resolve(home, 'relay', 'supervisor.pid'));
+  const relayPid = await pidFrom(resolve(home, 'relay', 'relay.pid'));
+  const sessionPid = await pidFrom(resolve(namedSessionPaths(home, name).root, 'service.lock'));
+  const processes = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
+  const argv = [[process.execPath, entry, 'relay', 'supervise', '--policy', startup.policy],
+    [process.execPath, entry, 'relay', 'start', '--policy', startup.policy],
+    [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
+  if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
+    || canonicalize(value.argv) !== canonicalize(argv[i])
+      && (i !== 2 || canonicalize(value.argv) !== canonicalize([...argv[i]!, '--setup-handoff']))) || processes[1]!.parentPid !== supervisorPid
+    || processes[2]!.parentPid !== supervisorPid) {
+    throw new Error('setup_runtime_process_unconfirmed');
+  }
+  if (intentDigest !== undefined || processes[2]!.argv.includes('--setup-handoff')) {
+    if (!intentDigest || !/^sha256:[a-f0-9]{64}$(?![\s\S])/.test(intentDigest)) throw new Error('setup_runtime_session_unconfirmed');
+    const handoff = await step(() => vault.readCodexSetupSession(intent.operationId, intentDigest));
+    const request = handoff?.request, result = handoff?.result;
+    if (handoff?.state !== 'accepted' || !request || result?.state !== 'started'
+      || request.setupReference !== intent.setupReference || request.membershipId !== intent.recipientMembershipId
+      || request.organizationId !== intent.organizationId || request.deviceId !== config.deviceId
+      || request.workspaceId !== item.workspaceId || request.workspaceRoot !== workspace || request.name !== name
+      || request.repositoryBindingId !== roleScope.repositoryBindingId || request.endpointId !== roleScope.endpointId
+      || request.repositoryFingerprint !== intent.repositoryFingerprint || request.policyRevision !== intent.policyRevision
+      || request.scopeDigest !== intent.scopeDigest || request.contractDigest !== intent.contractDigest
+      || result.bindingId !== binding.bindingId || result.sessionId !== binding.sessionId || result.sessionPid !== sessionPid
+      || result.supervisorPid !== supervisorPid || result.sessionStartTicks !== processes[2]!.startTicks
+      || result.supervisorStartTicks !== processes[0]!.startTicks) throw new Error('setup_runtime_session_unconfirmed');
+  }
+  const supervisor = await readBootstrapRuntimeJson(resolve(home, 'relay', 'supervisor-workspace.json'), scope) as Record<string, unknown>;
+  if (supervisor.pid !== supervisorPid || supervisor.organizationId !== intent.organizationId || supervisor.deviceId !== config.deviceId
+    || supervisor.policyPath !== startup.policy || supervisor.version !== VERSION || supervisor.standardRepositories !== true) {
+    throw new Error('setup_runtime_process_unconfirmed');
+  }
+  const poll = await readBootstrapRuntimeJson(resolve(home, 'relay', 'repositories', item.workspaceId,
+    'last-successful-poll.json'), scope) as Record<string, unknown>;
+  if (!repositoryRelayObservationReady({observation: poll, workspaceId: item.workspaceId, version: VERSION, pid: relayPid})) {
+    throw new Error('setup_runtime_poll_unconfirmed');
+  }
+  const currentContent = await step(async () => readNamedSessionPackageContent(
+    await verifyAgentFabricSkillInstallation({provider: 'codex', workspace}), true));
+  if ((Object.keys(content) as Array<keyof typeof content>).some(key => currentContent[key] !== content[key])) {
+    throw new Error('setup_runtime_package_changed');
+  }
+  const currentProcesses = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
+  if (processes.some((value, i) => canonicalize(value) !== canonicalize(currentProcesses[i]))) throw new Error('setup_runtime_process_changed');
+  const currentStartup = await step(() => inspectOwnedRelayAutostart({home}));
+  const currentStartupState = await step(() => relayAutostartStatus({home}));
+  const currentStartupItem = selectDeviceWorkspace(await step(() => registry()), {organizationId: intent.organizationId,
+    deviceId: config.deviceId, path: startup.workspace});
+  const currentConfig = await step(() => readDeviceConfig());
+  if (canonicalize(currentStartup) !== startupSnapshot || canonicalize(currentStartupState) !== startupStateSnapshot
+    || !currentStartupItem || canonicalize({workspaceId: currentStartupItem.workspaceId, path: currentStartupItem.path,
+      routeHash: currentStartupItem.routeHash, repositoryRemoteHash: currentStartupItem.repositoryRemoteHash,
+      status: currentStartupItem.status}) !== startupRoute
+    || !currentConfig || currentConfig.deviceId !== config.deviceId || currentConfig.organizationId !== intent.organizationId
+    || normalizeHqUrl(currentConfig.hqUrl) !== intent.origin) throw new Error('setup_runtime_startup_changed');
+  const currentStartupPolicy = await step(() => loadVerifiedWorkspacePolicy(startup.policy!, startupItem.workspaceId));
+  if (sha256(canonicalize(currentStartupPolicy)) !== startupPolicyHash) throw new Error('setup_runtime_startup_changed');
+  await step(() => assertWorkspaceAuthorizationCurrent(startupItem.workspaceId, currentStartupPolicy.serverAuthorization!));
+  await step(() => assertWorkspaceAuthorizationCurrent(item.workspaceId, policy.serverAuthorization!));
+  return parseLocalCodexSetupReadiness({schema: 'dharma.local-codex-setup-readiness/v1',
+    operationId: intent.operationId, organizationId: intent.organizationId, membershipId: session.identity.membershipId,
+    deviceId: config.deviceId, workspaceId: item.workspaceId, repositoryBindingId: roleScope.repositoryBindingId,
+    repositoryAgentId: roleScope.repositoryAgentId, endpointId: roleScope.endpointId, sessionBindingId: binding.bindingId,
+    sessionId: binding.sessionId, repositoryFingerprint: intent.repositoryFingerprint, policyRevision: policy.revision,
+    policyHash: sha256(canonicalize(policy)), manifestHash: content.manifestHash, catalogHash: content.catalogHash,
+    bundleId: content.bundleId, bundleHash: content.bundleHash, activeReceiptHash: anchor.receiptHash,
+    roleRevision: item.repositoryRole!.revision, roleProfileHash: item.repositoryRole!.profileHash, nativeSkillHash: content.skillsHash,
+    contractDigest: intent.contractDigest, cliVersion: VERSION, relayPid, relayPolledAt: poll.at,
+    startupBackend: startup.backend, firstLearning, verifiedAt: new Date().toISOString(),
+    expiresAt: new Date(Math.min(Date.parse(intent.expiresAt), Date.parse(policy.serverAuthorization!.expiresAt),
+      Date.parse(startupPolicy.serverAuthorization!.expiresAt),
+      Date.parse(binding.expiresAt), signed.expiresAt ? Date.parse(signed.expiresAt) : Infinity)).toISOString()});
+}
+
+/** Trusted native host composition, not an MCP/model/peer tool. */
+export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostScope, vault: CodexCompletionVault) {
+  const prepared = await runCodexBootstrapHostScope(scope, async value => value);
+  let firstLearning: LocalCodexSetupReadiness['firstLearning'] | undefined;
+  const readiness = createCodexSetupReadinessOwner({intent: prepared.intent,
+    workspace: String(prepared.flags.get('workspace')), scope, vault,
+    observe: async (_intent, _scope, retained, intentDigest) => {
+      const disposition = firstLearning ?? retained?.firstLearning;
+      if (!disposition) throw new Error('setup_runtime_first_learning_unconfirmed');
+      // Keep the original execution's disposition; reobserve all live state.
+      return runCodexBootstrapHostScope(scope, current => observeCodexBootstrapRuntime(current, vault, disposition, intentDigest));
+    }});
+  return Object.freeze({
+    execute: async (lease: Readonly<CodexSetupExecutionLease>) => {
+      await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
+      const result = await withCodexSetupSessionSender({scope, vault, lease},
+        () => bootstrapFromCodexSetupScope(scope)) as Record<string, unknown>;
+      await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
+      const workflow = result.workflowReadiness as Record<string, unknown> | undefined;
+      if (result.ok !== true || result.stage !== 'complete' || !workflow
+        || !['synchronized', 'no_eligible_history', 'denied_disclosure'].includes(String(workflow.firstLearning))) {
+        return {state: 'unconfirmed' as const, code: 'setup_execution_unconfirmed' as const};
+      }
+      firstLearning = workflow.firstLearning as LocalCodexSetupReadiness['firstLearning'];
+      return readiness.record(lease);
+    },
+    verify: readiness.verify,
+  });
+}
+
+/** Controller entry: owns the official connection and never accepts a peer transport. */
+export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof startCodexBootstrapNativeHost>[0],
+  'transport' | 'additionalFilesystemRules'> & {expectedAccountEmail: string}) {
+  if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
+  const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail} = input;
+  if (!/^[a-z][a-z0-9-]{0,47}$/.test(name) || typeof reserve !== 'function'
+    || !Number.isInteger(maximumProviderCostCents) || maximumProviderCostCents < 1 || maximumProviderCostCents > 10_000) {
+    throw new Error('codex_setup_owned_input_invalid');
+  }
+  const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace, signal, current});
+  let connection: Awaited<ReturnType<typeof openCodexSetupOwnedConnection>> | undefined;
+  let host: Awaited<ReturnType<typeof startCodexBootstrapNativeHost>> | undefined;
+  try {
+    await prepared.scope.assert();
+    const source = await preflightBootstrapWorkspaceIdentity(workspace);
+    const contract = await loadAgentFabricOnboardingContract();
+    if (source.fingerprint !== prepared.intent.repositoryFingerprint || `sha256:${contract.sha256}` !== prepared.intent.contractDigest) {
+      throw new Error('codex_setup_owned_source_unconfirmed');
+    }
+    await prepared.scope.assert();
+    connection = await openCodexSetupOwnedConnection({workspace, deviceHome: dharmaHome(),
+      expectedAccountEmail, signal, current});
+    await prepared.scope.assert();
+    host = await startCodexBootstrapNativeHost({workspace, name,
+      intent: prepared.intent, signal, maximumProviderCostCents,
+      reserve, current: connection.current, transport: connection.transport,
+      additionalFilesystemRules: connection.additionalFilesystemRules});
+    await prepared.scope.assert();
+    const ownedHost = host, ownedConnection = connection;
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= (async () => {
+      try {await ownedHost.close();} finally {await ownedConnection.close();}
+    })();
+    // A terminal native turn must also release its owned transport.
+    const settled = ownedHost.settled.then(close, async () => {
+      try {await close();} finally {throw new Error('codex_setup_owned_completion_unconfirmed');}
+    });
+    void settled.catch(() => {});
+    return Object.freeze({threadId: host.threadId, turnId: host.turnId, close, settled});
+  } catch {
+    let cleanupFailed = false;
+    try {await host?.close();} catch {cleanupFailed = true;}
+    try {await connection?.close();} catch {cleanupFailed = true;}
+    if (cleanupFailed) throw new Error('codex_setup_owned_close_unconfirmed');
+    throw new Error('codex_setup_owned_start_unqualified');
+  } finally {prepared.scope.close();}
+}
+
+/** Prepared controller ingress for the portal's public command, never a shell evaluator. */
+export async function openCodexBootstrapFromPortalCommand(input: Parameters<typeof openCodexBootstrapNativeHost>[0]
+  & {portalArgs: readonly string[]}) {
+  if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
+  const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail} = input;
+  if (!Array.isArray(input.portalArgs) || input.portalArgs.length > 64) {
+    throw new Error('codex_setup_portal_command_mismatch');
+  }
+  const args = [...input.portalArgs];
+  if (args.some(value => typeof value !== 'string' || value.length > 4096 || /[\u0000-\u001f\u007f]/.test(value))) {
+    throw new Error('codex_setup_portal_command_mismatch');
+  }
+  const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace, signal, current});
+  try {
+    const parsed = parseCliOptions(args);
+    const expected = prepared.flags;
+    const allowed = new Set([...expected.keys(), 'repository-url-base64url']);
+    if (parsed.positional.length !== 1 || parsed.positional[0] !== 'bootstrap'
+      || [...parsed.flags.keys()].some(key => !allowed.has(key))
+      || [...parsed.repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('codex_setup_portal_command_mismatch');
+    }
+    for (const [key, value] of expected) {
+      const supplied = parsed.flags.get(key);
+      if (key === 'workspace') {
+        if (supplied !== undefined && (typeof supplied !== 'string' || resolve(workspace, supplied) !== workspace)) {
+          throw new Error('codex_setup_portal_command_mismatch');
+        }
+      } else if (key === 'provider') {
+        if (supplied !== undefined && supplied !== 'auto' && supplied !== 'codex') throw new Error('codex_setup_portal_command_mismatch');
+      } else if (supplied !== value) throw new Error('codex_setup_portal_command_mismatch');
+    }
+    const selected = parsed.flags.get('repository-url-base64url');
+    if (selected !== undefined) {
+      if (typeof selected !== 'string' || !/^[A-Za-z0-9_-]+$/.test(selected)) throw new Error('codex_setup_portal_command_mismatch');
+      const bytes = Buffer.from(selected, 'base64url'), decoded = bytes.toString('utf8');
+      let url: URL, fingerprint: string;
+      try {url = new URL(decoded); fingerprint = sourceRepositoryFingerprint(decoded).fingerprint;}
+      catch {throw new Error('codex_setup_portal_command_mismatch');}
+      if (bytes.toString('base64url') !== selected || !Buffer.from(decoded, 'utf8').equals(bytes)
+        || /[\u0000-\u0020\u007f]/.test(decoded) || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+        || fingerprint !== prepared.intent.repositoryFingerprint) {
+        throw new Error('codex_setup_portal_command_mismatch');
+      }
+    }
+    await prepared.scope.assert();
+    return await openCodexBootstrapNativeHost({workspace, name, signal, current, reserve, maximumProviderCostCents,
+      expectedAccountEmail, intent: prepared.intent});
+  } finally {prepared.scope.close();}
+}
+
+/** Official native-host composition. The caller supplies its already owned
+ * transport and qualification, never a vault, executor or readiness callback. */
+export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeof startCodexSetupNativeHost>[0],
+  'openJournal' | 'execute' | 'verifyReadiness'>) {
+  const root = resolve(dharmaHome(), 'vault');
+  let completion: Awaited<ReturnType<typeof createCodexBootstrapCompletionOwner>> | undefined;
+  let ownerScope: BootstrapHostScope | undefined;
+  return startCodexSetupNativeHost({...input,
+    openJournal: async scope => {
+      let vault: ScopedLocalVault | undefined;
+      try {
+        await runCodexBootstrapHostScope(scope, async () => {
+          // Capture the owned handle before the borrower's post-open check.
+          // The original ALS scope selects the scoped LocalVault overload.
+          vault = await openBootstrapVault({root}) as ScopedLocalVault;
+        });
+        completion = await createCodexBootstrapCompletionOwner(scope, vault!);
+        ownerScope = scope;
+        return Object.freeze({
+          claim: (operationId: string, intentDigest: string) => vault!.claimCodexSetupOperation(operationId, intentDigest),
+          read: (operationId: string, intentDigest: string) => vault!.readCodexSetupOperation(operationId, intentDigest),
+          finish: (leaseId: string, intentDigest: string,
+            result: Parameters<ScopedLocalVault['finishCodexSetupOperation']>[2]) =>
+            vault!.finishCodexSetupOperation(leaseId, intentDigest, result),
+          close: async () => {await vault!.close();},
+        });
+      } catch (error) {
+        try {await vault?.close();} catch {throw new Error('codex_setup_native_journal_close_unconfirmed');}
+        throw error;
+      }
+    },
+    execute: async (_intent, _signal, _current, lease, scope) => {
+      if (!completion || scope !== ownerScope) throw new Error('codex_setup_host_scope_unavailable');
+      return completion.execute(lease);
+    },
+    verifyReadiness: async (receiptId, intent, digest) => {
+      if (!completion) return false;
+      return completion.verify(receiptId, intent, digest);
+    },
+  });
+}
+
+async function bootstrap(flags: Map<string, string | boolean>, hostScope?: BootstrapHostScope): Promise<Output> {
+  const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
+  await hostScope?.assert();
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
   const resuming = flags.has('resume');
@@ -2153,9 +2901,16 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     for (const key of ['setup-scope-digest', 'setup-contract-digest']) {
       if (!/^sha256:[a-f0-9]{64}$/.test(required(flags, key))) throw new Error('setup_claim_context_invalid');
     }
-    const installedContract = await loadAgentFabricOnboardingContract();
+    const installedContract = await step(() => loadAgentFabricOnboardingContract());
     if (required(flags, 'setup-contract-digest') !== `sha256:${installedContract.sha256}`) {
       throw new Error('setup_claim_contract_mismatch: the portal setup must match this published client operating contract.');
+    }
+    // A prepared scope alone is not execution admission. Only the original
+    // native turn's still-live private lease may enter this continuation.
+    if (hostScope && !flags.has('dry-run')) {
+      try {await originalCodexSetupSessionSender(hostScope);}
+      catch {return {ok: false, stage: 'host_setup_unavailable',
+        code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};}
     }
     if (flags.has('dry-run')) return { ok: true, stage: 'plan', setupTransport: 'public_claim_v1',
       organizationId, portalUrl: hqUrl, setupReference: required(flags, 'setup-reference'),
@@ -2178,7 +2933,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     repositorySelection = joinedBindingId
       ? { workspace: resolve(dharmaHome(), 'joined-repositories', joinedBindingId), selection: 'existing_organization_binding' }
       : typeof selectedRemote === 'string'
-      ? await resolveBootstrapRepositoryWorkspace({
+      ? await step(() => resolveBootstrapRepositoryWorkspace({
         workspace: String(flags.get('workspace') || '.'),
         selectedRemoteBase64url: selectedRemote,
         organizationId,
@@ -2186,8 +2941,8 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
         normalizeRemote: normalizeGitRemoteIdentity,
         withLock: (path) => acquirePidLock(path, 30_000,
           'repository_checkout_busy: another setup is selecting this repository; retry after it finishes.'),
-      })
-      : { workspace: await realpath(String(flags.get('workspace') || '.')), selection: 'provided' };
+      }))
+      : { workspace: await step(() => realpath(String(flags.get('workspace') || '.'))), selection: 'provided' };
   } catch (error) {
     const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
       ? error.message : '';
@@ -2202,18 +2957,19 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   const policyRevision = required(flags, 'policy-revision');
   const repositoryIdentity = joinedBindingId
     ? { fingerprint: joinedFingerprint! }
-    : await preflightBootstrapWorkspaceIdentity(
+    : await step(() => preflightBootstrapWorkspaceIdentity(
       workspace,
       typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null,
-    );
+    ));
   const requestedProvider = String(flags.get('provider') || 'auto').trim().toLowerCase();
+  await assertBootstrapHostSource(workspace, repositoryIdentity.fingerprint);
   const provider = requestedProvider === 'auto'
-    ? await detectBootstrapProvider(joinedBindingId ? String(flags.get('workspace') || '.') : workspace)
+    ? await step(() => detectBootstrapProvider(joinedBindingId ? String(flags.get('workspace') || '.') : workspace))
     : requestedProvider;
   if (!isLocalProviderId(provider)) {
     throw new Error('Bootstrap provider must be auto, codex, claude, agy, or hermes.');
   }
-  let existing = await readDeviceConfig();
+  let existing = await step(() => readDeviceConfig());
   const enrollmentMismatch = Boolean(existing
     && (existing.organizationId !== organizationId || normalizeHqUrl(existing.hqUrl) !== hqUrl));
   if (resuming) assertBootstrapResumeAuthority({ flags, existing, organizationId, hqUrl });
@@ -2233,20 +2989,27 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   if (resuming) {
     config = existing!;
   } else if (grantMode === 'reference') {
-    const result = await claimSetupReference({ hqUrl, organizationId,
+    const claimPlatform = await step(() => platform());
+    const claimInstallationId = existing?.installationId ?? await step(() => loadOrCreateInstallationId());
+    const result = await step(() => claimSetupReference({ hqUrl, organizationId,
       setupReference: required(flags, 'setup-reference'),
       recipientMembershipId: required(flags, 'setup-recipient-membership-id'),
       repositoryFingerprint: repositoryIdentity.fingerprint, policyRevision,
       scopeDigest: required(flags, 'setup-scope-digest'), contractDigest: required(flags, 'setup-contract-digest'),
       name: String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`),
-      platform: await platform(), installationId: existing?.installationId ?? await loadOrCreateInstallationId(),
+      platform: claimPlatform, installationId: claimInstallationId,
       existingConfig: existing, configPath: configPath(),
+      hostScope,
+      onFailureDiagnostic: diagnostic => {
+        process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
+      },
       onRecipientApprovalRequired: async approval => {
         recipientApproval.required = true;
-        recipientApproval.browserOpened = flags.has('no-browser') ? false : await openVerificationUri(approval.url);
+        recipientApproval.browserOpened = flags.has('no-browser') ? false : await step(() => openVerificationUri(approval.url));
+        await hostScope?.assert();
         process.stderr.write(`Approve this exact device in the authenticated portal before ${approval.expiresAt}: ${approval.url}\n`);
       },
-    });
+    }));
     config = result.config; scopes = result.scopes;
   } else {
     const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
@@ -2315,22 +3078,24 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       config.serverSigningKeyset = redeemed.serverSigningKeyset;
     }
     await saveDeviceConfig(configPath(), config);
-    await saveDeviceEnrollmentAnchor({ config });
+    await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
     await saveOrganizationApiToken({
       hqUrl,
       organizationId,
       installationId: config.installationId,
       token: redeemed.organizationApiToken,
+      hostScope: currentBootstrapHostScope(),
     });
     scopes = redeemed.organizationApiTokenScopes;
   }
   let organizationApiTokenStored = false;
   let credentialFailure: 'organization_api_credentials_required' | 'organization_api_credential_store_unavailable' | null = null;
   try {
-    organizationApiTokenStored = Boolean(await loadOrganizationApiToken({
+    organizationApiTokenStored = Boolean(await step(() => loadOrganizationApiToken({
       hqUrl, organizationId, installationId: config.installationId,
-    }));
-    if (!organizationApiTokenStored && !String(process.env.DHARMA_ORG_API_TOKEN || '').trim()) {
+      hostScope: currentBootstrapHostScope(),
+    })));
+    if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(process.env.DHARMA_ORG_API_TOKEN || '').trim())) {
       credentialFailure = 'organization_api_credentials_required';
     }
   } catch {
@@ -2360,9 +3125,9 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
   onboardFlags.set('provider', provider);
-  const onboarded = await retryBootstrapOnboarding(async () => joinedBindingId
-    ? await joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!) as Record<string, unknown>
-    : await onboard(onboardFlags) as Record<string, unknown>);
+  const onboarded = await step(() => retryBootstrapOnboarding(async () => joinedBindingId
+    ? await step(() => joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!)) as Record<string, unknown>
+    : await step(() => onboard(onboardFlags)) as Record<string, unknown>));
   if (onboarded.ok !== true || onboarded.stage === 'approve_device') {
     return {
       ok: onboarded.ok === true,
@@ -2382,40 +3147,40 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
       repository: onboarded,
     };
   }
-  const launcher = await installStableRepositoryLauncher(workspace);
+  const launcher = await step(() => installStableRepositoryLauncher(workspace));
   const autostart = flags.has('no-relay-daemon')
     ? { state: 'disabled' as const, backend: null }
-    : await withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
+    : await step(() => withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
         + (joinedBindingId ? ` --join-repository-binding-id ${joinedBindingId} --join-source-fingerprint ${joinedFingerprint}` : ''),
       () => withRelayStartupMutation(async () => {
         const home = dharmaHome();
-        const existing = await relayAutostartStatus({ home });
+        const existing = await step(() => relayAutostartStatus({ home }));
         if (existing.backend !== null || existing.state !== 'disabled') {
-          const anchor = await inspectOwnedRelayAutostart({ home });
+          const anchor = await step(() => inspectOwnedRelayAutostart({ home }));
           if (anchor.policy !== null) {
-            const current = await readDeviceConfig();
+            const current = await step(() => readDeviceConfig());
             if (!current || current.organizationId !== organizationId || current.deviceId !== config.deviceId) {
               throw new Error('relay_workspace_conflict: startup enrollment changed.');
             }
-            const selected = selectDeviceWorkspace(await registry(), { organizationId,
+            const selected = selectDeviceWorkspace(await step(() => registry()), { organizationId,
               deviceId: config.deviceId, path: anchor.workspace });
             if (!selected) throw new Error('relay_workspace_conflict: startup anchor is not registered to this device.');
             if (anchor.policy !== resolve(anchor.workspace, '.dharma', 'approved-policy.json')) {
               throw new Error('relay_workspace_conflict: startup policy is not canonical.');
             }
-            const authorized = await loadOrganizationPolicy(anchor.policy);
-            const canonical = (await registry()).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
+            const authorized = await step(() => loadOrganizationPolicy(anchor.policy!));
+            const canonical = (await step(() => registry())).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
               && row.organizationId === organizationId && row.path === anchor.workspace
               && row.routeHash === selected.routeHash && row.repositoryRemoteHash === selected.repositoryRemoteHash);
             if (canonical.length !== 1) throw new Error('relay_workspace_conflict: startup policy route changed.');
-            await loadVerifiedWorkspacePolicy(anchor.policy, authorized.serverAuthorization?.workspaceId ?? '');
+            await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? ''));
           }
         }
-        return enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
+        return step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
-          version: VERSION, preserveStandardAnchor: true });
-      }));
+          version: VERSION, preserveStandardAnchor: true }));
+      })));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
   if (!completionRequested) {
@@ -2440,7 +3205,7 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     };
   }
 
-  const skill = await verifyAgentFabricSkillInstallation({ provider, workspace });
+  const skill = await step(() => verifyAgentFabricSkillInstallation({ provider, workspace }));
   if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
   const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
   const firstLearning = (onboarded as Record<string, unknown>).firstLearningEvidence as Record<string, unknown> | undefined;
@@ -2448,14 +3213,14 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     || joinedBindingId !== null && firstLearning?.state === 'shared_package_inherited';
   const relay = flags.has('no-relay-daemon')
     ? { started: false, ...(await waitForRelayReadiness()) }
-    : await startRelayDaemon(policyPath);
+    : await step(() => startRelayDaemon(policyPath));
   let repositoryReadiness: RepositoryReadinessResult | null = null;
   if (!sharedRepositoryReady && relay.state === 'running') {
     const workspaceId = String(onboarded.workspaceId || '');
     const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision} --provider ${provider}`;
-    repositoryReadiness = await withOnboardingStage('readiness', workspaceId, resumeCommand,
+    repositoryReadiness = await step(() => withOnboardingStage('readiness', workspaceId, resumeCommand,
       () => waitForRepositoryReadiness(async () => {
-        const current = (await registry()).find(item => item.workspaceId === workspaceId
+        const current = (await step(() => registry())).find(item => item.workspaceId === workspaceId
           && item.organizationId === organizationId && item.path === workspace);
         if (!current) throw new Error('Enrolled repository workspace disappeared during publication.');
         return {
@@ -2463,20 +3228,20 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
           ready: await repositorySharedReady(current),
           candidateId: current.repositoryPackage?.candidateId || null,
         };
-      }));
+      })));
     sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
   }
   const apiFlags = new Map<string, string | boolean>([
     ['organization-id', organizationId], ['portal-url', hqUrl],
   ]);
   const [organization, agents, experiments, failures, remediations, skills, usage] = await Promise.all([
-    runOrganizationCommand('organization', 'status', apiFlags),
-    runOrganizationCommand('agents', 'list', apiFlags),
-    runOrganizationCommand('experiments', 'list', apiFlags),
-    runOrganizationCommand('failures', 'list', apiFlags),
-    runOrganizationCommand('remediations', 'list', apiFlags),
-    runOrganizationCommand('skills', 'list', apiFlags),
-    runOrganizationCommand('usage', 'list', apiFlags),
+    step(() => runOrganizationCommand('organization', 'status', apiFlags)),
+    step(() => runOrganizationCommand('agents', 'list', apiFlags)),
+    step(() => runOrganizationCommand('experiments', 'list', apiFlags)),
+    step(() => runOrganizationCommand('failures', 'list', apiFlags)),
+    step(() => runOrganizationCommand('remediations', 'list', apiFlags)),
+    step(() => runOrganizationCommand('skills', 'list', apiFlags)),
+    step(() => runOrganizationCommand('usage', 'list', apiFlags)),
   ]);
   const organizationApi = summarizeBootstrapOrganizationApi({
     organizationId,
@@ -2488,25 +3253,39 @@ async function bootstrap(flags: Map<string, string | boolean>): Promise<Output> 
     skills,
     usage,
   });
-  const operatingContract = await loadAgentFabricOnboardingContract();
-  const namedSession = !joinedBindingId && provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
-    ? await withOnboardingStage('named_session', String(onboarded.workspaceId),
+  const operatingContract = await step(() => loadAgentFabricOnboardingContract());
+  let namedSession = !joinedBindingId && provider === 'codex' && process.platform === 'linux' && sharedRepositoryReady
+    ? await step(() => withOnboardingStage('named_session', String(onboarded.workspaceId),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
       () => namedSessionCommand('start', new Map<string, string | boolean>([
       ['name', String(flags.get('session-name') || `codex-${String(onboarded.workspaceId).slice(0, 8)}`)],
       ['workspace-id', String(onboarded.workspaceId)], ['apply', true],
       ...(typeof flags.get('session-budget-cents') === 'string'
         ? [['session-budget-cents', String(flags.get('session-budget-cents'))] as [string, string]] : []),
-    ]))) as Record<string, unknown>
+    ])))) as Record<string, unknown>
     : null;
+  if (namedSession) {
+    const native = await step(() => withOnboardingStage('readiness', String(onboarded.workspaceId),
+      `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+      () => namedSessionCommand('readiness', new Map<string, string | boolean>([
+        ['name', String(flags.get('session-name') || `codex-${String(onboarded.workspaceId).slice(0, 8)}`)],
+        ['workspace-id', String(onboarded.workspaceId)],
+      ])))) as Record<string, unknown>;
+    if (['name', 'bindingId', 'sessionId', 'organizationId', 'repositoryBindingId', 'workspaceId',
+      'endpointId', 'membershipId', 'deviceId', 'provider'].some(key => native[key] !== namedSession![key])) {
+      throw new Error('named_session_readiness_scope_mismatch');
+    }
+    namedSession = {...namedSession, nativeSkill: parseNamedCodexSkillObservation(native.nativeSkill)};
+  }
   const repositoryReceipt = onboarded as Record<string, unknown>;
   const namedSessionReady = Boolean(joinedBindingId) || provider !== 'codex' || process.platform !== 'linux'
-    || Boolean(namedSession?.ok === true && ['running', 'executing'].includes(String(namedSession.state)));
+    || Boolean(namedSession?.ok === true && namedSession.nativeSkill
+      && ['running', 'executing'].includes(String(namedSession.state)));
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
   const observedAutostart = autostart.backend === 'container-entrypoint'
-    ? await relayAutostartStatus({ home: dharmaHome() }) : autostart;
+    ? await step(() => relayAutostartStatus({ home: dharmaHome() })) : autostart;
   const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform)
     || observedAutostart.state === 'enabled'
       && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running');
@@ -3009,7 +3788,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         config.serverSigningKeyset = candidate;
       }
       await saveDeviceConfig(configPath(), config);
-      await saveDeviceEnrollmentAnchor({ config });
+      await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
       await rm(pendingEnrollmentPath(), { force: true });
       return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
     }
@@ -3084,7 +3863,6 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     taskReceiptHash: null,
   });
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync')
     ? await client() as AgentFabricClient & {
       getTrajectoryHead(body: { trajectoryId: string; workspaceId: string }): Promise<Record<string, unknown>>;
@@ -3095,9 +3873,8 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     throw new Error('The enrolled device changed during evidence capture. Retry from the current device home.');
   }
   if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -3121,7 +3898,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       if (fabric) {
         await vault.discardCapsuleRevisionsAfter(firstRevision.trajectoryId, serverHead?.revision || 0);
       }
-      const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
+      const latestMetadata = await vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
         ? await vault.getLatestCapsule<ReturnType<typeof buildTrajectoryCapsule>>(firstRevision.trajectoryId)
         : null;
@@ -3165,7 +3942,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       }
       capsules.push(capsule);
       if (fabric) {
-        vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+        await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
         try {
           await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
           // An unknown delivery outcome retains the local advisory reservation.
@@ -3173,11 +3950,11 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
           syncResults.push(await fabric.syncTrajectory(capsule));
         } catch (error) {
           if (isDefinitiveSecretDisclosureRejection(error)) {
-            vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'secret_disclosure_forbidden');
+            await vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'secret_disclosure_forbidden');
           }
           throw error;
         }
-        vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+        await vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
       }
     }
     const output = flags.get('output');
@@ -3206,7 +3983,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     };
     if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     return manifest;
-  } finally { vault.close(); }
+  } finally { await vault.close(); }
 }
 
 async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
@@ -3359,7 +4136,7 @@ async function workspaceRecoverRegistry(flags: Map<string, string | boolean>): P
   if (flags.has('apply') && flags.has('dry-run')) throw new Error('registry_recovery_flags_conflict');
   const config = await readDeviceConfig();
   if (!config) throw new Error('registry_recovery_enrollment_required');
-  const enrollment = await loadDeviceEnrollmentAnchor({ config });
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
   const workspace = await realpath(String(flags.get('workspace') || '.'));
   const home = dharmaHome();
   const startup = await inspectOwnedRelayAutostart({ home });
@@ -3569,14 +4346,17 @@ export async function receiptAwareProviderCapabilities(
   providers: ProviderCapability[],
   now = new Date(),
 ): Promise<ProviderCapability[]> {
+  const hostScope = currentBootstrapHostScope();
+  await hostScope?.assert();
   const selfTestedAt = now.toISOString();
   let freshUntil = now.toISOString();
   let receiverState: 'available' | 'unavailable' = 'unavailable';
   let reason = 'device_not_enrolled';
   let trustedKeyVersions: string[] = [];
   try {
-    const config = await recoverDeviceEnrollmentConsistency({ configPath: configPath(), now });
-    await loadDeviceEnrollmentAnchor({ config });
+    const config = await recoverDeviceEnrollmentConsistency({ configPath: configPath(), now,
+      hostScope });
+    await loadDeviceEnrollmentAnchor({ config, hostScope });
     const keyset = config.serverSigningKeyset;
     if (!keyset) throw new Error('trusted_server_signing_keyset_unavailable');
     if (!validateTrustedServerSigningKeysetContract(keyset).ok
@@ -3589,12 +4369,14 @@ export async function receiptAwareProviderCapabilities(
       .map((key) => key.keyVersion);
     if (trustedKeyVersions.length === 0) throw new Error('trusted_server_signing_keys_unavailable');
     freshUntil = actionDecisionCapabilityFreshUntil(keyset, trustedKeyVersions, now);
-    await new FileActionExecutionJournal(resolve(dharmaHome(), 'relay', 'action-execution-journal')).selfTest();
+    await new FileActionExecutionJournal(resolve(dharmaHome(), 'relay', 'action-execution-journal')).selfTest(hostScope);
     receiverState = 'available';
     reason = '';
   } catch (error) {
-    reason = error instanceof Error ? error.message : String(error);
+    await hostScope?.assert();
+    reason = hostScope ? 'codex_setup_host_receiver_unavailable' : error instanceof Error ? error.message : String(error);
   }
+  await hostScope?.assert();
   return providers.map((provider) => {
     const available = provider.taskExecution === 'available' && receiverState === 'available';
     return {
@@ -3813,16 +4595,88 @@ async function repositoryRoleCommand(action: 'register' | 'discover' | 'ask' | '
   return readRepositoryRoleReply({ transport, scope, questionId: required(flags, 'question-id') });
 }
 
+/** Original setup submits to the standing owner; it never spawns its worker. */
+async function requestBootstrapNamedSession(hostScope: BootstrapHostScope,
+  flags: Map<string, string | boolean>): Promise<Output> {
+  const sender = await originalCodexSetupSessionSender(hostScope);
+  const prepared = await inspectCodexBootstrapHostPreparation(hostScope);
+  const workspace = String(prepared.flags.get('workspace')), intent = sender.intent;
+  const workspaceId = required(flags, 'workspace-id'), name = `codex-${workspaceId.slice(0, 8)}`;
+  if (flags.get('name') !== name || [...flags.keys()].some(key => !['name', 'workspace-id', 'apply'].includes(key))) {
+    throw new Error('setup_session_scope_changed');
+  }
+  const step = <T>(operation: () => Promise<T>) => hostScope.step(operation);
+  const config = await step(() => readDeviceConfig());
+  const rows = (await step(() => registry())).filter(row => row.workspaceId === workspaceId && row.path === workspace
+    && row.organizationId === intent.organizationId && row.repositoryRemoteHash === intent.repositoryFingerprint && row.status === 'active');
+  if (!config || config.organizationId !== intent.organizationId || normalizeHqUrl(config.hqUrl) !== intent.origin
+    || config.setupClaimReference !== intent.setupReference || config.setupClaimRepositoryFingerprint !== intent.repositoryFingerprint
+    || rows.length !== 1) throw new Error('setup_session_scope_changed');
+  const item = rows[0]!, role = repositoryRoleScope(item);
+  await step(() => assertBootstrapHostSource(workspace, intent.repositoryFingerprint));
+  const enrollment = await step(() => loadDeviceEnrollmentAnchor({config, hostScope}));
+  const policy = await step(() => loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), workspaceId));
+  verifyServerAuthorizedPolicy({policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: intent.organizationId, workspaceId});
+  await step(() => assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!));
+  if (policy.revision !== intent.policyRevision) throw new Error('setup_session_scope_changed');
+  const senderProcess = await step(() => readContainerProcessIdentity(process.pid));
+  if (senderProcess.uid !== process.getuid!()) throw new Error('setup_session_scope_changed');
+  const result = await awaitCodexSetupSession({vault: sender.vault, scope: hostScope, leaseId: sender.lease.leaseId,
+    request: {schema: 'dharma.local-codex-setup-session/v1', operationId: intent.operationId, intentDigest: sender.lease.intentDigest,
+      setupReference: intent.setupReference, senderPid: process.pid, senderStartTicks: senderProcess.startTicks,
+      organizationId: intent.organizationId, membershipId: intent.recipientMembershipId, deviceId: config.deviceId,
+      workspaceId, repositoryBindingId: role.repositoryBindingId, endpointId: role.endpointId, provider: 'codex',
+      origin: intent.origin, repositoryFingerprint: intent.repositoryFingerprint, policyRevision: policy.revision,
+      policyHash: sha256(canonicalize(policy)), scopeDigest: intent.scopeDigest, contractDigest: intent.contractDigest,
+      name, workspaceRoot: workspace, maximumCostCents: 1000, maximumTurnCostCents: 25,
+      issuedAt: new Date().toISOString(), expiresAt: new Date(Math.min(Date.parse(intent.expiresAt),
+        Date.parse(policy.serverAuthorization!.expiresAt))).toISOString()}});
+  await step(() => assertCodexSetupExecutionLease(sender.lease, intent));
+  if (result.state !== 'started') throw new Error('setup_session_start_unconfirmed');
+  const status = await step(() => namedSessionCommand('status', new Map<string, string | boolean>([
+    ['name', name], ['workspace-id', workspaceId]]))) as Record<string, unknown>;
+  if (status.ok !== true || status.bindingId !== result.bindingId || status.sessionId !== result.sessionId
+    || status.membershipId !== intent.recipientMembershipId || status.deviceId !== config.deviceId
+    || status.organizationId !== intent.organizationId || status.workspaceId !== workspaceId
+    || status.repositoryBindingId !== role.repositoryBindingId || status.endpointId !== role.endpointId || status.provider !== 'codex') {
+    throw new Error('setup_session_scope_changed');
+  }
+  return status;
+}
+
 async function namedSessionCommand(action: string, flags: Map<string, string | boolean>): Promise<Output> {
+  const hostScope = currentBootstrapHostScope();
+  const setupSessionScope = currentAcceptedSetupSessionScope();
+  const supervisorOwner = currentNamedSessionChildOwner();
+  if (hostScope && (supervisorOwner || setupSessionScope)) throw new Error('named_session_child_owner_conflict');
+  if (setupSessionScope && !['start', 'status', 'readiness'].includes(action)) throw new Error('setup_session_scope_changed');
+  const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation)
+    : setupSessionScope ? setupSessionScope.step(operation) : operation();
+  await hostScope?.assert();
+  if (action === 'start' && hostScope && flags.has('apply')) {
+    return requestBootstrapNamedSession(hostScope, flags);
+  }
   const name = String(flags.get('name') || 'codex');
   const paths = namedSessionPaths(dharmaHome(), name);
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
   const workspaceId = required(flags, 'workspace-id');
-  const item = (await registry()).find(row => row.workspaceId === workspaceId);
-  const config = await readDeviceConfig();
+  let childMessage: Readonly<CodexSetupChildMessage> | undefined;
+  if (flags.has('setup-handoff')) {
+    if (action !== 'serve' || flags.get('setup-handoff') !== true
+      || [...flags.keys()].some(key => !['name', 'workspace-id', 'apply', 'setup-handoff'].includes(key))) {
+      throw new Error('setup_child_unavailable');
+    }
+    childMessage = await receiveCodexSetupChildStart({process, signal: new AbortController().signal});
+  }
+  const item = (await step(() => registry())).find(row => row.workspaceId === workspaceId);
+  const config = await step(() => readDeviceConfig());
   if (!item || !config || item.organizationId !== config.organizationId) throw new Error('named_session_scope_mismatch');
+  await assertBootstrapHostSource(item.path, String(item.repositoryRemoteHash || ''));
   const scope = repositoryRoleScope(item);
-  const existing = await readNamedSession(dharmaHome(), name);
+  const existing = await step(() => readNamedSession(dharmaHome(), name));
+  if (setupSessionScope && (name !== setupSessionScope.request.name || workspaceId !== setupSessionScope.request.workspaceId
+    || existing && existing.identity.membershipId !== setupSessionScope.request.membershipId)) throw new Error('setup_session_scope_changed');
   if (existing && (existing.identity.workspaceId !== item.workspaceId
     || existing.identity.organizationId !== config.organizationId || existing.identity.deviceId !== config.deviceId
     || existing.identity.endpointId !== scope.endpointId || existing.identity.repositoryBindingId !== scope.repositoryBindingId)) {
@@ -3832,6 +4686,17 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); }
     catch { return { ok: true, name, state: 'stopped', registered: Boolean(existing), enabled: existing?.enabled ?? false,
       bindingId: existing?.bindingId ?? null }; }
+  }
+  if (action === 'readiness') {
+    if (!existing?.enabled) throw new Error('named_session_readiness_unavailable');
+    const result = await namedSessionRequest(dharmaHome(), name, {action: 'readiness'});
+    if (Object.keys(result).sort().join(',') !== 'bindingId,deviceId,endpointId,membershipId,name,nativeSkill,ok,organizationId,provider,repositoryBindingId,schema,sessionId,workspaceId'
+      || result.schema !== 'dharma.named-session-readiness/v1' || result.name !== name || result.bindingId !== existing.bindingId
+      || typeof result.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(result.sessionId)
+      || Object.entries(existing.identity).some(([key, value]) => result[key] !== value)) {
+      throw new Error('named_session_readiness_scope_mismatch');
+    }
+    return {...result, nativeSkill: parseNamedCodexSkillObservation(result.nativeSkill)};
   }
   if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
@@ -3844,50 +4709,108 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   if (!['start', 'serve'].includes(action)) throw new Error('named_session_action_invalid');
   if (!flags.has('apply')) return { ok: true, planned: true, name, workspaceId,
     provider: 'codex', localWork: 'workspace_write', peerQuestions: 'read_only', network: 'deny' };
-  await verifyNamedSessionVisibleSkill(
+  await step(async () => verifyNamedSessionVisibleSkill(
     await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path }),
-    await repositorySharedReady(item),
-  );
+    await repositorySharedReady(item)));
   if (action === 'start') {
-    if (existing && !existing.enabled) await saveNamedSession(dharmaHome(), { ...existing, enabled: true });
-    try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Start an owned worker below. */ }
+    if (existing && !existing.enabled) await step(() => saveNamedSession(dharmaHome(), { ...existing, enabled: true }));
+    try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Start an owned worker below. */ }
     const args = [fileURLToPath(import.meta.url), 'sessions', 'serve', '--name', name,
       '--workspace-id', workspaceId, '--apply'];
+    if (setupSessionScope) args.push('--setup-handoff');
     for (const key of ['session-budget-cents', 'turn-budget-cents']) {
       if (flags.has(key)) args.push(`--${key}`, required(flags, key));
     }
-    const child = spawn(process.execPath, args, { cwd: item.path, detached: true, stdio: 'ignore', env: process.env });
-    child.on('error', () => {}); child.unref();
+    await step(async () => {
+      const start = () => spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
+        stdio: setupSessionScope ? ['ignore', 'ignore', 'ignore', 'ipc'] : 'ignore', env: process.env });
+      if (supervisorOwner) {
+        const child = await supervisorOwner.spawn(name, start);
+        if (setupSessionScope) await sendCodexSetupChildStart({owner: supervisorOwner, child, scope: setupSessionScope});
+        return;
+      }
+      const child = start();
+      if (hostScope) captureBootstrapHostChild(hostScope, child);
+      else {child.on('error', () => {}); child.unref();}
+    });
     for (let attempt = 0; attempt < 80; attempt++) {
-      await new Promise(resolveWait => setTimeout(resolveWait, 250));
-      try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); } catch { /* Await service initialization. */ }
+      await step(() => new Promise<void>(resolveWait => setTimeout(resolveWait, 250)));
+      await hostScope?.assert();
+      try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Await service initialization. */ }
     }
     throw new Error('named_session_startup_failed');
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
-  const releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey() });
+  const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
+  let releaseLock: (() => Promise<void>) | undefined;
   const controller = new AbortController(), stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  if (childMessage) process.once('disconnect', stop);
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
   try {
-    const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json') });
+    releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
+    const startProvider = async (childScope?: CodexSetupChildScope) => {
+    const startupStep = <T>(operation: () => Promise<T>) => childScope ? childScope.step(operation) : operation();
+    if (childScope && existing && existing.identity.membershipId !== childScope.request.membershipId) {
+      throw new Error('setup_child_unavailable');
+    }
+    const fabric = await startupStep(() => AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json'),
+      hostScope: currentBootstrapHostScope() }));
     if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
       || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
     const trust = createNamedSessionTrust({ configPath: configPath(), identity: fabric.config });
-    await trust.refresh();
-    await fabric.openSession(VERSION);
+    await startupStep(() => trust.refresh());
+    await startupStep(() => fabric.openSession(VERSION));
     const policyPath = resolve(item.path, '.dharma', 'approved-policy.json');
-    const policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
+    const policy = await startupStep(() => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric));
     const writeRoots = policy.tasks.writePaths.filter(path => /^[a-zA-Z0-9_-]+\/\*\*$/.test(path))
       .map(path => path.slice(0, -3));
     if (!writeRoots.length) throw new Error('named_session_workspace_write_not_authorized');
+    let registration = existing, pending: NamedSessionRegistration | undefined;
+    let ownerReceipt: Record<string, unknown>;
+    // Resolve authenticated ownership before opening any provider transport.
+    if (registration) {
+      const response = await startupStep(() => fabric.signedPost('/agent-fabric/provider-sessions', {
+        schema: 'dharma.provider-session-registration/v1', action: 'inspect', provider: 'codex', mode: 'bridge_owned',
+        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        bindingId: registration!.bindingId, expectedRevision: 0, leaseSeconds: 60,
+      }));
+      if (!isNamedSessionOwnerReceipt(response, registration.bindingId, registration.identity)) {
+        throw new Error('named_session_registration_invalid');
+      }
+      ownerReceipt = response;
+    } else {
+      const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
+      const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
+      const bindingId = randomUUID();
+      const response = await startupStep(() => fabric.signedPost('/agent-fabric/provider-sessions', {
+        schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
+        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        bindingId, expectedRevision: 0, leaseSeconds: 60,
+      }));
+      const remote = response.registration as Record<string, unknown> | undefined;
+      if (!remote || !UUID_PATTERN.test(String(remote.membershipId))
+        || childScope && remote.membershipId !== childScope.request.membershipId || remote.revision !== 1) {
+        throw new Error('named_session_registration_invalid');
+      }
+      const identity = {organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
+        workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
+        provider: 'codex' as const};
+      if (!isNamedSessionOwnerReceipt(response, bindingId, identity)) throw new Error('named_session_registration_invalid');
+      ownerReceipt = response;
+      pending = {schema: 'dharma.named-session/v1', name, bindingId, identity,
+        maximumCostCents, maximumTurnCostCents, enabled: true};
+    }
     const environment = namedCodexEnvironment(process.env);
     const privateRoots = [dharmaHome(), resolve(environment.CODEX_HOME || resolve(homedir(), '.codex'))];
     if (environment.XDG_RUNTIME_DIR) privateRoots.push(environment.XDG_RUNTIME_DIR);
     if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
-    const filesystem = await namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots });
+    const filesystem = await startupStep(() => namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots }));
+    await startupStep(async () => {
+    const expectedOwner = registration ?? pending!;
+    if (!isNamedSessionOwnerReceipt(ownerReceipt, expectedOwner.bindingId, expectedOwner.identity)) {
+      throw new Error('named_session_registration_invalid');
+    }
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
       environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
       argv: ['-c', 'default_permissions="dharma_bridge"',
@@ -3895,38 +4818,25 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         '-c', 'permissions.dharma_bridge.network={enabled=false}',
         '-c', `permissions.dharma_work.filesystem=${filesystem.work}`,
         '-c', 'permissions.dharma_work.network={enabled=false}', 'app-server'] });
-    const account = await transport.request('account/read', { refreshToken: false }) as { account?: unknown };
+    return transport;
+    });
+    const account = await startupStep(() => transport!.request('account/read', { refreshToken: false })) as { account?: unknown };
     if (!account.account) throw new Error('named_session_provider_authentication_required');
-    let registration = existing;
-    if (!registration) {
-      const maximumCostCents = boundedInteger(flags.get('session-budget-cents'), 1000, 1, 10000, '--session-budget-cents');
-      const maximumTurnCostCents = boundedInteger(flags.get('turn-budget-cents'), 25, 1, maximumCostCents, '--turn-budget-cents');
-      const threadId = await startNamedCodexThread(transport, item.path, name);
-      const bindingId = randomUUID();
-      const response = await fabric.signedPost('/agent-fabric/provider-sessions', {
-        schema: 'dharma.provider-session-registration/v1', action: 'attach', provider: 'codex', mode: 'bridge_owned',
-        workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
-        bindingId, expectedRevision: 0, leaseSeconds: 60,
-      });
-      const remote = response.registration as Record<string, unknown> | undefined;
-      if (response.ok !== true || response.organizationId !== config.organizationId || !remote
-        || remote.bindingId !== bindingId || remote.workspaceId !== workspaceId || remote.endpointId !== scope.endpointId
-        || remote.repositoryBindingId !== scope.repositoryBindingId || remote.deviceId !== config.deviceId
-        || !UUID_PATTERN.test(String(remote.membershipId)) || remote.provider !== 'codex'
-        || remote.mode !== 'bridge_owned' || remote.state !== 'attached' || remote.revision !== 1) {
-        throw new Error('named_session_registration_invalid');
-      }
-      const identity = { organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
-        workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
-        provider: 'codex' as const };
-      vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
-        bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
+    if (pending) {
+      const threadId = await startupStep(() => startNamedCodexThread(transport!, item.path, name));
+      await startupStep(async () => vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...pending!.identity,
+        bindingId: pending!.bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
-        maximumProviderCostCents: maximumTurnCostCents });
-      registration = { schema: 'dharma.named-session/v1', name, bindingId, identity,
-        maximumCostCents, maximumTurnCostCents, enabled: true };
-      await saveNamedSession(dharmaHome(), registration);
+        maximumProviderCostCents: pending!.maximumTurnCostCents }));
+      registration = pending;
+      await startupStep(async () => saveNamedSession(dharmaHome(), registration!));
     }
+    return {registration: registration!, filesystem, fabric, trust, policyPath, writeRoots};
+    };
+    const {registration, filesystem, fabric, trust, policyPath, writeRoots} = childMessage
+      ? await runCodexSetupChildStartup({vault: vault as LocalVault, message: childMessage, name, workspaceId,
+        signal: controller.signal, authorize: qualifyCodexSetupChildRequest}, startProvider)
+      : await startProvider();
     const authorizeLifetime = async () => {
       const current = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric);
       if (!writeRoots.every(root => current.tasks.writePaths.includes(`${root}/**`))) return false;
@@ -3960,6 +4870,16 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     };
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
         localWriteRoots: writeRoots, additionalFilesystemRules: filesystem.additionalFilesystemRules,
+      observeNativeSkill: async () => {
+        const installation = await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path});
+        const native = await observeNamedCodexSkill(transport!, {workspace: item.path, installation,
+          sharedRepositoryReady: await repositorySharedReady(item)});
+        const current = await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path});
+        if (!current.signedLifecycleReady || current.activeBundleId !== native.bundleId
+          || current.activeBundleHash !== native.bundleHash || current.nativeSkillPath !== installation.nativeSkillPath
+          || !await repositorySharedReady(item)) throw new Error('named_session_native_skill_unavailable');
+        return native;
+      },
       syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
@@ -3977,7 +4897,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           if (current.evidence.automaticDisclosure?.mode === 'customer_authorized_content' && skill.activeBundleHash) {
             try {
               taskStateFailure = 'public_context_unavailable';
-              const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+              const binding = await vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
               if (!binding) throw new Error('named_session_binding_unavailable');
               const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
               taskStateFailure = 'runtime_version_unavailable';
@@ -4024,7 +4944,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           || current.evidence.automaticDisclosure.consentReceiptId !== taskState.consentReceiptId) {
           throw new Error('named_session_repository_state_consent_changed');
         }
-        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        const binding = await vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
         if (!binding) throw new Error('named_session_binding_unavailable');
         const receipt = await retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
           before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash,
@@ -4040,7 +4960,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       },
       queueEvidence: async capture => {
         const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
-        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        const binding = await vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
         if (!binding) throw new Error('named_session_binding_unavailable');
         // The existing relay rechecks current authority, disclosure limits and device binding before upload.
         return queueNamedSessionEvidence({ vault, capture, binding, policy: current });
@@ -4052,7 +4972,11 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) });
   } finally {
     try { if (transport) await transport.close(); }
-    finally { vault.close(); await releaseLock(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+    finally {
+      try {await vault.close();}
+      finally {await releaseLock?.(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
+        if (childMessage) process.removeListener('disconnect', stop);}
+    }
   }
 }
 
@@ -4261,8 +5185,17 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
-  try { return JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; }
-  catch { return null; }
+  const scope = currentBootstrapHostScope();
+  try {
+    const bytes = scope ? await scope.step(() => readFile(configPath(), 'utf8')) : await readFile(configPath(), 'utf8');
+    return JSON.parse(bytes) as DeviceConfig;
+  } catch {await scope?.assert(); return null;}
+}
+
+async function enrolledDeviceIdentity(config: DeviceConfig, store?: SecureSecretStore) {
+  const hostScope = currentBootstrapHostScope();
+  return hostScope ? loadDeviceIdentity({config, store, hostScope}) : loadOrCreateDeviceIdentity({
+    hqUrl: config.hqUrl, organizationId: config.organizationId, installationId: config.installationId, store});
 }
 
 async function activeSkillAuthorization(
@@ -4276,19 +5209,16 @@ async function activeSkillAuthorization(
   if (!await pathExistsOrThrow(pointer)) return null;
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
-    loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-    }),
-    loadDeviceEnrollmentAnchor({ config }),
-    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+    enrolledDeviceIdentity(config),
+    loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider, hostScope: currentBootstrapHostScope() }),
   ]);
   if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
     throw new Error('Active skill device identity does not match secure enrollment state.');
   }
   const authorizationInput = (expectedReceiptHash: string) => ({
+    hostScope: currentBootstrapHostScope(),
     nativeSkillDirectory: root,
     workspaceId,
     provider,
@@ -4312,6 +5242,7 @@ async function activeSkillAuthorization(
       || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
     const refreshed = await loadActiveSkillAuthorizationAnchor({
       config, workspaceId, organizationAgentId, provider, fresh: true,
+      hostScope: currentBootstrapHostScope(),
     });
     if (!refreshed) throw error;
     return getActiveSkillBundleAuthorization(authorizationInput(refreshed.receiptHash));
@@ -4327,19 +5258,16 @@ async function expiredSkillAuthorizationForReplacement(
   const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId });
   if (!organizationAgentId) throw new Error('Workspace is not bound to a repository agent. Run dharma workspace sync.');
   const [identity, enrollment, active] = await Promise.all([
-    loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-    }),
-    loadDeviceEnrollmentAnchor({ config }),
-    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider }),
+    enrolledDeviceIdentity(config),
+    loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() }),
+    loadActiveSkillAuthorizationAnchor({ config, workspaceId, organizationAgentId, provider, hostScope: currentBootstrapHostScope() }),
   ]);
   if (!active) throw new Error('Active skill state is not anchored in secure storage. Run dharma skill sync again.');
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) {
     throw new Error('Active skill device identity does not match secure enrollment state.');
   }
   const authorizationInput = (expectedReceiptHash: string) => ({
+    hostScope: currentBootstrapHostScope(),
     nativeSkillDirectory: root,
     workspaceId,
     provider,
@@ -4363,6 +5291,7 @@ async function expiredSkillAuthorizationForReplacement(
       || error.message !== 'Active bundle receipt is not the current protected authorization.') throw error;
     const refreshed = await loadActiveSkillAuthorizationAnchor({
       config, workspaceId, organizationAgentId, provider, fresh: true,
+      hostScope: currentBootstrapHostScope(),
     });
     if (!refreshed) throw error;
     return getExpiredSkillBundleAuthorizationForReplacement(authorizationInput(refreshed.receiptHash));
@@ -4391,32 +5320,19 @@ async function loadVerifiedWorkspacePolicy(path: string, workspaceId?: string) {
   return verified;
 }
 
-export async function installRepositoryAgentFabricSkill(input: {
-  workspace: string;
-  hqUrl: string;
-  organizationId: string;
-  workspaceId: string;
-  policyRevision: string;
-  repositoryAgentId?: string | null;
-  repositoryBindingId?: string | null;
-  sourceAuthorization?: unknown;
-  repositoryAgentKey?: string | null;
-  controlBranch?: string | null;
-}) {
-  if (input.sourceAuthorization !== undefined) input = { ...input,
-    sourceAuthorization: validateRepositorySourceAuthorization(input.sourceAuthorization, input, new Date()) };
-  await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
-  input = { ...input, workspace: await realpath(input.workspace) };
-  const ownership = await assertRepositoryInstallerOwnership(input.workspace, input.workspaceId);
-  const skillRoot = resolve(input.workspace, '.agents', 'skills', 'dharma-agent-fabric');
-  if (ownership !== 'signed') await mkdir(resolve(skillRoot, 'references'), { recursive: true, mode: 0o700 });
-  await mkdir(resolve(input.workspace, '.dharma'), { recursive: true, mode: 0o700 });
+export async function installRepositoryAgentFabricSkill(input: RepositoryInstallerInput) {
+  const scope = currentBootstrapHostScope();
+  input = captureRepositoryInstallerInput(input);
+  const prepared = await prepareRepositoryInstallerWorkspace(input.workspace, input.workspaceId);
+  input = {...input, workspace: prepared.workspace};
+  const ownership = prepared.ownership;
+  const contract = scope ? await scope.step(() => loadAgentFabricOnboardingContract()) : await loadAgentFabricOnboardingContract();
   const skill = `---
 name: dharma-agent-fabric
 description: Connect this repository to Dharma Agent Fabric for shared knowledge, signed skills, and team coordination.
 ---
 
-${(await loadAgentFabricOnboardingContract()).markdown}
+${contract.markdown}
 `;
   const reference = `# Organization connection
 
@@ -4476,6 +5392,7 @@ The CLI enrolls this device through browser-confirmed Clerk organization consent
   });
   await writeRepositoryInstallerFile(input.workspace, '.dharma/agent-fabric.json', `${JSON.stringify(connection, null, 2)}\n`);
   await writeRepositoryInstallerFile(input.workspace, '.dharma/repository-agent.json', `${JSON.stringify(repositoryAgent, null, 2)}\n`);
+  await scope?.assert();
   return {
     skillPath: '.agents/skills/dharma-agent-fabric/SKILL.md',
     connectionPath: '.dharma/agent-fabric.json',
@@ -4493,7 +5410,7 @@ async function repositoryInstallerRecoveryCommand(flags: Map<string, string | bo
   const organizationId = required(flags, 'organization-id');
   const config = await readDeviceConfig();
   if (!config || config.organizationId !== organizationId) throw new Error('Recovery requires current organization enrollment.');
-  await loadDeviceEnrollmentAnchor({ config });
+  await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
   const identity = await preflightBootstrapWorkspaceIdentity(workspace);
   const registered = selectLegacyInstallerRecoveryWorkspace(await registry(), { organizationId, deviceId: config.deviceId,
     path: workspace, repositoryRemoteHash: identity.fingerprint, workspaceId });
@@ -4557,6 +5474,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const requestedHqUrl = normalizeHqUrl(portalUrl(flags));
   let config = await readDeviceConfig();
   if (!config) {
+    if (currentBootstrapHostScope()) throw new Error('codex_setup_host_enrollment_missing');
     const loginFlags = new Map(flags);
     loginFlags.set('hq-url', requestedHqUrl);
     loginFlags.set('organization-id', organizationId);
@@ -4830,10 +5748,8 @@ async function evidenceSync(flags: Map<string, string | boolean>): Promise<Outpu
   assertCapsuleIntegrity(capsule);
   const trajectoryId = String(capsule.trajectoryId || '');
   const revision = Number(capsule.revision);
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
   });
   try {
     const storedCapsule = await vault.getCapsule<Record<string, unknown>>(trajectoryId, revision);
@@ -4846,7 +5762,7 @@ async function evidenceSync(flags: Map<string, string | boolean>): Promise<Outpu
     await reserveDailyContentUpload(storedCapsule, policy);
     return fabric.syncTrajectory(storedCapsule);
   } finally {
-    vault.close();
+    await vault.close();
   }
 }
 
@@ -4923,10 +5839,8 @@ async function processEvidenceRequest(
   } finally {
     await requestHandle?.close().catch(() => undefined);
   }
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -5021,7 +5935,7 @@ async function processEvidenceRequest(
     const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};
     const receiptHash = typeof receipt.hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(receipt.hash)
       ? receipt.hash : response.responseHash;
-    vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
+    await vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
     await writeJsonAtomic(requestReceipt, {
       schema: 'dharma.evidence-request-receipt/v1',
       requestId: request.requestId,
@@ -5035,7 +5949,7 @@ async function processEvidenceRequest(
       ok: true, requestId: request.requestId, responseId: unsignedResponse.responseId,
       approved: approved.length, excluded: excluded.length, bytesPrepared, receipt,
     };
-  } finally { vault.close(); }
+  } finally { await vault.close(); }
 }
 
 async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Promise<Output> {
@@ -5168,14 +6082,12 @@ async function syncSignedTaskTrajectory(input: {
   );
   if (!validation.ok) throw new Error(`Signed task capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
   assertCapsuleAuthorizedByCurrentPolicy(capsule as unknown as Record<string, unknown>, input.policy);
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(input.policy),
   });
   try {
-    const existing = vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+    const existing = await vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
     if (!existing) {
       await vault.commitCapture({
         raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
@@ -5191,13 +6103,13 @@ async function syncSignedTaskTrajectory(input: {
     } else if (existing.capsuleHash !== capsule.capsuleHash) {
       throw new Error('Signed task evidence already exists with different immutable content.');
     }
-    vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+    await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
     await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, input.policy);
     const synced = await input.fabric.syncTrajectory(capsule);
-    vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+    await vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
     return synced;
   } finally {
-    vault.close();
+    await vault.close();
   }
 }
 
@@ -5282,10 +6194,8 @@ async function stageSignedTaskTrajectoryRecovery(
   policy: OrganizationPolicy,
   prepared: ReturnType<typeof prepareSignedTaskTrajectory>,
 ): Promise<void> {
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -5300,7 +6210,7 @@ async function stageSignedTaskTrajectoryRecovery(
     };
     await vault.stageTaskCompletionRecovery(taskId, Buffer.from(JSON.stringify(recovery)));
   } finally {
-    vault.close();
+    await vault.close();
   }
 }
 
@@ -5313,17 +6223,15 @@ async function finalizeRecoveredSignedTaskTrajectories(
     .filter((item) => !onlyTaskId || item.taskId === onlyTaskId);
   const finalized: Array<{ taskId: string; trajectory: Record<string, unknown> }> = [];
   for (const completion of completions) {
-    const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-    const vault = await LocalVault.open({
+    const vault = await openBootstrapVault({
       root: resolve(dharmaHome(), 'vault'),
-      masterKey: await loadOrCreateVaultMasterKey(),
       rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     let recovery: SignedTaskTrajectoryRecovery | null;
     try {
       recovery = await vault.getTaskCompletionRecovery<SignedTaskTrajectoryRecovery>(completion.taskId);
     } finally {
-      vault.close();
+      await vault.close();
     }
     if (!recovery || recovery.schema !== 'dharma.signed-task-trajectory-recovery/v1'
       || recovery.taskId !== completion.taskId) {
@@ -5357,13 +6265,12 @@ async function finalizeRecoveredSignedTaskTrajectories(
     };
     assertCapsuleIntegrity(capsule as unknown as Record<string, unknown>);
     if (recoveredTaskPolicyWasSuperseded(capsule, recoveryPolicy)) {
-      const supersededVault = await LocalVault.open({
+      const supersededVault = await openBootstrapVault({
         root: resolve(dharmaHome(), 'vault'),
-        masterKey: await loadOrCreateVaultMasterKey(),
         rawLocalDays: rawLocalRetentionDays(vaultPolicy),
       });
       try {
-        const existing = supersededVault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+        const existing = await supersededVault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
         if (!existing) {
           await supersededVault.commitCapture({
             raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: recovery.prepared.rawContentId },
@@ -5383,18 +6290,17 @@ async function finalizeRecoveredSignedTaskTrajectories(
         } else if (existing.capsuleHash !== capsule.capsuleHash) {
           throw new Error('Recovered task evidence already exists with different immutable content.');
         }
-        supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
+        await supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
       } finally {
-        supersededVault.close();
+        await supersededVault.close();
       }
       await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
-      const acknowledgedVault = await LocalVault.open({
+      const acknowledgedVault = await openBootstrapVault({
         root: resolve(dharmaHome(), 'vault'),
-        masterKey: await loadOrCreateVaultMasterKey(),
         rawLocalDays: rawLocalRetentionDays(vaultPolicy),
       });
       try { await acknowledgedVault.clearTaskCompletionRecovery(completion.taskId); }
-      finally { acknowledgedVault.close(); }
+      finally { await acknowledgedVault.close(); }
       finalized.push({
         taskId: completion.taskId,
         trajectory: {
@@ -5417,13 +6323,12 @@ async function finalizeRecoveredSignedTaskTrajectories(
       },
     });
     await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
-    const cleanupVault = await LocalVault.open({
+    const cleanupVault = await openBootstrapVault({
       root: resolve(dharmaHome(), 'vault'),
-      masterKey: await loadOrCreateVaultMasterKey(),
       rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     try { await cleanupVault.clearTaskCompletionRecovery(completion.taskId); }
-    finally { cleanupVault.close(); }
+    finally { await cleanupVault.close(); }
     finalized.push({ taskId: completion.taskId, trajectory });
   }
   return finalized;
@@ -5647,6 +6552,7 @@ export async function nativeSkillDirectoryForWorkspace(input: {
         const anchor = await loadActiveSkillAuthorizationAnchor({
           config, workspaceId: input.workspaceId, organizationAgentId: registered.repositoryAgentId,
           provider: input.provider, fresh: true,
+          hostScope: currentBootstrapHostScope(),
         });
         if (anchor) {
           const matching = await nativeSkillRootMatchingAuthorization({
@@ -6363,6 +7269,7 @@ export async function recoverLegacySkillBundleIdAfterAuthorizationFailure(input:
   authorizationError: unknown;
 }): Promise<string> {
   const legacyBundleId = await getLegacySkillBundleIdForUpgrade({
+    hostScope: currentBootstrapHostScope(),
     nativeSkillDirectory: input.nativeSkillDirectory,
     workspaceId: input.workspaceId,
   });
@@ -6401,7 +7308,7 @@ export async function loadSkillSynchronizationPolicy(
   verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: config.serverPublicKeyEd25519,
     organizationId: config.organizationId, workspaceId });
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
-  const enrollment = await loadDeviceEnrollmentAnchor({ config, store: secureStore });
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, store: secureStore, hostScope: currentBootstrapHostScope() });
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
   verifyServerAuthorizedPolicy({ policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
     organizationId: config.organizationId, workspaceId });
@@ -6443,7 +7350,8 @@ export async function prepareSkillUpdate(input: {
   let legacyBaselineMigrationRequested = false;
   if (input.automatic) {
     activeBundleId = (await loadActiveSkillAuthorizationAnchor({ config, workspaceId,
-      organizationAgentId: String(workspace.repositoryAgentId || ''), provider, store: input.store, fresh: true }))?.bundleId ?? null;
+      organizationAgentId: String(workspace.repositoryAgentId || ''), provider, store: input.store, fresh: true,
+      hostScope: currentBootstrapHostScope() }))?.bundleId ?? null;
     assertRunning();
   } else {
   try {
@@ -6560,7 +7468,7 @@ export async function prepareSkillUpdate(input: {
     assertCurrent();
   }
   for (const skill of bundle.skills) {
-    const actual = await contentHash(containedInlinePath(sourceRoot, skill.path));
+    const actual = await contentHash(containedInlinePath(sourceRoot, skill.path), currentBootstrapHostScope());
     assertCurrent();
     if (actual !== skill.contentHash) throw new Error('Prepared skill tree does not match the signed content hash.');
   }
@@ -6589,12 +7497,9 @@ async function activatePreparedSkillUpdate(input: {
       workspaceId,
       organizationAgentId: String(workspace.repositoryAgentId || ''),
       provider,
+      hostScope: currentBootstrapHostScope(),
     });
-    const identity = await loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-    });
+    const identity = await enrolledDeviceIdentity(config);
     repositoryDelivery?.assertCurrent();
     const current = await loadSkillSynchronizationPolicy(policyPath, workspaceId);
     if (canonicalize(current.policy) !== canonicalize(policy)
@@ -6604,6 +7509,7 @@ async function activatePreparedSkillUpdate(input: {
     }
     repositoryDelivery?.assertCurrent();
     const receipt = await installSkillBundle({
+      hostScope: currentBootstrapHostScope(),
       bundle,
       sourceDirectory: sourceRoot,
       nativeSkillDirectory: destination,
@@ -6641,15 +7547,17 @@ async function activatePreparedSkillUpdate(input: {
           receiptHash: previousAnchor.receiptHash,
           activatedAt: previousAnchor.activatedAt,
           expiresAt: previousAnchor.expiresAt,
+          hostScope: currentBootstrapHostScope(),
         });
       } else {
-        await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider });
+        await deleteActiveSkillAuthorizationAnchor({ config, workspaceId, provider, hostScope: currentBootstrapHostScope() });
       }
     };
     const recoverLocalInstallation = async (error: unknown): Promise<never> => {
       const recoveryErrors: unknown[] = [];
       try {
         await rollbackUnconfirmedSkillBundle({
+          hostScope: currentBootstrapHostScope(),
           nativeSkillDirectory: destination,
           workspaceId,
           receipt,
@@ -6678,6 +7586,7 @@ async function activatePreparedSkillUpdate(input: {
           receiptHash: receipt.receiptHash,
           activatedAt: receipt.completedAt,
           expiresAt: bundle.expiresAt ?? null,
+          hostScope: currentBootstrapHostScope(),
         });
       }
     } catch (error) {
@@ -6721,12 +7630,8 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord, selected
   if (!config || config.organizationId !== workspace.organizationId || !workspace.repositoryBindingId || !workspace.repositoryAgentId) {
     throw new Error('Installed repository knowledge requires current enrolled workspace scope.');
   }
-  const identity = await loadOrCreateDeviceIdentity({
-    hqUrl: config.hqUrl,
-    organizationId: config.organizationId,
-    installationId: config.installationId,
-  });
-  const enrollment = await loadDeviceEnrollmentAnchor({ config });
+  const identity = await enrolledDeviceIdentity(config);
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
   if (identity.publicKeyEd25519 !== enrollment.devicePublicKeyEd25519) throw new Error('Installed knowledge device identity mismatch.');
   const organizationAgentId = workspace.repositoryAgentId;
   return selectInstalledRepositoryKnowledge({ organizationId: config.organizationId,
@@ -6737,10 +7642,12 @@ async function installedRepositoryKnowledge(workspace: WorkspaceRecord, selected
         provider, workspaceId: workspace.workspaceId, workspace: workspace.path,
       });
       if (!await pathExistsOrThrow(resolve(root, '.dharma-managed/workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE'))) return null;
-      const anchorInput = { config, workspaceId: workspace.workspaceId, organizationAgentId, provider };
+      const anchorInput = { config, workspaceId: workspace.workspaceId, organizationAgentId, provider,
+        hostScope: currentBootstrapHostScope() };
       const active = await loadActiveSkillAuthorizationAnchor(anchorInput);
       if (!active) throw new Error('Installed knowledge release lacks a protected authorization anchor.');
       const read = (expectedReceiptHash: string) => readVerifiedRepositoryKnowledge({
+        hostScope: currentBootstrapHostScope(),
         nativeSkillDirectory: root, workspaceId: workspace.workspaceId, provider,
         organizationId: config.organizationId, organizationAgentId, deviceId: config.deviceId,
         serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 }, format: 'jwk' }),
@@ -6778,7 +7685,7 @@ async function takeCachedSkillUpdate(input: {
     const serverPublicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });
     verifySkillBundle(bundle, serverPublicKey);
     for (const skill of bundle.skills) {
-      if (await contentHash(containedInlinePath(cached.sourceRoot, skill.path)) !== skill.contentHash) {
+      if (await contentHash(containedInlinePath(cached.sourceRoot, skill.path), currentBootstrapHostScope()) !== skill.contentHash) {
         throw new Error('Cached skill tree does not match the signed content hash.');
       }
     }
@@ -6937,13 +7844,11 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let sourceScanFlight: Promise<void> | null = null;
   let sourceScanReady: { cycle: Awaited<ReturnType<typeof scanRepositorySourceChanges>> }
     | { state: 'awaiting_signed_baseline' } | { error: unknown } | null = null;
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
-  if (signal.aborted) vault.close();
+  if (signal.aborted) await vault.close();
   signal.throwIfAborted();
   signal.addEventListener('abort', stop, { once: true });
   if (signal.aborted) stop();
@@ -7233,7 +8138,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     if (sourceScanFlight) await sourceScanFlight;
     await consumeSourceScan();
     await skillPreparationPump.stop();
-    vault.close();
+    await vault.close();
     signal.removeEventListener('abort', stop);
   }
   return {
@@ -7250,6 +8155,19 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
 export async function run(argv: string[]): Promise<Output> {
   const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
+  const setupScope = currentBootstrapHostScope();
+  if (setupScope) {
+    // An admitted native callback keeps its original authority through the
+    // official dispatcher. Closed descendants never use the legacy route.
+    const prepared = await inspectCodexBootstrapHostPreparation(setupScope);
+    if (command !== 'bootstrap' || positional.length !== 1 || flags.size !== prepared.flags.size
+      || [...repeated.values()].some(values => values.length !== 1)
+      || [...prepared.flags].some(([key, value]) => flags.get(key) !== value)) {
+      throw new Error('codex_setup_host_command_mismatch');
+    }
+    if (!prepared.flags.has('dry-run')) await originalCodexSetupSessionSender(setupScope);
+    return setupScope.step(() => bootstrap(flags, setupScope));
+  }
   if (command === 'relay' && subcommand === 'container-entrypoint') {
     if (positional.length === 2 && flags.size === 1 && flags.get('dry-run') === true) {
       return { ok: true, stage: 'container_entrypoint_plan', started: false,

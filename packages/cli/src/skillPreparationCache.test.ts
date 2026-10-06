@@ -14,6 +14,7 @@ import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 type PublishInput = { home: string; workspaceId: string; provider: 'codex'; sourceRoot: string;
@@ -299,9 +300,12 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
   diagnostic(`synthetic production-caller source=${sha256(await readFile(new URL('../src/index.ts', import.meta.url)))} emitted=${sha256(source)}`);
   const ast = ts.createSourceFile('index.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-  const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'relayWorkspaceLoop');
-  assert.equal(declarations.length, 1, 'exact production repository worker declaration is required');
-  const declaration = declarations[0]!.getText(ast);
+  const declarations = ['openBootstrapVault', 'relayWorkspaceLoop'].map(name => {
+    const matches = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.equal(matches.length, 1, `exact production ${name} declaration is required`);
+    return matches[0]!.getText(ast);
+  });
+  const declaration = declarations.join('\n');
   const roots = [f.sourceRoot];
   for (let index = 1; index < cycles; index++) roots.push(await mkdtemp(join(f.scopeRoot, 'attempt-')));
   let preparedCount = 0; let flight: Promise<void> | undefined; let stopped = false;
@@ -343,8 +347,12 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },
+    currentBootstrapHostScope,
     loadVaultModule: async () => ({ LocalVault: { open: async () => ({ close: () => { vaultCloses++; } }) },
-      loadOrCreateVaultMasterKey: async () => Buffer.alloc(32) }),
+      loadOrCreateVaultMasterKey: async (_store: unknown, scope: unknown) => {
+        assert.equal(scope, undefined, 'ordinary relay does not acquire host setup authority');
+        return Buffer.alloc(32);
+      } }),
     rawLocalRetentionDays: () => 1,
     providerAdapters: [{ providerId: 'codex', capability: async () => ({ skillInstall: 'available' }) }],
     isLocalProviderId: (provider: string) => provider === 'codex', prepareProvidersIndependently,

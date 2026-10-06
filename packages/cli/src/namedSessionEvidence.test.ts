@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -57,6 +57,27 @@ function withRequest(input = fixture()) {
     captureScope: 'turn_request_and_notifications' as const, request,
     requestHash: `sha256:${createHash('sha256').update(JSON.stringify(request)).digest('hex')}` } };
 }
+
+test('named evidence uses actual scoped async capture and queue, then refuses upload after withdrawal', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'named-evidence-scoped-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const controller = new AbortController();
+  const vault = await LocalVault.open({root, masterKey: randomBytes(32)},
+    {signal: controller.signal, current: async () => !controller.signal.aborted});
+  const input = withRequest(); let network = 0;
+  try {
+    const result = await queueNamedSessionEvidence({...input, vault});
+    assert.ok((await vault.getBlob(result.captureHash)).includes(Buffer.from('EXACT_PUBLIC_WORK_REQUEST')));
+    assert.equal((await vault.listPendingCapsuleSyncs()).length, 1);
+    assert.deepEqual(await queueNamedSessionEvidence({...input, vault}), result);
+    controller.abort();
+    await assert.rejects(syncPendingRetentionCapsules(vault, {
+      config: {organizationId: input.binding.organizationId, deviceId: input.binding.deviceId},
+      syncTrajectory: async () => {network++; return {};}, getTrajectoryHead: async () => {network++; return {};},
+    } as never, input.policy, input.binding.workspaceId), {message: 'vault_scope_unavailable'});
+    assert.equal(network, 0);
+  } finally {await vault.close();}
+});
 
 test('the exact native request reaches the encrypted outbox under the existing disclosure boundary', async () => {
   await withVault(async vault => {

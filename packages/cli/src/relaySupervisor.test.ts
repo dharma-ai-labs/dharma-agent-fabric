@@ -110,6 +110,7 @@ test('supervisor restarts unexpected exits and stops its child on shutdown', asy
     start: () => {
       starts += 1;
       const child = new EventEmitter() as ChildProcess;
+      Object.assign(child, { pid: 12345, exitCode: null, signalCode: null });
       child.kill = () => {
         queueMicrotask(() => child.emit('exit', 0, null));
         return true;
@@ -136,6 +137,31 @@ test('supervisor does not start a relay after shutdown', async () => {
   });
   assert.equal(starts, 0);
   assert.equal(result.restarts, 0);
+});
+
+test('supervisor retains an errored live child until its actual exit', async () => {
+  const controller = new AbortController();
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, { pid: 12345, exitCode: null, signalCode: null });
+  let starts = 0;
+  let settled = false;
+  let kills = 0;
+  child.kill = () => { kills++; return true; };
+  const result = superviseRelay({ signal: controller.signal,
+    start: () => { starts++; return child; },
+    wait: async () => { controller.abort(); },
+  }).then(value => { settled = true; return value; });
+  child.emit('error', new Error('SYNTHETIC_SIGNAL_ERROR'));
+  await new Promise<void>(done => setImmediate(done));
+  try {
+    assert.equal(settled, false, 'a process error is not an exit receipt');
+    assert.equal(starts, 1, 'must not replace a potentially live child');
+  } finally {
+    controller.abort();
+    child.emit('exit', null, 'SIGTERM');
+    await result;
+  }
+  assert.ok(kills >= 1);
 });
 
 test('a detached supervisor records its workspace and relay stop shuts it down', {

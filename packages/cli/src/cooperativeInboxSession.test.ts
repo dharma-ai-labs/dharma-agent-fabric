@@ -100,6 +100,43 @@ test('cooperative bindings cannot be driven by a bridge-owned app-server', async
   } finally { f.vault.close(); }
 });
 
+test('cooperative close waits for deferred lease cleanup before reporting a closed consumer', async () => {
+  const f = await fixture(), acquire = f.vault.tryAcquireProviderSessionLease.bind(f.vault);
+  let ready!: () => void, finish!: () => void, settled = false, releases = 0;
+  const entered = new Promise<void>(resolve => {ready = resolve;}), pending = new Promise<void>(resolve => {finish = resolve;});
+  f.vault.tryAcquireProviderSessionLease = (...args) => {
+    const lease = acquire(...args); if (!lease) return lease;
+    return {assertHeld: lease.assertHeld, release: async () => {
+      releases++; ready(); await pending; lease.release();
+    }};
+  };
+  const owner = await openCooperativeInboxSession(f.input);
+  const closing = owner.close().then(result => {settled = true; return result;});
+  try {
+    await entered; assert.equal(settled, false); assert.equal(releases, 1);
+    finish(); assert.equal((await closing).consumerClosed, true);
+    const lease = acquire(f.binding.bindingId, f.identity); assert.ok(lease); lease.release();
+  } finally {finish(); await closing; await owner.close(); f.vault.close();}
+});
+
+test('cooperative failed asynchronous lease cleanup is not reported closed and can be retried', async () => {
+  const f = await fixture(), acquire = f.vault.tryAcquireProviderSessionLease.bind(f.vault);
+  let fail = true, releases = 0;
+  f.vault.tryAcquireProviderSessionLease = (...args) => {
+    const lease = acquire(...args); if (!lease) return lease;
+    return {assertHeld: lease.assertHeld, release: async () => {
+      releases++; if (fail) throw new Error('vault_cleanup_unconfirmed'); lease.release();
+    }};
+  };
+  const owner = await openCooperativeInboxSession(f.input);
+  try {
+    await assert.rejects(owner.close(), {message: 'vault_cleanup_unconfirmed'});
+    assert.equal(acquire(f.binding.bindingId, f.identity), null);
+    fail = false; assert.equal((await owner.close()).consumerClosed, true); assert.equal(releases, 2);
+    const lease = acquire(f.binding.bindingId, f.identity); assert.ok(lease); lease.release();
+  } finally {fail = false; await owner.close(); f.vault.close();}
+});
+
 test('only the exact active cooperative session may attach; bridge bindings remain separate', async t => {
   for (const wrong of ['missing', 'inactive', 'thread', 'workspace', 'bridge'] as const) await t.test(wrong, async () => {
     const f = await fixture(wrong === 'bridge' ? 'dharma_bridge' : 'cooperative_session');

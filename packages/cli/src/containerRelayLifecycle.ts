@@ -6,6 +6,8 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { pinnedRollbackControllerMatches } from './containerRelayRecovery.js';
+import { watchOwnedChild, type OwnedChildLifecycle } from './ownedChildLifecycle.js';
+import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
 export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number; processGroupId?: number; sessionId?: number }
 export interface ContainerChildIdentity { pid: number; uid: number; parentPid: number; startTicks: string }
@@ -277,24 +279,29 @@ function registrationHash(home: string, registration: ContainerRelayRegistration
 }
 
 async function writePrivateJson(options: ContainerLifecycleOptions, name: string, value: unknown) {
-  await privateDirectory(options);
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
+  await step(() => privateDirectory(options));
   // Refuse a substituted/symlink/world-accessible receipt before replacing it.
-  await privateJson(options, name);
+  await step(() => privateJson(options, name));
   const destination = privatePath(options.home, name);
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, JSON.stringify(value) + '\n', { mode: 0o600, flag: 'wx' });
-    await rename(temporary, destination);
+    await step(() => writeFile(temporary, JSON.stringify(value) + '\n', { mode: 0o600, flag: 'wx' }));
+    await step(() => rename(temporary, destination));
+    // Temporary cleanup never reverses an admitted control rename.
   } finally { await rm(temporary, { force: true }); }
 }
 
 export async function containerStartupControl(options: ContainerLifecycleOptions,
   registration: ContainerRelayRegistration, running: boolean) {
-  if (!await containerEntrypointAvailable(options)) throw unavailable();
-  await writePrivateJson(options, 'container-control.json', {
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
+  if (!await step(() => containerEntrypointAvailable(options))) throw unavailable();
+  await step(() => writePrivateJson(options, 'container-control.json', {
     schema: 'dharma.container-relay-control/v1', home: options.home,
     registrationHash: registrationHash(options.home, registration), running,
-  } satisfies Control);
+  } satisfies Control));
 }
 
 export async function containerStartupState(options: ContainerLifecycleOptions, registration: ContainerRelayRegistration) {
@@ -398,22 +405,12 @@ export async function containerConsumerStoreReady(): Promise<boolean> {
   } catch { return false; }
 }
 
-async function stopOwnedChild(child: ChildProcess, options: ContainerLifecycleOptions, identity: ContainerChildIdentity | null, controller: Marker) {
-  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
-  // Never signal a recycled PID or a process outside this owned parent/UID.
-  if (identity && !await ownedChild(options, child.pid, identity.startTicks, controller).catch(() => null)) return;
-  // On an initial /proc failure, the freshly spawned ChildProcess handle is
-  // still ours. Drain it immediately; never leave unverified work running.
-  // This function accepts no raw PID and only receives this loop's own spawn.
-  const exited = new Promise<void>(resolveWait => {
-    child.once('exit', () => resolveWait()); child.once('error', () => resolveWait());
-  });
-  child.kill('SIGTERM');
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([exited, new Promise<void>(resolveWait => { timer = setTimeout(resolveWait, 10_000); })]);
-  if (timer) clearTimeout(timer);
-  if (child.exitCode === null && child.signalCode === null
-    && (!identity || await ownedChild(options, child.pid, identity.startTicks, controller).catch(() => null))) { child.kill('SIGKILL'); await exited; }
+async function stopOwnedChild(child: ChildProcess, lifecycle: OwnedChildLifecycle,
+  options: ContainerLifecycleOptions, identity: ContainerChildIdentity | null, controller: Marker) {
+  // An initial /proc failure still leaves the fresh spawn handle ours. A later
+  // attribution failure must not become a successful stop or a recycled-PID kill.
+  await lifecycle.stop({ verify: identity ? async () => Boolean(child.pid
+    && await ownedChild(options, child.pid, identity.startTicks, controller).catch(() => null)) : undefined });
 }
 
 export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOptions & {
@@ -446,9 +443,9 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
   try { await writeFile(lockPath, JSON.stringify(marker), { mode: 0o600, flag: 'wx' }); }
   catch { throw new Error('container_entrypoint_busy: an owned entrypoint is already active.'); }
   let child: ChildProcess | null = null;
+  let childLifecycle: OwnedChildLifecycle | null = null;
   let childHash: string | null = null;
   let childIdentity: ContainerChildIdentity | null = null;
-  let childFailed = false;
   let restarts = 0;
   let retryAt = 0;
   const pollMs = options.pollMs ?? 1000;
@@ -467,20 +464,23 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
         ? await (options.consumerStoreReady || containerConsumerStoreReady)().catch(() => false) : false;
       if (options.signal.aborted) break; // no new child after interrupted preflight
       const shouldRun = Boolean(configuration?.running && protectedConsumer);
-      if (child && (childFailed || child.exitCode !== null || child.signalCode !== null)) {
-        child = null; childIdentity = null; childHash = null; childFailed = false; restarts++; retryAt = Date.now() + restartDelayMs;
+      if (child && childLifecycle && (childLifecycle.failed || childLifecycle.stopped)) {
+        await stopOwnedChild(child, childLifecycle, options, childIdentity, marker);
+        child = null; childLifecycle = null; childIdentity = null; childHash = null; restarts++; retryAt = Date.now() + restartDelayMs;
       }
       if (child && (!shouldRun || hash !== childHash)) {
-        await stopOwnedChild(child, options, childIdentity, marker); child = null; childIdentity = null; childHash = null;
+        await stopOwnedChild(child, childLifecycle!, options, childIdentity, marker);
+        child = null; childLifecycle = null; childIdentity = null; childHash = null;
       }
       if (shouldRun && !child && Date.now() >= retryAt) {
         child = spawnRelay(configuration!.registration);
+        childLifecycle = watchOwnedChild(child);
         childHash = hash;
-        child.on('error', () => { childFailed = true; });
         childIdentity = child.pid ? await ownedChild(options, child.pid, undefined, marker).catch(() => null) : null;
         if (child.pid && !childIdentity && child.exitCode === null && child.signalCode === null) throw unavailable();
       }
-      const running = Boolean(child?.pid && childIdentity && !childFailed && child.exitCode === null && child.signalCode === null);
+      const running = Boolean(child?.pid && childIdentity && childLifecycle
+        && !childLifecycle.failed && !childLifecycle.stopped);
       const heartbeat: Heartbeat = { schema: 'dharma.container-relay-heartbeat/v1', home: options.home,
         startTicks: marker.startTicks, polledAt: Date.now(), registrationHash: hash, childPid: running ? child!.pid! : null,
         childStartTicks: running ? childIdentity!.startTicks : null,
@@ -494,7 +494,7 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
     return { stopped: true, restarts };
   } catch { throw unavailable(); }
   finally {
-    if (child) await stopOwnedChild(child, options, childIdentity, marker);
+    if (child) await stopOwnedChild(child, childLifecycle!, options, childIdentity, marker);
     const current = await privateJson(options, 'container-entrypoint.json').catch(() => null) as Marker | null;
     if (current?.startTicks === marker.startTicks && current.home === marker.home && current.pid === marker.pid && current.initStartTicks === marker.initStartTicks) {
       await rm(privatePath(options.home, 'container-entrypoint.json'), { force: true });

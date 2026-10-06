@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
+import { watchOwnedChild } from './ownedChildLifecycle.js';
 
 export function relayRestartDelayMs(consecutiveShortRuns: number): number {
   return Math.min(30_000, 1_000 * 2 ** Math.min(Math.max(0, consecutiveShortRuns - 1), 5));
@@ -40,19 +41,21 @@ export async function superviseRelay(input: {
       continue;
     }
 
-    await new Promise<void>((resolveExit) => {
-      const onAbort = () => { child.kill('SIGTERM'); };
-      const onExit = () => {
-        input.signal.removeEventListener('abort', onAbort);
-        child.removeListener('error', onExit);
-        child.removeListener('exit', onExit);
-        resolveExit();
-      };
-      child.once('error', onExit);
-      child.once('exit', onExit);
-      input.signal.addEventListener('abort', onAbort, { once: true });
-      if (input.signal.aborted) onAbort();
-    });
+    const owned = watchOwnedChild(child);
+    let stopFailed!: (error: unknown) => void;
+    const failedStop = new Promise<never>((_resolve, reject) => { stopFailed = reject; });
+    let stopping: Promise<void> | undefined;
+    const stop = () => { stopping ??= owned.stop(); void stopping.catch(stopFailed); };
+    child.on('error', stop);
+    input.signal.addEventListener('abort', stop, { once: true });
+    try {
+      if (input.signal.aborted || owned.failed) stop();
+      await Promise.race([owned.exited, failedStop]);
+      if (stopping) await stopping;
+    } finally {
+      input.signal.removeEventListener('abort', stop);
+      child.removeListener('error', stop);
+    }
     if (input.signal.aborted) break;
 
     consecutiveShortRuns = now() - startedAt >= 60_000 ? 1 : consecutiveShortRuns + 1;

@@ -1,12 +1,20 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { types } from 'node:util';
 import { canonicalize, sha256, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
+export {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
+import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult,
+  type LocalCodexSetupSessionRequest, type LocalCodexSetupSessionResult, type LocalCodexSetupSessionObservation,
+  type LocalCodexSetupSessionSubmission, type ScopedCodexSetupSessionSubmission, type LocalCodexSetupSessionAcceptance,
+  type ScopedCodexSetupSessionAcceptance} from './setupSessionHandoff.js';
+export * from './setupSessionHandoff.js';
 
 const BLOB_VERSION = 1;
 
@@ -15,6 +23,21 @@ export interface VaultOptions {
   masterKey: Buffer;
   rawLocalDays?: number;
 }
+
+type AsyncVaultMethods = {[K in keyof LocalVault as K extends 'root' | 'close' ? never : K]:
+  LocalVault[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never};
+export type ScopedLocalVault = Omit<AsyncVaultMethods, 'getLatestCapsule' | 'getCapsule' | 'getTaskCompletionRecovery' | 'listPendingCapsuleSyncs' | 'tryAcquireProviderSessionLease' | 'stageCodexSetupSession' | 'acceptCodexSetupSession'> & {
+  readonly root: string;
+  close(): Promise<void>;
+  getLatestCapsule<T = Record<string, unknown>>(trajectoryId: string): Promise<T>;
+  getCapsule<T = Record<string, unknown>>(trajectoryId: string, revision: number): Promise<T>;
+  getTaskCompletionRecovery<T = Record<string, unknown>>(taskId: string): Promise<T | null>;
+  listPendingCapsuleSyncs<T = Record<string, unknown>>(limit?: number, offset?: number):
+    Promise<Array<{trajectoryId: string; revision: number; capsule: T}>>;
+  tryAcquireProviderSessionLease(bindingId: string, expected: LocalProviderSessionIdentity): Promise<ScopedLocalProviderSessionLease | null>;
+  stageCodexSetupSession(leaseId: string, intentDigest: string, request: LocalCodexSetupSessionRequest): Promise<ScopedCodexSetupSessionSubmission>;
+  acceptCodexSetupSession(operationId: string, intentDigest: string, requestHash: string): Promise<ScopedCodexSetupSessionAcceptance | null>;
+};
 
 export interface VaultCaptureInput {
   raw: { plaintext: Uint8Array; kind: string; expectedContentId: string };
@@ -49,6 +72,85 @@ export type LocalProviderSessionIdentity = Pick<SessionBindingScope,
 export interface LocalProviderSessionLease {
   assertHeld(): Promise<boolean>;
   release(): void;
+}
+export interface ScopedLocalProviderSessionLease extends Omit<LocalProviderSessionLease, 'release'> {
+  release(): Promise<void>;
+}
+
+export type LocalCodexSetupResult = {state: 'completed'; readinessReceiptId: string}
+  | {state: 'unconfirmed'; code: 'setup_execution_unconfirmed'};
+export type LocalCodexSetupClaim = {state: 'acquired'; leaseId: string; intentDigest: string}
+  | {state: 'running'; intentDigest: string}
+  | {state: 'terminal'; intentDigest: string; result: LocalCodexSetupResult};
+export type LocalCodexSetupObservation = Exclude<LocalCodexSetupClaim, {state: 'acquired'}>;
+interface CodexSetupRow {
+  operation_id: string; intent_digest: string; lease_hash: string; state: 'running' | 'terminal';
+  nonce: Uint8Array | null; tag: Uint8Array | null; ciphertext: Uint8Array | null;
+}
+const setupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/;
+const setupDigest = /^sha256:[a-f0-9]{64}$(?![\s\S])/;
+const SETUP_JOURNAL_SCHEMA = `create table if not exists codex_setup_operations (
+  operation_id text primary key,
+  intent_digest text not null,
+  lease_hash text not null unique,
+  state text not null check (state in ('running', 'terminal')),
+  nonce blob,
+  tag blob,
+  ciphertext blob,
+  check ((state = 'running' and nonce is null and tag is null and ciphertext is null)
+    or (state = 'terminal' and nonce is not null and tag is not null and ciphertext is not null))
+);`;
+const SETUP_READINESS_SCHEMA = `create table if not exists codex_setup_readiness (
+  receipt_id text primary key,
+  operation_id text not null unique,
+  intent_digest text not null,
+  observation_hash text not null,
+  nonce blob not null,
+  tag blob not null,
+  ciphertext blob not null
+);`;
+const SETUP_SESSION_SCHEMA = `create table if not exists codex_setup_sessions (
+  operation_id text primary key,
+  intent_digest text not null,
+  sender_hash text not null,
+  request_hash text not null,
+  expires_at text not null,
+  state text not null check (state in ('pending', 'accepted', 'withdrawn')),
+  state_mac text not null,
+  acceptance_hash text,
+  request_nonce blob not null, request_tag blob not null, request_ciphertext blob not null,
+  result_nonce blob, result_tag blob, result_ciphertext blob,
+  check ((result_nonce is null and result_tag is null and result_ciphertext is null)
+    or (state = 'accepted' and result_nonce is not null and result_tag is not null and result_ciphertext is not null))
+);`;
+interface CodexSetupSessionRow {
+  operation_id: string; intent_digest: string; sender_hash: string; request_hash: string; expires_at: string;
+  state: 'pending' | 'accepted' | 'withdrawn'; state_mac: string; acceptance_hash: string | null;
+  request_nonce: Uint8Array; request_tag: Uint8Array; request_ciphertext: Uint8Array;
+  result_nonce: Uint8Array | null; result_tag: Uint8Array | null; result_ciphertext: Uint8Array | null;
+}
+
+export interface ScopedCodexSetupJournal {
+  claimCodexSetupOperation(operationId: string, intentDigest: string): Promise<LocalCodexSetupClaim>;
+  readCodexSetupOperation(operationId: string, intentDigest: string): Promise<LocalCodexSetupObservation | null>;
+  finishCodexSetupOperation(leaseId: string, intentDigest: string, result: LocalCodexSetupResult): Promise<void>;
+  close(): void;
+}
+
+function parseCodexSetupResult(value: unknown): LocalCodexSetupResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('setup_operation_invalid');
+  const properties = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(properties).length !== 2
+    || Reflect.ownKeys(properties).some(key => typeof key !== 'string'
+      || !Object.hasOwn(properties[key]!, 'value'))) throw new Error('setup_operation_invalid');
+  if (properties.state?.value === 'completed' && properties.readinessReceiptId
+    && typeof properties.readinessReceiptId.value === 'string' && setupId.test(properties.readinessReceiptId.value)) {
+    return {state: 'completed', readinessReceiptId: properties.readinessReceiptId.value};
+  }
+  if (properties.state?.value === 'unconfirmed' && properties.code?.value === 'setup_execution_unconfirmed') {
+    return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
+  }
+  throw new Error('setup_operation_invalid');
 }
 
 function processIsAlive(pid: number): boolean {
@@ -108,19 +210,174 @@ function sameLocalProviderSessionIdentity(
 export class LocalVault {
   readonly root: string;
   readonly #masterKey: Buffer;
-  readonly #database: DatabaseSync;
+  readonly #databaseHandle: DatabaseSync;
+  #closed = false;
+  #databaseClosed = false;
+  readonly #fence: ReturnType<typeof createVaultEffectFence>;
+  readonly #ownedLeases = new Set<() => void>();
 
-  private constructor(options: VaultOptions, database: DatabaseSync) {
+  private constructor(options: VaultOptions, database: DatabaseSync,
+    fence = createVaultEffectFence(undefined, 'vault')) {
     this.root = options.root;
     this.#masterKey = options.masterKey;
-    this.#database = database;
+    this.#databaseHandle = database;
+    this.#fence = fence;
   }
 
-  static async open(options: VaultOptions): Promise<LocalVault> {
-    if (options.masterKey.length !== 32) throw new Error('Vault master key must contain exactly 32 bytes.');
-    await mkdir(resolve(options.root, 'blobs'), { recursive: true, mode: 0o700 });
-    const database = new DatabaseSync(resolve(options.root, 'vault.sqlite'));
-    database.exec(`
+  #assertOpen(): void {
+    if (this.#closed) throw new Error('vault_closed');
+  }
+
+  get #database(): DatabaseSync {
+    this.#fence.assertSync();
+    this.#assertOpen();
+    return this.#databaseHandle;
+  }
+
+  async #effect<T>(operation: () => Promise<T>): Promise<T> {
+    this.#assertOpen();
+    return this.#fence.scoped ? this.#fence.step(operation) : operation();
+  }
+
+  async #writeTemporary(path: string, bytes: Uint8Array): Promise<{dev: bigint; ino: bigint}> {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await this.#effect(async () => {handle = await open(path, 'wx', 0o600);});
+      const identity = await this.#effect(() => handle!.stat({bigint: true}));
+      await this.#effect(() => handle!.writeFile(bytes));
+      await this.#effect(() => handle!.sync());
+      return {dev: identity.dev, ino: identity.ino};
+    } finally {
+      try {await handle?.close();} catch {throw new Error('vault_cleanup_unconfirmed');}
+    }
+  }
+
+  async #removeOwnedTemporary(path: string, identity: {dev: bigint; ino: bigint}): Promise<void> {
+    // Withdrawal preserves encrypted interruption evidence. No path-based cleanup then.
+    try {await this.#fence.assert();} catch {return;}
+    const current = await this.#effect(() => lstat(path, {bigint: true}));
+    if (!current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino) {
+      throw new Error('vault_cleanup_unconfirmed');
+    }
+    await this.#effect(() => rm(path));
+  }
+
+  #scoped(): ScopedLocalVault {
+    let tail = Promise.resolve(), closing: Promise<void> | undefined;
+    const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+      const work = tail.then(() => this.#fence.step(operation));
+      tail = work.then(() => undefined, () => undefined);
+      return work;
+    };
+    const enqueueCleanup = (operation: () => void): Promise<void> => {
+      // An exact-holder release must commit after any pending transaction settles.
+      const work = tail.then(() => {
+        try {operation();} catch {throw new Error('vault_cleanup_unconfirmed');}
+      });
+      tail = work.then(() => undefined, () => undefined);
+      return work;
+    };
+    const close = (): Promise<void> => closing ??= (async () => {
+      this.#fence.close();
+      await tail;
+      try {this.close();} catch {closing = undefined; throw new Error('vault_cleanup_unconfirmed');}
+    })();
+    const facade: Record<string, unknown> = {root: this.root, close};
+    for (const name of Object.getOwnPropertyNames(LocalVault.prototype)) {
+      if (name === 'constructor' || name === 'close') continue;
+      const method = Object.getOwnPropertyDescriptor(LocalVault.prototype, name)?.value;
+      if (typeof method !== 'function') throw new Error('vault_api_unavailable');
+      facade[name] = (...args: unknown[]) => {
+        let snapshot: unknown[];
+        try {this.#fence.assertSync(); snapshot = snapshotVaultInput(args);}
+        catch (error) {
+          return Promise.reject(new Error(vaultErrorCode(error) === 'vault_scope_unavailable'
+            ? 'vault_scope_unavailable' : 'vault_input_invalid'));
+        }
+        return enqueue(async () => {
+          const result = await Reflect.apply(method, this, snapshot);
+          if (name === 'stageCodexSetupSession') {
+            const submission = result as LocalCodexSetupSessionSubmission;
+            return Object.freeze({withdraw: () => enqueueCleanup(submission.withdraw)});
+          }
+          if (name === 'acceptCodexSetupSession' && result !== null) {
+            const acceptance = result as LocalCodexSetupSessionAcceptance;
+            return Object.freeze({request: acceptance.request, record: (value: LocalCodexSetupSessionResult) => {
+              let captured: LocalCodexSetupSessionResult;
+              try {captured = snapshotVaultInput(value);} catch {return Promise.reject(new Error('vault_input_invalid'));}
+              return enqueue(async () => acceptance.record(captured));
+            }});
+          }
+          if (name !== 'tryAcquireProviderSessionLease' || result === null) return result;
+          const lease = result as LocalProviderSessionLease;
+          return Object.freeze({assertHeld: () => enqueue(() => lease.assertHeld()),
+            release: () => enqueueCleanup(lease.release)});
+        });
+      };
+    }
+    return Object.freeze(facade) as ScopedLocalVault;
+  }
+
+  /** Open only the existing encrypted setup ledger; no capture or retention work. */
+  static async openSetupJournal(options: Pick<VaultOptions, 'root' | 'masterKey'>,
+    scope: VaultOperationScope): Promise<ScopedCodexSetupJournal> {
+    if (typeof options.root !== 'string' || !isAbsolute(options.root) || resolve(options.root) !== options.root
+      || !Buffer.isBuffer(options.masterKey) || options.masterKey.length !== 32 || !scope) {
+      throw new Error('vault_setup_journal_input_invalid');
+    }
+    const root = options.root, masterKey = Buffer.from(options.masterKey);
+    const fence = createVaultEffectFence(scope, 'vault_setup_journal');
+    let database: DatabaseSync | undefined, closed = false;
+    const close = () => {
+      fence.close();
+      if (closed) return;
+      closed = true;
+      try {database?.close();}
+      catch {throw new Error('vault_setup_journal_close_failed');}
+      finally {masterKey.fill(0);}
+    };
+    try {
+      await fence.step(() => mkdir(root, {recursive: true, mode: 0o700}));
+      // Capture the handle before post-open admission can reject it.
+      await fence.step(async () => {database = new DatabaseSync(resolve(root, 'vault.sqlite'));});
+      await fence.step(async () => {database!.exec('pragma journal_mode = WAL; pragma synchronous = FULL;');});
+      await fence.step(async () => {database!.exec(SETUP_JOURNAL_SCHEMA);});
+      const vault = new LocalVault({root, masterKey}, database!);
+      return Object.freeze({
+        claimCodexSetupOperation: (operationId: string, intentDigest: string) =>
+          fence.step(async () => vault.claimCodexSetupOperation(operationId, intentDigest)),
+        readCodexSetupOperation: (operationId: string, intentDigest: string) =>
+          fence.step(async () => vault.readCodexSetupOperation(operationId, intentDigest)),
+        finishCodexSetupOperation: async (leaseId: string, intentDigest: string, result: LocalCodexSetupResult) => {
+          let accepted: LocalCodexSetupResult;
+          try {accepted = parseCodexSetupResult(result);}
+          catch {
+            await fence.assert();
+            throw new Error('setup_operation_invalid');
+          }
+          await fence.step(async () => vault.finishCodexSetupOperation(leaseId, intentDigest, accepted));
+        },
+        close,
+      });
+    } catch (error) {close(); throw error;}
+  }
+
+  static open(options: VaultOptions): Promise<LocalVault>;
+  static open(options: VaultOptions, scope: VaultOperationScope): Promise<ScopedLocalVault>;
+  static async open(options: VaultOptions, scope?: VaultOperationScope): Promise<LocalVault | ScopedLocalVault> {
+    const fence = createVaultEffectFence(scope, 'vault');
+    const suppliedKey = options.masterKey;
+    if (!Buffer.isBuffer(suppliedKey) || suppliedKey.length !== 32) {
+      throw new Error('Vault master key must contain exactly 32 bytes.');
+    }
+    const root = options.root, rawLocalDays = options.rawLocalDays;
+    options = {root, rawLocalDays, masterKey: Buffer.from(suppliedKey)};
+    let database: DatabaseSync | undefined, vault: LocalVault | undefined;
+    try {
+      await fence.step(() => mkdir(resolve(options.root, 'blobs'), { recursive: true, mode: 0o700 }));
+      await fence.step(async () => {database = new DatabaseSync(resolve(options.root, 'vault.sqlite'));});
+      await fence.assert();
+      database!.exec(`
       pragma journal_mode = WAL;
       create table if not exists blobs (
         content_id text primary key,
@@ -225,25 +482,41 @@ export class LocalVault {
         receipt_hash text references blobs(content_id),
         primary key (binding_id, work_key)
       );
+      ${SETUP_JOURNAL_SCHEMA}
+      ${SETUP_READINESS_SCHEMA}
+      ${SETUP_SESSION_SCHEMA}
       create index if not exists blobs_raw_retention_idx on blobs(kind, created_at, content_id);
       create index if not exists capsules_blob_content_id_idx on capsules(blob_content_id);
       create index if not exists capsules_latest_revision_idx on capsules(trajectory_id, revision desc);
       create index if not exists capsule_content_refs_lookup_idx
         on capsule_content_refs(content_id, available_locally, trajectory_id, revision);
     `);
-    database.exec('begin immediate');
-    try {
-      const columns = database.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
-      if (!columns.some(column => column.name === 'receipt_hash')) {
-        database.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
-      }
-      database.exec('commit');
-    } catch (error) { database.exec('rollback'); database.close(); throw error; }
-    const vault = new LocalVault(options, database);
-    await vault.#recoverRetentionQuarantine();
-    await vault.#backfillCapsuleContentRefs();
-    await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
-    return vault;
+      database!.exec('begin immediate');
+      try {
+        const columns = database!.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
+        if (!columns.some(column => column.name === 'receipt_hash')) {
+          database!.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
+        }
+        database!.exec('commit');
+      } catch (error) { database!.exec('rollback'); throw error; }
+      vault = new LocalVault(options, database!, fence);
+      await vault.#recoverRetentionQuarantine();
+      await vault.#backfillCapsuleContentRefs();
+      await vault.enforceRawEvidenceRetention({ retentionDays: options.rawLocalDays ?? 30 });
+      await fence.assert();
+      return scope === undefined ? vault : vault.#scoped();
+    } catch (error) {
+      let cleanupConfirmed = true;
+      try {
+        if (vault) vault.close();
+        else database?.close();
+      } catch {cleanupConfirmed = false;}
+      finally {options.masterKey.fill(0);}
+      if (!cleanupConfirmed) throw new Error('vault_open_cleanup_unconfirmed');
+      await fence.assert();
+      if (scope !== undefined) throw new Error('vault_storage_unavailable');
+      throw error;
+    }
   }
 
   async #putBlob(plaintext: Uint8Array, kind: string): Promise<{ contentId: string; created: boolean }> {
@@ -254,15 +527,18 @@ export class LocalVault {
     const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
     if (existing) return { contentId, created: false };
 
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await this.#effect(() => mkdir(dirname(path), { recursive: true, mode: 0o700 }));
+    this.#assertOpen();
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     const tag = cipher.getAuthTag();
     const envelope = Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, tag, ciphertext]);
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
-    let started = false;
+    let identity: {dev: bigint; ino: bigint} | undefined;
+    if (this.#fence.scoped) identity = await this.#writeTemporary(temporary, envelope);
+    else await writeFile(temporary, envelope, { mode: 0o600, flag: 'wx' });
+    let started = false, published = false;
     try {
       // Publish under the SQLite write fence without yielding between metadata
       // insertion and rename. A failed INSERT never creates an unindexed final blob.
@@ -271,16 +547,22 @@ export class LocalVault {
         'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?) on conflict(content_id) do nothing',
       ).run(contentId, plaintext.byteLength, kind, new Date().toISOString());
       const created = Number(result.changes) === 1;
-      if (created) renameSync(temporary, path);
+      if (created) {
+        this.#fence.assertSync(); renameSync(temporary, path); published = true;
+      }
       this.#database.exec('release vault_blob_write'); started = false;
       return { contentId, created };
     } catch (error) {
       if (started) {
-        try { this.#database.exec('rollback to vault_blob_write; release vault_blob_write'); } catch {}
+        try { this.#databaseHandle.exec('rollback to vault_blob_write; release vault_blob_write'); } catch {}
       }
       // The final address may already belong to a committed writer. Never unlink it.
       throw error;
-    } finally { await rm(temporary, { force: true }); }
+    } finally {
+      if (this.#fence.scoped) {
+        if (!published && identity) await this.#removeOwnedTemporary(temporary, identity);
+      } else await rm(temporary, { force: true });
+    }
   }
 
   async putBlob(plaintext: Uint8Array, kind: string): Promise<string> {
@@ -458,48 +740,63 @@ export class LocalVault {
   }
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
-    const source = await stat(sourcePath);
+    this.#assertOpen();
+    const source = await this.#effect(() => stat(sourcePath));
+    this.#assertOpen();
     if (!source.isFile() || source.size < 1) throw new Error('Vault source must be a non-empty file.');
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
     const hash = createHash('sha256');
     const incoming = resolve(this.root, 'blobs', `.incoming-${process.pid}-${randomBytes(8).toString('hex')}`);
-    const destination = await open(incoming, 'wx', 0o600);
+    let destination: Awaited<ReturnType<typeof open>> | undefined;
+    let identity: {dev: bigint; ino: bigint} | undefined;
+    let sourceStream: ReturnType<typeof createReadStream> | undefined;
+    let published = false;
     try {
-      await destination.write(Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, Buffer.alloc(16)]));
-      for await (const value of createReadStream(sourcePath, { highWaterMark: 1_048_576 })) {
+      await this.#effect(async () => {destination = await open(incoming, 'wx', 0o600);});
+      identity = await this.#effect(() => destination!.stat({bigint: true}));
+      this.#assertOpen();
+      await this.#effect(() => destination!.write(Buffer.concat([Buffer.from([BLOB_VERSION]), nonce, Buffer.alloc(16)])));
+      await this.#fence.assert();
+      sourceStream = createReadStream(sourcePath, {highWaterMark: 1_048_576, signal: this.#fence.signal});
+      for await (const value of sourceStream) {
+        await this.#fence.assert();
+        this.#assertOpen();
         const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
         hash.update(chunk);
         const encrypted = cipher.update(chunk);
-        if (encrypted.length) await destination.write(encrypted);
+        if (encrypted.length) await this.#effect(() => destination!.write(encrypted));
       }
       const final = cipher.final();
-      if (final.length) await destination.write(final);
-      await destination.write(cipher.getAuthTag(), 0, 16, 13);
-    } catch (error) {
-      await destination.close().catch(() => undefined);
-      await rm(incoming, { force: true });
-      throw error;
-    }
-    await destination.close();
+      if (final.length) await this.#effect(() => destination!.write(final));
+      await this.#effect(() => destination!.write(cipher.getAuthTag(), 0, 16, 13));
+      await this.#effect(() => destination!.sync());
+      await destination!.close(); destination = undefined;
 
-    const contentId = `sha256:${hash.digest('hex')}`;
-    const path = this.#blobPath(contentId);
-    const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
-    if (existing) {
-      await rm(incoming, { force: true });
+      const contentId = `sha256:${hash.digest('hex')}`;
+      const path = this.#blobPath(contentId);
+      const existing = this.#database.prepare('select content_id from blobs where content_id = ?').get(contentId);
+      if (existing) return { contentId, bytes: source.size };
+      await this.#effect(() => mkdir(dirname(path), { recursive: true, mode: 0o700 }));
+      await this.#effect(async () => {await rename(incoming, path); published = true;});
+      this.#database.prepare(
+        'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
+      ).run(contentId, source.size, kind, new Date().toISOString());
       return { contentId, bytes: source.size };
+    } finally {
+      sourceStream?.destroy();
+      try {await destination?.close();} catch {throw new Error('vault_cleanup_unconfirmed');}
+      if (!published) {
+        if (this.#fence.scoped) {if (identity) await this.#removeOwnedTemporary(incoming, identity);}
+        else await rm(incoming, {force: true});
+      }
     }
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await rename(incoming, path);
-    this.#database.prepare(
-      'insert into blobs(content_id, bytes, kind, created_at) values (?, ?, ?, ?)',
-    ).run(contentId, source.size, kind, new Date().toISOString());
-    return { contentId, bytes: source.size };
   }
 
   async getBlob(contentId: string): Promise<Buffer> {
-    const envelope = await readFile(this.#blobPath(contentId));
+    this.#assertOpen();
+    const envelope = await this.#effect(() => readFile(this.#blobPath(contentId)));
+    this.#assertOpen();
     if (envelope[0] !== BLOB_VERSION || envelope.length < 29) throw new Error('Unsupported or corrupt vault blob.');
     const nonce = envelope.subarray(1, 13);
     const tag = envelope.subarray(13, 29);
@@ -509,6 +806,303 @@ export class LocalVault {
     const actual = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
     if (actual !== contentId) throw new Error('Vault content hash mismatch.');
     return plaintext;
+  }
+
+  #assertSetupJournalDurability(): void {
+    const transaction = this.#database.isTransaction;
+    if (transaction !== false) throw new Error(transaction === true
+      ? 'setup_operation_transaction_active' : 'setup_operation_durability_unqualified');
+    const row = this.#database.prepare('pragma synchronous').get() as {synchronous: number};
+    if (!row || !Number.isInteger(row.synchronous) || row.synchronous < 2 || row.synchronous > 3) {
+      throw new Error('setup_operation_durability_unqualified');
+    }
+  }
+
+  #decodeCodexSetupResult(row: CodexSetupRow): LocalCodexSetupResult {
+    try {
+      if (row.state !== 'terminal' || !row.nonce || !row.tag || !row.ciphertext) throw new Error();
+      const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.nonce);
+      decipher.setAAD(Buffer.from(canonicalize({operationId: row.operation_id,
+        intentDigest: row.intent_digest, state: 'terminal'})));
+      decipher.setAuthTag(row.tag);
+      const value: unknown = JSON.parse(Buffer.concat([decipher.update(row.ciphertext), decipher.final()]).toString('utf8'));
+      return parseCodexSetupResult(value);
+    } catch {throw new Error('setup_operation_integrity_failed');}
+  }
+
+  claimCodexSetupOperation(operationId: string, intentDigest: string): LocalCodexSetupClaim {
+    if (typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_operation_invalid');
+    this.#assertSetupJournalDurability();
+    const leaseId = randomUUID();
+    const leaseHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const inserted = this.#database.prepare(`insert into codex_setup_operations
+      (operation_id, intent_digest, lease_hash, state) values (?, ?, ?, 'running')
+      on conflict(operation_id) do nothing`).run(operationId, intentDigest, leaseHash);
+    if (Number(inserted.changes) === 1) return {state: 'acquired', leaseId, intentDigest};
+    const row = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupRow | undefined;
+    if (!row || row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    if (row.state === 'running') return {state: 'running', intentDigest};
+    return {state: 'terminal', intentDigest, result: this.#decodeCodexSetupResult(row)};
+  }
+
+  /** Read the durable original outcome without acquiring or recycling a lease. */
+  readCodexSetupOperation(operationId: string, intentDigest: string): LocalCodexSetupObservation | null {
+    if (typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_operation_invalid');
+    this.#assertSetupJournalDurability();
+    const row = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupRow | undefined;
+    if (!row) return null;
+    if (row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    if (row.state === 'running') return {state: 'running', intentDigest};
+    return {state: 'terminal', intentDigest, result: this.#decodeCodexSetupResult(row)};
+  }
+
+  finishCodexSetupOperation(leaseId: string, intentDigest: string, result: LocalCodexSetupResult): void {
+    if (typeof leaseId !== 'string' || !setupId.test(leaseId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_operation_invalid');
+    const accepted = parseCodexSetupResult(result); this.#assertSetupJournalDurability();
+    const leaseHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const row = this.#database.prepare('select * from codex_setup_operations where lease_hash = ? and intent_digest = ?')
+      .get(leaseHash, intentDigest) as unknown as CodexSetupRow | undefined;
+    if (!row) throw new Error('setup_operation_conflict');
+    if (row.state === 'terminal') {
+      if (canonicalize(this.#decodeCodexSetupResult(row)) !== canonicalize(accepted)) throw new Error('setup_operation_conflict');
+      return;
+    }
+    const nonce = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    cipher.setAAD(Buffer.from(canonicalize({operationId: row.operation_id, intentDigest, state: 'terminal'})));
+    const ciphertext = Buffer.concat([cipher.update(canonicalize(accepted)), cipher.final()]);
+    const changed = this.#database.prepare(`update codex_setup_operations set
+      state = 'terminal', nonce = ?, tag = ?, ciphertext = ?
+      where operation_id = ? and lease_hash = ? and intent_digest = ? and state = 'running'`)
+      .run(nonce, cipher.getAuthTag(), ciphertext, row.operation_id, leaseHash, intentDigest);
+    if (Number(changed.changes) !== 1) {
+      const current = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+        .get(row.operation_id) as unknown as CodexSetupRow;
+      if (!current || current.state !== 'terminal'
+        || canonicalize(this.#decodeCodexSetupResult(current)) !== canonicalize(accepted)) throw new Error('setup_operation_conflict');
+    }
+  }
+
+  stageCodexSetupSession(leaseId: string, intentDigest: string,
+    value: LocalCodexSetupSessionRequest): LocalCodexSetupSessionSubmission {
+    const request = parseLocalCodexSetupSessionRequest(value), now = Date.now();
+    if (typeof leaseId !== 'string' || !setupId.test(leaseId) || typeof intentDigest !== 'string'
+      || !setupDigest.test(intentDigest) || request.intentDigest !== intentDigest
+      || Date.parse(request.issuedAt) > now || Date.parse(request.expiresAt) <= now) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    const senderHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const operation = this.#database.prepare('select * from codex_setup_operations where lease_hash = ? and intent_digest = ?')
+      .get(senderHash, intentDigest) as unknown as CodexSetupRow | undefined;
+    if (!operation || operation.operation_id !== request.operationId || operation.state !== 'running') throw new Error('setup_operation_conflict');
+    const requestHash = sha256(canonicalize(request));
+    const withdraw = () => {
+      if (this.#databaseClosed || !this.#ownedLeases.has(withdraw)) return;
+      if (this.#databaseHandle.isTransaction) throw new Error('vault_cleanup_unconfirmed');
+      // Capture exact sender cleanup before the write; never undo acceptance.
+      const row = this.#databaseHandle.prepare(`select * from codex_setup_sessions
+        where operation_id = ? and intent_digest = ? and sender_hash = ? and request_hash = ?`)
+        .get(request.operationId, intentDigest, senderHash, requestHash) as unknown as CodexSetupSessionRow | undefined;
+      if (row) {
+        this.#decodeSetupSession(row);
+        if (row.state === 'pending') this.#databaseHandle.prepare(`update codex_setup_sessions set state = 'withdrawn', state_mac = ?
+          where operation_id = ? and intent_digest = ? and sender_hash = ? and request_hash = ? and state = 'pending' and state_mac = ?`)
+          .run(this.#setupSessionStateMac({...row, state: 'withdrawn'}), request.operationId, intentDigest, senderHash, requestHash, row.state_mac);
+      }
+      this.#ownedLeases.delete(withdraw); this.#fence.signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {try {withdraw();} catch { /* Retain exact cleanup ownership for close retry. */ }};
+    this.#ownedLeases.add(withdraw); this.#fence.signal?.addEventListener('abort', abort, {once: true});
+    if (this.#fence.signal?.aborted) withdraw();
+    this.#fence.assertSync();
+    const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    cipher.setAAD(Buffer.from(`setup-session-request:${request.operationId}:${intentDigest}:${requestHash}`));
+    const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(request))), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const stateMac = this.#setupSessionStateMac({operation_id: request.operationId, intent_digest: intentDigest,
+      sender_hash: senderHash, request_hash: requestHash, expires_at: request.expiresAt, state: 'pending', acceptance_hash: null,
+      request_nonce: nonce, request_tag: tag, request_ciphertext: ciphertext,
+      result_nonce: null, result_tag: null, result_ciphertext: null});
+    this.#database.prepare(`insert into codex_setup_sessions
+      (operation_id, intent_digest, sender_hash, request_hash, expires_at, state, state_mac, request_nonce, request_tag, request_ciphertext)
+      values (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?) on conflict(operation_id) do nothing`)
+      .run(request.operationId, intentDigest, senderHash, requestHash, request.expiresAt, stateMac, nonce, tag, ciphertext);
+    const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+      .get(request.operationId) as unknown as CodexSetupSessionRow;
+    if (row.intent_digest !== intentDigest || row.sender_hash !== senderHash || row.request_hash !== requestHash) {
+      throw new Error('setup_operation_conflict');
+    }
+    this.#decodeSetupSession(row);
+    this.#fence.assertSync();
+    return Object.freeze({withdraw});
+  }
+
+  #setupSessionStateMac(row: Omit<CodexSetupSessionRow, 'state_mac'>): string {
+    const bytes = createHash('sha256');
+    for (const value of [row.request_nonce, row.request_tag, row.request_ciphertext,
+      row.result_nonce, row.result_tag, row.result_ciphertext]) {
+      bytes.update(`${value?.byteLength ?? -1}:`); if (value) bytes.update(value);
+    }
+    return createHmac('sha256', this.#masterKey).update(canonicalize({schema: 'dharma.local-setup-session-state/v1',
+      operationId: row.operation_id, intentDigest: row.intent_digest, senderHash: row.sender_hash,
+      requestHash: row.request_hash, expiresAt: row.expires_at, state: row.state,
+      acceptanceHash: row.acceptance_hash, ciphertextHash: bytes.digest('hex')})).digest('hex');
+  }
+
+  #decodeSetupSession(row: CodexSetupSessionRow): LocalCodexSetupSessionObservation {
+    try {
+      if (typeof row.state_mac !== 'string' || !/^[a-f0-9]{64}$(?![\s\S])/.test(row.state_mac)
+        || !timingSafeEqual(Buffer.from(row.state_mac, 'hex'), Buffer.from(this.#setupSessionStateMac(row), 'hex'))) throw new Error();
+      if (row.state === 'accepted' ? typeof row.acceptance_hash !== 'string' || !setupDigest.test(row.acceptance_hash)
+        : row.acceptance_hash !== null) throw new Error();
+      const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.request_nonce);
+      decipher.setAuthTag(row.request_tag);
+      decipher.setAAD(Buffer.from(`setup-session-request:${row.operation_id}:${row.intent_digest}:${row.request_hash}`));
+      const request = parseLocalCodexSetupSessionRequest(JSON.parse(Buffer.concat([
+        decipher.update(row.request_ciphertext), decipher.final()]).toString('utf8')));
+      if (request.operationId !== row.operation_id || request.intentDigest !== row.intent_digest
+        || request.expiresAt !== row.expires_at || sha256(canonicalize(request)) !== row.request_hash) throw new Error();
+      let result: Readonly<LocalCodexSetupSessionResult> | null = null;
+      if (row.result_ciphertext) {
+        if (!row.result_nonce || !row.result_tag || row.state !== 'accepted') throw new Error();
+        const outcome = createDecipheriv('aes-256-gcm', this.#masterKey, row.result_nonce);
+        outcome.setAuthTag(row.result_tag);
+        outcome.setAAD(Buffer.from(`setup-session-result:${row.operation_id}:${row.intent_digest}:${row.request_hash}`));
+        result = parseLocalCodexSetupSessionResult(JSON.parse(Buffer.concat([
+          outcome.update(row.result_ciphertext), outcome.final()]).toString('utf8')));
+      }
+      if (!['pending', 'accepted', 'withdrawn'].includes(row.state)) throw new Error();
+      return {state: row.state, request, result};
+    } catch {throw new Error('setup_operation_integrity_failed');}
+  }
+
+  readCodexSetupSession(operationId: string, intentDigest: string): LocalCodexSetupSessionObservation | null {
+    if (typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+    if (!row) return null;
+    if (row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    return this.#decodeSetupSession(row);
+  }
+
+  listPendingCodexSetupSessions(limit = 50): Array<{operationId: string; intentDigest: string}> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    return (this.#database.prepare(`select operation_id, intent_digest from codex_setup_sessions
+      where state = 'pending' and expires_at > ? order by operation_id limit ?`)
+      .all(new Date().toISOString(), limit) as Array<{operation_id: string; intent_digest: string}>)
+      .map(row => ({operationId: row.operation_id, intentDigest: row.intent_digest}));
+  }
+
+  acceptCodexSetupSession(operationId: string, intentDigest: string, requestHash: string): LocalCodexSetupSessionAcceptance | null {
+    if (typeof operationId !== 'string' || !setupId.test(operationId) || typeof intentDigest !== 'string'
+      || !setupDigest.test(intentDigest) || typeof requestHash !== 'string' || !setupDigest.test(requestHash)) throw new Error('setup_session_invalid');
+    this.#assertSetupJournalDurability();
+    const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+      .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+    if (!row) return null;
+    if (row.intent_digest !== intentDigest) throw new Error('setup_operation_conflict');
+    const observation = this.#decodeSetupSession(row);
+    if (observation.state !== 'pending' || sha256(canonicalize(observation.request)) !== requestHash
+      || Date.parse(observation.request.expiresAt) <= Date.now()) return null;
+    const token = randomUUID(), tokenHash = sha256(token);
+    const accepted = this.#database.prepare(`update codex_setup_sessions set state = 'accepted', acceptance_hash = ?, state_mac = ?
+      where operation_id = ? and intent_digest = ? and request_hash = ? and state = 'pending' and expires_at > ? and state_mac = ?
+      and exists (select 1 from codex_setup_operations where operation_id = ? and intent_digest = ? and state = 'running')`)
+      .run(tokenHash, this.#setupSessionStateMac({...row, state: 'accepted', acceptance_hash: tokenHash}),
+        operationId, intentDigest, requestHash, new Date().toISOString(), row.state_mac, operationId, intentDigest);
+    if (accepted.changes !== 1) return null;
+    return Object.freeze({request: observation.request, record: (value: LocalCodexSetupSessionResult) => {
+      const result = parseLocalCodexSetupSessionResult(value);
+      this.#assertSetupJournalDurability();
+      const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+        .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+      if (!row || row.intent_digest !== intentDigest || row.acceptance_hash !== tokenHash || row.state !== 'accepted') {
+        throw new Error('setup_operation_conflict');
+      }
+      const current = this.#decodeSetupSession(row);
+      if (current.result) {
+        if (canonicalize(current.result) !== canonicalize(result)) throw new Error('setup_operation_conflict');
+        return;
+      }
+      const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+      cipher.setAAD(Buffer.from(`setup-session-result:${operationId}:${intentDigest}:${requestHash}`));
+      const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(result))), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const committed = this.#database.prepare(`update codex_setup_sessions set result_nonce = ?, result_tag = ?, result_ciphertext = ?, state_mac = ?
+        where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted' and result_ciphertext is null and state_mac = ?`)
+        .run(nonce, tag, ciphertext, this.#setupSessionStateMac({...row, result_nonce: nonce, result_tag: tag, result_ciphertext: ciphertext}),
+          operationId, intentDigest, tokenHash, row.state_mac);
+      if (committed.changes !== 1) throw new Error('setup_operation_conflict');
+    }});
+  }
+
+  getCodexSetupReadiness(receiptId: string, operationId: string, intentDigest: string): LocalCodexSetupReadinessReceipt | null {
+    if (typeof receiptId !== 'string' || !setupId.test(receiptId)
+      || typeof operationId !== 'string' || !setupId.test(operationId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) {
+      throw new Error('setup_readiness_invalid');
+    }
+    const row = this.#database.prepare('select * from codex_setup_readiness where receipt_id = ?').get(receiptId) as {
+      receipt_id: string; operation_id: string; intent_digest: string; observation_hash: string;
+      nonce: Uint8Array; tag: Uint8Array; ciphertext: Uint8Array;
+    } | undefined;
+    if (!row) return null;
+    if (row.operation_id !== operationId || row.intent_digest !== intentDigest) throw new Error('setup_readiness_scope_mismatch');
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this.#masterKey, row.nonce);
+      decipher.setAAD(Buffer.from(canonicalize({receiptId, operationId, intentDigest, observationHash: row.observation_hash})));
+      decipher.setAuthTag(row.tag);
+      const plaintext = Buffer.concat([decipher.update(row.ciphertext), decipher.final()]);
+      const observation = parseLocalCodexSetupReadiness(JSON.parse(plaintext.toString('utf8')));
+      if (observation.operationId !== operationId || `sha256:${createHash('sha256').update(canonicalize(observation)).digest('hex')}` !== row.observation_hash) {
+        throw new Error();
+      }
+      return {receiptId, intentDigest, observationHash: row.observation_hash, observation};
+    } catch {throw new Error('setup_readiness_integrity_failed');}
+  }
+
+  /** Only the original running lease may persist an immutable observation.
+   * Persistence establishes provenance/durability, not native runtime safety. */
+  recordCodexSetupReadiness(leaseId: string, intentDigest: string,
+    value: LocalCodexSetupReadiness): LocalCodexSetupReadinessReceipt {
+    const observation = parseLocalCodexSetupReadiness(value);
+    if (typeof leaseId !== 'string' || !setupId.test(leaseId)
+      || typeof intentDigest !== 'string' || !setupDigest.test(intentDigest)) throw new Error('setup_readiness_invalid');
+    this.#assertSetupJournalDurability();
+    const now = Date.now(), verified = Date.parse(observation.verifiedAt);
+    if (verified > now || now - verified > 60_000 || now >= Date.parse(observation.expiresAt)) {
+      throw new Error('setup_readiness_stale');
+    }
+    const leaseHash = createHash('sha256').update(`codex-setup-lease\0${leaseId}`).digest('hex');
+    const operation = this.#database.prepare('select * from codex_setup_operations where operation_id = ?')
+      .get(observation.operationId) as unknown as CodexSetupRow | undefined;
+    if (!operation || operation.state !== 'running' || operation.lease_hash !== leaseHash || operation.intent_digest !== intentDigest) {
+      throw new Error('setup_operation_conflict');
+    }
+    const plaintext = canonicalize(observation), observationHash = `sha256:${createHash('sha256').update(plaintext).digest('hex')}`;
+    const receiptId = randomUUID(), nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
+    cipher.setAAD(Buffer.from(canonicalize({receiptId, operationId: observation.operationId, intentDigest, observationHash})));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    this.#database.prepare(`insert into codex_setup_readiness
+      (receipt_id, operation_id, intent_digest, observation_hash, nonce, tag, ciphertext)
+      select ?, ?, ?, ?, ?, ?, ? from codex_setup_operations
+      where operation_id = ? and lease_hash = ? and intent_digest = ? and state = 'running'
+      on conflict(operation_id) do nothing`)
+      .run(receiptId, observation.operationId, intentDigest, observationHash, nonce, cipher.getAuthTag(), ciphertext,
+        observation.operationId, leaseHash, intentDigest);
+    const persisted = this.#database.prepare('select receipt_id from codex_setup_readiness where operation_id = ?')
+      .get(observation.operationId) as {receipt_id: string} | undefined;
+    if (!persisted) throw new Error('setup_operation_conflict');
+    const receipt = this.getCodexSetupReadiness(persisted.receipt_id, observation.operationId, intentDigest);
+    if (!receipt || receipt.observationHash !== observationHash) throw new Error('setup_readiness_conflict');
+    return receipt;
   }
 
   #readProviderSessionBinding(bindingId: string): LocalProviderSessionBinding | null {
@@ -600,7 +1194,7 @@ export class LocalVault {
       }
       const lease = this.#database.prepare('select host_name, owner_pid from provider_session_leases where binding_id = ?')
         .get(bindingId) as { host_name: string; owner_pid: number } | undefined;
-      if (lease && (lease.host_name !== hostname() || (lease.owner_pid !== process.pid && processIsAlive(lease.owner_pid)))) {
+      if (lease && (lease.host_name !== hostname() || (lease.owner_pid !== process.pid && this.#processIsAlive(lease.owner_pid)))) {
         throw new Error('provider_session_lease_unavailable');
       }
       const next = { ...record, expiresAt }; assertLocalProviderSessionBinding(next);
@@ -635,7 +1229,7 @@ export class LocalVault {
       const prior = this.#database.prepare(`
         select host_name, owner_pid from provider_session_leases where binding_id = ?
       `).get(bindingId) as { host_name: string; owner_pid: number } | undefined;
-      if (prior && (prior.host_name !== currentHost || processIsAlive(prior.owner_pid))) {
+      if (prior && (prior.host_name !== currentHost || this.#processIsAlive(prior.owner_pid))) {
         this.#database.exec('commit');
         return null;
       }
@@ -651,21 +1245,27 @@ export class LocalVault {
       try { this.#database.exec('rollback'); } catch {}
       throw error;
     }
-    return {
-      assertHeld: async () => {
+    const release = () => {
+      if (this.#databaseClosed || !this.#ownedLeases.has(release)) return;
+      // Never forget ownership for a DELETE that could still be rolled back.
+      if (this.#databaseHandle.isTransaction) throw new Error('vault_cleanup_unconfirmed');
+      // Cooperative cleanup can remove only the row acquired by this handle.
+      this.#databaseHandle.prepare(`delete from provider_session_leases where binding_id = ? and holder_id = ?`)
+        .run(bindingId, holderId);
+      this.#ownedLeases.delete(release);
+    };
+    this.#ownedLeases.add(release);
+    return Object.freeze({
+      assertHeld: () => this.#effect(async () => {
         const active = this.getProviderSessionBinding(bindingId, expected);
         if (!active || Date.now() >= Date.parse(active.expiresAt)) return false;
         const row = this.#database.prepare(`
           select holder_id, host_name, owner_pid from provider_session_leases where binding_id = ?
         `).get(bindingId) as { holder_id: string; host_name: string; owner_pid: number } | undefined;
         return row?.holder_id === holderId && row.host_name === currentHost && row.owner_pid === process.pid;
-      },
-      release: () => {
-        this.#database.prepare(`
-          delete from provider_session_leases where binding_id = ? and holder_id = ?
-        `).run(bindingId, holderId);
-      },
-    };
+      }),
+      release,
+    });
   }
 
   recordSession(input: {
@@ -754,8 +1354,9 @@ export class LocalVault {
       this.#database.exec('commit');
       return { rawContentId: raw.contentId, capsuleContentId: capsule.contentId };
     } catch (error) {
-      try { this.#database.exec('rollback'); } catch {}
-      await Promise.all([...created].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
+      try { this.#databaseHandle.exec('rollback'); }
+      catch {if (this.#fence.scoped) throw new Error('vault_cleanup_unconfirmed');}
+      if (!this.#fence.scoped) await Promise.all([...created].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
       throw error;
     }
   }
@@ -809,7 +1410,7 @@ export class LocalVault {
       if (referenced) continue;
       this.#database.prepare('delete from blobs where content_id = ? and kind = ?')
         .run(row.blob_content_id, 'trajectory-capsule');
-      await rm(this.#blobPath(row.blob_content_id), { force: true });
+      await this.#effect(() => rm(this.#blobPath(row.blob_content_id), { force: true }));
     }
     return rows.length;
   }
@@ -911,7 +1512,7 @@ export class LocalVault {
       `).run(taskId, blob.contentId, new Date().toISOString());
       return blob.contentId;
     } catch (error) {
-      if (blob.created) {
+      if (blob.created && !this.#fence.scoped) {
         await rm(this.#blobPath(blob.contentId), { force: true });
         this.#database.prepare('delete from blobs where content_id = ?').run(blob.contentId);
       }
@@ -960,7 +1561,7 @@ export class LocalVault {
       try { this.#database.exec('rollback'); } catch {}
       throw error;
     }
-    if (deletedBlob) await rm(this.#blobPath(record.blob_content_id), { force: true });
+    if (deletedBlob) await this.#effect(() => rm(this.#blobPath(record.blob_content_id), { force: true }));
   }
 
   listSessions(): unknown[] {
@@ -1018,7 +1619,14 @@ export class LocalVault {
   }
 
   close(): void {
-    this.#database.close();
+    this.#closed = true;
+    try {
+      if (!this.#databaseClosed) {
+        for (const release of this.#ownedLeases) release();
+        this.#databaseHandle.close();
+        this.#databaseClosed = true;
+      }
+    } finally {this.#masterKey.fill(0);}
   }
 
   #blobPath(contentId: string): string {
@@ -1027,16 +1635,24 @@ export class LocalVault {
     return resolve(this.root, 'blobs', digest.slice(0, 2), `${digest}.blob`);
   }
 
+  #processIsAlive(pid: number): boolean {
+    this.#fence.assertSync();
+    return processIsAlive(pid);
+  }
+
   async #expireRawEvidenceBatch(contentIds: string[], createdAt: string): Promise<void> {
     const quarantined: Array<{ original: string; quarantine: string }> = [];
     const createdCapsuleIds = new Set<string>();
+    let committed = false;
     this.#database.exec('begin immediate');
     try {
       for (const contentId of contentIds) {
         const original = this.#blobPath(contentId);
         const quarantine = `${original}.expired-${process.pid}-${randomBytes(4).toString('hex')}`;
-        await rename(original, quarantine);
-        quarantined.push({ original, quarantine });
+        await this.#effect(async () => {
+          await rename(original, quarantine);
+          quarantined.push({ original, quarantine });
+        });
 
         const capsuleRows = this.#database.prepare(`
           select c.trajectory_id, c.revision, c.capsule_hash, c.blob_content_id
@@ -1100,13 +1716,20 @@ export class LocalVault {
         if (result.changes !== 1) throw new Error('Raw evidence changed during retention enforcement.');
       }
       this.#database.exec('commit');
-      await Promise.all(quarantined.map((entry) => rm(entry.quarantine, { force: true })));
+      committed = true;
+      for (const entry of quarantined) await this.#effect(() => rm(entry.quarantine, { force: true }));
     } catch (error) {
-      try { this.#database.exec('rollback'); } catch {}
-      await Promise.all([...createdCapsuleIds].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
-      await Promise.all(quarantined.map(async (entry) => {
-        try { await rename(entry.quarantine, entry.original); } catch {}
-      }));
+      if (!committed) {
+        try { this.#databaseHandle.exec('rollback'); }
+        catch {if (this.#fence.scoped) throw new Error('vault_cleanup_unconfirmed');}
+        // Scoped interruption leaves encrypted files for the existing recovery contract.
+        if (!this.#fence.scoped) {
+          await Promise.all([...createdCapsuleIds].map((contentId) => rm(this.#blobPath(contentId), { force: true })));
+          await Promise.all(quarantined.map(async (entry) => {
+            try { await rename(entry.quarantine, entry.original); } catch {}
+          }));
+        }
+      }
       throw error;
     }
   }
@@ -1145,16 +1768,17 @@ export class LocalVault {
 
   async #recoverUnindexedBlobs(): Promise<void> {
     const blobsRoot = resolve(this.root, 'blobs');
-    for (const prefix of await readdir(blobsRoot, { withFileTypes: true })) {
+    for (const prefix of await this.#effect(() => readdir(blobsRoot, { withFileTypes: true }))) {
       if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
       const directory = resolve(blobsRoot, prefix.name);
-      for (const entry of await readdir(directory, { withFileTypes: true })) {
+      for (const entry of await this.#effect(() => readdir(directory, { withFileTypes: true }))) {
         const final = /^([a-f0-9]{64})\.blob$/.exec(entry.name);
         const temporary = /^([a-f0-9]{64})\.blob\.([1-9][0-9]*)\.[a-f0-9]{8}\.tmp$/.exec(entry.name);
         if (!entry.isFile() || (!final && !temporary)) continue;
         const digest = (final ?? temporary)![1]!;
         if (digest.slice(0, 2) !== prefix.name) continue;
-        if (temporary && processIsAlive(Number(temporary[2]))) continue;
+        await this.#fence.assert();
+        if (temporary && this.#processIsAlive(Number(temporary[2]))) continue;
         const path = resolve(directory, entry.name);
         // Final publication uses this same SQLite write fence. Recheck metadata
         // and unlink without yielding so a concurrent commit cannot lose its blob.
@@ -1162,22 +1786,25 @@ export class LocalVault {
         try {
           const retained = final && this.#database.prepare('select 1 from blobs where content_id = ?').get(`sha256:${digest}`);
           if (!retained) {
-            try { if (lstatSync(path).isFile()) unlinkSync(path); }
+            try {
+              this.#fence.assertSync();
+              if (lstatSync(path).isFile()) {this.#fence.assertSync(); unlinkSync(path);}
+            }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
           }
           this.#database.exec('commit');
-        } catch (error) { this.#database.exec('rollback'); throw error; }
+        } catch (error) { this.#databaseHandle.exec('rollback'); throw error; }
       }
     }
   }
 
   async #recoverRetentionQuarantine(): Promise<void> {
     const blobsRoot = resolve(this.root, 'blobs');
-    const prefixes = await readdir(blobsRoot, { withFileTypes: true });
+    const prefixes = await this.#effect(() => readdir(blobsRoot, { withFileTypes: true }));
     for (const prefix of prefixes) {
       if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/.test(prefix.name)) continue;
       const directory = resolve(blobsRoot, prefix.name);
-      const entries = await readdir(directory, { withFileTypes: true });
+      const entries = await this.#effect(() => readdir(directory, { withFileTypes: true }));
       for (const entry of entries) {
         if (!entry.isFile() || !/^[a-f0-9]{64}\.blob\.expired-/.test(entry.name)) continue;
         const quarantine = resolve(directory, entry.name);
@@ -1186,13 +1813,14 @@ export class LocalVault {
         const contentId = `sha256:${digest}`;
         const retained = this.#database.prepare('select 1 from blobs where content_id = ?').get(contentId);
         if (retained) {
-          try { await rename(quarantine, original); }
+          try { await this.#effect(() => rename(quarantine, original)); }
           catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'EEXIST') await rm(quarantine, { force: true });
+            await this.#fence.assert();
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') await this.#effect(() => rm(quarantine, { force: true }));
             else throw error;
           }
         } else {
-          await rm(quarantine, { force: true });
+          await this.#effect(() => rm(quarantine, { force: true }));
         }
       }
     }
@@ -1208,19 +1836,125 @@ export function loadExplicitTestKey(env: NodeJS.ProcessEnv): Buffer {
   return key;
 }
 
-export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore): Promise<Buffer> {
-  if (process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
-  const secureStore = store ?? await createSystemSecureStore();
+export interface VaultOperationScope {
+  signal: AbortSignal;
+  current(): Promise<boolean>;
+}
+export type VaultKeyOperationScope = VaultOperationScope;
+
+function vaultErrorCode(error: unknown): string | undefined {
+  try {
+    if (!error || typeof error !== 'object') return undefined;
+    const message = Object.getOwnPropertyDescriptor(error, 'message');
+    return message && Object.hasOwn(message, 'value') && typeof message.value === 'string' ? message.value : undefined;
+  } catch {return undefined;}
+}
+
+// Snapshot data before any async qualification without running payload accessors.
+function snapshotVaultInput<T>(input: T): T {
+  const seen = new Map<object, unknown>();
+  let entries = 0;
+  const copy = (value: unknown, depth: number): unknown => {
+    if (depth > 256 || ++entries > 1_000_000) throw new Error('vault_input_invalid');
+    if (value === null || ['undefined', 'string', 'number', 'boolean', 'bigint'].includes(typeof value)) return value;
+    if (typeof value !== 'object') throw new Error('vault_input_invalid');
+    const object = value as object;
+    if (types.isProxy(object)) throw new Error('vault_input_invalid');
+    if (seen.has(object)) return seen.get(object);
+    if (types.isUint8Array(object)) {
+      const length = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length')!.get!.call(object);
+      const bytes = new Uint8Array(length);
+      Uint8Array.prototype.set.call(bytes, object);
+      seen.set(object, bytes); return bytes;
+    }
+    if (types.isDate(object)) return new Date(Date.prototype.getTime.call(object));
+    const prototype = Object.getPrototypeOf(object);
+    const constructor = prototype && Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value;
+    const name = typeof constructor === 'function' ? Object.getOwnPropertyDescriptor(constructor, 'name')?.value : undefined;
+    const array = Array.isArray(object);
+    if (!array && prototype !== null && (name !== 'Object' || Object.getPrototypeOf(prototype) !== null)) {
+      throw new Error('vault_input_invalid');
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(object);
+    const result: Record<string, unknown> | unknown[] = array ? [] : Object.create(null);
+    seen.set(object, result);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== 'string') throw new Error('vault_input_invalid');
+      const descriptor = descriptors[key];
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error('vault_input_invalid');
+      if (array && key === 'length') {Object.defineProperty(result, key, {value: descriptor.value}); continue;}
+      Object.defineProperty(result, key, {value: copy(descriptor.value, depth + 1), enumerable: descriptor.enumerable,
+        writable: true, configurable: true});
+    }
+    return result;
+  };
+  return copy(input, 0) as T;
+}
+
+function createVaultEffectFence(scope: VaultOperationScope | undefined, prefix: string) {
+  let signal: AbortSignal | undefined, qualify: (() => Promise<boolean>) | undefined;
+  if (scope !== undefined) {
+    try {
+      if (!scope || typeof scope !== 'object') throw new Error();
+      const descriptors = Object.getOwnPropertyDescriptors(scope);
+      const suppliedSignal = descriptors.signal?.value, current = descriptors.current?.value;
+      if (!descriptors.signal || !descriptors.current || !Object.hasOwn(descriptors.signal, 'value')
+        || !Object.hasOwn(descriptors.current, 'value')) throw new Error();
+      if (!(suppliedSignal instanceof AbortSignal) || typeof current !== 'function') throw new Error();
+      signal = suppliedSignal; qualify = () => Reflect.apply(current, scope, []);
+    } catch {throw new Error(`${prefix}_scope_unavailable`);}
+  }
+  let withdrawn = false, admitted = false;
+  const assertCurrent = async () => {
+    if (scope === undefined) return;
+    let current = false;
+    if (!withdrawn && signal instanceof AbortSignal && !signal.aborted) {
+      try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
+    }
+    if (withdrawn || !current || signal?.aborted) {withdrawn = true; throw new Error(`${prefix}_scope_unavailable`);}
+    admitted = true;
+  };
+  const step = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await assertCurrent();
+    try {const result = await operation(); await assertCurrent(); return result;}
+    catch (error) {
+      const code = vaultErrorCode(error);
+      if (scope !== undefined && prefix === 'vault'
+        && (code === 'vault_cleanup_unconfirmed' || code === 'vault_open_cleanup_unconfirmed')) throw new Error(code);
+      await assertCurrent();
+      if (scope !== undefined) {
+        const safe = new Set(['setup_operation_invalid', 'setup_operation_conflict', 'setup_operation_integrity_failed',
+          'setup_operation_transaction_active', 'setup_operation_durability_unqualified']);
+        if (prefix === 'vault_setup_journal' && code !== undefined && safe.has(code)) throw new Error(code);
+        throw new Error(`${prefix}_storage_unavailable`);
+      }
+      throw error;
+    }
+  };
+  const assertSync = () => {
+    if (scope !== undefined && (withdrawn || !admitted || signal?.aborted)) {
+      withdrawn = true; throw new Error(`${prefix}_scope_unavailable`);
+    }
+  };
+  return {assert: assertCurrent, assertSync, step, signal, scoped: scope !== undefined, close: () => {withdrawn = true;}};
+}
+
+/** Cooperative effect admission, not proof that an OS adapter child has stopped. */
+export async function loadOrCreateVaultMasterKey(store?: SecureSecretStore, scope?: VaultKeyOperationScope): Promise<Buffer> {
+  const fence = createVaultEffectFence(scope, 'vault_key'), step = fence.step;
+  await fence.assert();
+  if (scope === undefined && process.env.DHARMA_ALLOW_ENV_KEY === '1') return loadExplicitTestKey(process.env);
+  const secureStore = await step(async () => store ?? await createSystemSecureStore());
   const account = 'vault-master-key-v1';
-  const current = await secureStore.get(account);
+  const current = await step(() => secureStore.get(account));
   if (current) {
     const key = Buffer.from(current, 'base64');
     if (key.length !== 32) throw new Error('Stored vault master key is corrupt.');
     return key;
   }
   const key = randomBytes(32);
-  await secureStore.put(account, key.toString('base64'));
-  const confirmed = await secureStore.get(account);
+  await step(() => secureStore.put(account, key.toString('base64')));
+  const confirmed = await step(() => secureStore.get(account));
   if (confirmed !== key.toString('base64')) throw new Error('Secure store did not confirm the vault key write.');
   return key;
 }

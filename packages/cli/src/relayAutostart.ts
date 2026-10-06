@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
   writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
+import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
 const execFileAsync = promisify(execFile);
 const UNIT_NAME = 'dharma-agent-fabric.service';
@@ -458,25 +459,27 @@ export async function disableRelayAutostart(options: RelayAutostartOptions): Pro
 }
 
 export async function startRelayAutostart(options: RelayAutostartOptions) {
-  const registration = await readRegistration(options);
-  const status = await relayAutostartStatus(options);
+  const scope = currentBootstrapHostScope();
+  const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
+  const registration = await step(() => readRegistration(options));
+  const status = await step(() => relayAutostartStatus(options));
   if (!registration || status.state !== 'enabled') {
     throw new Error(`autostart_conflict: an enabled owned startup entry is required (${status.reason ?? status.state}).`);
   }
   const run = options.run || defaultRunner;
   if (registration.backend === 'container-entrypoint') {
-    await containerStartupControl(options, registration as ContainerRelayRegistration, true);
+    await step(() => containerStartupControl(options, registration as ContainerRelayRegistration, true));
   } else if (registration.backend === 'systemd-user') {
-    await run('systemctl', ['--user', 'start', UNIT_NAME]);
+    await step(() => run('systemctl', ['--user', 'start', UNIT_NAME]));
   } else if (registration.backend === 'launchd-user') {
-    if (!await macLoaded(options, registration)) {
-      await run('/bin/launchctl', ['bootstrap', macDomain(options), macPath(options)]);
+    if (!await step(() => macLoaded(options, registration))) {
+      await step(() => run('/bin/launchctl', ['bootstrap', macDomain(options), macPath(options)]));
     }
-    await run('/bin/launchctl', ['kickstart', `${macDomain(options)}/${MAC_LABEL}`]);
+    await step(() => run('/bin/launchctl', ['kickstart', `${macDomain(options)}/${MAC_LABEL}`]));
   } else {
-    await run('powershell.exe', encodedPowerShell(windowsTaskLookup(registration)
+    await step(() => run('powershell.exe', encodedPowerShell(windowsTaskLookup(registration)
       + windowsTaskGuard(registration, options.home)
-      + `Start-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')}`));
+      + `Start-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')}`)));
   }
   return { state: 'start_requested' as const, backend: registration.backend, version: registration.version };
 }

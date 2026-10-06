@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { canonicalize, sha256, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
-import type { LocalProviderSessionBinding, LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
+import type { LocalProviderSessionBinding, LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { assertPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { AgentFabricRequestError } from '@dharma-ai-labs/agent-fabric-relay-client';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -37,11 +37,11 @@ function authorized(policy: OrganizationPolicy, descriptor: Descriptor) {
     && policy.evidence.automaticDisclosure.consentReceiptId === descriptor.consentReceiptId;
 }
 
-export async function stageNamedSessionTaskExport(vault: LocalVault, input: NamedSessionTaskExportInput) {
+export async function stageNamedSessionTaskExport(vault: LocalVault | ScopedLocalVault, input: NamedSessionTaskExportInput) {
   const snapshot = { ...input, binding: structuredClone(input.binding), capture: structuredClone(input.capture),
     contextBytes: Buffer.from(input.contextBytes) };
   const scope = identity(snapshot.binding);
-  const current = vault.getProviderSessionBinding(snapshot.binding.bindingId, scope);
+  const current = await vault.getProviderSessionBinding(snapshot.binding.bindingId, scope);
   if (!current || current.sessionId !== snapshot.binding.sessionId || current.workspaceRoot !== snapshot.binding.workspaceRoot) {
     throw new Error('named_session_task_export_binding_unavailable');
   }
@@ -66,7 +66,7 @@ export async function stageNamedSessionTaskExport(vault: LocalVault, input: Name
 }
 
 export async function syncNamedSessionTaskExports(input: {
-  vault: LocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
+  vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   loadPolicy(): Promise<OrganizationPolicy>;
   send(body: { schema: 'dharma.codex-task-export-upload/v1'; exportBytes: string; exportHash: string }): Promise<unknown>;
 }): Promise<NamedSessionTaskExportSyncResult> {
@@ -76,12 +76,12 @@ export async function syncNamedSessionTaskExports(input: {
     ({ state, pending: pendingKnown ? pending : null, delivered, ...(code ? { code } : {}),
       ...(lastReceipt ? { lastReceipt } : {}), acceptedLearningObservation: false });
   let rows: Array<{ workKey: string; descriptorHash: string }>;
-  try { rows = input.vault.listProviderSessionTaskExports(input.bindingId, input.identity); }
+  try { rows = await input.vault.listProviderSessionTaskExports(input.bindingId, input.identity); }
   catch { return result('blocked', 'task_export_binding_unavailable'); }
   pending = rows.length;
   pendingKnown = true;
   try {
-    const prior = input.vault.latestProviderSessionTaskExportReceipt(input.bindingId, input.identity);
+    const prior = await input.vault.latestProviderSessionTaskExportReceipt(input.bindingId, input.identity);
     if (prior) {
       const receipt: unknown = JSON.parse((await input.vault.getBlob(prior.receiptHash)).toString('utf8'));
       const descriptor: unknown = JSON.parse((await input.vault.getBlob(prior.descriptorHash)).toString('utf8'));
@@ -118,7 +118,7 @@ export async function syncNamedSessionTaskExports(input: {
     catch { return result('pending', 'task_export_policy_refresh_pending'); }
     if (!authorized(policy, descriptor)) return result('blocked', 'task_export_original_consent_unavailable');
     let binding: LocalProviderSessionBinding | null;
-    try { binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity); }
+    try { binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity); }
     catch { return result('blocked', 'task_export_binding_unavailable'); }
     if (!binding) return result('blocked', 'task_export_binding_unavailable');
     const prepared = await prepareNamedSessionTaskExport({ capture, binding, contextBytes, contextHash: descriptor.contextHash, policy });
@@ -132,7 +132,7 @@ export async function syncNamedSessionTaskExports(input: {
     if (final.state !== 'ready') return result('blocked', final.code);
     if (final.exportHash !== descriptor.exportHash || final.bytes !== retained) return result('blocked', 'task_export_projection_changed');
     try {
-      if (!input.vault.getProviderSessionBinding(input.bindingId, input.identity)) return result('blocked', 'task_export_binding_unavailable');
+      if (!await input.vault.getProviderSessionBinding(input.bindingId, input.identity)) return result('blocked', 'task_export_binding_unavailable');
       assertPolicy(policy);
     } catch { return result('blocked', 'task_export_current_authority_unavailable'); }
     let response: unknown;
@@ -157,7 +157,7 @@ export async function syncNamedSessionTaskExports(input: {
     // Retain the evidence-backed response encrypted before retiring this pending entry.
     try {
       const receiptHash = await input.vault.putBlob(Buffer.from(canonicalize(receipt)), 'named-session-task-export-receipt');
-      input.vault.acknowledgeProviderSessionTaskExport(input.bindingId, input.identity, row.workKey, row.descriptorHash, receiptHash);
+      await input.vault.acknowledgeProviderSessionTaskExport(input.bindingId, input.identity, row.workKey, row.descriptorHash, receiptHash);
     } catch { return result('blocked', 'task_export_acknowledgement_unavailable'); }
     delivered++; pending--; lastReceipt = receipt;
   }

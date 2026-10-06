@@ -1,10 +1,12 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {
   parseSetupClaimChallenge, setupClaimSigningPayload, openSetupClaimCredential, canonicalize,
   verifyInitialServerSigningKeyset, verifyServerSigningKeysetUpdate,
   type SetupClaimContext, type SetupClaimChallenge,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
 import {
   loadOrCreateDeviceIdentity, normalizeHqUrl, normalizeRelayUrl, saveDeviceConfig,
   saveDeviceEnrollmentAnchor, saveOrganizationApiToken,
@@ -17,6 +19,14 @@ const SCOPES = ['agents:read', 'agents:run', 'evals:read', 'evals:run', 'traces:
 const fail = (): never => { throw new Error('setup_claim_failed'); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
+  | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
+export interface SetupClaimFailureDiagnostic {
+  schema: 'dharma.setup-claim-failure/v1';
+  code: 'setup_claim_failed';
+  phase: SetupClaimFailurePhase;
+}
+
 export interface ClaimSetupReferenceInput {
   hqUrl: string; organizationId: string; setupReference: string; recipientMembershipId: string;
   repositoryFingerprint: string; policyRevision: string; scopeDigest: string; contractDigest: string;
@@ -24,6 +34,11 @@ export interface ClaimSetupReferenceInput {
   existingConfig?: DeviceConfig | null; store?: SecureSecretStore; fetcher?: typeof fetch;
   now?: () => number; sleep?: (ms: number) => Promise<void>; maximumWaitMs?: number; pollIntervalMs?: number;
   onRecipientApprovalRequired?: (approval: BootstrapRecipientApproval) => Promise<void> | void;
+  /** Owning host only; never derived from model arguments or cached approval.
+   * Absence preserves the existing CLI claim path. Cancellation is cooperative. */
+  hostScope?: HostOperationScope;
+  /** Local phase observation only: no vendor exception, response body, or retry authority. */
+  onFailureDiagnostic?: (diagnostic: Readonly<SetupClaimFailureDiagnostic>) => void;
 }
 
 /** Never apply one repository's public claim reference to a legacy sibling.
@@ -39,17 +54,21 @@ function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail();
   return value as Record<string, unknown>;
 }
-async function boundedJson(response: Response): Promise<Record<string, unknown>> {
+async function boundedJson(response: Response, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (Number(response.headers.get('content-length')) > 65_536 || !response.body) return fail();
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+  const cancel = () => {void reader.cancel().catch(() => undefined);};
+  signal?.addEventListener('abort', cancel, {once: true});
   try {
+    if (signal?.aborted) {cancel(); return fail();}
     while (true) {
       const next = await reader.read(); if (next.done) break;
       size += next.value.byteLength; if (size > 65_536) { await reader.cancel(); return fail(); }
       chunks.push(next.value);
     }
+    if (signal?.aborted) return fail();
     return record(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-  } finally { reader.releaseLock(); }
+  } finally { signal?.removeEventListener('abort', cancel); reader.releaseLock(); }
 }
 function sameDevice(value: unknown, expected: {name: string; platform: string}): boolean {
   const device = record(value);
@@ -94,6 +113,7 @@ export function parseSetupClaimRecipientApproval(value: unknown, challenge: Setu
 /** Non-TTY native enrollment. Credential plaintext never leaves this method;
  * only the existing protected store receives it. Network errors are never reflected. */
 export async function claimSetupReference(input: ClaimSetupReferenceInput): Promise<{config: DeviceConfig; scopes: string[]}> {
+  let phase: SetupClaimFailurePhase = 'input_validation';
   try {
     const hqUrl = normalizeHqUrl(input.hqUrl);
     if (!hqUrl.startsWith('https:') || input.name.trim().length < 2 || input.name.length > 120
@@ -106,14 +126,32 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     const maximumWaitMs = input.maximumWaitMs ?? 900_000;
     if (!Number.isFinite(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 900_000) return fail();
     const deadline = now() + maximumWaitMs;
-    const store = input.store ?? await createSystemSecureStore();
+    const hostScope = input.hostScope;
+    const hostFence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
+    const scopeSignal = hostFence?.signal;
+    const assertScope = async () => {await hostFence?.assert();};
+    const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+      await assertScope(); const result = await operation(); await assertScope(); return result;
+    };
+    const sleep = async (ms: number) => {
+      await guarded(() => input.sleep ? input.sleep(ms) : delay(ms, undefined, {signal: scopeSignal}));
+    };
+    phase = 'store_preflight';
+    const rawStore = await guarded(async () => input.store ?? await createSystemSecureStore());
+    const store: SecureSecretStore = hostFence ? hostFence.store(rawStore) : rawStore;
     const probeAccount = `setup-claim-preflight-${randomBytes(16).toString('hex')}`;
     const probeValue = randomBytes(32).toString('base64url');
     try {
       await store.put(probeAccount, probeValue);
       if (await (store.getFresh ?? store.get).call(store, probeAccount) !== probeValue) return fail();
-    } finally { await store.delete(probeAccount); }
+    } finally {
+      // Only clean our random probe after cancellation; never delete identity
+      // or partially installed credentials to pretend protected-store rollback.
+      await rawStore.delete(probeAccount);
+    }
+    await assertScope();
     // Existing protected identity access fails before challenge/approval/effects.
+    phase = 'identity';
     const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId: input.organizationId,
       installationId: input.installationId, store });
     const existing = input.existingConfig;
@@ -130,14 +168,21 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     const device = { name: input.name, platform: input.platform };
     const fetcher = input.fetcher ?? fetch;
     const send = async (body: unknown) => {
+      await assertScope();
       const remaining = deadline - now(); if (remaining <= 0) return fail();
+      const timeout = AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining)));
+      const requestSignal = scopeSignal ? AbortSignal.any([scopeSignal, timeout]) : timeout;
       const response = await fetcher(`${hqUrl}${PATH}`, { method: 'POST', redirect: 'error',
         headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining))) });
+        signal: requestSignal });
+      await assertScope();
       if (response.redirected || (response.url && response.url !== `${hqUrl}${PATH}`)
         || response.status >= 300 && ![409,429].includes(response.status)) return fail();
-      return { response, body: await boundedJson(response) };
+      const parsed = await boundedJson(response, requestSignal);
+      await assertScope();
+      return { response, body: parsed };
     };
+    phase = 'challenge';
     const initial = await send({ action: 'challenge', organizationId: input.organizationId,
       setupReference: input.setupReference, publicKeyEd25519: identity.publicKeyEd25519,
       credentialEncryptionPublicKey: expected.credentialEncryptionPublicKey, device });
@@ -151,36 +196,43 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       // Validate the complete bound response before waiting. Do not adjust the
       // clock or relax the strict issued-at/expiry checks used by every effect.
       parseSetupClaimChallenge(initial.body.challenge, expected, issuedAt);
-      await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(issuedAt - localNow);
+      await sleep(issuedAt - localNow);
       if (now() >= deadline) return fail();
     }
     const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, now());
+    phase = 'signing';
+    await assertScope();
     const signature = sign(null, setupClaimSigningPayload(challenge), createPrivateKey({key: identity.privateJwk, format: 'jwk'})).toString('base64url');
+    await assertScope();
     const request = { action: 'finalize', challenge, signature, device };
     let pending: BootstrapRecipientApproval | null = null;
     while (true) {
+      phase = 'finalize';
       parseSetupClaimChallenge(challenge, expected, now());
       const result = await send(request);
       parseSetupClaimChallenge(challenge, expected, now());
       if (result.response.status === 429) {
         const wait = quotaRetryDelay(result.response, result.body, now(), Math.min(deadline, Date.parse(challenge.expiresAt)));
-        await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(wait);
+        await sleep(wait);
         continue;
       }
       if (result.response.status === 409 && result.body.ok === false
         && result.body.status === 'recipient_approval_required') {
+        phase = 'recipient_approval';
         if (Object.keys(result.body).sort().join(',') !== 'approval,ok,status') return fail();
         const current = parseSetupClaimRecipientApproval(result.body.approval, challenge, signature, device, now());
-        if (!pending) { pending = current; await input.onRecipientApprovalRequired?.(current); }
+        if (!pending) { pending = current; await guarded(async () => {await input.onRecipientApprovalRequired?.(current);}); }
         else if (JSON.stringify(pending) !== JSON.stringify(current)) return fail();
         const remaining = Math.min(deadline, Date.parse(challenge.expiresAt)) - now();
         if (remaining <= 0) return fail();
-        await (input.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(
+        await sleep(
           Math.min(Math.max(input.pollIntervalMs ?? 3_000, 250), 10_000, remaining));
         continue;
       }
       if (!result.response.ok || result.body.ok !== true || result.body.status !== 'approved'
         || Object.keys(result.body).sort().join(',') !== 'credential,ok,status') return fail();
+      phase = 'credential_validation';
+      await assertScope();
       const enrolled = record(JSON.parse(openSetupClaimCredential(challenge, result.body.credential, encryption.privateKey)));
       for (const key of ['organizationId', 'setupReference', 'recipientMembershipId', 'publicKeyEd25519',
         'repositoryFingerprint', 'scopeDigest', 'contractDigest'] as const) if (enrolled[key] !== challenge[key]) return fail();
@@ -212,22 +264,34 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       // The protected store and public config file are not a single transaction:
       // interruption preserves partial protected writes for same-key recovery.
       const assertCommit = async () => {
+        await assertScope();
         if (now() >= deadline) return fail();
         parseSetupClaimChallenge(challenge, expected, now());
+        await assertScope();
         const current = await (store.getFresh ?? store.get).call(store, identity.account);
         if (!current || canonicalize(JSON.parse(current)) !== canonicalize(identity.privateJwk)) return fail();
         if (now() >= deadline) return fail();
         parseSetupClaimChallenge(challenge, expected, now());
       };
+      phase = 'credential_commit';
       await assertCommit();
       await saveOrganizationApiToken({ hqUrl, organizationId: input.organizationId,
         installationId: input.installationId, token: approved.organizationApiToken, store });
       await assertCommit();
       await saveDeviceEnrollmentAnchor({ config, store });
       await assertCommit();
-      await saveDeviceConfig(input.configPath, config);
+      await saveDeviceConfig(input.configPath, config, {signal: scopeSignal ?? new AbortController().signal,
+        current: async () => {await assertCommit(); return true;}});
       await assertCommit();
       return { config, scopes: [...SCOPES] };
     }
-  } catch { return fail(); }
+  } catch {
+    // Observers cannot replace the original sanitized failure or authorize retries.
+    try {
+      void Promise.resolve(input.onFailureDiagnostic?.(Object.freeze({
+        schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase,
+      }))).catch(() => undefined);
+    } catch { /* Ignore local diagnostic observer failures. */ }
+    return fail();
+  }
 }

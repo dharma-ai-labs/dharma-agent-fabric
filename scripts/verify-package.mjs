@@ -63,6 +63,27 @@ for (const packageName of [
 }
 
 const cli = workspaceManifests.get('@dharma-ai-labs/agent-fabric');
+// Compilation can resolve workspace links even when the published CLI would
+// install an older runtime. Check every direct first-party runtime pin.
+const cliRuntimePackages = ['contracts', 'evidence-reduction', 'local-vault', 'policy',
+  'provider-adapters', 'relay-client', 'sdk', 'secure-store', 'skill-manager', 'task-runner'];
+for (const suffix of cliRuntimePackages) {
+  const name = `@dharma-ai-labs/agent-fabric-${suffix}`;
+  const runtime = workspaceManifests.get(name);
+  if (!runtime || cli?.dependencies?.[name] !== runtime.version) {
+    throw new Error(`cli_runtime_package_pin_invalid:${suffix}`);
+  }
+}
+for (const name of Object.keys(cli?.dependencies ?? {})) {
+  if (name.startsWith('@dharma-ai-labs/') && !workspaceManifests.has(name)) {
+    throw new Error('cli_runtime_package_unknown');
+  }
+}
+const localVault = workspaceManifests.get('@dharma-ai-labs/agent-fabric-local-vault');
+if (cli?.dependencies?.[localVault?.name] !== localVault?.version
+  || localVault?.exports?.['./setup-readiness'] !== './dist/setupReadiness.js') {
+  throw new Error('CLI must pin the qualified local-vault readiness export.');
+}
 const skillManager = workspaceManifests.get('@dharma-ai-labs/agent-fabric-skill-manager');
 const pinnedSkillManager = cli?.dependencies?.['@dharma-ai-labs/agent-fabric-skill-manager'];
 if (pinnedSkillManager !== skillManager?.version) {
@@ -98,6 +119,8 @@ for (const workspace of workspaceDirectories) {
   if (workspace === 'packages/provider-adapters' && !packedPaths.has('dist/knowledge-server.js')) {
     throw new Error(`${manifest.name} tarball does not contain the task knowledge server.`);
   }
+  if (workspace === 'packages/local-vault' && (!packedPaths.has('dist/setupReadiness.js')
+    || !packedPaths.has('dist/setupReadiness.d.ts'))) throw new Error('Local-vault readiness export is absent from its tarball.');
 }
 
 const reference = JSON.parse(await readFile(resolve(root, 'packages/lifecycle-adapter/package.json'), 'utf8'));

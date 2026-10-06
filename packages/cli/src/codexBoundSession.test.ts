@@ -48,11 +48,14 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
   const calls: string[] = [];
   const listeners = new Set<(event: unknown) => void>();
   let closed = false;
+  const lifetime = new AbortController();
   const transport: CodexStdioTransport = {
+    signal: lifetime.signal,
     onToolCall() { return () => {}; },
     onNotification(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     async close() {
       calls.push('close');
+      lifetime.abort();
       if (options.closeFails) throw new Error('process_still_running');
       closed = true;
     },

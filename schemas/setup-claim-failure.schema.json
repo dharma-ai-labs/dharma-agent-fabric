@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/setup-claim-failure/v1",
+  "title": "Local setup claim failure phase (not a readiness or retry receipt)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "code", "phase"],
+  "properties": {
+    "schema": { "const": "dharma.setup-claim-failure/v1" },
+    "code": { "const": "setup_claim_failed" },
+    "phase": {
+      "enum": ["input_validation", "store_preflight", "identity", "challenge", "signing", "finalize", "recipient_approval", "credential_validation", "credential_commit"]
+    }
+  }
+}

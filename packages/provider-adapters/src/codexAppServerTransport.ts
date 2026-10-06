@@ -10,6 +10,9 @@ type PendingRequest = {
 };
 
 export interface CodexStdioTransport extends CodexAppServerTransport {
+  /** Aborted when admission stops, including after a tool callback returns.
+   * This is not confirmation that the process tree has terminated. */
+  readonly signal: AbortSignal;
   close(): Promise<void>;
   onToolCall(handler: CodexToolHandler): () => void;
 }
@@ -58,20 +61,27 @@ export async function openCodexAppServerTransport(input: {
   let buffer = Buffer.alloc(0);
   let stopped = false;
   let closed = false;
+  const lifetime = new AbortController();
   const processClosed = new Promise<void>(resolve => child.once('close', () => {
     closed = true;
     resolve();
   }));
 
-  function fail(reason: string) {
-    if (stopped) return;
+  function stopAdmission(reason: string) {
+    if (stopped) return false;
     stopped = true;
+    lifetime.abort();
     activeTool?.abort();
     for (const entry of pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(new Error(reason));
     }
     pending.clear();
+    return true;
+  }
+
+  function fail(reason: string) {
+    if (!stopAdmission(reason)) return;
     stopOwnedTree('SIGTERM');
   }
 
@@ -180,11 +190,14 @@ export async function openCodexAppServerTransport(input: {
   });
   child.stdin.on('error', () => fail('codex_app_server_write_failed'));
   child.stdout.on('error', () => fail('codex_app_server_read_failed'));
+  child.stdout.on('end', () => fail('codex_app_server_closed'));
   child.stderr.on('error', () => fail('codex_app_server_stderr_failed'));
   child.on('error', () => fail('codex_app_server_spawn_failed'));
+  child.on('exit', () => fail('codex_app_server_closed'));
   child.on('close', () => fail('codex_app_server_closed'));
 
   const transport: CodexStdioTransport = {
+    get signal() { return lifetime.signal; },
     request(method, params) {
       if (!method || !params || typeof params !== 'object') {
         return Promise.reject(new Error('codex_app_server_request_invalid'));
@@ -218,15 +231,7 @@ export async function openCodexAppServerTransport(input: {
       return () => { if (toolHandler === handler) toolHandler = undefined; };
     },
     async close() {
-      if (!stopped) {
-        stopped = true;
-        activeTool?.abort();
-        for (const entry of pending.values()) {
-          clearTimeout(entry.timer);
-          entry.reject(new Error('codex_app_server_closed'));
-        }
-        pending.clear();
-      }
+      stopAdmission('codex_app_server_closed');
       child.stdin.end();
       if (closed) return;
       stopOwnedTree('SIGTERM');

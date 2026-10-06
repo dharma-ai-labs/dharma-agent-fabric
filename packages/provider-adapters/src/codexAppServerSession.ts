@@ -91,6 +91,17 @@ async function assertRestrictedProfile(transport: CodexAppServerTransport, works
   }
 }
 
+/** Profile readback only; the owning runtime must separately qualify Linux containment. */
+export async function verifyCodexSetupReadOnlyProfile(transport: CodexAppServerTransport,
+  workspaceRoot: string, scope: {step<T>(operation: () => Promise<T>): Promise<T>},
+  additionalFilesystemRules: Readonly<Record<string, 'read' | 'deny'>> = {}) {
+  const guarded: CodexAppServerTransport = {
+    request: (method, params) => scope.step(() => transport.request(method, params)),
+    onNotification: listener => transport.onNotification(listener),
+  };
+  await assertRestrictedProfile(guarded, workspaceRoot, 'dharma_bridge', [], additionalFilesystemRules);
+}
+
 function completedTurn(event: unknown, threadId: string, turnId: string): Record<string, unknown> | null {
   try {
     const message = object(event);

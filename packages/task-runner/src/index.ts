@@ -500,25 +500,37 @@ export interface ActionExecutionClaim {
   expiresAt: string;
 }
 
-async function durableJsonWrite(path: string, value: unknown): Promise<void> {
+type JournalEffect = <T>(operation: () => Promise<T>) => Promise<T>;
+
+async function durableJsonWrite(path: string, value: unknown,
+  effect: JournalEffect = operation => operation()): Promise<void> {
   const directory = resolve(path, '..');
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await effect(() => mkdir(directory, { recursive: true, mode: 0o700 }));
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  const handle = await open(temp, 'wx', 0o600);
+  // Capture ownership before a post-open scope check can reject the result.
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    await handle.writeFile(`${JSON.stringify(value)}\n`);
-    await handle.sync();
+    await effect(async () => {handle = await open(temp, 'wx', 0o600);});
+    await effect(() => handle!.writeFile(`${JSON.stringify(value)}\n`));
+    await effect(() => handle!.sync());
   } finally {
-    await handle.close();
+    await handle?.close();
   }
-  await rename(temp, path);
+  await effect(() => rename(temp, path));
+  let directoryHandle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const directoryHandle = await open(directory, 'r');
-    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    await effect(async () => {directoryHandle = await open(directory, 'r');});
+    await effect(() => directoryHandle!.sync());
   } catch {
+    await effect(async () => undefined);
     // Directory fsync is unavailable on some supported hosts; the file itself
     // has still been flushed before the atomic rename.
-  }
+  } finally {await directoryHandle?.close();}
+}
+
+export interface ActionJournalSelfTestScope {
+  signal: AbortSignal;
+  current(): Promise<boolean>;
 }
 
 export class FileActionExecutionJournal {
@@ -671,13 +683,47 @@ export class FileActionExecutionJournal {
     await rm(this.claimPath(receipt.taskId), { force: true });
   }
 
-  async selfTest(): Promise<void> {
+  async selfTest(scope?: ActionJournalSelfTestScope): Promise<void> {
+    let signal: AbortSignal | undefined, qualify: (() => Promise<boolean>) | undefined;
+    if (scope !== undefined) {
+      try {
+        if (!scope || typeof scope !== 'object') throw new Error();
+        const suppliedSignal = scope.signal, current = scope.current;
+        if (!(suppliedSignal instanceof AbortSignal) || typeof current !== 'function') throw new Error();
+        signal = suppliedSignal; qualify = () => Reflect.apply(current, scope, []);
+      } catch {throw new Error('journal_self_test_scope_unavailable');}
+    }
+    let withdrawn = false;
+    const assertCurrent = async () => {
+      if (scope === undefined) return;
+      let current = false;
+      if (!withdrawn && signal instanceof AbortSignal && !signal.aborted) {
+        try {current = await qualify!() === true;} catch { /* Withhold host diagnostics. */ }
+      }
+      if (!current || signal?.aborted) {withdrawn = true; throw new Error('journal_self_test_scope_unavailable');}
+    };
+    const effect: JournalEffect = async operation => {
+      await assertCurrent();
+      try {const result = await operation(); await assertCurrent(); return result;}
+      catch (error) {
+        await assertCurrent();
+        if (scope !== undefined) throw new Error('journal_self_test_failed');
+        throw error;
+      }
+    };
     const path = resolve(this.directory, `.self-test-${randomUUID()}.json`);
     try {
-      await durableJsonWrite(path, { schema: 'dharma.action-execution-journal-self-test/v1' });
-      const value = JSON.parse(await readFile(path, 'utf8')) as { schema?: string };
-      if (value.schema !== 'dharma.action-execution-journal-self-test/v1') throw new Error('Journal self-test readback failed.');
-    } finally { await rm(path, { force: true }); }
+      await durableJsonWrite(path, { schema: 'dharma.action-execution-journal-self-test/v1' }, effect);
+      const bytes = await effect(() => readFile(path, 'utf8'));
+      let value: {schema?: string};
+      try {value = JSON.parse(bytes) as {schema?: string};}
+      catch {throw new Error('Journal self-test readback failed.');}
+      if (!value || value.schema !== 'dharma.action-execution-journal-self-test/v1') throw new Error('Journal self-test readback failed.');
+    } catch (error) {
+      await assertCurrent();
+      if (scope !== undefined) throw new Error('journal_self_test_failed');
+      throw error;
+    } finally { await effect(() => rm(path, { force: true })); }
   }
 }
 
