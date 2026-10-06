@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import type { LocalVault, LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
+import type { LocalVault, ScopedLocalVault, LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { assertPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import type { ProviderSession, SourceRecord } from '@dharma-ai-labs/agent-fabric-provider-adapters';
@@ -73,7 +73,7 @@ function sourceRecords(capture: CodexLocalWorkCapture, workspace: string): Sourc
 }
 
 export async function queueNamedSessionEvidence(input: {
-  vault: LocalVault;
+  vault: LocalVault | ScopedLocalVault;
   capture: CodexLocalWorkCapture;
   binding: Pick<LocalProviderSessionBinding, 'organizationId' | 'repositoryBindingId' | 'workspaceId' | 'deviceId'
     | 'endpointId' | 'membershipId' | 'provider' | 'bindingId' | 'sessionId' | 'workspaceRoot'>;
@@ -132,13 +132,13 @@ export async function queueNamedSessionEvidence(input: {
   if (!checked.ok || Buffer.byteLength(JSON.stringify(capsule)) > policy.evidence.maximumCapsuleBytes) {
     throw new Error('named_session_evidence_capsule_invalid');
   }
-  const existing = vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+  const existing = await vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
   if (existing && existing.capsuleHash !== capsule.capsuleHash) throw new Error('named_session_evidence_revision_conflict');
   if (!existing) await vault.commitCapture({ raw: { plaintext: raw, kind: 'raw-provider-turn', expectedContentId: captureHash },
     capsule: { plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
       revision: capsule.revision, capsuleHash: capsule.capsuleHash },
     session: { sessionId: session.sessionId, provider: session.provider, workspaceId: binding.workspaceId,
       sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt } });
-  vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+  await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
   return { ...base, state: 'queued', trajectoryId: capsule.trajectoryId, capsuleHash: capsule.capsuleHash, code: 'relay_outbox_queued' };
 }

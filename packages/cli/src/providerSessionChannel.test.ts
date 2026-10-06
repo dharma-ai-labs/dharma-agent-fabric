@@ -58,6 +58,28 @@ function fixture() {
     setPermitted: (value: boolean) => { permitted = value; } };
 }
 
+test('async expiry lookup cannot carry stale ownership into a signed request', async () => {
+  let held = true, sends = 0;
+  const channel = createProviderSessionChannel({scope, mode: 'bridge_owned', expectedRevision: 0,
+    now: () => now, assertOwner: async () => held,
+    currentExpiresAt: async () => {held = false; return scope.expiresAt;},
+    transport: {signedPost: async () => {sends++; throw new Error('should not send');}},
+    verifier: {resolvePublicKey: () => publicKey}, authorizeContent: async () => true});
+  await assert.rejects(channel.attach(), {message: 'provider_session_channel_owner_lost'});
+  assert.equal(sends, 0);
+});
+
+test('failed async expiry lookup emits only a typed owner refusal with no signed request', async () => {
+  let sends = 0;
+  const channel = createProviderSessionChannel({scope, mode: 'bridge_owned', expectedRevision: 0,
+    now: () => now, assertOwner: async () => true,
+    currentExpiresAt: async () => {throw new Error('private expiry canary');},
+    transport: {signedPost: async () => {sends++; throw new Error('should not send');}},
+    verifier: {resolvePublicKey: () => publicKey}, authorizeContent: async () => true});
+  await assert.rejects(channel.attach(), {message: 'provider_session_channel_owner_lost'});
+  assert.equal(sends, 0);
+});
+
 test('cancelled ask/read admission produces no signed request', async () => {
   const f = fixture(), admission = new AbortController(); admission.abort();
   await assert.rejects(f.channel.ask({ targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',

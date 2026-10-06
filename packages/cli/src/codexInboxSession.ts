@@ -13,7 +13,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   authorizeContent: Parameters<typeof createProviderSessionChannel>[0]['authorizeContent'];
   authorizeLocalTools?: () => Promise<boolean>;
 }) {
-  const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+  const binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
   if (!binding || binding.owner !== 'dharma_bridge' || binding.provider !== 'codex') {
     throw new Error('codex_inbox_binding_unavailable');
   }
@@ -39,7 +39,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   } });
   channel = createProviderSessionChannel({ transport: input.channelTransport, scope, mode: 'bridge_owned',
     expectedRevision: input.expectedRevision ?? 0, assertOwner: owner.assertActive,
-    currentExpiresAt: () => input.vault.getProviderSessionBinding(input.bindingId, input.identity)?.expiresAt ?? null,
+    currentExpiresAt: async () => (await input.vault.getProviderSessionBinding(input.bindingId, input.identity))?.expiresAt ?? null,
     verifier: input.verifier, authorizeContent: input.authorizeContent });
   try { await (input.expectedRevision === undefined ? channel.reconnect() : channel.attach()); }
   catch (error) { try { await owner.close(); } catch { /* Keep the fence if shutdown is unconfirmed. */ } throw error; }
@@ -144,7 +144,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
         try {
           const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
             outcome: 'answered', answer: result.answer, failureCode: null });
-          input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, offer.questionId, completionHash);
+          await input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, offer.questionId, completionHash);
           return { ...receipt, completionHash, providerTelemetryHash };
         } catch (error) {
           // Preserve the encrypted completed result. Never repeat the provider turn

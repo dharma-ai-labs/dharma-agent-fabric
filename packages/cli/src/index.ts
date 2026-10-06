@@ -233,6 +233,31 @@ async function loadVaultModule() {
   }
 }
 
+async function openBootstrapVault(options: {root: string; rawLocalDays?: number}): Promise<
+  import('@dharma-ai-labs/agent-fabric-local-vault').LocalVault
+  | import('@dharma-ai-labs/agent-fabric-local-vault').ScopedLocalVault> {
+  const scope = currentBootstrapHostScope(), snapshot = {root: options.root, rawLocalDays: options.rawLocalDays};
+  let key: Buffer | undefined;
+  let vault: import('@dharma-ai-labs/agent-fabric-local-vault').LocalVault
+    | import('@dharma-ai-labs/agent-fabric-local-vault').ScopedLocalVault | undefined;
+  try {
+    await scope?.assert();
+    const {LocalVault, loadOrCreateVaultMasterKey} = scope
+      ? await scope.step(() => loadVaultModule()) : await loadVaultModule();
+    key = await loadOrCreateVaultMasterKey(undefined, scope);
+    await scope?.assert();
+    vault = scope ? await LocalVault.open({...snapshot, masterKey: key}, scope)
+      : await LocalVault.open({...snapshot, masterKey: key});
+    await scope?.assert();
+    return vault;
+  } catch (error) {
+    if (vault) {
+      try {await vault.close();} catch {throw new Error('vault_cleanup_unconfirmed');}
+    }
+    throw error;
+  } finally {key?.fill(0);}
+}
+
 export function isDirectExecution(argvPath: string | undefined, moduleUrl: string): boolean {
   if (!argvPath) return false;
   try {
@@ -401,8 +426,8 @@ export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retentio
 export async function syncPendingRetentionCapsules(
   vault: {
     listPendingCapsuleSyncs<T>(limit?: number, offset?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
-    markCapsuleSynced(trajectoryId: string, revision: number): void;
-    discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void;
+    markCapsuleSynced(trajectoryId: string, revision: number): void | Promise<void>;
+    discardPendingCapsuleSync(trajectoryId: string, revision: number, reason?: string): void | Promise<void>;
   },
   fabric: AgentFabricClient,
   policy: OrganizationPolicy,
@@ -427,12 +452,12 @@ export async function syncPendingRetentionCapsules(
       try {
         assertCapsuleIntegrity(item.capsule);
       } catch {
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'capsule_integrity_failed');
         continue;
       }
       if (item.capsule.organizationId === fabric.config.organizationId
         && item.capsule.deviceId !== fabric.config.deviceId) {
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'device_binding_changed');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'device_binding_changed');
         if (!warnedPreviousDevice) {
           process.stderr.write('Queued trajectory capsules from a previous device were preserved locally and excluded from upload. Recapture eligible provider sessions under the current device.\n');
           warnedPreviousDevice = true;
@@ -448,7 +473,7 @@ export async function syncPendingRetentionCapsules(
         assertPolicy(policy);
         // A successfully refreshed policy is authoritative. Retire only the
         // superseded capsule so it cannot permanently block later valid work.
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'authorization_superseded');
         continue;
       }
       const oversized = Buffer.byteLength(canonicalize(item.capsule)) > policy.evidence.maximumCapsuleBytes;
@@ -459,7 +484,7 @@ export async function syncPendingRetentionCapsules(
         }), item.trajectoryId);
         if (serverHead && serverHead.revision === item.revision
           && serverHead.capsuleHash === item.capsule.capsuleHash) {
-          vault.markCapsuleSynced(item.trajectoryId, item.revision);
+          await vault.markCapsuleSynced(item.trajectoryId, item.revision);
           synced += 1;
           continue;
         }
@@ -468,7 +493,7 @@ export async function syncPendingRetentionCapsules(
           : item.revision !== 1 || item.capsule.previousRevisionHash !== null) {
           throw new Error('Rejected pending trajectory revision conflicts with the accepted server head.');
         }
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision,
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision,
           containsLocalPath ? 'local_path_disclosure_superseded' : 'capsule_size_limit_superseded');
         process.stderr.write(containsLocalPath
           ? 'An unsent trajectory capsule containing a local path was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n'
@@ -480,10 +505,10 @@ export async function syncPendingRetentionCapsules(
         await fabric.syncTrajectory(item.capsule);
       } catch (error) {
         if (!isDefinitiveSecretDisclosureRejection(error)) throw error;
-        vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'secret_disclosure_forbidden');
+        await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision, 'secret_disclosure_forbidden');
         continue;
       }
-      vault.markCapsuleSynced(item.trajectoryId, item.revision);
+      await vault.markCapsuleSynced(item.trajectoryId, item.revision);
       synced += 1;
     }
     if (matched === 0) {
@@ -3280,7 +3305,6 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     taskReceiptHash: null,
   });
   let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
   const fabric = flags.has('sync')
     ? await client() as AgentFabricClient & {
       getTrajectoryHead(body: { trajectoryId: string; workspaceId: string }): Promise<Record<string, unknown>>;
@@ -3291,9 +3315,8 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     throw new Error('The enrolled device changed during evidence capture. Retry from the current device home.');
   }
   if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -3317,7 +3340,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       if (fabric) {
         await vault.discardCapsuleRevisionsAfter(firstRevision.trajectoryId, serverHead?.revision || 0);
       }
-      const latestMetadata = vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
+      const latestMetadata = await vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
       const latestCapsule = latestMetadata
         ? await vault.getLatestCapsule<ReturnType<typeof buildTrajectoryCapsule>>(firstRevision.trajectoryId)
         : null;
@@ -3361,7 +3384,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
       }
       capsules.push(capsule);
       if (fabric) {
-        vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+        await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
         try {
           await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
           // An unknown delivery outcome retains the local advisory reservation.
@@ -3369,11 +3392,11 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
           syncResults.push(await fabric.syncTrajectory(capsule));
         } catch (error) {
           if (isDefinitiveSecretDisclosureRejection(error)) {
-            vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'secret_disclosure_forbidden');
+            await vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'secret_disclosure_forbidden');
           }
           throw error;
         }
-        vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+        await vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
       }
     }
     const output = flags.get('output');
@@ -3402,7 +3425,7 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     };
     if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     return manifest;
-  } finally { vault.close(); }
+  } finally { await vault.close(); }
 }
 
 async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
@@ -4067,8 +4090,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({ root: resolve(dharmaHome(), 'vault'), masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()) });
+  const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
   const controller = new AbortController(), stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
@@ -4121,7 +4143,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       const identity = { organizationId: config.organizationId, repositoryBindingId: scope.repositoryBindingId,
         workspaceId, endpointId: scope.endpointId, membershipId: String(remote.membershipId), deviceId: config.deviceId,
         provider: 'codex' as const };
-      vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
+      await vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...identity,
         bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
         maximumProviderCostCents: maximumTurnCostCents });
@@ -4179,7 +4201,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           if (current.evidence.automaticDisclosure?.mode === 'customer_authorized_content' && skill.activeBundleHash) {
             try {
               taskStateFailure = 'public_context_unavailable';
-              const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+              const binding = await vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
               if (!binding) throw new Error('named_session_binding_unavailable');
               const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
               taskStateFailure = 'runtime_version_unavailable';
@@ -4226,7 +4248,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           || current.evidence.automaticDisclosure.consentReceiptId !== taskState.consentReceiptId) {
           throw new Error('named_session_repository_state_consent_changed');
         }
-        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        const binding = await vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
         if (!binding) throw new Error('named_session_binding_unavailable');
         const receipt = await retainNamedSessionRepositoryState({ vault, binding, capture, workId: taskState.workId,
           before: taskState.before, after: await taskSnapshot(), activeBundleId: taskState.bundleId, activeBundleHash: taskState.bundleHash,
@@ -4242,7 +4264,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       },
       queueEvidence: async capture => {
         const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
-        const binding = vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
+        const binding = await vault.getProviderSessionBinding(registration!.bindingId, registration!.identity);
         if (!binding) throw new Error('named_session_binding_unavailable');
         // The existing relay rechecks current authority, disclosure limits and device binding before upload.
         return queueNamedSessionEvidence({ vault, capture, binding, policy: current });
@@ -4254,7 +4276,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) });
   } finally {
     try { if (transport) await transport.close(); }
-    finally { vault.close(); await releaseLock(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
+    finally {
+      try {await vault.close();}
+      finally {await releaseLock(); process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);}
+    }
   }
 }
 
@@ -5036,10 +5061,8 @@ async function evidenceSync(flags: Map<string, string | boolean>): Promise<Outpu
   assertCapsuleIntegrity(capsule);
   const trajectoryId = String(capsule.trajectoryId || '');
   const revision = Number(capsule.revision);
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
   });
   try {
     const storedCapsule = await vault.getCapsule<Record<string, unknown>>(trajectoryId, revision);
@@ -5052,7 +5075,7 @@ async function evidenceSync(flags: Map<string, string | boolean>): Promise<Outpu
     await reserveDailyContentUpload(storedCapsule, policy);
     return fabric.syncTrajectory(storedCapsule);
   } finally {
-    vault.close();
+    await vault.close();
   }
 }
 
@@ -5129,10 +5152,8 @@ async function processEvidenceRequest(
   } finally {
     await requestHandle?.close().catch(() => undefined);
   }
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -5227,7 +5248,7 @@ async function processEvidenceRequest(
     const receipt = accepted.receipt && typeof accepted.receipt === 'object' ? accepted.receipt as Record<string, unknown> : {};
     const receiptHash = typeof receipt.hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(receipt.hash)
       ? receipt.hash : response.responseHash;
-    vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
+    await vault.recordDisclosure(unsignedResponse.responseId, receiptHash, bytesPrepared);
     await writeJsonAtomic(requestReceipt, {
       schema: 'dharma.evidence-request-receipt/v1',
       requestId: request.requestId,
@@ -5241,7 +5262,7 @@ async function processEvidenceRequest(
       ok: true, requestId: request.requestId, responseId: unsignedResponse.responseId,
       approved: approved.length, excluded: excluded.length, bytesPrepared, receipt,
     };
-  } finally { vault.close(); }
+  } finally { await vault.close(); }
 }
 
 async function runOneEvidenceRequest(flags: Map<string, string | boolean>): Promise<Output> {
@@ -5374,14 +5395,12 @@ async function syncSignedTaskTrajectory(input: {
   );
   if (!validation.ok) throw new Error(`Signed task capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
   assertCapsuleAuthorizedByCurrentPolicy(capsule as unknown as Record<string, unknown>, input.policy);
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(input.policy),
   });
   try {
-    const existing = vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+    const existing = await vault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
     if (!existing) {
       await vault.commitCapture({
         raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
@@ -5397,13 +5416,13 @@ async function syncSignedTaskTrajectory(input: {
     } else if (existing.capsuleHash !== capsule.capsuleHash) {
       throw new Error('Signed task evidence already exists with different immutable content.');
     }
-    vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+    await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
     await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, input.policy);
     const synced = await input.fabric.syncTrajectory(capsule);
-    vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+    await vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
     return synced;
   } finally {
-    vault.close();
+    await vault.close();
   }
 }
 
@@ -5488,10 +5507,8 @@ async function stageSignedTaskTrajectoryRecovery(
   policy: OrganizationPolicy,
   prepared: ReturnType<typeof prepareSignedTaskTrajectory>,
 ): Promise<void> {
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
   try {
@@ -5506,7 +5523,7 @@ async function stageSignedTaskTrajectoryRecovery(
     };
     await vault.stageTaskCompletionRecovery(taskId, Buffer.from(JSON.stringify(recovery)));
   } finally {
-    vault.close();
+    await vault.close();
   }
 }
 
@@ -5519,17 +5536,15 @@ async function finalizeRecoveredSignedTaskTrajectories(
     .filter((item) => !onlyTaskId || item.taskId === onlyTaskId);
   const finalized: Array<{ taskId: string; trajectory: Record<string, unknown> }> = [];
   for (const completion of completions) {
-    const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-    const vault = await LocalVault.open({
+    const vault = await openBootstrapVault({
       root: resolve(dharmaHome(), 'vault'),
-      masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
       rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     let recovery: SignedTaskTrajectoryRecovery | null;
     try {
       recovery = await vault.getTaskCompletionRecovery<SignedTaskTrajectoryRecovery>(completion.taskId);
     } finally {
-      vault.close();
+      await vault.close();
     }
     if (!recovery || recovery.schema !== 'dharma.signed-task-trajectory-recovery/v1'
       || recovery.taskId !== completion.taskId) {
@@ -5563,13 +5578,12 @@ async function finalizeRecoveredSignedTaskTrajectories(
     };
     assertCapsuleIntegrity(capsule as unknown as Record<string, unknown>);
     if (recoveredTaskPolicyWasSuperseded(capsule, recoveryPolicy)) {
-      const supersededVault = await LocalVault.open({
+      const supersededVault = await openBootstrapVault({
         root: resolve(dharmaHome(), 'vault'),
-        masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
         rawLocalDays: rawLocalRetentionDays(vaultPolicy),
       });
       try {
-        const existing = supersededVault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
+        const existing = await supersededVault.getCapsuleMetadata(capsule.trajectoryId, capsule.revision);
         if (!existing) {
           await supersededVault.commitCapture({
             raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: recovery.prepared.rawContentId },
@@ -5589,18 +5603,17 @@ async function finalizeRecoveredSignedTaskTrajectories(
         } else if (existing.capsuleHash !== capsule.capsuleHash) {
           throw new Error('Recovered task evidence already exists with different immutable content.');
         }
-        supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
+        await supersededVault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'policy_revision_superseded');
       } finally {
-        supersededVault.close();
+        await supersededVault.close();
       }
       await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
-      const acknowledgedVault = await LocalVault.open({
+      const acknowledgedVault = await openBootstrapVault({
         root: resolve(dharmaHome(), 'vault'),
-        masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
         rawLocalDays: rawLocalRetentionDays(vaultPolicy),
       });
       try { await acknowledgedVault.clearTaskCompletionRecovery(completion.taskId); }
-      finally { acknowledgedVault.close(); }
+      finally { await acknowledgedVault.close(); }
       finalized.push({
         taskId: completion.taskId,
         trajectory: {
@@ -5623,13 +5636,12 @@ async function finalizeRecoveredSignedTaskTrajectories(
       },
     });
     await fabric.acknowledgeRecoveredTaskCompletion(completion.taskId, completion.receiptHash);
-    const cleanupVault = await LocalVault.open({
+    const cleanupVault = await openBootstrapVault({
       root: resolve(dharmaHome(), 'vault'),
-      masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
       rawLocalDays: rawLocalRetentionDays(vaultPolicy),
     });
     try { await cleanupVault.clearTaskCompletionRecovery(completion.taskId); }
-    finally { cleanupVault.close(); }
+    finally { await cleanupVault.close(); }
     finalized.push({ taskId: completion.taskId, trajectory });
   }
   return finalized;
@@ -7141,13 +7153,11 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let sourceScanFlight: Promise<void> | null = null;
   let sourceScanReady: { cycle: Awaited<ReturnType<typeof scanRepositorySourceChanges>> }
     | { state: 'awaiting_signed_baseline' } | { error: unknown } | null = null;
-  const { LocalVault, loadOrCreateVaultMasterKey } = await loadVaultModule();
-  const vault = await LocalVault.open({
+  const vault = await openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
-    masterKey: await loadOrCreateVaultMasterKey(undefined, currentBootstrapHostScope()),
     rawLocalDays: rawLocalRetentionDays(policy),
   });
-  if (signal.aborted) vault.close();
+  if (signal.aborted) await vault.close();
   signal.throwIfAborted();
   signal.addEventListener('abort', stop, { once: true });
   if (signal.aborted) stop();
@@ -7437,7 +7447,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     if (sourceScanFlight) await sourceScanFlight;
     await consumeSourceScan();
     await skillPreparationPump.stop();
-    vault.close();
+    await vault.close();
     signal.removeEventListener('abort', stop);
   }
   return {

@@ -1,10 +1,10 @@
 import { inspectSessionQuestionForBinding, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
-import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
+import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { CodexSessionAnswerTooLargeError, runCodexBridgeQuestion, runCodexLocalWork, type CodexSessionBudget, type CodexToolHandler, type CodexTurnEvidenceSink } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 
 interface CodexBoundSessionInput {
-  vault: LocalVault;
+  vault: LocalVault | ScopedLocalVault;
   bindingId: string;
   identity: LocalProviderSessionIdentity;
   // The factory must close its child process before rejecting initialization.
@@ -17,13 +17,13 @@ interface CodexBoundSessionInput {
 }
 
 export async function openCodexBoundSession(input: CodexBoundSessionInput) {
-  const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+  const binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
   if (!binding || binding.provider !== 'codex' || binding.owner !== 'dharma_bridge') {
     throw new Error('codex_session_binding_unavailable');
   }
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
-  const currentBinding = () => {
-    const current = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+  const currentBinding = async () => {
+    const current = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
     if (!current) throw new Error('codex_session_lease_unavailable');
     if (current.sessionId !== binding.sessionId || current.workspaceRoot !== binding.workspaceRoot
       || current.owner !== binding.owner || current.maximumProviderCostCents !== binding.maximumProviderCostCents) {
@@ -31,7 +31,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
     }
     return { ...current, threadId: current.sessionId };
   };
-  const lease = input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
+  const lease = await input.vault.tryAcquireProviderSessionLease(input.bindingId, input.identity);
   if (!lease) throw new Error('codex_session_lease_unavailable');
   const heldLease = lease;
   let transport: CodexStdioTransport;
@@ -65,7 +65,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
       if (running) throw new Error('codex_session_busy');
       running = true;
       try {
-        const result = await runCodexLocalWork({ ...request, transport, binding: currentBinding(),
+        const result = await runCodexLocalWork({ ...request, transport, binding: await currentBinding(),
           exclusiveLease: heldLease, budget: input.budget, writeRoots: input.localWriteRoots ?? [],
           toolHandler: input.localToolHandler, additionalFilesystemRules: input.additionalFilesystemRules });
         if (closing) throw new Error('codex_session_closed');
@@ -80,13 +80,15 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
     async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');
-      let codexBinding: ReturnType<typeof currentBinding>;
-      try { codexBinding = currentBinding(); }
-      catch (error) { try { await close(); } catch { /* Retain an unconfirmed owner fence. */ } throw error; }
-      const inspected = inspectSessionQuestionForBinding(request.question, codexBinding,
-        input.verifier, request.now ?? new Date());
-      if (!inspected.ok) throw new Error(inspected.reason);
       running = true;
+      let codexBinding: Awaited<ReturnType<typeof currentBinding>>;
+      try {
+        try { codexBinding = await currentBinding(); }
+        catch (error) { try { await close(); } catch { /* Retain an unconfirmed owner fence. */ } throw error; }
+        const inspected = inspectSessionQuestionForBinding(request.question, codexBinding,
+          input.verifier, request.now ?? new Date());
+        if (!inspected.ok) throw new Error(inspected.reason);
+      } catch (error) {running = false; throw error;}
       try {
         const result = await runCodexBridgeQuestion({
           transport, binding: codexBinding, question: request.question,
@@ -115,7 +117,7 @@ export async function runCodexBoundSessionQuestion(input: CodexBoundSessionInput
   now?: Date;
   timeoutMs?: number;
 }) {
-  const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+  const binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
   if (!binding || binding.provider !== 'codex' || binding.owner !== 'dharma_bridge') {
     throw new Error('codex_session_binding_unavailable');
   }

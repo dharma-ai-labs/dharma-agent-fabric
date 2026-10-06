@@ -1,4 +1,4 @@
-import type { LocalVault, LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
+import type { LocalVault, ScopedLocalVault, LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { serializeRepositoryPackageSnapshot, type RepositoryPackageSnapshot } from './repositoryPackage.js';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
@@ -30,7 +30,7 @@ export type NamedSessionRepositoryStateDisposition = NamedSessionRepositoryState
 
 // Local inventory proves captured bytes, not an independent grade or server acceptance.
 export async function retainNamedSessionRepositoryState(input: {
-  vault: LocalVault;
+  vault: LocalVault | ScopedLocalVault;
   binding: LocalProviderSessionBinding;
   workId: string;
   capture: CodexLocalWorkCapture;

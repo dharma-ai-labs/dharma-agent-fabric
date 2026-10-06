@@ -1,5 +1,5 @@
 import { createActionDecisionPublicKeyResolver, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
-import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
+import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { loadDeviceEnrollmentAnchor, recoverDeviceEnrollmentConsistency,
   type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { createSystemSecureStore } from '@dharma-ai-labs/agent-fabric-secure-store';
@@ -60,13 +60,13 @@ export function createNamedSessionTrust(input: {
 }
 
 export async function renewNamedSessionLifetime(input: {
-  vault: LocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
+  vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   trust: ReturnType<typeof createNamedSessionTrust>;
   authorize(): Promise<boolean>;
   now?: () => Date;
 }) {
   await input.trust.refresh();
-  const binding = input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+  const binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
   if (!binding || binding.owner !== 'dharma_bridge') throw new Error('named_session_binding_unavailable');
   const now = (input.now ?? (() => new Date()))();
   if (Date.parse(binding.expiresAt) - now.getTime() >= 86400000) return binding;

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createConnection, createServer, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
-import type { LocalProviderSessionIdentity, LocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
+import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { validateContract, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexInboxSession } from './codexInboxSession.js';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -99,7 +99,7 @@ export async function namedSessionRequest(home: string, name: string, request: R
 }
 
 export async function runNamedSessionService(input: {
-  home: string; registration: NamedSessionRegistration; vault: LocalVault;
+  home: string; registration: NamedSessionRegistration; vault: LocalVault | ScopedLocalVault;
   openTransport: Parameters<typeof openCodexInboxSession>[0]['openTransport'];
   channelTransport: Parameters<typeof openCodexInboxSession>[0]['channelTransport'];
   verifier: SessionQuestionVerifier;
@@ -117,7 +117,7 @@ export async function runNamedSessionService(input: {
   const { NamedSessionBudget } = await import('./namedSessionBudget.js');
   const registration = input.registration, paths = namedSessionPaths(input.home, registration.name);
   if (!registration.enabled) throw new Error('named_session_disabled');
-  const binding = input.vault.getProviderSessionBinding(registration.bindingId, registration.identity);
+  const binding = await input.vault.getProviderSessionBinding(registration.bindingId, registration.identity);
   if (!binding) throw new Error('named_session_binding_unavailable');
   const budget = new NamedSessionBudget(paths.budget, createHash('sha256').update(JSON.stringify(registration.identity)).digest('hex'),
     registration.maximumCostCents);
