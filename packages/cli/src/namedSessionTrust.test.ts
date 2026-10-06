@@ -8,10 +8,33 @@ import { signCanonicalObject, type TrustedServerSigningKeyset } from '@dharma-ai
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { installTrustedServerSigningKeyset, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
-import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
+import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 
 const uuid = (n: number) => `40000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+test('restart ownership accepts expired presence only for exact same-binding CAS reconnect', () => {
+  const now = new Date('2026-10-06T13:04:08.000Z');
+  const identity = { organizationId: 'org_test', workspaceId: uuid(1), endpointId: uuid(2),
+    repositoryBindingId: uuid(3), membershipId: uuid(4), deviceId: uuid(5), provider: 'codex' as const };
+  const {organizationId, ...scope} = identity;
+  const receipt = {ok: true, organizationId, correlationId: uuid(90),
+    registration: {...scope, bindingId: uuid(6), mode: 'bridge_owned',
+      revision: 118, state: 'attached', leaseUntil: '2026-10-06T12:58:00.000Z', replay: false}};
+  assert.equal(isNamedSessionOwnerReceipt(receipt, uuid(6), identity, now), false);
+  assert.equal(isNamedSessionReconnectReceipt(receipt, uuid(6), identity, now), true);
+  for (const change of [{state: 'detached'}, {membershipId: uuid(99)}, {deviceId: uuid(99)},
+    {repositoryBindingId: uuid(99)}, {workspaceId: uuid(99)}, {endpointId: uuid(99)},
+    {bindingId: uuid(99)}, {provider: 'other'}, {mode: 'cooperative'}, {replay: true},
+    {revision: 0}, {revision: 2147483647}, {leaseUntil: 'invalid'},
+    {leaseUntil: new Date(now.getTime()+120001).toISOString()}, {extra: true}]) {
+    assert.equal(isNamedSessionReconnectReceipt({...receipt,registration:{...receipt.registration,...change}},uuid(6),identity,now),false);
+  }
+  assert.equal(isNamedSessionReconnectReceipt({...receipt,organizationId:'org_foreign'},uuid(6),identity,now),false);
+  assert.equal(isNamedSessionReconnectReceipt({...receipt,correlationId:'invalid'},uuid(6),identity,now),false);
+  assert.equal(isNamedSessionReconnectReceipt({ok:true},uuid(6),identity,now),false);
+  assert.equal(isNamedSessionReconnectReceipt(receipt,uuid(6),identity,new Date('invalid')),false);
+});
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'fabric-session-trust-'));
   let now = new Date();

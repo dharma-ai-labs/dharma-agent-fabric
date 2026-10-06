@@ -4,8 +4,20 @@ import { loadDeviceEnrollmentAnchor, recoverDeviceEnrollmentConsistency,
   type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { createSystemSecureStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
+export function isNamedSessionReconnectReceipt(response: Record<string, unknown>, bindingId: string,
+  identity: LocalProviderSessionIdentity, now = new Date()): boolean {
+  // Expired presence is reconnectable ownership, never permission to execute.
+  // The retained channel must still attach through the exact server revision CAS.
+  return isNamedSessionRegistrationReceipt(response, bindingId, identity, now, false);
+}
+
 export function isNamedSessionOwnerReceipt(response: Record<string, unknown>, bindingId: string,
   identity: LocalProviderSessionIdentity, now = new Date()): boolean {
+  return isNamedSessionRegistrationReceipt(response, bindingId, identity, now, true);
+}
+
+function isNamedSessionRegistrationReceipt(response: Record<string, unknown>, bindingId: string,
+  identity: LocalProviderSessionIdentity, now: Date, requireLivePresence: boolean): boolean {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const value = response.registration as Record<string, unknown> | undefined;
   const fields = ['bindingId', 'workspaceId', 'endpointId', 'repositoryBindingId', 'membershipId', 'deviceId',
@@ -16,8 +28,9 @@ export function isNamedSessionOwnerReceipt(response: Record<string, unknown>, bi
     && Boolean(value) && Object.keys(value!).sort().join(',') === fields.sort().join(',')
     && value!.bindingId === bindingId && value!.mode === 'bridge_owned' && value!.state === 'attached'
     && value!.replay === false && Number.isInteger(value!.revision) && Number(value!.revision) >= 1
-    && Number(value!.revision) <= 2147483647 && typeof value!.leaseUntil === 'string' && Number.isFinite(Date.parse(value!.leaseUntil))
-    && Number.isFinite(now.getTime()) && Date.parse(value!.leaseUntil) > now.getTime()
+    && Number(value!.revision) <= (requireLivePresence ? 2147483647 : 2147483646)
+    && typeof value!.leaseUntil === 'string' && Number.isFinite(Date.parse(value!.leaseUntil))
+    && Number.isFinite(now.getTime()) && (!requireLivePresence || Date.parse(value!.leaseUntil) > now.getTime())
     && Date.parse(value!.leaseUntil) <= now.getTime() + 120000
     && Object.entries(identity).filter(([key]) => key !== 'organizationId').every(([key, expected]) => value![key] === expected);
 }

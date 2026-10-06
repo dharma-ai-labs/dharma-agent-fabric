@@ -99,7 +99,7 @@ import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
-import { createNamedSessionTrust, isNamedSessionOwnerReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
+import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
 import { startNamedCodexThread } from './namedCodexThread.js';
 import {observeNamedCodexSkill, parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import { namedCodexEnvironment } from './namedCodexEnvironment.js';
@@ -125,7 +125,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.156';
+const VERSION = '0.2.157';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4775,7 +4775,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         workspaceId, endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
         bindingId: registration!.bindingId, expectedRevision: 0, leaseSeconds: 60,
       }));
-      if (!isNamedSessionOwnerReceipt(response, registration.bindingId, registration.identity)) {
+      if (!isNamedSessionReconnectReceipt(response, registration.bindingId, registration.identity)) {
         throw new Error('named_session_registration_invalid');
       }
       ownerReceipt = response;
@@ -4808,7 +4808,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const filesystem = await startupStep(() => namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots }));
     await startupStep(async () => {
     const expectedOwner = registration ?? pending!;
-    if (!isNamedSessionOwnerReceipt(ownerReceipt, expectedOwner.bindingId, expectedOwner.identity)) {
+    const ownerConfirmed = registration
+      ? isNamedSessionReconnectReceipt(ownerReceipt, expectedOwner.bindingId, expectedOwner.identity)
+      : isNamedSessionOwnerReceipt(ownerReceipt, expectedOwner.bindingId, expectedOwner.identity);
+    if (!ownerConfirmed) {
       throw new Error('named_session_registration_invalid');
     }
     transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
