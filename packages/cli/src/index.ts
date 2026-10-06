@@ -2478,10 +2478,16 @@ export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): P
 
 /** Native-owner continuation: no caller-selected flags or replacement authority. */
 export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope): Promise<Output> {
-  try {return await runCodexBootstrapHostScope(scope, prepared => bootstrap(prepared.flags, prepared.scope));}
+  try {return await runCodexBootstrapHostScope(scope, prepared => run(['bootstrap',
+    ...[...prepared.flags].flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)]),
+  ]));}
   catch (error) {
+    if (error instanceof Error && error.message === 'setup_session_sender_unavailable') {
+      return {ok: false, stage: 'host_setup_unavailable',
+        code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};
+    }
     const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable',
-      'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch']);
+      'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch', 'codex_setup_host_command_mismatch']);
     let code = 'codex_setup_host_operation_failed';
     try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
     throw new Error(code);
@@ -8049,6 +8055,19 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
 export async function run(argv: string[]): Promise<Output> {
   const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
+  const setupScope = currentBootstrapHostScope();
+  if (setupScope) {
+    // An admitted native callback keeps its original authority through the
+    // official dispatcher. Closed descendants never use the legacy route.
+    const prepared = await inspectCodexBootstrapHostPreparation(setupScope);
+    if (command !== 'bootstrap' || positional.length !== 1 || flags.size !== prepared.flags.size
+      || [...repeated.values()].some(values => values.length !== 1)
+      || [...prepared.flags].some(([key, value]) => flags.get(key) !== value)) {
+      throw new Error('codex_setup_host_command_mismatch');
+    }
+    if (!prepared.flags.has('dry-run')) await originalCodexSetupSessionSender(setupScope);
+    return setupScope.step(() => bootstrap(flags, setupScope));
+  }
   if (command === 'relay' && subcommand === 'container-entrypoint') {
     if (positional.length === 2 && flags.size === 1 && flags.get('dry-run') === true) {
       return { ok: true, stage: 'container_entrypoint_plan', started: false,

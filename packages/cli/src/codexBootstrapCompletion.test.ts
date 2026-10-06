@@ -12,7 +12,8 @@ import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness}
   from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
-import {assertBootstrapHostSource, currentBootstrapHostScope, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
+import {assertBootstrapHostSource, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation,
+  prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {assertCodexSetupExecutionLease, createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 import {isNamedSessionOwnerReceipt} from './namedSessionTrust.js';
@@ -21,7 +22,7 @@ import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
 import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
-import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract} from './index.js';
+import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, parseCliOptions} from './index.js';
 import {originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
@@ -382,6 +383,10 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
         return effect('named', {...f.native, state: 'running'});
       },
     }) as (flags: Map<string, string | boolean>, scope: typeof f.prepared.scope) => Promise<unknown>;
+    const run = await declaration('run', {parseCliOptions, currentBootstrapHostScope,
+      inspectCodexBootstrapHostPreparation, originalCodexSetupSessionSender, bootstrap}) as (argv: string[]) => Promise<unknown>;
+    const continueFromScope = await declaration('bootstrapFromCodexSetupScope', {runCodexBootstrapHostScope, run}) as
+      (scope: typeof f.prepared.scope) => Promise<unknown>;
     const vault = {...f.vault, ...f.providerVault,
       readCodexSetupSession: async (operation: string, digest: string) => {
         assert.equal(operation, f.prepared.intent.operationId); assert.equal(digest, completionDigest);
@@ -391,8 +396,7 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
     const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
       runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
       observeCodexBootstrapRuntime: f.observe,
-      bootstrapFromCodexSetupScope: (scope: typeof f.prepared.scope) =>
-        runCodexBootstrapHostScope(scope, prepared => bootstrap(prepared.flags, scope)),
+      bootstrapFromCodexSetupScope: continueFromScope,
     }) as (scope: typeof f.prepared.scope, suppliedVault: typeof vault) => Promise<{
       execute: (lease: {leaseId: string; intentDigest: string}) => Promise<unknown>;
       verify: ReturnType<typeof createCodexSetupReadinessOwner>['verify'];
