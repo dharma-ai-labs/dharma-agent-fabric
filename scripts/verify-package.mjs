@@ -63,6 +63,22 @@ for (const packageName of [
 }
 
 const cli = workspaceManifests.get('@dharma-ai-labs/agent-fabric');
+// Compilation can resolve workspace links even when the published CLI would
+// install an older runtime. Check every direct first-party runtime pin.
+const cliRuntimePackages = ['contracts', 'evidence-reduction', 'local-vault', 'policy',
+  'provider-adapters', 'relay-client', 'sdk', 'secure-store', 'skill-manager', 'task-runner'];
+for (const suffix of cliRuntimePackages) {
+  const name = `@dharma-ai-labs/agent-fabric-${suffix}`;
+  const runtime = workspaceManifests.get(name);
+  if (!runtime || cli?.dependencies?.[name] !== runtime.version) {
+    throw new Error(`cli_runtime_package_pin_invalid:${suffix}`);
+  }
+}
+for (const name of Object.keys(cli?.dependencies ?? {})) {
+  if (name.startsWith('@dharma-ai-labs/') && !workspaceManifests.has(name)) {
+    throw new Error('cli_runtime_package_unknown');
+  }
+}
 const localVault = workspaceManifests.get('@dharma-ai-labs/agent-fabric-local-vault');
 if (cli?.dependencies?.[localVault?.name] !== localVault?.version
   || localVault?.exports?.['./setup-readiness'] !== './dist/setupReadiness.js') {
