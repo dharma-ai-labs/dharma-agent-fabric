@@ -198,7 +198,8 @@ test('registry recovery command plans before applying one current-device anchor 
 test('bootstrap preserves only a verified current-device startup anchor before enabling another repository', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
   f.dependencies.relayAutostartStatus = async () => ({ state: 'enabled', backend: 'systemd-user' });
-  f.dependencies.inspectOwnedRelayAutostart = async () => ({ workspace: '/first', policy: resolve('/first', '.dharma', 'approved-policy.json') });
+  f.dependencies.inspectOwnedRelayAutostart = async () => ({ workspace: '/first',
+    policy: resolve('/first', '.dharma', 'approved-policy.json'), version: '0.2.102' });
   let reads = 0;
   f.dependencies.readDeviceConfig = async () => ++reads === 1 ? null
     : { organizationId: 'org_fixture', deviceId: 'fixture_device' };

@@ -3174,9 +3174,9 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       repository: onboarded,
     };
   }
-  const launcher = await step(() => installStableRepositoryLauncher(workspace));
-  const autostart = flags.has('no-relay-daemon')
-    ? { state: 'disabled' as const, backend: null }
+  const {launcher, autostart} = flags.has('no-relay-daemon')
+    ? {launcher: await step(() => installStableRepositoryLauncher(workspace)),
+      autostart: {state: 'disabled' as const, backend: null}}
     : await step(() => withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
         + (joinedBindingId ? ` --join-repository-binding-id ${joinedBindingId} --join-source-fingerprint ${joinedFingerprint}` : ''),
@@ -3202,11 +3202,18 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
               && row.routeHash === selected.routeHash && row.repositoryRemoteHash === selected.repositoryRemoteHash);
             if (canonical.length !== 1) throw new Error('relay_workspace_conflict: startup policy route changed.');
             await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? ''));
+            if (anchor.version !== VERSION) {
+              throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
+            }
           }
         }
-        return step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
+        // Keep previous launcher bytes intact until startup ownership and version
+        // admit this operation; the supported upgrade relies on those exact bytes.
+        const launcher = await step(() => installStableRepositoryLauncher(workspace));
+        const autostart = await step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
           version: VERSION, preserveStandardAnchor: true }));
+        return {launcher, autostart};
       })));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
