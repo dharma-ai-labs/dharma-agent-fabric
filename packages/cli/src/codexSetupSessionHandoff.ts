@@ -7,6 +7,16 @@ import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult,
 import {currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {assertCodexSetupExecutionLease, type CodexSetupExecutionLease, type CodexSetupIntent} from './codexSetupAdmission.js';
 import {currentNamedSessionChildOwner, type NamedSessionChildOwner} from './namedSessionChildOwner.js';
+import type {OrganizationPolicy} from '@dharma-ai-labs/agent-fabric-policy';
+
+export function codexSetupSessionPolicyHash(policy: OrganizationPolicy): string {
+  if (!policy.serverAuthorization) throw new Error('setup_session_scope_changed');
+  // Bind all permissions and authority identities, not renewable envelope bytes.
+  // Callers must still verify the current signature, expiry and replay anchor.
+  const authorization = Object.fromEntries(Object.entries(policy.serverAuthorization)
+    .filter(([key]) => !['issuedAt', 'expiresAt', 'signature'].includes(key)));
+  return sha256(canonicalize({...policy, serverAuthorization: authorization}));
+}
 
 type SenderVault = Pick<ScopedLocalVault, 'stageCodexSetupSession' | 'readCodexSetupSession'>;
 type ReceiverVault = Pick<LocalVault, 'listPendingCodexSetupSessions' | 'readCodexSetupSession' | 'acceptCodexSetupSession'>;

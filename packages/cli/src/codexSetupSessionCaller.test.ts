@@ -9,7 +9,7 @@ import {compileFunction} from 'node:vm';
 import ts from 'typescript';
 import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
 import {LocalVault, type LocalCodexSetupSessionRequest} from '@dharma-ai-labs/agent-fabric-local-vault';
-import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
+import {awaitCodexSetupSession, codexSetupSessionPolicyHash, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
   originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {assertBootstrapHostSource, inspectCodexBootstrapHostPreparation, prepareCodexBootstrapHost,
   runCodexBootstrapHostScope} from './bootstrapHostScope.js';
@@ -49,11 +49,12 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, managedCleanup
     setupClaimReference: request.setupReference, setupClaimRepositoryFingerprint: request.repositoryFingerprint};
   const row = {path: root, workspaceId: request.workspaceId, organizationId: request.organizationId,
     repositoryRemoteHash: request.repositoryFingerprint, status: 'active'};
-  const policy = {revision: request.policyRevision, serverAuthorization: {expiresAt: request.expiresAt}};
-  request.policyHash = sha256(canonicalize(policy));
+  const policy = {revision: request.policyRevision, serverAuthorization: {
+    issuedAt: request.issuedAt, expiresAt: request.expiresAt, signature: 'synthetic-envelope'}};
+  request.policyHash = codexSetupSessionPolicyHash(policy as Parameters<typeof codexSetupSessionPolicyHash>[0]);
   const sender = {uid: 1000, startTicks: '10'};
   const dependencies: Record<string, unknown> = {process: {platform: 'linux', getuid: () => 1000},
-    Date, resolve, canonicalize, sha256, currentNamedSessionChildOwner,
+    Date, resolve, canonicalize, sha256, codexSetupSessionPolicyHash, currentNamedSessionChildOwner,
     readDeviceConfig: async () => config, normalizeHqUrl: (value: string) => value,
     readContainerProcessIdentity: async (pid: number) => {assert.equal(pid, process.pid); return sender;},
     registry: async () => [row], repositoryRoleScope: () => ({repositoryBindingId: request.repositoryBindingId, endpointId: request.endpointId}),
@@ -74,6 +75,28 @@ test('actual standing receiver qualifies the bound source and process context on
   assert.equal(await qualify(f.request), false);
   await createNamedSessionChildOwner(new AbortController().signal).run(async () => {
     assert.equal(await qualify(f.request), true);
+  });
+});
+
+test('actual standing receiver admits only a freshly verified renewal with unchanged permissions', async t => {
+  const f = await fixture(t); let signatures = 0, replayChecks = 0;
+  f.dependencies.verifyServerAuthorizedPolicy = () => {signatures++;};
+  f.dependencies.assertWorkspaceAuthorizationCurrent = async () => {replayChecks++;};
+  const qualify = await f.qualify();
+  await createNamedSessionChildOwner(new AbortController().signal).run(async () => {
+    assert.equal(await qualify(f.request), true);
+    f.policy.serverAuthorization.issuedAt = new Date().toISOString();
+    f.policy.serverAuthorization.expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    f.policy.serverAuthorization.signature = 'synthetic-renewed-envelope';
+    assert.equal(await qualify(f.request), true);
+    assert.equal(signatures, 2); assert.equal(replayChecks, 2);
+    f.dependencies.assertWorkspaceAuthorizationCurrent = async () => {throw new Error('synthetic-revoked');};
+  });
+  // A new declaration reads the changed synthetic dependency, as production
+  // performs fresh authorization rather than trusting the stable digest alone.
+  const revoked = await f.qualify();
+  await createNamedSessionChildOwner(new AbortController().signal).run(async () => {
+    assert.equal(await revoked(f.request), false);
   });
 });
 
