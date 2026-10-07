@@ -9,7 +9,7 @@ import ts from 'typescript';
 
 // Execute the actual post-enrollment caller with synthetic lifecycle boundaries.
 // No fixture starts a daemon, accesses credentials, or contacts the platform.
-async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean} = {}) {
+async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean; previousVersion?: string} = {}) {
   const baseline = process.env.DHARMA_BOOTSTRAP_ORDER_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('bootstrap_order_baseline_invalid');
   const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`], {
@@ -86,9 +86,17 @@ async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: b
     withRelayStartupMutation: async (run: () => Promise<unknown>) => run(), dharmaHome: () => '/synthetic/device',
     relayAutostartStatus: async () => {
       if (options.conflict) throw new Error('autostart_conflict: foreign registration');
+      if (options.previousVersion) return {state: 'enabled', backend: 'systemd-user', version: options.previousVersion};
       return {state: 'disabled', backend: null};
     },
+    inspectOwnedRelayAutostart: async () => ({workspace, policy: policyPath, version: options.previousVersion}),
+    readDeviceConfig: async () => ({organizationId: 'org_demo'}),
+    registry: async () => [{workspaceId: 'workspace', organizationId: 'org_demo', path: workspace}],
+    selectDeviceWorkspace: () => ({workspaceId: 'workspace', organizationId: 'org_demo', path: workspace}),
+    loadOrganizationPolicy: async () => ({serverAuthorization: {workspaceId: 'workspace'}}),
+    loadVerifiedWorkspacePolicy: async () => ({}),
     enableRelayAutostart: async () => {
+      if (options.previousVersion) throw new Error('relay_runtime_upgrade_required');
       effects.push('enable'); enabled = true;
       if (options.withdraw) withdrawn = true;
       return {state: 'enabled', backend: 'systemd-user'};
@@ -127,6 +135,18 @@ test('native bootstrap preserves startup ownership conflicts without a fallback'
   const f = await fixture({conflict: true});
   await assert.rejects(f.run(), /autostart_conflict: foreign registration/);
   assert.equal(f.effects.includes('start'), false);
+});
+
+test('bootstrap rejects an older owned startup before replacing its managed launcher', async () => {
+  const f = await fixture({previousVersion: '0.2.164'});
+  await assert.rejects(f.run(), /relay_runtime_upgrade_required/);
+  assert.deepEqual(f.effects, ['onboard'], 'the supported upgrade must retain the exact previous launcher pair');
+});
+
+test('explicit no-relay bootstrap does not try to upgrade or inspect startup', async () => {
+  const f = await fixture({noRelay: true, conflict: true});
+  await f.run();
+  assert.deepEqual(f.effects, ['onboard', 'launcher']);
 });
 
 test('legacy unscoped onboarding retains its original relay-start order', async () => {
