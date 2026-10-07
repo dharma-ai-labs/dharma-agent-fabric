@@ -17,6 +17,7 @@ import {assertCodexSetupExecutionLease, createCodexSetupAdmission} from './codex
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {watchOwnedChild} from './ownedChildLifecycle.js';
 import {sendCodexSetupChildStart} from './codexSetupChildStartup.js';
+import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -228,7 +229,7 @@ test('actual accepted session caller sends public handoff IDs only to its fresh 
     required: (flags: Map<string, unknown>, name: string) => flags.get(name),
     process: {platform: 'linux', execPath: process.execPath, env: {}}, fileURLToPath: () => '/synthetic/index.js',
     verifyAgentFabricSkillInstallation: async () => ({}), repositorySharedReady: async () => true,
-    verifyNamedSessionVisibleSkill: async () => {}, setTimeout,
+    verifyNamedSessionVisibleSkill: async () => {}, setTimeout, waitForNamedSessionStartup,
     spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
       launches.push({argv, options});
       child = spawn(process.execPath, ['-e', 'process.on("message", value => process.send(value));'],

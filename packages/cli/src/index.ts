@@ -94,6 +94,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
+import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
@@ -127,7 +128,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.170';
+const VERSION = '0.2.171';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -4785,12 +4786,11 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       if (hostScope) captureBootstrapHostChild(hostScope, child);
       else {child.on('error', () => {}); child.unref();}
     });
-    for (let attempt = 0; attempt < 80; attempt++) {
-      await step(() => new Promise<void>(resolveWait => setTimeout(resolveWait, 250)));
-      await hostScope?.assert();
-      try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Await service initialization. */ }
-    }
-    throw new Error('named_session_startup_failed');
+    return waitForNamedSessionStartup({step,
+      assertActive: async () => {await hostScope?.assert();},
+      observe: () => namedSessionRequest(dharmaHome(), name, {action: 'status'}),
+      maximumWaitMs: setupSessionScope
+        ? Math.min(120_000, Date.parse(setupSessionScope.request.expiresAt) - Date.now()) : 120_000});
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
@@ -5022,7 +5022,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       },
       openTransport: async () => transport!, channelTransport,
       verifier: { resolvePublicKey: trust.resolvePublicKey, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
-      authorizeContent: createNamedPeerContentAuthorization({ scope: repositoryRoleScope(item),
+      authorizeContent: createNamedPeerContentAuthorization({ scope: repositoryRoleScope(item), diagnostics: true,
         loadCurrentPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) });
   } finally {

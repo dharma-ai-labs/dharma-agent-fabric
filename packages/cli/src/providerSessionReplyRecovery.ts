@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { sha256, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { createProviderSessionChannel } from './providerSessionChannel.js';
+import { NamedPeerContentAuthorizationError } from './namedPeerContentAuthorization.js';
 
 interface Completion {
   schema: 'dharma.provider-session-completion/v1'; organizationId: string; repositoryBindingId: string;
@@ -48,7 +49,8 @@ export async function reconcileProviderSessionReply(input: {
         : reason === 'provider_session_channel_uncertain' ? 'delivery_unconfirmed' as const : null;
     if (!reasonCode) throw error;
     return { state: 'reply_pending' as const, questionId: completion.questionId, taskId: completion.taskId,
-      completionHash: pending.completionHash, reasonCode };
+      completionHash: pending.completionHash, reasonCode,
+      ...(error instanceof NamedPeerContentAuthorizationError ? { blocker: error.blocker } : {}) };
   }
   if (observed.state === 'expired') {
     const dispositionHash = await input.vault.quarantineExpiredProviderSessionReply(input.bindingId, input.identity,

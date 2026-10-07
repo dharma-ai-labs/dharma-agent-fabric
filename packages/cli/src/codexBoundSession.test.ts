@@ -10,6 +10,7 @@ import type { CodexStdioTransport } from '@dharma-ai-labs/agent-fabric-provider-
 import { openCodexBoundSession, runCodexBoundSessionQuestion } from './codexBoundSession.js';
 import { openCodexInboxSession } from './codexInboxSession.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
+import { NamedPeerContentAuthorizationError } from './namedPeerContentAuthorization.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const ids = {
@@ -117,6 +118,34 @@ async function fixture() {
   return { vault, binding, identity, verifier, now, root, masterKey, budget: { reserve: async () => true } };
 }
 
+test('retained reply diagnostic preserves encrypted content and never admits provider work', async () => {
+  const f = await fixture();
+  const question = signedQuestion(f.binding, f.now), answer = 'Catalog generation 13.';
+  const encryptedBytes = Buffer.from(canonicalize({
+    schema: 'dharma.provider-session-completion/v1', organizationId: f.binding.organizationId,
+    repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+    deviceId: f.binding.deviceId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+    questionId: question.questionId, taskId: question.taskId, bindingId: f.binding.bindingId,
+    targetEndpointId: f.binding.endpointId, answer, answerHash: `sha256:${createHash('sha256').update(answer).digest('hex')}`,
+  }));
+  const hash = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity, question.questionId, encryptedBytes);
+  let reads = 0, replies = 0;
+  try {
+    const result = await reconcileProviderSessionReply({ ...f, bindingId: f.binding.bindingId, channel: {
+      read: async () => { reads++; return { questionId: question.questionId, taskId: question.taskId,
+        targetBindingId: f.binding.bindingId, state: 'accepted' as const, answer: null, failureCode: null,
+        replyReceiptHash: null, correlationId: ids.threadId }; },
+      reply: async () => { replies++; throw new NamedPeerContentAuthorizationError('private_local_path'); },
+    } });
+    assert.deepEqual(result, { state: 'reply_pending', questionId: question.questionId, taskId: question.taskId,
+      completionHash: hash, reasonCode: 'content_or_contract_blocked', blocker: 'private_local_path' });
+    assert.equal(reads, 1); assert.equal(replies, 1);
+    assert.equal(JSON.stringify(result).includes(answer), false);
+    assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+    assert.deepEqual(await f.vault.getBlob(hash), encryptedBytes);
+  } finally { f.vault.close(); }
+});
+
 test('unqualified native host cannot open or advertise a bridge-owned provider',
   { skip: process.platform === 'linux' }, async () => {
     const f = await fixture();
@@ -188,6 +217,42 @@ test('default inbox startup recovers the server revision with its retained local
   try {
     assert.deepEqual(actions, ['inspect', 'attach']);
     assert.equal(reserves, 0); assert.equal(remote.calls.includes('turn/start'), false);
+  } finally { await inbox.close(); f.vault.close(); }
+});
+
+test('new completed answer reports a fixed content blocker without upload or provider replay', async () => {
+  const f = await fixture(), remote = fakeTransport(f.binding), question = signedQuestion(f.binding, f.now);
+  let replies = 0, reserves = 0;
+  const transport = { async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    const envelope = { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId };
+    if (route.endsWith('provider-sessions')) return { ...envelope, registration: {
+      bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+      repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+      deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned', revision: 1, state: 'attached',
+      leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+    if (body.action === 'inbox') return { ...envelope, result: { offers: [question] } };
+    if (body.action === 'reply') replies++;
+    return { ...envelope, result: { questionId: question.questionId, taskId: question.taskId,
+      targetBindingId: f.binding.bindingId, state: 'accepted', replay: false } };
+  } };
+  const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+    channelTransport: transport, authorizeContent: async (_content, kind) => {
+      if (kind === 'answer') throw new NamedPeerContentAuthorizationError('private_local_path');
+      return true;
+    }, budget: { reserve: async () => { reserves++; return true; } }, openTransport: async () => remote.transport });
+  try {
+    const result = await inbox.runNext();
+    assert.equal(result.state, 'reply_pending');
+    assert.ok('blocker' in result && result.blocker === 'private_local_path');
+    assert.ok('reasonCode' in result && result.reasonCode === 'content_or_contract_blocked');
+    assert.ok('providerShutdownConfirmed' in result && result.providerShutdownConfirmed);
+    assert.equal(replies, 0); assert.equal(reserves, 1); assert.equal(remote.isClosed(), true);
+    assert.equal(remote.calls.filter(call => call === 'turn/start').length, 1);
+    assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+    assert.equal(JSON.stringify(result).includes('Catalog generation 13.'), false);
+    await assert.rejects(inbox.runNext(), /codex_inbox_session_unavailable/);
+    assert.equal(reserves, 1);
   } finally { await inbox.close(); f.vault.close(); }
 });
 
