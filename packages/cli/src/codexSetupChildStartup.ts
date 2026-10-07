@@ -42,9 +42,12 @@ export async function sendCodexSetupChildStart(input: {owner: NamedSessionChildO
 type IpcProcess = Pick<NodeJS.Process, 'connected' | 'channel' | 'on' | 'removeListener'>;
 const receivers = new WeakSet<object>();
 export async function receiveCodexSetupChildStart(input: {process: IpcProcess; signal: AbortSignal; waitMs?: number}) {
-  const waitMs = input.waitMs ?? 5000;
+  // Parent authorization runs after spawn and can outlast five seconds. This
+  // public IPC wait grants nothing; encrypted acceptance and current authority
+  // remain mandatory below, within the unchanged original setup lifetime.
+  const waitMs = input.waitMs ?? 30_000;
   if (!input.process.connected || !input.process.channel || receivers.has(input.process) || input.signal.aborted
-    || !Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 5000) throw new Error('setup_child_unavailable');
+    || !Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 30_000) throw new Error('setup_child_unavailable');
   receivers.add(input.process);
   return new Promise<Readonly<CodexSetupChildMessage>>((done, fail) => {
     const cleanup = () => {clearTimeout(timer); input.process.removeListener('message', message);

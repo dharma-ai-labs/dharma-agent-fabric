@@ -43,7 +43,7 @@ test('child startup verifies encrypted acceptance and original running operation
   assert.equal(effects, 1);
 });
 
-for (const change of ['absent', 'pending', 'withdrawn', 'completed-request', 'terminal-operation', 'name', 'workspace', 'policy', 'abort'] as const) {
+for (const change of ['absent', 'pending', 'withdrawn', 'completed-request', 'terminal-operation', 'name', 'workspace', 'policy', 'abort', 'expiry', 'future'] as const) {
   test(`child startup refuses ${change} without provider effects`, async t => {
     const f = await fixture(t); let effects = 0;
     if (change === 'withdrawn') f.submission.withdraw();
@@ -58,6 +58,8 @@ for (const change of ['absent', 'pending', 'withdrawn', 'completed-request', 'te
     if (change === 'workspace') f.input.workspaceId = uuid(99);
     if (change === 'policy') f.input.authorize = async () => false;
     if (change === 'abort') f.controller.abort();
+    if (change === 'expiry' || change === 'future') t.mock.timers.enable({apis: ['Date'],
+      now: Date.parse(change === 'expiry' ? f.request.expiresAt : f.request.issuedAt) + (change === 'expiry' ? 0 : -1)});
     await assert.rejects(runCodexSetupChildStartup(f.input, scope => scope.step(async () => {effects++;})), /setup_child_unavailable/);
     assert.equal(effects, 0);
   });
@@ -93,6 +95,30 @@ test('child IPC accepts one bounded message and never accepts a second receive',
   assert.deepEqual(await waiting, message);
   await assert.rejects(receiveCodexSetupChildStart({process, signal}), /setup_child_unavailable/);
   assert.equal(process.listenerCount('message'), 0); assert.equal(process.listenerCount('disconnect'), 0);
+});
+
+test('child IPC tolerates parent authorization beyond five seconds within the existing thirty-second bound', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const process = ipc(), signal = new AbortController().signal;
+  let received = false;
+  const waiting = receiveCodexSetupChildStart({process, signal}).then(value => {received = true; return value;});
+  t.mock.timers.tick(6000);
+  assert.equal(received, false);
+  assert.equal(process.listenerCount('message'), 1);
+  process.emit('message', message);
+  assert.deepEqual(await waiting, message);
+  assert.equal(process.listenerCount('message'), 0);
+});
+
+test('child IPC keeps the thirty-second ceiling and cannot wait beyond it', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const process = ipc(), signal = new AbortController().signal;
+  const waiting = receiveCodexSetupChildStart({process, signal});
+  const rejected = assert.rejects(waiting, /setup_child_unavailable/);
+  t.mock.timers.tick(30_000);
+  await rejected;
+  assert.equal(process.listenerCount('message'), 0);
+  await assert.rejects(receiveCodexSetupChildStart({process: ipc(), signal, waitMs: 30_001}), /setup_child_unavailable/);
 });
 
 for (const kind of ['disconnected', 'malformed', 'extra', 'accessor', 'timeout', 'abort', 'disconnect'] as const) {
