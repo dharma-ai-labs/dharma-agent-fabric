@@ -28,6 +28,39 @@ test('unknown secret-bearing messages and causes only produce fixed unknown clas
   assert.equal(classifyCodexSetupFailure(new Error('first_learning_pending'), 'completion').category, 'first_learning_pending');
 });
 
+test('every fixed completion runtime gate preserves its category without leaking a wrapped private cause', async () => {
+  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+  const observe = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'observeCodexBootstrapRuntime');
+  assert.ok(observe);
+  const categories = new Set<string>();
+  const visit = (node: ts.Node) => {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'Error'
+      && node.arguments?.[0] && ts.isStringLiteral(node.arguments[0])
+      && /^(?:setup_runtime_|setup_readiness_)/.test(node.arguments[0].text)) categories.add(node.arguments[0].text);
+    ts.forEachChild(node, visit);
+  };
+  visit(observe);
+  const stateReader = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'readBootstrapRuntimeJson');
+  assert.ok(stateReader); visit(stateReader);
+  for (const path of [new URL('../src/codexSetupReadiness.ts', import.meta.url),
+    new URL('../../../packages/local-vault/src/setupReadiness.ts', import.meta.url)]) {
+    visit(ts.createSourceFile(path.pathname, await readFile(path, 'utf8'), ts.ScriptTarget.Latest, true));
+  }
+  assert.ok(categories.size >= 10);
+  assert.ok(categories.has('setup_runtime_session_unconfirmed'));
+  assert.ok(categories.has('setup_runtime_startup_unconfirmed'));
+  const schema = JSON.parse(await readFile(new URL('../../../schemas/codex-setup-failure-diagnostic.schema.json', import.meta.url), 'utf8'));
+  const validate = new Ajv2020({strict: true}).compile(schema);
+  for (const category of categories) {
+    const diagnostic = classifyCodexSetupFailure(new Error('private-grant-placeholder', {cause: new Error(category)}), 'completion');
+    assert.equal(diagnostic.category, category);
+    assert.equal(validate(diagnostic), true);
+    for (const privateValue of ['private-grant-placeholder', 'cause', 'message']) assert.equal(JSON.stringify(diagnostic).includes(privateValue), false);
+    assert.equal(classifyCodexSetupFailure(new Error(category + ': private-token-placeholder'), 'completion').category, 'setup_runtime_unclassified');
+  }
+});
+
 test('diagnostics do not invoke accessors, proxies or cyclic causes', () => {
   let reads = 0;
   const accessor = Object.defineProperties({}, {message: {get() {reads++; throw new Error('private');}},

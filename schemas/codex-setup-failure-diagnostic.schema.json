@@ -4,10 +4,85 @@
   "title": "Controller-local setup failure classification; not an authority envelope",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "stage", "category"],
+  "required": [
+    "schema",
+    "stage",
+    "category"
+  ],
   "properties": {
-    "schema": {"const": "dharma.codex-setup-failure-diagnostic/v1"},
-    "stage": {"enum": ["local_skill_inventory", "first_learning_preview", "first_learning_sync", "package_snapshot", "package_publication", "role_registration", "native_skill_install", "relay_start", "autostart", "named_session", "readiness", "bootstrap", "completion"]},
-    "category": {"enum": ["setup_runtime_unclassified", "codex_setup_host_scope_unavailable", "codex_setup_host_source_mismatch", "codex_setup_host_operation_failed", "codex_setup_execution_lease_unavailable", "setup_session_sender_unavailable", "setup_session_scope_changed", "setup_session_invalid", "setup_session_start_unconfirmed", "setup_session_owner_unconfirmed", "setup_session_receiver_timeout", "setup_session_accepted_unconfirmed", "setup_session_authorization_unconfirmed", "setup_session_scope_unavailable", "setup_session_owner_unavailable", "setup_runtime_first_learning_unconfirmed", "setup_runtime_startup_changed", "setup_execution_unconfirmed", "setup_operation_conflict", "setup_operation_integrity_failed", "named_session_readiness_unavailable", "named_session_readiness_scope_mismatch", "named_session_startup_failed", "shared_repository_pending", "shared_repository_blocked", "named_session_pending", "first_learning_pending", "role_registration_pending", "synchronization_pending", "autostart_pending", "repository_source_authorization_required", "approve_device"]}
+    "schema": {
+      "const": "dharma.codex-setup-failure-diagnostic/v1"
+    },
+    "stage": {
+      "enum": [
+        "local_skill_inventory",
+        "first_learning_preview",
+        "first_learning_sync",
+        "package_snapshot",
+        "package_publication",
+        "role_registration",
+        "native_skill_install",
+        "relay_start",
+        "autostart",
+        "named_session",
+        "readiness",
+        "bootstrap",
+        "completion"
+      ]
+    },
+    "category": {
+      "enum": [
+        "setup_runtime_unclassified",
+        "codex_setup_host_scope_unavailable",
+        "codex_setup_host_source_mismatch",
+        "codex_setup_host_operation_failed",
+        "codex_setup_execution_lease_unavailable",
+        "setup_session_sender_unavailable",
+        "setup_session_scope_changed",
+        "setup_session_invalid",
+        "setup_session_start_unconfirmed",
+        "setup_session_owner_unconfirmed",
+        "setup_session_receiver_timeout",
+        "setup_session_accepted_unconfirmed",
+        "setup_session_authorization_unconfirmed",
+        "setup_session_scope_unavailable",
+        "setup_session_owner_unavailable",
+        "setup_runtime_first_learning_unconfirmed",
+        "setup_runtime_startup_changed",
+        "setup_runtime_route_unqualified",
+        "setup_runtime_contract_changed",
+        "setup_runtime_identity_unconfirmed",
+        "setup_runtime_repository_unconfirmed",
+        "setup_runtime_policy_changed",
+        "setup_runtime_package_unconfirmed",
+        "setup_runtime_role_unconfirmed",
+        "setup_runtime_session_unconfirmed",
+        "setup_runtime_startup_unconfirmed",
+        "setup_runtime_process_unconfirmed",
+        "setup_runtime_poll_unconfirmed",
+        "setup_runtime_package_changed",
+        "setup_runtime_process_changed",
+        "setup_runtime_state_unconfirmed",
+        "setup_readiness_invalid",
+        "setup_execution_unconfirmed",
+        "setup_operation_conflict",
+        "setup_operation_integrity_failed",
+        "named_session_readiness_unavailable",
+        "named_session_readiness_scope_mismatch",
+        "named_session_startup_failed",
+        "shared_repository_pending",
+        "shared_repository_blocked",
+        "named_session_pending",
+        "first_learning_pending",
+        "role_registration_pending",
+        "synchronization_pending",
+        "autostart_pending",
+        "repository_source_authorization_required",
+        "approve_device",
+        "setup_readiness_context_unconfirmed",
+        "setup_readiness_lease_invalid",
+        "setup_readiness_persistence_unconfirmed"
+      ]
+    }
   }
 }
