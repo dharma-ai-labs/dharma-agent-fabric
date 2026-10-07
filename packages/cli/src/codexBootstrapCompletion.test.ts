@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {randomBytes} from 'node:crypto';
+import {generateKeyPairSync, randomBytes} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';
 import {mkdtemp, readFile, realpath, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -8,7 +8,8 @@ import {resolve} from 'node:path';
 import {compileFunction} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
-import {canonicalize, sha256} from '@dharma-ai-labs/agent-fabric-contracts';
+import {canonicalize, sha256, signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
+import {verifyServerAuthorizedPolicy, type OrganizationPolicy} from '@dharma-ai-labs/agent-fabric-policy';
 import {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness}
   from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
@@ -23,8 +24,8 @@ import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
 import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
-import {bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, parseCliOptions} from './index.js';
-import {originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
+import {applyServerEvidencePolicy, bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, materializeWorkspacePolicy, parseCliOptions} from './index.js';
+import {codexSetupSessionPolicyHash, originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -102,7 +103,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   ]);
   const calls: string[] = [], mutations: Record<string, () => void> = {};
   const dependencies: Record<string, unknown> = {
-    resolve, Date, canonicalize, sha256, selectDeviceWorkspace, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
+    resolve, Date, canonicalize, sha256, codexSetupSessionPolicyHash, selectDeviceWorkspace, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
     isNamedSessionOwnerReceipt, repositoryRelayObservationReady, discoverRepositoryRoleMetadata,
     ENTRY_URL: 'file:///synthetic/index.js',
     fileURLToPath: (value: string | URL) => new URL(value).pathname.endsWith('/bin.js') ? resolve(root, 'bin.js') : entry,
@@ -154,6 +155,77 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     content, startup, startupState, policy, supervisor, poll, processes, dependencies, handoff,
     enableHandoff: () => {handoffEnabled = true; processes[2]!.argv.push('--setup-handoff');}};
 }
+
+async function signedReadinessFixture(f: Awaited<ReturnType<typeof fixture>>) {
+  const generated = await materializeWorkspacePolicy({workspace:f.row.path,organizationId:'org_demo',revision:'policy-v1'});
+  const keys = generateKeyPairSync('ed25519'), publicKey = keys.publicKey.export({format:'jwk'}).x!;
+  const now = Date.now();
+  const authorize = (offset: number) => {
+    const unsigned = {schema:'dharma.workspace-policy-authorization/v1',organizationId:'org_demo',workspaceId:f.row.workspaceId,
+      policy:{revision:'policy-v1',evidence:generated.policy.evidence},keyVersion:'test',
+      issuedAt:new Date(now-60_000+offset).toISOString(),expiresAt:new Date(now+300_000+offset).toISOString()};
+    return applyServerEvidencePolicy(structuredClone(generated.policy),
+      {...unsigned,signature:signCanonicalObject(unsigned,keys.privateKey)},publicKey,'org_demo',f.row.workspaceId);
+  };
+  const initial = authorize(0), renewed = authorize(1000);
+  let current = initial;
+  f.dependencies.loadVerifiedWorkspacePolicy = async () => current;
+  f.dependencies.loadDeviceEnrollmentAnchor = async () => ({devicePublicKeyEd25519:'synthetic-public-key',serverPublicKeyEd25519:publicKey});
+  f.dependencies.verifyServerAuthorizedPolicy = verifyServerAuthorizedPolicy;
+  const observe = await declaration('observeCodexBootstrapRuntime',f.dependencies) as typeof f.observe;
+  return {initial,renewed,observe,set(policy: OrganizationPolicy){current = policy;}};
+}
+
+test('actual readiness record verifies a fresh same-authority signed renewal without extending the receipt lifetime', async t => {
+  const f = await fixture(t), policies = await signedReadinessFixture(f);
+  const claim = await f.vault.claimCodexSetupOperation(id(1),hash);
+  if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
+  const owner = createCodexSetupReadinessOwner({intent:f.prepared.intent,workspace:f.row.path,scope:f.prepared.scope,vault:f.vault,
+    observe:() => policies.observe(f.prepared,f.providerVault,'no_eligible_history')});
+  const receipt = await owner.record({leaseId:claim.leaseId,intentDigest:hash});
+  policies.set(policies.renewed);
+  assert.equal(await owner.verify(receipt.readinessReceiptId,f.prepared.intent,hash),true);
+  const current = await policies.observe(f.prepared,f.providerVault,'no_eligible_history');
+  assert.equal(current.policyHash,codexSetupSessionPolicyHash(policies.initial));
+  assert.ok(Date.parse(current.expiresAt) <= Date.parse(f.prepared.intent.expiresAt));
+});
+
+test('actual startup readback allows only freshly verified same-authority envelope renewal', async t => {
+  const f = await fixture(t), policies = await signedReadinessFixture(f);
+  let reads = 0;
+  f.mutations.process = () => {if (++reads === 4) policies.set(policies.renewed);};
+  const result = await policies.observe(f.prepared,f.providerVault,'no_eligible_history');
+  assert.equal(result.policyHash,codexSetupSessionPolicyHash(policies.initial));
+  assert.equal(result.expiresAt,policies.initial.serverAuthorization!.expiresAt);
+});
+
+for (const change of ['signature','expired','workspace','permissions','revoked'] as const) {
+  test(`actual readiness rejects renewed ${change} after a recorded success`, async t => {
+    const f = await fixture(t), policies = await signedReadinessFixture(f);
+    const claim = await f.vault.claimCodexSetupOperation(id(1),hash);
+    if (claim.state !== 'acquired') throw new Error('fixture_claim_missing');
+    const owner = createCodexSetupReadinessOwner({intent:f.prepared.intent,workspace:f.row.path,scope:f.prepared.scope,vault:f.vault,
+      observe:() => policies.observe(f.prepared,f.providerVault,'no_eligible_history')});
+    const receipt = await owner.record({leaseId:claim.leaseId,intentDigest:hash});
+    const changed = structuredClone(policies.renewed);
+    if (change === 'signature') changed.serverAuthorization!.signature = 'tampered';
+    if (change === 'expired') changed.serverAuthorization!.expiresAt = new Date(Date.now()-1000).toISOString();
+    if (change === 'workspace') changed.serverAuthorization!.workspaceId = id(99);
+    if (change === 'permissions') changed.tasks.writePaths = ['foreign/**'];
+    if (change === 'revoked') f.mutations.authorization = () => {throw new Error('fixture_revoked');};
+    policies.set(changed);
+    assert.equal(await owner.verify(receipt.readinessReceiptId,f.prepared.intent,hash),false);
+  });
+}
+
+test('actual final startup readback re-verifies a tampered renewable signature', async t => {
+  const f = await fixture(t), policies = await signedReadinessFixture(f);
+  let reads = 0;
+  f.mutations.process = () => {
+    if (++reads === 4) {const changed = structuredClone(policies.renewed);changed.serverAuthorization!.signature = 'tampered';policies.set(changed);}
+  };
+  await assert.rejects(policies.observe(f.prepared,f.providerVault,'no_eligible_history'));
+});
 
 test('actual CLI producer joins the IPC-started child to its exact encrypted handoff result', async t => {
   const f = await fixture(t); f.enableHandoff();

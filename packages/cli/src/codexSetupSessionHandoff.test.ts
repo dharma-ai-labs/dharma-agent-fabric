@@ -40,6 +40,76 @@ const sender = (vault: LocalVault) => ({async stageCodexSetupSession(...args: Pa
 }, async readCodexSetupSession(...args: Parameters<LocalVault['readCodexSetupSession']>) {return vault.readCodexSetupSession(...args);}});
 const unconfirmed: LocalCodexSetupSessionResult = {state: 'unconfirmed', code: 'session_start_unconfirmed'};
 
+test('accepted startup can finish after 30 seconds without restaging or extending original expiry', async t => {
+  await fixture(async f => {
+    let now = Date.now(), reads = 0, submissions = 0, withdrawals = 0;
+    t.mock.method(Date, 'now', () => now);
+    const result: LocalCodexSetupSessionResult = {state:'started',bindingId:uuid(9),sessionId:'synthetic_delayed',
+      sessionPid:42,supervisorPid:process.pid,sessionStartTicks:'1',supervisorStartTicks:'1'};
+    const vault = {
+      async stageCodexSetupSession() {submissions++;return {async withdraw(){withdrawals++;}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request:f.request,state:'accepted' as const,result:null};
+        if (reads === 2) {now += 31_000;return {request:f.request,state:'accepted' as const,result:null};}
+        return {request:f.request,state:'accepted' as const,result};
+      },
+    };
+    assert.deepEqual(await awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId}),result);
+    assert.equal(submissions,1);assert.equal(reads,3);assert.equal(withdrawals,1);
+    assert.ok(now < Date.parse(f.request.expiresAt));
+  });
+});
+
+test('accepted wait rejects invalid budgets before staging any authority', async () => {
+  await fixture(async f => {
+    for (const acceptedWaitMs of [0,-1,120_001,1.5,NaN,Infinity]) {
+      let stages = 0;
+      const vault = {...sender(f.vault),async stageCodexSetupSession() {stages++;throw new Error('unexpected_stage');}};
+      await assert.rejects(awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId,acceptedWaitMs}),/setup_session_invalid/);
+      assert.equal(stages,0);
+    }
+  });
+});
+
+test('accepted wait cannot extend pending timeout, original expiry, or its own finite deadline', async t => {
+  await fixture(async f => {
+    let now = Date.now();
+    t.mock.method(Date,'now',() => now);
+    for (const mode of ['pending','expiry','accepted-budget'] as const) {
+      now = Date.parse(f.request.issuedAt) + 1000;
+      let reads = 0,stages = 0,withdrawals = 0;
+      const vault = {async stageCodexSetupSession(){stages++;return {async withdraw(){withdrawals++;}};},
+        async readCodexSetupSession(){
+          reads++;
+          if (mode === 'pending') now += 30_001;
+          else if (reads === 2) now = mode === 'expiry' ? Date.parse(f.request.expiresAt) : now + 1000;
+          return {request:f.request,state:'accepted' as const,result:reads === 2 ? unconfirmed : null};
+        }};
+      await assert.rejects(awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId,
+        acceptedWaitMs:mode === 'accepted-budget' ? 1000 : 120_000}),
+      mode === 'pending' ? /setup_session_receiver_timeout/ : /setup_session_accepted_unconfirmed/);
+      assert.equal(stages,1);assert.equal(withdrawals,1);assert.equal(reads,mode === 'pending' ? 1 : 2);
+    }
+  });
+});
+
+test('cancellation and state regression after acceptance never restage or return a late result', async () => {
+  for (const mode of ['cancel','regress'] as const) await fixture(async f => {
+    let reads = 0,stages = 0,withdrawals = 0;
+    const vault = {async stageCodexSetupSession(){stages++;return {async withdraw(){withdrawals++;}};},
+      async readCodexSetupSession(){
+        reads++;
+        if (reads === 2 && mode === 'cancel') f.abort();
+        return {request:f.request,state:reads === 2 && mode === 'regress' ? 'pending' as const : 'accepted' as const,
+          result:reads === 2 ? unconfirmed : null};
+      }};
+    await assert.rejects(awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId}),
+      mode === 'cancel' ? /codex_setup_host_scope_unavailable/ : /setup_session_scope_changed/);
+    assert.equal(stages,1);assert.equal(reads,2);assert.equal(withdrawals,1);
+  });
+});
+
 test('sender and actual standing owner share one encrypted request and a fresh child, without another dispatch', async () => {
   await fixture(async f => {
     const owner = createNamedSessionChildOwner(f.signal);
@@ -162,7 +232,7 @@ test('accepted request without a result is distinct from a never-accepted timeou
       return submission;
     }};
     await assert.rejects(awaitCodexSetupSession({vault: staged, scope: f.scope, request: f.request,
-      leaseId: f.leaseId, waitMs: 1}), /setup_session_accepted_unconfirmed/);
+      leaseId: f.leaseId, acceptedWaitMs: 1}), /setup_session_accepted_unconfirmed/);
     assert.equal(f.vault.readCodexSetupSession(f.request.operationId, f.request.intentDigest)?.state, 'accepted');
   });
 });
