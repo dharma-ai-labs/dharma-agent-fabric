@@ -94,6 +94,7 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
+import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
@@ -4785,12 +4786,11 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       if (hostScope) captureBootstrapHostChild(hostScope, child);
       else {child.on('error', () => {}); child.unref();}
     });
-    for (let attempt = 0; attempt < 80; attempt++) {
-      await step(() => new Promise<void>(resolveWait => setTimeout(resolveWait, 250)));
-      await hostScope?.assert();
-      try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Await service initialization. */ }
-    }
-    throw new Error('named_session_startup_failed');
+    return waitForNamedSessionStartup({step,
+      assertActive: async () => {await hostScope?.assert();},
+      observe: () => namedSessionRequest(dharmaHome(), name, {action: 'status'}),
+      maximumWaitMs: setupSessionScope
+        ? Math.min(120_000, Date.parse(setupSessionScope.request.expiresAt) - Date.now()) : 120_000});
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
