@@ -126,7 +126,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.163';
+const VERSION = '0.2.164';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3126,6 +3126,9 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
   onboardFlags.set('provider', provider);
+  // The standing lifecycle owner must be registered before a setup turn can
+  // request relay startup; it cannot own a detached supervisor itself.
+  if (hostScope) onboardFlags.set('no-relay-daemon', true);
   const onboarded = await step(() => retryBootstrapOnboarding(async () => joinedBindingId
     ? await step(() => joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!)) as Record<string, unknown>
     : await step(() => onboard(onboardFlags)) as Record<string, unknown>));
@@ -3206,15 +3209,18 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     };
   }
 
+  const setupRelay = hostScope && !flags.has('no-relay-daemon')
+    ? await step(() => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')))
+    : null;
   const skill = await step(() => verifyAgentFabricSkillInstallation({ provider, workspace }));
   if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
   const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
   const firstLearning = (onboarded as Record<string, unknown>).firstLearningEvidence as Record<string, unknown> | undefined;
   const firstLearningReady = firstLearning?.state === 'synchronized' || firstLearning?.state === 'denied_disclosure'
     || joinedBindingId !== null && firstLearning?.state === 'shared_package_inherited';
-  const relay = flags.has('no-relay-daemon')
+  const relay = setupRelay ?? (flags.has('no-relay-daemon')
     ? { started: false, ...(await waitForRelayReadiness()) }
-    : await step(() => startRelayDaemon(policyPath));
+    : await step(() => startRelayDaemon(policyPath)));
   let repositoryReadiness: RepositoryReadinessResult | null = null;
   if (!sharedRepositoryReady && relay.state === 'running') {
     const workspaceId = String(onboarded.workspaceId || '');
