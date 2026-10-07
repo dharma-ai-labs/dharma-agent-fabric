@@ -104,7 +104,9 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const dependencies: Record<string, unknown> = {
     resolve, Date, canonicalize, sha256, selectDeviceWorkspace, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
     isNamedSessionOwnerReceipt, repositoryRelayObservationReady, discoverRepositoryRoleMetadata,
-    ENTRY_URL: 'file:///synthetic/index.js', fileURLToPath: () => entry, VERSION: '0.2.153',
+    ENTRY_URL: 'file:///synthetic/index.js',
+    fileURLToPath: (value: string | URL) => new URL(value).pathname.endsWith('/bin.js') ? resolve(root, 'bin.js') : entry,
+    VERSION: '0.2.153',
     process: {platform: 'linux', execPath: 'synthetic-node', getuid: () => 1000},
     preflightBootstrapWorkspaceIdentity: async () => ({fingerprint: hash}), assertBootstrapHostSource: async () => {},
     loadAgentFabricOnboardingContract: async () => ({sha256: 'a'.repeat(64)}),
@@ -156,6 +158,40 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
 test('actual CLI producer joins the IPC-started child to its exact encrypted handoff result', async t => {
   const f = await fixture(t); f.enableHandoff();
   assert.equal((await f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash)).sessionId, f.binding.sessionId);
+});
+
+for (const ipc of [false, true]) {
+  test(`actual completion accepts the official same-package bin supervisor with IPC=${ipc}`, async t => {
+    const f = await fixture(t);
+    f.processes[0]!.argv[1] = resolve(f.row.path, 'bin.js');
+    if (ipc) f.enableHandoff();
+    const result = await f.observe(f.prepared, f.providerVault, 'no_eligible_history', ipc ? hash : undefined);
+    assert.equal(result.sessionId, f.binding.sessionId);
+  });
+}
+
+for (const change of ['foreign-supervisor', 'relay-bin', 'session-bin', 'runtime', 'uid', 'policy', 'extra-args'] as const) {
+  test(`official bin completion still rejects ${change}`, async t => {
+    const f = await fixture(t); f.enableHandoff();
+    f.processes[0]!.argv[1] = resolve(f.row.path, 'bin.js');
+    if (change === 'foreign-supervisor') f.processes[0]!.argv[1] = resolve(f.row.path, 'foreign', 'bin.js');
+    if (change === 'relay-bin') f.processes[1]!.argv[1] = resolve(f.row.path, 'bin.js');
+    if (change === 'session-bin') f.processes[2]!.argv[1] = resolve(f.row.path, 'bin.js');
+    if (change === 'runtime') f.processes[0]!.argv[0] = 'foreign-node';
+    if (change === 'uid') f.processes[0]!.uid = 999;
+    if (change === 'policy') f.processes[0]!.argv[5] = resolve(f.row.path, 'foreign-policy.json');
+    if (change === 'extra-args') f.processes[0]!.argv.push('--foreign');
+    await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash),
+      {message: 'setup_runtime_process_unconfirmed'});
+  });
+}
+
+test('official bin completion rejects launcher drift during the final readback', async t => {
+  const f = await fixture(t); f.enableHandoff(); let reads = 0;
+  f.processes[0]!.argv[1] = resolve(f.row.path, 'bin.js');
+  f.mutations.process = () => {if (++reads === 4) f.processes[0]!.argv[1] = resolve(f.row.path, 'index.js');};
+  await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash),
+    {message: 'setup_runtime_process_changed'});
 });
 
 for (const change of ['absent', 'digest', 'member', 'device', 'repository', 'endpoint', 'source', 'scope', 'contract',

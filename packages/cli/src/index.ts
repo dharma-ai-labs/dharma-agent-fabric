@@ -2652,7 +2652,12 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
   const relayPid = await pidFrom(resolve(home, 'relay', 'relay.pid'));
   const sessionPid = await pidFrom(resolve(namedSessionPaths(home, name).root, 'service.lock'));
   const processes = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
-  const argv = [[process.execPath, entry, 'relay', 'supervise', '--policy', startup.policy],
+  const supervisorEntry = processes[0]!.argv[1];
+  if (typeof supervisorEntry !== 'string'
+    || ![entry, fileURLToPath(new URL('./bin.js', import.meta.url))].includes(supervisorEntry)) {
+    throw new Error('setup_runtime_process_unconfirmed');
+  }
+  const argv = [[process.execPath, supervisorEntry, 'relay', 'supervise', '--policy', startup.policy],
     [process.execPath, entry, 'relay', 'start', '--policy', startup.policy],
     [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
   if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
