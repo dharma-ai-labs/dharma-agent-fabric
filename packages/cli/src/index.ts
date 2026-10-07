@@ -76,6 +76,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
+import {reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
@@ -126,7 +127,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.164';
+const VERSION = '0.2.165';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -846,11 +847,19 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
                 windowsRecoveryOwner = owner;
               } catch (inspectionError) {
                 let disappeared = (inspectionError as NodeJS.ErrnoException).code === 'ENOENT';
-                if (!disappeared && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
+                // Invalid owner metadata rethrows renameError and remains an immediate denial.
+                if (!disappeared && inspectionError !== renameError
+                  && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
                   // Windows can deny owner reads while its directory is being
-                  // deleted. Retry only when fresh metadata confirms absence.
-                  try { await step(() => lstat(recoveryPath)); }
-                  catch (readbackError) { disappeared = (readbackError as NodeJS.ErrnoException).code === 'ENOENT'; }
+                  // deleted. Observe only; never republish until absence is verified.
+                  while (Date.now() < deadline) {
+                    try { await step(() => lstat(recoveryPath)); }
+                    catch (readbackError) {
+                      if ((readbackError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+                      disappeared = true; break;
+                    }
+                    await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
+                  }
                 }
                 if (disappeared && Date.now() < deadline) {
                   await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
@@ -2479,11 +2488,13 @@ export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): P
 }
 
 /** Native-owner continuation: no caller-selected flags or replacement authority. */
-export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope): Promise<Output> {
+export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope,
+  observeFailure?: CodexSetupFailureObserver): Promise<Output> {
   try {return await runCodexBootstrapHostScope(scope, prepared => run(['bootstrap',
     ...[...prepared.flags].flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)]),
   ]));}
   catch (error) {
+    if (observeFailure) reportCodexSetupFailure(observeFailure, error, 'bootstrap');
     if (error instanceof Error && error.message === 'setup_session_sender_unavailable') {
       return {ok: false, stage: 'host_setup_unavailable',
         code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};
@@ -2705,7 +2716,8 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
 }
 
 /** Trusted native host composition, not an MCP/model/peer tool. */
-export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostScope, vault: CodexCompletionVault) {
+export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostScope, vault: CodexCompletionVault,
+  observeFailure?: CodexSetupFailureObserver) {
   const prepared = await runCodexBootstrapHostScope(scope, async value => value);
   let firstLearning: LocalCodexSetupReadiness['firstLearning'] | undefined;
   const readiness = createCodexSetupReadinessOwner({intent: prepared.intent,
@@ -2718,17 +2730,24 @@ export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostSc
     }});
   return Object.freeze({
     execute: async (lease: Readonly<CodexSetupExecutionLease>) => {
-      await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
-      const result = await withCodexSetupSessionSender({scope, vault, lease},
-        () => bootstrapFromCodexSetupScope(scope)) as Record<string, unknown>;
-      await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
-      const workflow = result.workflowReadiness as Record<string, unknown> | undefined;
-      if (result.ok !== true || result.stage !== 'complete' || !workflow
-        || !['synchronized', 'no_eligible_history', 'denied_disclosure'].includes(String(workflow.firstLearning))) {
-        return {state: 'unconfirmed' as const, code: 'setup_execution_unconfirmed' as const};
+      try {
+        await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
+        const result = await withCodexSetupSessionSender({scope, vault, lease},
+          () => bootstrapFromCodexSetupScope(scope, observeFailure)) as Record<string, unknown>;
+        await scope.step(() => assertCodexSetupExecutionLease(lease, prepared.intent));
+        const workflow = result.workflowReadiness as Record<string, unknown> | undefined;
+        if (result.ok !== true || result.stage !== 'complete' || !workflow
+          || !['synchronized', 'no_eligible_history', 'denied_disclosure'].includes(String(workflow.firstLearning))) {
+          if (observeFailure) reportCodexSetupFailure(observeFailure,
+            new Error(typeof result.stage === 'string' ? result.stage : 'setup_execution_unconfirmed'), 'completion');
+          return {state: 'unconfirmed' as const, code: 'setup_execution_unconfirmed' as const};
+        }
+        firstLearning = workflow.firstLearning as LocalCodexSetupReadiness['firstLearning'];
+        return await readiness.record(lease);
+      } catch (error) {
+        if (observeFailure) reportCodexSetupFailure(observeFailure, error, 'completion');
+        throw error;
       }
-      firstLearning = workflow.firstLearning as LocalCodexSetupReadiness['firstLearning'];
-      return readiness.record(lease);
     },
     verify: readiness.verify,
   });
@@ -2772,7 +2791,8 @@ export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof
       try {await close();} finally {throw new Error('codex_setup_owned_completion_unconfirmed');}
     });
     void settled.catch(() => {});
-    return Object.freeze({threadId: host.threadId, turnId: host.turnId, close, settled});
+    return Object.freeze({threadId: host.threadId, turnId: host.turnId, close, settled,
+      get diagnostics() {return ownedHost.diagnostics;}});
   } catch {
     let cleanupFailed = false;
     try {await host?.close();} catch {cleanupFailed = true;}
@@ -2840,7 +2860,9 @@ export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeo
   const root = resolve(dharmaHome(), 'vault');
   let completion: Awaited<ReturnType<typeof createCodexBootstrapCompletionOwner>> | undefined;
   let ownerScope: BootstrapHostScope | undefined;
-  return startCodexSetupNativeHost({...input,
+  const failures: Readonly<CodexSetupFailureDiagnostic>[] = [];
+  const observeFailure: CodexSetupFailureObserver = failure => {if (failures.length < 16) failures.push(failure);};
+  const host = await startCodexSetupNativeHost({...input,
     openJournal: async scope => {
       let vault: ScopedLocalVault | undefined;
       try {
@@ -2849,7 +2871,7 @@ export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeo
           // The original ALS scope selects the scoped LocalVault overload.
           vault = await openBootstrapVault({root}) as ScopedLocalVault;
         });
-        completion = await createCodexBootstrapCompletionOwner(scope, vault!);
+        completion = await createCodexBootstrapCompletionOwner(scope, vault!, observeFailure);
         ownerScope = scope;
         return Object.freeze({
           claim: (operationId: string, intentDigest: string) => vault!.claimCodexSetupOperation(operationId, intentDigest),
@@ -2873,6 +2895,7 @@ export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeo
       return completion.verify(receiptId, intent, digest);
     },
   });
+  return Object.freeze({...host, get diagnostics() {return Object.freeze([...failures]);}});
 }
 
 async function bootstrap(flags: Map<string, string | boolean>, hostScope?: BootstrapHostScope): Promise<Output> {

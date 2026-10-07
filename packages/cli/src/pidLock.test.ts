@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,10 @@ type Acquire = (path: string, timeout: number, message: string) => Promise<() =>
 
 // Parse and execute the production helper; inject only OS boundaries, not lock logic.
 async function acquire(overrides: Record<string, unknown> = {}): Promise<Acquire> {
-  const text = await fs.readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
+  const baseline = process.env.DHARMA_PID_LOCK_BASELINE;
+  if (baseline && baseline !== '83034f4c2581279478aa9e7050cda8f9ae09facb') throw new Error('fixture_source_unqualified');
+  const text = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding:'utf8'})
+    : await fs.readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const nodes = source.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'acquirePidLock');
   assert.equal(nodes.length, 1);
@@ -366,4 +370,77 @@ test('Windows owner inspection denial retries only after recovery directory disa
     await release();
     assert.deepEqual(await fs.readdir(f.root), []);
   } finally { await f.cleanup(); }
+});
+
+test('Windows deletion-in-progress denial waits for verified absence before retrying publication', async () => {
+  const f = await fixture();
+  try {
+    await fs.mkdir(f.recovery); await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
+    let denied = false, absent = false, probes = 0, earlyPublication = false;
+    const lock = await acquire({process: {platform: 'win32', pid: process.pid, kill: process.kill.bind(process)},
+      rename: async (from: string, to: string) => {
+        if (to === f.recovery && denied && !absent) earlyPublication = true;
+        await windowsRename(f.recovery)(from, to);
+      },
+      readFile: async (path: string, encoding: 'utf8') => {
+        if (path === resolve(f.recovery, 'owner') && !denied) {denied = true; throw permissionError();}
+        return fs.readFile(path, encoding);
+      },
+      lstat: async (path: string) => {
+        if (path === f.recovery && denied && ++probes === 3) {
+          await fs.rm(f.recovery, {recursive: true}); await fs.unlink(f.lock); absent = true;
+        }
+        return fs.lstat(path);
+      }});
+    const release = await lock(f.lock, 500, 'lock timeout');
+    assert.equal(probes, 3); assert.equal(absent, true); assert.equal(earlyPublication, false);
+    await release(); assert.deepEqual(await fs.readdir(f.root), []);
+  } finally {await f.cleanup();}
+});
+
+test('scoped Windows absence observation stops on withdrawal without removing foreign records', async () => {
+  const f = await fixture(); let allowed = true;
+  const scope = scopedFixture(f.root, async () => allowed);
+  try {
+    await fs.mkdir(f.recovery); await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
+    let denied = false, probes = 0;
+    const lock = await acquire({currentBootstrapHostScope: () => scope,
+      process: {platform: 'win32', pid: process.pid, kill: process.kill.bind(process)},
+      rename: windowsRename(f.recovery),
+      readFile: async (path: string, encoding: 'utf8') => {
+        if (path === resolve(f.recovery, 'owner')) {denied = true; throw permissionError();}
+        return fs.readFile(path, encoding);
+      },
+      lstat: async (path: string) => {
+        if (path === f.recovery && denied && ++probes === 2) allowed = false;
+        return fs.lstat(path);
+      }});
+    await assert.rejects(lock(f.lock, 500, 'private-timeout-canary'), {message:'codex_setup_host_scope_unavailable'});
+    assert.equal(probes, 2);
+    assert.equal(await fs.readFile(f.lock, 'utf8'), `${process.pid}\n`);
+    assert.equal(await fs.readFile(resolve(f.recovery, 'owner'), 'utf8'), `${process.pid}\n`);
+    assert.deepEqual((await fs.readdir(f.root)).sort(), ['startup.lock','startup.lock.recovery']);
+  } finally {scope.close(); await f.cleanup();}
+});
+
+test('persistent Windows inspection denial preserves foreign records and the original deadline', async () => {
+  const f = await fixture();
+  try {
+    await fs.mkdir(f.recovery); await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
+    const denied = permissionError(); let clock = 0, inspectionDenied = false, probes = 0, killCalls = 0;
+    const lock = await acquire({Date:{now:()=>clock},
+      setTimeout:(done:()=>void, milliseconds:number)=>setImmediate(()=>{clock+=milliseconds;done();}),
+      process:{platform:'win32',pid:process.pid,kill:()=>{killCalls++;throw new Error('unknown owner must not be adopted');}},
+      rename:async(from:string,to:string)=>{if(to===f.recovery)throw denied;await fs.rename(from,to);},
+      readFile:async(path:string,encoding:'utf8')=>{
+        if(path===resolve(f.recovery,'owner')){inspectionDenied=true;throw permissionError();}
+        return fs.readFile(path,encoding);
+      },
+      lstat:async(path:string)=>{if(path===f.recovery&&inspectionDenied)probes++;return fs.lstat(path);}});
+    await assert.rejects(lock(f.lock,100,'lock timeout'), error=>error===denied);
+    assert.equal(clock,100);assert.equal(probes,4);assert.equal(killCalls,0);
+    assert.equal(await fs.readFile(f.lock,'utf8'),`${process.pid}\n`);
+    assert.equal(await fs.readFile(resolve(f.recovery,'owner'),'utf8'),`${process.pid}\n`);
+    assert.deepEqual((await fs.readdir(f.root)).sort(),['startup.lock','startup.lock.recovery']);
+  } finally {await f.cleanup();}
 });
