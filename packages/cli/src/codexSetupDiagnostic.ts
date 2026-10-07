@@ -19,6 +19,10 @@ const categories = new Set(['codex_setup_host_scope_unavailable', 'codex_setup_h
   'setup_runtime_startup_changed', 'setup_execution_unconfirmed', 'setup_operation_conflict',
   'setup_operation_integrity_failed', 'named_session_readiness_unavailable',
   'named_session_readiness_scope_mismatch', 'named_session_startup_failed',
+  'named_session_startup_setup_child_unavailable', 'named_session_startup_registration_invalid',
+  'named_session_startup_provider_authentication_required', 'named_session_startup_workspace_write_not_authorized',
+  'named_session_startup_trust_scope_mismatch', 'named_session_startup_sandbox_unqualified',
+  'named_session_startup_child_spawn_failed', 'named_session_startup_child_exited', 'named_session_startup_child_failed',
   'shared_repository_pending', 'shared_repository_blocked', 'named_session_pending',
   'first_learning_pending', 'role_registration_pending', 'synchronization_pending',
   'autostart_pending', 'repository_source_authorization_required', 'approve_device']);

@@ -18,6 +18,7 @@ import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './nam
 import {watchOwnedChild} from './ownedChildLifecycle.js';
 import {sendCodexSetupChildStart} from './codexSetupChildStartup.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
+import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -208,11 +209,13 @@ test(`actual supervisor consumes an encrypted request, drains its fresh child an
 });
 }
 
-test('actual accepted session caller sends public handoff IDs only to its fresh IPC child', async t => {
+for (const mode of ['ready', 'child-failure'] as const) {
+test(`actual accepted session caller sends public handoff IDs only to its fresh IPC child (${mode})`, async t => {
   const f = await fixture(t, true), key = randomBytes(32), controller = new AbortController();
   const vault = await LocalVault.open({root: resolve(f.root, 'vault'), masterKey: key});
   let child: ChildProcess | undefined, statusCalls = 0, observed: unknown;
   const launches: Array<{argv: string[]; options: Record<string, unknown>}> = [];
+  const diagnostics: unknown[] = [];
   let received!: () => void;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const receipt = new Promise<void>((done, fail) => {received = () => {clearTimeout(timer); done();};
@@ -229,24 +232,29 @@ test('actual accepted session caller sends public handoff IDs only to its fresh 
     required: (flags: Map<string, unknown>, name: string) => flags.get(name),
     process: {platform: 'linux', execPath: process.execPath, env: {}}, fileURLToPath: () => '/synthetic/index.js',
     verifyAgentFabricSkillInstallation: async () => ({}), repositorySharedReady: async () => true,
-    verifyNamedSessionVisibleSkill: async () => {}, setTimeout, waitForNamedSessionStartup,
+    verifyNamedSessionVisibleSkill: async () => {}, setTimeout, waitForNamedSessionStartup, observeNamedSessionStartupChild,
     spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
       launches.push({argv, options});
-      child = spawn(process.execPath, ['-e', 'process.on("message", value => process.send(value));'],
-        {cwd: f.root, stdio: ['ignore', 'ignore', 'ignore', 'ipc']});
+      const script = mode === 'ready' ? 'process.on("message", value => process.send(value));'
+        : 'process.once("message", value => process.send(value, () => {process.stderr.write("private-secret-placeholder\\nsetup_child_unavailable\\n");process.exitCode=2;process.disconnect();}));';
+      child = spawn(process.execPath, ['-e', script],
+        {cwd: f.root, stdio: ['ignore', 'ignore', 'pipe', 'ipc']});
       child.once('message', value => {observed = value; received();});
       return child;
     }, namedSessionRequest: async () => {
       if (++statusCalls === 1) throw new Error('synthetic-not-running');
       await receipt;
+      if (mode === 'child-failure') throw new Error('synthetic-socket-unavailable');
       return {ok: true, ...f.request, bindingId: uuid(40), sessionId: 'synthetic-session'};
     }});
   const owner = createNamedSessionChildOwner(controller.signal);
   await owner.run(async () => {
     await consumeCodexSetupSessions({vault, owner, signal: controller.signal, authorize: async () => true,
+      onFailure: failure => {diagnostics.push(failure);},
       start: async scope => {
         const result = await session('start', new Map<string, string | boolean>([
           ['name', scope.request.name], ['workspace-id', scope.request.workspaceId], ['apply', true]]));
+        assert.equal(mode, 'ready', 'a failed child cannot establish readiness');
         assert.equal(result.ok, true);
         assert.equal(owner.ownedPid(scope.request.name), child?.pid);
         return {state: 'started', bindingId: uuid(40), sessionId: 'synthetic-session', sessionPid: child!.pid!,
@@ -258,12 +266,16 @@ test('actual accepted session caller sends public handoff IDs only to its fresh 
     assert.deepEqual(launches[0]!.argv, ['/synthetic/index.js', 'sessions', 'serve', '--name', f.request.name,
       '--workspace-id', f.request.workspaceId, '--apply', '--setup-handoff']);
     assert.equal(launches[0]!.options.detached, false);
-    assert.deepEqual(launches[0]!.options.stdio, ['ignore', 'ignore', 'ignore', 'ipc']);
-    assert.equal(child!.exitCode, null);
+    assert.deepEqual(launches[0]!.options.stdio, ['ignore', 'ignore', 'pipe', 'ipc']);
+    if (mode === 'ready') assert.equal(child!.exitCode, null);
   });
   assert.ok(child!.exitCode !== null || child!.signalCode !== null);
-  assert.equal(vault.readCodexSetupSession(f.request.operationId, digest)?.result?.state, 'started');
+  assert.equal(vault.readCodexSetupSession(f.request.operationId, digest)?.result?.state, mode === 'ready' ? 'started' : 'unconfirmed');
+  assert.deepEqual(diagnostics, mode === 'ready' ? [] : [{schema: 'dharma.codex-setup-failure-diagnostic/v1',
+    stage: 'named_session', category: 'named_session_startup_setup_child_unavailable'}]);
+  assert.equal(JSON.stringify(diagnostics).includes('private-secret-placeholder'), false);
 });
+}
 
 test('actual original sender stages and verifies the standing result without reentering context or spawning a child', async t => {
   const f = await fixture(t, true), key = randomBytes(32), controller = new AbortController();
