@@ -2238,6 +2238,9 @@ async function superviseNamedSessions(signal: AbortSignal) {
         owner.assert();
         await consumeCodexSetupSessions({vault, owner, signal,
           authorize: qualifyCodexSetupSessionRequest,
+          onFailure: diagnostic => {
+            process.stderr.write(`${JSON.stringify({event: 'named_session_setup_failure', diagnostic})}\n`);
+          },
           start: async scope => {
             const request = scope.request;
             const status = await namedSessionCommand('start', new Map<string, string | boolean>([
@@ -4670,7 +4673,7 @@ async function requestBootstrapNamedSession(hostScope: BootstrapHostScope,
       issuedAt: new Date().toISOString(), expiresAt: new Date(Math.min(Date.parse(intent.expiresAt),
         Date.parse(policy.serverAuthorization!.expiresAt))).toISOString()}});
   await step(() => assertCodexSetupExecutionLease(sender.lease, intent));
-  if (result.state !== 'started') throw new Error('setup_session_start_unconfirmed');
+  if (result.state !== 'started') throw new Error('setup_session_accepted_unconfirmed');
   const status = await step(() => namedSessionCommand('status', new Map<string, string | boolean>([
     ['name', name], ['workspace-id', workspaceId]]))) as Record<string, unknown>;
   if (status.ok !== true || status.bindingId !== result.bindingId || status.sessionId !== result.sessionId
