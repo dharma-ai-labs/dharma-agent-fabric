@@ -127,7 +127,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.168';
+const VERSION = '0.2.169';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2639,7 +2639,7 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     organizationId: intent.organizationId, workspaceId: startupItem.workspaceId});
   await step(() => assertWorkspaceAuthorizationCurrent(startupItem.workspaceId, startupPolicy.serverAuthorization!));
   const startupSnapshot = canonicalize(startup), startupStateSnapshot = canonicalize(startupState);
-  const startupPolicyHash = sha256(canonicalize(startupPolicy));
+  const startupPolicyHash = codexSetupSessionPolicyHash(startupPolicy);
   const pidFrom = async (path: string) => {
     const value = await readBootstrapRuntimeJson(path, scope);
     if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 2147483647) {
@@ -2710,7 +2710,9 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     || !currentConfig || currentConfig.deviceId !== config.deviceId || currentConfig.organizationId !== intent.organizationId
     || normalizeHqUrl(currentConfig.hqUrl) !== intent.origin) throw new Error('setup_runtime_startup_changed');
   const currentStartupPolicy = await step(() => loadVerifiedWorkspacePolicy(startup.policy!, startupItem.workspaceId));
-  if (sha256(canonicalize(currentStartupPolicy)) !== startupPolicyHash) throw new Error('setup_runtime_startup_changed');
+  verifyServerAuthorizedPolicy({policy: currentStartupPolicy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
+    organizationId: intent.organizationId, workspaceId: startupItem.workspaceId});
+  if (codexSetupSessionPolicyHash(currentStartupPolicy) !== startupPolicyHash) throw new Error('setup_runtime_startup_changed');
   await step(() => assertWorkspaceAuthorizationCurrent(startupItem.workspaceId, currentStartupPolicy.serverAuthorization!));
   await step(() => assertWorkspaceAuthorizationCurrent(item.workspaceId, policy.serverAuthorization!));
   return parseLocalCodexSetupReadiness({schema: 'dharma.local-codex-setup-readiness/v1',
@@ -2718,7 +2720,7 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     deviceId: config.deviceId, workspaceId: item.workspaceId, repositoryBindingId: roleScope.repositoryBindingId,
     repositoryAgentId: roleScope.repositoryAgentId, endpointId: roleScope.endpointId, sessionBindingId: binding.bindingId,
     sessionId: binding.sessionId, repositoryFingerprint: intent.repositoryFingerprint, policyRevision: policy.revision,
-    policyHash: sha256(canonicalize(policy)), manifestHash: content.manifestHash, catalogHash: content.catalogHash,
+    policyHash: codexSetupSessionPolicyHash(policy), manifestHash: content.manifestHash, catalogHash: content.catalogHash,
     bundleId: content.bundleId, bundleHash: content.bundleHash, activeReceiptHash: anchor.receiptHash,
     roleRevision: item.repositoryRole!.revision, roleProfileHash: item.repositoryRole!.profileHash, nativeSkillHash: content.skillsHash,
     contractDigest: intent.contractDigest, cliVersion: VERSION, relayPid, relayPolledAt: poll.at,

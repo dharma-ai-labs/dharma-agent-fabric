@@ -47,19 +47,32 @@ export async function originalCodexSetupSessionSender(scope: BootstrapHostScope)
 
 /** Original setup caller stages a request; it never starts or adopts a daemon. */
 export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: BootstrapHostScope;
-  leaseId: string; request: LocalCodexSetupSessionRequest; waitMs?: number}): Promise<Readonly<LocalCodexSetupSessionResult>> {
+  leaseId: string; request: LocalCodexSetupSessionRequest; waitMs?: number;
+  acceptedWaitMs?: number}): Promise<Readonly<LocalCodexSetupSessionResult>> {
   const request = parseLocalCodexSetupSessionRequest(input.request), waitMs = input.waitMs ?? 30_000;
-  if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 30_000) throw new Error('setup_session_invalid');
+  const acceptedWaitMs = input.acceptedWaitMs ?? 120_000;
+  if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 30_000
+    || !Number.isSafeInteger(acceptedWaitMs) || acceptedWaitMs < 1 || acceptedWaitMs > 120_000) {
+    throw new Error('setup_session_invalid');
+  }
   const submission = await input.scope.step(() => input.vault.stageCodexSetupSession(input.leaseId, request.intentDigest, request));
   try {
-    const deadline = Math.min(Date.now() + waitMs, Date.parse(request.expiresAt));
+    const expiresAt = Date.parse(request.expiresAt);
+    let deadline = Math.min(Date.now() + waitMs, expiresAt);
     let accepted = false;
     do {
+      if (Date.now() >= expiresAt) break;
       const observation = await input.scope.step(() => input.vault.readCodexSetupSession(request.operationId, request.intentDigest));
       if (!observation || canonicalize(observation.request) !== canonicalize(request) || observation.state === 'withdrawn') {
         throw new Error('setup_session_scope_changed');
       }
+      if (accepted && observation.state !== 'accepted') throw new Error('setup_session_scope_changed');
+      if (Date.now() >= deadline) break;
+      // Acceptance is not readiness. Keep the original caller alive while its
+      // standing owner performs bounded startup, without a second submission.
+      if (!accepted && observation.state === 'accepted') deadline = Math.min(Date.now() + acceptedWaitMs, expiresAt);
       accepted = observation.state === 'accepted';
+      if (Date.now() >= expiresAt) break;
       if (observation.state === 'accepted' && observation.result) return parseLocalCodexSetupSessionResult(observation.result);
       await input.scope.step(() => new Promise<void>(resolveWait => {
         const finish = () => {clearTimeout(timer); input.scope.signal.removeEventListener('abort', finish); resolveWait();};
