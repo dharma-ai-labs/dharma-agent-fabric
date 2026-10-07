@@ -847,11 +847,19 @@ async function acquirePidLock(lockPath: string, timeoutMs: number, timeoutMessag
                 windowsRecoveryOwner = owner;
               } catch (inspectionError) {
                 let disappeared = (inspectionError as NodeJS.ErrnoException).code === 'ENOENT';
-                if (!disappeared && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
+                // Invalid owner metadata rethrows renameError and remains an immediate denial.
+                if (!disappeared && inspectionError !== renameError
+                  && (inspectionError as NodeJS.ErrnoException).code === 'EPERM') {
                   // Windows can deny owner reads while its directory is being
-                  // deleted. Retry only when fresh metadata confirms absence.
-                  try { await step(() => lstat(recoveryPath)); }
-                  catch (readbackError) { disappeared = (readbackError as NodeJS.ErrnoException).code === 'ENOENT'; }
+                  // deleted. Observe only; never republish until absence is verified.
+                  while (Date.now() < deadline) {
+                    try { await step(() => lstat(recoveryPath)); }
+                    catch (readbackError) {
+                      if ((readbackError as NodeJS.ErrnoException).code !== 'ENOENT') throw renameError;
+                      disappeared = true; break;
+                    }
+                    await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
+                  }
                 }
                 if (disappeared && Date.now() < deadline) {
                   await step(() => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25)));
