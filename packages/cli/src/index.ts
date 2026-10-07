@@ -3048,6 +3048,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         recipientApproval.browserOpened = flags.has('no-browser') ? false : await step(() => openVerificationUri(approval.url));
         await hostScope?.assert();
         process.stderr.write(`Approve this exact device in the authenticated portal before ${approval.expiresAt}: ${approval.url}\n`);
+        process.stderr.write(`Device fingerprint: ${approval.fingerprint}\nRepository fingerprint: ${approval.repositoryFingerprint}\n`);
       },
     }));
     config = result.config; scopes = result.scopes;

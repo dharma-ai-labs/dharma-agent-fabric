@@ -409,6 +409,45 @@ function bootstrapFlags(complete = false) {
   return flags;
 }
 
+test('public claim approval prints the validated device fingerprint rather than decoding challenge fields', async () => {
+  for (const noBrowser of [false, true]) {
+    const f = bootstrapDependencies({});
+    const messages: string[] = [];
+    f.dependencies.process = {platform: 'linux', env: {USER: 'fixture'},
+      stderr: {write: (message: string) => {messages.push(message); return true;}}};
+    const approval = {
+      url: 'https://fixture.invalid/portal/agent-fabric/setup-claim-approval#request=public_fixture',
+      expiresAt: '2026-10-07T20:12:27.938Z',
+      fingerprint: `sha256:${'b'.repeat(64)}`,
+      repositoryFingerprint: `sha256:${'e'.repeat(64)}`,
+    };
+    f.dependencies.claimSetupReference = async (input: {
+      onRecipientApprovalRequired: (value: typeof approval) => Promise<void>;
+    }) => {
+      await input.onRecipientApprovalRequired(approval);
+      throw new Error('approval_fixture_stop_before_enrollment');
+    };
+    const flags = bootstrapFlags(true);
+    flags.delete('grant');
+    flags.set('setup-reference', '11111111-1111-4111-8111-111111111111');
+    flags.set('setup-recipient-membership-id', '22222222-2222-4222-8222-222222222222');
+    flags.set('setup-scope-digest', `sha256:${'d'.repeat(64)}`);
+    flags.set('setup-contract-digest', `sha256:${'a'.repeat(64)}`);
+    if (noBrowser) flags.set('no-browser', true);
+    await assert.rejects((await caller('bootstrap', f.dependencies))(flags),
+      /approval_fixture_stop_before_enrollment/);
+    const output = messages.join('');
+    assert.ok(output.includes(`Device fingerprint: ${approval.fingerprint}`));
+    assert.ok(output.includes(`Repository fingerprint: ${approval.repositoryFingerprint}`));
+    assert.ok(output.includes(approval.expiresAt));
+    assert.ok(output.includes(approval.url));
+    assert.doesNotMatch(output, /fixture_token|fixture_private_grant|privateJwk|authenticator/);
+    assert.equal(f.calls.filter(name => name === 'open_approval').length, noBrowser ? 0 : 1);
+    assert.equal(f.calls.includes('save_token'), false);
+    assert.equal(f.calls.includes('onboard'), false);
+  }
+});
+
 test('private grant entry follows preflight, uses the unchanged redemption scope and stays out of onboard flags', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
   const flags = bootstrapFlags(); flags.delete('grant'); flags.set('grant-prompt', true);
