@@ -13,6 +13,7 @@ import {watchOwnedChild} from './ownedChildLifecycle.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {currentAcceptedSetupSessionScope, originalCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
+import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 // Actual caller declarations, with synthetic registry/OS readiness boundaries.
@@ -43,7 +44,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     requestBootstrapNamedSession: async (scope: typeof prepared.scope) => originalCodexSetupSessionSender(scope),
     resolve, dirname, Error, Promise, Number, String, Date, VERSION: '0.2.153',
     process: {execPath: process.execPath, env: {}, platform: 'linux'},
-    setTimeout: (done: () => void) => {queueMicrotask(done);}, waitForNamedSessionStartup,
+    setTimeout: (done: () => void) => {queueMicrotask(done);}, waitForNamedSessionStartup, observeNamedSessionStartupChild,
     fileURLToPath: () => entry, dharmaHome: () => resolve(workspace, 'synthetic-home'),
     readDeviceConfig: async () => ({organizationId: 'org_demo', deviceId: id(6)}), registry: async () => [item],
     loadOrganizationPolicy: async () => ({serverAuthorization: {workspaceId: item.workspaceId}}),
