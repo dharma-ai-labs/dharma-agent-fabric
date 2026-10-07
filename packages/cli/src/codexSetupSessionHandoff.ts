@@ -8,6 +8,7 @@ import {currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, type Bo
 import {assertCodexSetupExecutionLease, type CodexSetupExecutionLease, type CodexSetupIntent} from './codexSetupAdmission.js';
 import {currentNamedSessionChildOwner, type NamedSessionChildOwner} from './namedSessionChildOwner.js';
 import type {OrganizationPolicy} from '@dharma-ai-labs/agent-fabric-policy';
+import {reportCodexSetupFailure, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 
 export function codexSetupSessionPolicyHash(policy: OrganizationPolicy): string {
   if (!policy.serverAuthorization) throw new Error('setup_session_scope_changed');
@@ -52,11 +53,13 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
   const submission = await input.scope.step(() => input.vault.stageCodexSetupSession(input.leaseId, request.intentDigest, request));
   try {
     const deadline = Math.min(Date.now() + waitMs, Date.parse(request.expiresAt));
+    let accepted = false;
     do {
       const observation = await input.scope.step(() => input.vault.readCodexSetupSession(request.operationId, request.intentDigest));
       if (!observation || canonicalize(observation.request) !== canonicalize(request) || observation.state === 'withdrawn') {
         throw new Error('setup_session_scope_changed');
       }
+      accepted = observation.state === 'accepted';
       if (observation.state === 'accepted' && observation.result) return parseLocalCodexSetupSessionResult(observation.result);
       await input.scope.step(() => new Promise<void>(resolveWait => {
         const finish = () => {clearTimeout(timer); input.scope.signal.removeEventListener('abort', finish); resolveWait();};
@@ -65,7 +68,7 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
         if (input.scope.signal.aborted) finish();
       }));
     } while (Date.now() < deadline);
-    throw new Error('setup_session_start_unconfirmed');
+    throw new Error(accepted ? 'setup_session_accepted_unconfirmed' : 'setup_session_receiver_timeout');
   } finally {
     // Exact pending-request cleanup remains available after scope withdrawal.
     // An accepted request is not cancelled or represented as rolled back.
@@ -86,7 +89,10 @@ export function currentAcceptedSetupSessionScope() {return acceptedContext.getSt
  * confer signed policy, enrollment or provider authority on a JSON request. */
 export async function consumeCodexSetupSessions(input: {vault: ReceiverVault; owner: NamedSessionChildOwner;
   signal: AbortSignal; authorize(request: Readonly<LocalCodexSetupSessionRequest>): Promise<boolean>;
-  start(scope: AcceptedSetupSessionScope): Promise<LocalCodexSetupSessionResult>}): Promise<number> {
+  start(scope: AcceptedSetupSessionScope): Promise<LocalCodexSetupSessionResult>;
+  onFailure?: CodexSetupFailureObserver}): Promise<number> {
+  const reportFailure = (error: unknown) => reportCodexSetupFailure(input.onFailure,
+    new Error('agent_fabric_onboarding_named_session:', {cause: error}), 'bootstrap');
   const assertOwner = () => {
     if (input.signal.aborted || currentNamedSessionChildOwner() !== input.owner) throw new Error('setup_session_owner_unavailable');
     input.owner.assert();
@@ -105,7 +111,10 @@ export async function consumeCodexSetupSessions(input: {vault: ReceiverVault; ow
       }
     };
     assertLifetime();
-    if (!await input.authorize(request)) continue;
+    if (!await input.authorize(request)) {
+      reportFailure(new Error('setup_session_authorization_unconfirmed'));
+      continue;
+    }
     assertLifetime();
     const cleanup = input.owner.checkpoint(request.name);
     const acceptance = input.vault.acceptCodexSetupSession(entry.operationId, entry.intentDigest, sha256(canonicalize(request)));
@@ -134,7 +143,7 @@ export async function consumeCodexSetupSessions(input: {vault: ReceiverVault; ow
         || input.owner.ownedPid(request.name) !== accepted.sessionPid)) throw new Error('setup_session_owner_unconfirmed');
       if (accepted.state === 'unconfirmed') await cleanup.stopFresh();
       acceptance.record(accepted);
-    } catch {
+    } catch (error) {
       // Accepted-but-interrupted is durable, not a retry license. Withhold all
       // provider/private diagnostics and do not signal unrelated workers.
       // Drain only this request's newly captured child, even after withdrawal.
@@ -142,6 +151,7 @@ export async function consumeCodexSetupSessions(input: {vault: ReceiverVault; ow
       await cleanup.stopFresh();
       assertOwner();
       acceptance.record({state: 'unconfirmed', code: 'session_start_unconfirmed'});
+      reportFailure(error);
     } finally {active = false; receiverContext.delete(scope);}
   }
   return consumed;

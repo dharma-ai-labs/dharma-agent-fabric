@@ -8,6 +8,8 @@ const categories = new Set(['codex_setup_host_scope_unavailable', 'codex_setup_h
   'codex_setup_host_operation_failed', 'codex_setup_execution_lease_unavailable',
   'setup_session_sender_unavailable', 'setup_session_scope_changed', 'setup_session_invalid',
   'setup_session_start_unconfirmed', 'setup_session_owner_unconfirmed', 'setup_runtime_first_learning_unconfirmed',
+  'setup_session_receiver_timeout', 'setup_session_accepted_unconfirmed',
+  'setup_session_authorization_unconfirmed', 'setup_session_scope_unavailable', 'setup_session_owner_unavailable',
   'setup_runtime_startup_changed', 'setup_execution_unconfirmed', 'setup_operation_conflict',
   'setup_operation_integrity_failed', 'named_session_readiness_unavailable',
   'named_session_readiness_scope_mismatch', 'named_session_startup_failed',

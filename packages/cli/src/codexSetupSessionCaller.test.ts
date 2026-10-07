@@ -156,17 +156,19 @@ for (const change of ['claim', 'device', 'organization', 'origin', 'fingerprint'
   });
 }
 
-test('actual supervisor consumes an encrypted pending request and drains only its fresh owned child', async t => {
+for (const failure of [null, 'named_session_startup_failed', 'private-secret-placeholder']) {
+test(`actual supervisor consumes an encrypted request, drains its fresh child and sanitizes ${failure ?? 'success'}`, async t => {
   const f = await fixture(t, true), key = randomBytes(32), controller = new AbortController();
   const sender = await LocalVault.open({root: resolve(f.root, 'vault'), masterKey: key});
   let receiver: LocalVault | undefined, child: ChildProcess | undefined, starts = 0, closed = 0;
+  const events: unknown[] = [];
   t.after(async () => {controller.abort(); if (child) await watchOwnedChild(child).stop({graceMs: 1000});
     receiver?.close(); sender.close(); key.fill(0); await rm(f.root, {recursive: true, force: true});});
   const claim = sender.claimCodexSetupOperation(f.request.operationId, digest);
   assert.equal(claim.state, 'acquired'); if (claim.state !== 'acquired') throw new Error('synthetic_claim_missing');
   sender.stageCodexSetupSession(claim.leaseId, digest, f.request);
   const supervise = await declaration('superviseNamedSessions', {process: {platform: 'linux', pid: process.pid,
-    getuid: () => 1000, stderr: {write: () => {}}}, resolve, setTimeout, clearTimeout,
+    getuid: () => 1000, stderr: {write: (value: string) => {events.push(JSON.parse(value));}}}, resolve, setTimeout, clearTimeout,
     createNamedSessionChildOwner, consumeCodexSetupSessions, dharmaHome: () => f.root, access: async () => {},
     openBootstrapVault: async () => {
       receiver = await LocalVault.open({root: resolve(f.root, 'vault'), masterKey: key});
@@ -180,6 +182,7 @@ test('actual supervisor consumes an encrypted pending request and drains only it
       const owner = currentNamedSessionChildOwner(); assert.ok(owner); starts++;
       child = await owner.spawn(scope.request.name, () => spawn(process.execPath,
         ['-e', 'setInterval(()=>{},1000)'], {cwd: f.root, stdio: 'ignore'}));
+      if (failure) throw new Error(failure);
       return {ok: true, ...scope.request, bindingId: uuid(40), sessionId: 'synthetic-session'};
     }, readContainerProcessIdentity: async (pid: number) => ({uid: 1000, parentPid: process.pid,
       startTicks: pid === process.pid ? '20' : '30'}),
@@ -188,9 +191,14 @@ test('actual supervisor consumes an encrypted pending request and drains only it
   assert.equal(starts, 1); assert.equal(closed, 1);
   assert.ok(child); assert.ok(child.exitCode !== null || child.signalCode !== null);
   const observed = sender.readCodexSetupSession(f.request.operationId, digest);
-  assert.equal(observed?.state, 'accepted'); assert.equal(observed?.result?.state, 'started');
+  assert.equal(observed?.state, 'accepted'); assert.equal(observed?.result?.state, failure ? 'unconfirmed' : 'started');
+  assert.deepEqual(events, failure ? [{event: 'named_session_setup_failure', diagnostic: {
+    schema: 'dharma.codex-setup-failure-diagnostic/v1', stage: 'named_session',
+    category: failure === 'private-secret-placeholder' ? 'setup_runtime_unclassified' : failure}}] : []);
+  assert.equal(JSON.stringify(events).includes('secret-placeholder'), false);
   assert.deepEqual(sender.listPendingCodexSetupSessions(), []);
 });
+}
 
 test('actual accepted session caller sends public handoff IDs only to its fresh IPC child', async t => {
   const f = await fixture(t, true), key = randomBytes(32), controller = new AbortController();

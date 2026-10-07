@@ -11,6 +11,7 @@ import {createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createNamedSessionChildOwner} from './namedSessionChildOwner.js';
 import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
   originalCodexSetupSessionSender, withCodexSetupSessionSender, type AcceptedSetupSessionScope} from './codexSetupSessionHandoff.js';
+import type {CodexSetupFailureDiagnostic} from './codexSetupDiagnostic.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -76,11 +77,15 @@ test('policy rejection leaves pending request untouched and produces no provider
   await fixture(async f => {
     f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
     const owner = createNamedSessionChildOwner(f.signal); let starts = 0;
+    const failures: Readonly<CodexSetupFailureDiagnostic>[] = [];
     await owner.run(async () => {
       assert.equal(await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal, authorize: async () => false,
+        onFailure: failure => {failures.push(failure);},
         start: async () => {starts++; return unconfirmed;}}), 0);
     });
     assert.equal(starts, 0); assert.equal(f.vault.readCodexSetupSession(uuid(1), digest)?.state, 'pending');
+    assert.deepEqual(failures, [{schema: 'dharma.codex-setup-failure-diagnostic/v1',
+      stage: 'named_session', category: 'setup_session_authorization_unconfirmed'}]);
   });
 });
 
@@ -140,9 +145,45 @@ test('late accepted-scope descendants cannot dispatch after callback completion'
 test('sender timeout withdraws only pending authority and never invents successful startup', async () => {
   await fixture(async f => {
     await assert.rejects(awaitCodexSetupSession({vault: sender(f.vault), scope: f.scope, request: f.request,
-      leaseId: f.leaseId, waitMs: 1}), /setup_session_start_unconfirmed/);
+      leaseId: f.leaseId, waitMs: 1}), /setup_session_receiver_timeout/);
     assert.equal(f.vault.readCodexSetupSession(uuid(1), digest)?.state, 'withdrawn');
   });
+});
+
+test('accepted request without a result is distinct from a never-accepted timeout and is not withdrawn', async () => {
+  await fixture(async f => {
+    const wrapped = sender(f.vault);
+    const staged = {...wrapped, async stageCodexSetupSession(...args: Parameters<LocalVault['stageCodexSetupSession']>) {
+      const submission = await wrapped.stageCodexSetupSession(...args);
+      const observation = f.vault.readCodexSetupSession(f.request.operationId, f.request.intentDigest)!;
+      const {canonicalize, sha256} = await import('@dharma-ai-labs/agent-fabric-contracts');
+      assert.ok(f.vault.acceptCodexSetupSession(f.request.operationId, f.request.intentDigest,
+        sha256(canonicalize(observation.request))));
+      return submission;
+    }};
+    await assert.rejects(awaitCodexSetupSession({vault: staged, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 1}), /setup_session_accepted_unconfirmed/);
+    assert.equal(f.vault.readCodexSetupSession(f.request.operationId, f.request.intentDigest)?.state, 'accepted');
+  });
+});
+
+test('accepted failure retains only a fixed category after cleanup; throwing observers cannot alter its disposition', async () => {
+  for (const category of ['named_session_startup_failed', 'setup_session_scope_unavailable', 'private-secret-placeholder']) {
+    await fixture(async f => {
+      f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
+      const owner = createNamedSessionChildOwner(f.signal);
+      const failures: Readonly<CodexSetupFailureDiagnostic>[] = [];
+      await owner.run(async () => {
+        assert.equal(await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal,
+          authorize: async () => true, start: async () => {throw new Error(category);},
+          onFailure: failure => {failures.push(failure); throw new Error('observer-secret-placeholder');}}), 1);
+      });
+      assert.deepEqual(f.vault.readCodexSetupSession(f.request.operationId, digest)?.result, unconfirmed);
+      assert.deepEqual(failures, [{schema: 'dharma.codex-setup-failure-diagnostic/v1', stage: 'named_session',
+        category: category === 'private-secret-placeholder' ? 'setup_runtime_unclassified' : category}]);
+      assert.equal(JSON.stringify(failures).includes('secret-placeholder'), false);
+    });
+  }
 });
 
 test('failed accepted startup drains only its new owned child and preserves a live sibling', async () => {
