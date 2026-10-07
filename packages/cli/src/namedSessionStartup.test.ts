@@ -102,3 +102,35 @@ test('deadline reached in step preauthorization admits no observation', async ()
   await assert.rejects(waitForNamedSessionStartup(f.input), /named_session_startup_failed/);
   assert.equal(f.effects(), 0);
 });
+
+test('an owned child failure is preserved rather than hidden behind a full startup timeout', async () => {
+  const f = fixture(Infinity, 1000);
+  const input = Object.assign(f.input, {readFailure: () => 'named_session_startup_setup_child_unavailable' as const});
+  await assert.rejects(waitForNamedSessionStartup(input), /^Error: named_session_startup_setup_child_unavailable$/);
+  assert.equal(f.time(), 250);
+  assert.equal(f.effects(), 0);
+});
+
+test('scope refusal takes priority over inspecting child diagnostics', async () => {
+  const f = fixture(Infinity, 1000);
+  let diagnosticReads = 0;
+  f.input.step = async () => {throw new Error('setup_session_scope_unavailable');};
+  const input = Object.assign(f.input, {readFailure: () => {diagnosticReads++; return 'named_session_startup_child_exited' as const;}});
+  await assert.rejects(waitForNamedSessionStartup(input), /setup_session_scope_unavailable/);
+  assert.equal(diagnosticReads, 0);
+});
+
+test('a child that closes during socket observation cannot produce ready status', async () => {
+  const f = fixture(0, 1000);
+  let failed = false;
+  f.input.observe = async () => {failed = true; return {ok: true};};
+  const input = Object.assign(f.input, {readFailure: () => failed ? 'named_session_startup_child_exited' as const : undefined});
+  await assert.rejects(waitForNamedSessionStartup(input), /named_session_startup_child_exited/);
+});
+
+test('an unexpected diagnostic value cannot become a secret-bearing error', async () => {
+  const f = fixture(0, 1000);
+  const input = Object.assign(f.input, {readFailure: () => 'private-secret-placeholder'});
+  await assert.rejects(waitForNamedSessionStartup(input as unknown as Parameters<typeof waitForNamedSessionStartup>[0]),
+    /^Error: named_session_startup_failed$/);
+});

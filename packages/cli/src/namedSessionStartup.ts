@@ -1,3 +1,5 @@
+import {isNamedSessionStartupFailure, type NamedSessionStartupFailure} from './namedSessionStartupChild.js';
+
 export async function waitForNamedSessionStartup<T>(input: {
   step<R>(operation: () => Promise<R>): Promise<R>;
   assertActive(): Promise<void>;
@@ -5,6 +7,7 @@ export async function waitForNamedSessionStartup<T>(input: {
   maximumWaitMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
+  readFailure?: () => NamedSessionStartupFailure | undefined;
 }): Promise<T> {
   const maximumWaitMs = input.maximumWaitMs ?? 120_000;
   if (!Number.isSafeInteger(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 120_000) {
@@ -21,8 +24,16 @@ export async function waitForNamedSessionStartup<T>(input: {
     // Only transport observation failures are retryable; never swallow a scope refusal.
     const result = await input.step(async () => {
       if (now() >= deadline) return {available: false as const};
-      try {return {available: true as const, value: await input.observe()};}
-      catch {return {available: false as const};}
+      const refuseFailedChild = () => {
+        const failure = input.readFailure?.();
+        if (failure !== undefined) throw new Error(isNamedSessionStartupFailure(failure) ? failure : 'named_session_startup_failed');
+      };
+      refuseFailedChild();
+      let observation: {available: true; value: T} | {available: false};
+      try {observation = {available: true, value: await input.observe()};}
+      catch {observation = {available: false};}
+      refuseFailedChild();
+      return observation;
     });
     if (now() >= deadline) break;
     if (result.available) return result.value;

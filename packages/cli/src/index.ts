@@ -95,6 +95,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
+import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
@@ -4775,9 +4776,15 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     for (const key of ['session-budget-cents', 'turn-budget-cents']) {
       if (flags.has(key)) args.push(`--${key}`, required(flags, key));
     }
+    let startupChild: ReturnType<typeof observeNamedSessionStartupChild> | undefined;
+    try {
     await step(async () => {
-      const start = () => spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
-        stdio: setupSessionScope ? ['ignore', 'ignore', 'ignore', 'ipc'] : 'ignore', env: process.env });
+      const start = () => {
+        const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
+          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: process.env });
+        startupChild = observeNamedSessionStartupChild(child);
+        return child;
+      };
       if (supervisorOwner) {
         const child = await supervisorOwner.spawn(name, start);
         if (setupSessionScope) await sendCodexSetupChildStart({owner: supervisorOwner, child, scope: setupSessionScope});
@@ -4787,11 +4794,13 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       if (hostScope) captureBootstrapHostChild(hostScope, child);
       else {child.on('error', () => {}); child.unref();}
     });
-    return waitForNamedSessionStartup({step,
+    return await waitForNamedSessionStartup({step,
       assertActive: async () => {await hostScope?.assert();},
       observe: () => namedSessionRequest(dharmaHome(), name, {action: 'status'}),
+      readFailure: () => startupChild?.readFailure(),
       maximumWaitMs: setupSessionScope
         ? Math.min(120_000, Date.parse(setupSessionScope.request.expiresAt) - Date.now()) : 120_000});
+    } finally {startupChild?.dispose();}
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
