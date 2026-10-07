@@ -107,7 +107,7 @@ import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexNodeOutputArguments } from './namedCodexNodeOutput.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
-import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
+import {awaitCodexSetupSession, codexSetupSessionPolicyHash, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
   originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {receiveCodexSetupChildStart, runCodexSetupChildStartup, sendCodexSetupChildStart,
   type CodexSetupChildMessage, type CodexSetupChildScope} from './codexSetupChildStartup.js';
@@ -127,7 +127,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.165';
+const VERSION = '0.2.166';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2320,7 +2320,7 @@ async function qualifyCodexSetupSessionSource(request: Readonly<LocalCodexSetupS
     verifyServerAuthorizedPolicy({policy, publicKeyEd25519: enrollment.serverPublicKeyEd25519,
       organizationId: request.organizationId, workspaceId: request.workspaceId});
     await assertWorkspaceAuthorizationCurrent(request.workspaceId, policy.serverAuthorization!);
-    if (policy.revision !== request.policyRevision || sha256(canonicalize(policy)) !== request.policyHash) return false;
+    if (policy.revision !== request.policyRevision || codexSetupSessionPolicyHash(policy) !== request.policyHash) return false;
     const fabric = await client();
     await fetchRepositorySourceAuthorization(fabric, role);
     const existing = await readNamedSession(dharmaHome(), request.name);
@@ -4665,7 +4665,7 @@ async function requestBootstrapNamedSession(hostScope: BootstrapHostScope,
       organizationId: intent.organizationId, membershipId: intent.recipientMembershipId, deviceId: config.deviceId,
       workspaceId, repositoryBindingId: role.repositoryBindingId, endpointId: role.endpointId, provider: 'codex',
       origin: intent.origin, repositoryFingerprint: intent.repositoryFingerprint, policyRevision: policy.revision,
-      policyHash: sha256(canonicalize(policy)), scopeDigest: intent.scopeDigest, contractDigest: intent.contractDigest,
+      policyHash: codexSetupSessionPolicyHash(policy), scopeDigest: intent.scopeDigest, contractDigest: intent.contractDigest,
       name, workspaceRoot: workspace, maximumCostCents: 1000, maximumTurnCostCents: 25,
       issuedAt: new Date().toISOString(), expiresAt: new Date(Math.min(Date.parse(intent.expiresAt),
         Date.parse(policy.serverAuthorization!.expiresAt))).toISOString()}});
