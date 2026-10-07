@@ -127,7 +127,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.167';
+const VERSION = '0.2.168';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2339,9 +2339,14 @@ async function qualifyCodexSetupChildRequest(request: Readonly<LocalCodexSetupSe
     if (!await qualifyCodexSetupSessionSource(request)) return false;
     const startup = await inspectOwnedRelayAutostart({home: dharmaHome()});
     const parent = await readContainerProcessIdentity(process.ppid);
+    // The official container/systemd launcher enters through bin.js; direct
+    // supervision enters through index.js in this same qualified package.
+    const entrypoint = parent.argv[1];
+    if (typeof entrypoint !== 'string'
+      || ![fileURLToPath(import.meta.url), fileURLToPath(new URL('./bin.js', import.meta.url))].includes(entrypoint)) return false;
     return ['systemd-user', 'container-entrypoint'].includes(startup.backend) && startup.version === VERSION
       && parent.uid === process.getuid!() && canonicalize(parent.argv) === canonicalize([
-        process.execPath, fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', startup.policy]);
+        process.execPath, entrypoint, 'relay', 'supervise', '--policy', startup.policy]);
   } catch {return false;}
 }
 

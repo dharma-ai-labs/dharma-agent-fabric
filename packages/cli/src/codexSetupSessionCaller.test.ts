@@ -100,11 +100,18 @@ test('actual standing receiver admits only a freshly verified renewal with uncha
   });
 });
 
-for (const change of ['none', 'parent-uid', 'parent-argv', 'backend', 'version', 'source', 'parent-unavailable'] as const) {
+for (const change of ['none', 'official-bin', 'systemd-bin', 'foreign-bin', 'foreign-index', 'parent-runtime',
+  'parent-policy', 'parent-uid', 'parent-argv', 'backend', 'version', 'source', 'parent-unavailable'] as const) {
   test(`actual child startup verifies source and its own IPC parent (${change})`, async t => {
     const f = await fixture(t), parentPid = process.pid + 1;
     const startup = {backend: 'container-entrypoint', version: '0.2.153', policy: resolve(f.root, '.dharma', 'approved-policy.json')};
     const parent = {uid: 1000, argv: [process.execPath, '/synthetic/index.js', 'relay', 'supervise', '--policy', startup.policy]};
+    if (change === 'official-bin' || change === 'systemd-bin') parent.argv[1] = '/synthetic/bin.js';
+    if (change === 'systemd-bin') startup.backend = 'systemd-user';
+    if (change === 'foreign-bin') parent.argv[1] = '/foreign/bin.js';
+    if (change === 'foreign-index') parent.argv[1] = '/foreign/index.js';
+    if (change === 'parent-runtime') parent.argv[0] = '/foreign/node';
+    if (change === 'parent-policy') parent.argv[5] = resolve(f.root, 'foreign-policy.json');
     if (change === 'parent-uid') parent.uid = 999;
     if (change === 'parent-argv') parent.argv.push('--foreign');
     if (change === 'backend') startup.backend = 'foreign';
@@ -113,11 +120,11 @@ for (const change of ['none', 'parent-uid', 'parent-argv', 'backend', 'version',
     const qualify = await declaration('qualifyCodexSetupChildRequest', {...f.dependencies,
       qualifyCodexSetupSessionSource: await declaration('qualifyCodexSetupSessionSource', f.dependencies),
       process: {platform: 'linux', ppid: parentPid, execPath: process.execPath, getuid: () => 1000}, VERSION: '0.2.153',
-      fileURLToPath: () => '/synthetic/index.js', inspectOwnedRelayAutostart: async () => startup,
+      fileURLToPath: (value: string | URL) => new URL(value).pathname, inspectOwnedRelayAutostart: async () => startup,
       readContainerProcessIdentity: async (pid: number) => {
         assert.equal(pid, parentPid); if (change === 'parent-unavailable') throw new Error('synthetic-parent-missing'); return parent;
       }});
-    assert.equal(await qualify(f.request), change === 'none');
+    assert.equal(await qualify(f.request), ['none', 'official-bin', 'systemd-bin'].includes(change));
   });
 }
 
