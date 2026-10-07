@@ -20,7 +20,7 @@ function source(roots = ['.']) {
     policyHash: `sha256:${createHash('sha256').update(canonicalize(policy)).digest('hex')}`,
     confirmedAt: '2026-10-04T06:00:00Z', policy };
 }
-function fixture() {
+function fixture(diagnostics = false) {
   let current = source();
   const policy: OrganizationPolicy = { schema: 'dharma.organization-policy/v2', organizationId: scope.organizationId,
     revision: 'local-analysis-v1', evidence: { defaultMode: 'structured', registeredWorkspaceOnly: true,
@@ -29,7 +29,7 @@ function fixture() {
     tasks: { defaultNetwork: 'deny', defaultGit: 'read_only', allowedCommands: {}, writePaths: [], requireLocalConfirmationFor: [] },
     skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {} };
   let loads = 0, unavailable = false;
-  const authorize = createNamedPeerContentAuthorization({ scope, now: () => now,
+  const authorize = createNamedPeerContentAuthorization({ scope, now: () => now, ...{ diagnostics },
     loadCurrentPolicy: async () => policy, loadCurrentSourceAuthorization: async () => {
       loads++; if (unavailable) throw new Error('fixture_denied'); return current;
     } });
@@ -118,4 +118,31 @@ test('task channel sends only after fresh source approval and cannot reuse it af
   await assert.rejects(channel.ask({ ...question, question: 'Should payload conflicts fail before effects?' }), /provider_session_channel_input/);
   assert.equal(calls.filter(call => call.action === 'ask').length, 1);
   assert.equal(f.policy.evidence.automaticDisclosure?.mode, 'local_analysis');
+});
+
+test('opt-in peer diagnostics expose fixed blockers without answer text or policy details', async () => {
+  const cases = [
+    ['text_contract_invalid', 'api_key=abcdefgh12345678', () => {}],
+    ['private_local_path', 'Read /home/user/private.txt', () => {}],
+    ['excluded_path', 'Read private/customer.txt', () => {}],
+    ['redaction_required', 'Read /internal/notes.txt', () => {}],
+    ['foreign_policy', 'Which catalog applies?', (f: ReturnType<typeof fixture>) => { f.policy.organizationId = 'org_other'; }],
+    ['metadata_only', 'Which catalog applies?', (f: ReturnType<typeof fixture>) => { f.policy.evidence.automaticDisclosure = { mode: 'metadata_only' }; }],
+    ['source_subtree_not_authorized', 'Which catalog applies?', (f: ReturnType<typeof fixture>) => { f.setSource(source(['src'])); }],
+    ['source_authority_unavailable', 'Which catalog applies?', (f: ReturnType<typeof fixture>) => { f.setUnavailable(); }],
+    ['authority_unavailable', 'Which catalog applies?', (f: ReturnType<typeof fixture>) => { f.policy.revision = ''; }],
+  ] as const;
+  for (const [blocker, content, change] of cases) {
+    const f = fixture(true); change(f);
+    await assert.rejects(f.authorize(content, 'answer'), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'provider_session_channel_input');
+      assert.deepEqual(Object.keys(error), ['blocker']);
+      assert.equal((error as Error & { blocker: string }).blocker, blocker);
+      assert.equal(JSON.stringify(error).includes(content), false);
+      assert.equal(JSON.stringify(error).includes('org_other'), false);
+      return true;
+    });
+  }
+  assert.equal(await fixture(true).authorize('Coalesce retries by logical job.', 'answer'), true);
 });

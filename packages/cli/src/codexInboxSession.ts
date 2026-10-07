@@ -4,6 +4,7 @@ import { openCodexBoundSession } from './codexBoundSession.js';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
 import { createCodexPeerToolHandler } from './codexPeerTools.js';
+import { NamedPeerContentAuthorizationError } from './namedPeerContentAuthorization.js';
 
 // Only a bridge-owned thread can be driven through app-server. Cooperative desktop
 // chats must consume in their own session; knowing a thread ID is not ownership.
@@ -155,7 +156,8 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
             : error instanceof Error && error.message === 'provider_session_channel_response' ? 'receipt_invalid'
               : 'delivery_unconfirmed';
           return { state: 'reply_pending' as const, questionId: offer.questionId, taskId: offer.taskId,
-            completionHash, reasonCode, providerShutdownConfirmed };
+            completionHash, reasonCode, providerShutdownConfirmed,
+            ...(error instanceof NamedPeerContentAuthorizationError ? { blocker: error.blocker } : {}) };
         }
       } catch (error) {
         try { await close(); } catch { /* Fail closed without reporting successful termination. */ }

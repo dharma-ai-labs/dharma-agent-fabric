@@ -5022,7 +5022,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       },
       openTransport: async () => transport!, channelTransport,
       verifier: { resolvePublicKey: trust.resolvePublicKey, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
-      authorizeContent: createNamedPeerContentAuthorization({ scope: repositoryRoleScope(item),
+      authorizeContent: createNamedPeerContentAuthorization({ scope: repositoryRoleScope(item), diagnostics: true,
         loadCurrentPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) });
   } finally {
