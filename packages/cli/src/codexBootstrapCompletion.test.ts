@@ -16,6 +16,7 @@ import {assertBootstrapHostSource, currentBootstrapHostScope, inspectCodexBootst
   prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {assertCodexSetupExecutionLease, createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
+import {reportCodexSetupFailure, type CodexSetupFailureDiagnostic} from './codexSetupDiagnostic.js';
 import {isNamedSessionOwnerReceipt} from './namedSessionTrust.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
@@ -296,6 +297,7 @@ test('actual CLI producer denies process reuse and policy withdrawal during read
 test('actual completion composition denies copied leases and retains the incomplete-execution guard', async t => {
   const f = await fixture(t); let executions = 0;
   const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
+    reportCodexSetupFailure,
     runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
     observeCodexBootstrapRuntime: f.observe,
     bootstrapFromCodexSetupScope: async () => {executions++; return {ok: false, stage: 'host_setup_unavailable',
@@ -394,6 +396,7 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
       }};
     if (disposition === 'foreign-recipient') f.binding.membershipId = id(99);
     const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
+      reportCodexSetupFailure,
       runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
       observeCodexBootstrapRuntime: f.observe,
       bootstrapFromCodexSetupScope: continueFromScope,
@@ -501,6 +504,7 @@ for (const withdrawAfterOpen of [false, true]) {
       },
     };
     const compose = await declaration('createCodexBootstrapCompletionOwner', {...f.dependencies,
+      reportCodexSetupFailure,
       runCodexBootstrapHostScope, createCodexSetupReadinessOwner, assertCodexSetupExecutionLease, withCodexSetupSessionSender,
       observeCodexBootstrapRuntime: f.observe, bootstrapFromCodexSetupScope,
     });
@@ -515,7 +519,7 @@ for (const withdrawAfterOpen of [false, true]) {
         return {...owned, close: async () => {closes++; await owned.close();}};
       },
     }) as (input: Omit<Parameters<typeof startCodexSetupNativeHost>[0], 'openJournal' | 'execute' | 'verifyReadiness'>)
-      => ReturnType<typeof startCodexSetupNativeHost>;
+      => Promise<Awaited<ReturnType<typeof startCodexSetupNativeHost>> & {diagnostics: readonly CodexSetupFailureDiagnostic[]}>;
     const contract = await loadAgentFabricOnboardingContract();
     const input = {transport, workspace: f.row.path, name: 'reviewer',
       intent: {...f.prepared.intent, contractDigest: `sha256:${contract.sha256}`},
@@ -534,6 +538,10 @@ for (const withdrawAfterOpen of [false, true]) {
       {signal: transport.signal});
       assert.equal(response.success, false);
       assert.equal(JSON.parse(response.contentItems[0]!.text).code, 'codex_setup_execution_unconfirmed');
+      assert.ok(host.diagnostics.length > 0);
+      assert.ok(Object.isFrozen(host.diagnostics));
+      assert.ok(host.diagnostics.every(row => Object.isFrozen(row)
+        && Object.keys(row).sort().join(',') === 'category,schema,stage'));
       assert.equal(f.calls.length, 0, 'the guarded actual bootstrap cannot synthesize live readiness');
       assert.equal(opens, 1); assert.equal(closes, 0);
       for (const listener of listeners) listener({method: 'turn/completed',
