@@ -13,6 +13,19 @@ export type BoundRepositorySource = RepositorySourceScope & {
   repositoryAgentId: string;
 };
 
+export function repositorySourceComparisonBaseline(record: {
+  state: string;
+  localBaselineSnapshotHash?: string | null;
+  pendingLocalOperationId?: string | null;
+}, publishedLocalSnapshotHash: string | null): string | null {
+  // Joining a published repository captures a local comparison base, not a
+  // publication receipt. Keep those identities separate while merging deltas.
+  const selected = publishedLocalSnapshotHash || (record.state === 'published'
+    && !record.pendingLocalOperationId ? record.localBaselineSnapshotHash ?? null : null);
+  if (selected !== null && !HASH.test(selected)) throw new Error('Repository source baseline hash is invalid.');
+  return selected;
+}
+
 export function repositorySourcePollInvalidatesWatcher(record: { state: string; operationId?: string | null },
   receipt: { state: string; operationId: string }): boolean {
   return receipt.state === 'blocked'

@@ -8,7 +8,7 @@ import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepositoryPackageSnapshot,
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
+import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
@@ -262,6 +262,94 @@ test('a joining member seeds from its own scoped source snapshot when the shared
   await assert.rejects(seedRepositorySourceWatcher({ ...scope, workspace: f.input.workspace,
     watcher: new RepositorySourceWatcher(1000), publishedHash: snapshot.manifest.snapshotHash,
     localHash: `sha256:${'e'.repeat(64)}` }), /ENOENT/);
+});
+
+test('joined published workspace uses its captured local comparison baseline without claiming publication', async t => {
+  const f = await fixture(t);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const snapshot = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace,
+    sourceAuthorization: authorization });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot, candidateOnly: true });
+  const record = { state: 'published', snapshotHash: B,
+    localBaselineSnapshotHash: snapshot.manifest.snapshotHash, pendingLocalOperationId: null };
+  const published = await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace, record });
+  assert.equal(published, null, 'the remote snapshot is not a locally published snapshot');
+  const comparison = repositorySourceComparisonBaseline(record, published);
+  assert.equal(comparison, snapshot.manifest.snapshotHash);
+  const watcher = new RepositorySourceWatcher(1000);
+  await seedRepositorySourceWatcher({ ...scope, workspace: f.input.workspace, watcher,
+    publishedHash: comparison!, localHash: comparison });
+  assert.equal((await scanRepositorySourceChanges({ ...f.input, watcher })).state, 'unchanged');
+  await f.put('output/approved/new.md', '# New local approved report\n');
+  f.setNow(1000);
+  assert.equal((await scanRepositorySourceChanges({ ...f.input, watcher })).state, 'debouncing');
+});
+
+test('source comparison baseline prefers actual publication and refuses unestablished or malformed fallback', () => {
+  const joined = { state: 'published', localBaselineSnapshotHash: A, pendingLocalOperationId: null };
+  assert.equal(repositorySourceComparisonBaseline(joined, B), B);
+  assert.equal(repositorySourceComparisonBaseline(joined, null), A);
+  for (const state of ['absent', 'accepted', 'processing', 'blocked']) {
+    assert.equal(repositorySourceComparisonBaseline({ ...joined, state }, null), null);
+  }
+  assert.equal(repositorySourceComparisonBaseline({ ...joined, pendingLocalOperationId: 'pending' }, null), null);
+  assert.equal(repositorySourceComparisonBaseline({ state: 'published' }, null), null);
+  assert.throws(() => repositorySourceComparisonBaseline({ ...joined, localBaselineSnapshotHash: 'invalid' }, null), /baseline hash/);
+  assert.throws(() => repositorySourceComparisonBaseline(joined, 'invalid'), /baseline hash/);
+});
+
+test('joined local baseline merges a new skill and report without overwriting a remotely updated skill', async t => {
+  const f = await fixture(t);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const baseline = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace, sourceAuthorization: authorization });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot: baseline, candidateOnly: true });
+  await f.put('.codex/skills/review/SKILL.md', '# Remote reviewed procedure\n');
+  const remote = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace, sourceAuthorization: authorization });
+  await f.put('.codex/skills/review/SKILL.md', '# Review');
+  await f.put('.codex/skills/reservation/SKILL.md', '# New reservation procedure\n');
+  await f.put('output/approved/new.md', '# New repair report\n');
+  const record = { state: 'published', snapshotHash: B, localBaselineSnapshotHash: baseline.manifest.snapshotHash };
+  const publishedLocal = await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace, record });
+  assert.equal(publishedLocal, null);
+  const comparison = repositorySourceComparisonBaseline(record, publishedLocal);
+  assert.equal(comparison, baseline.manifest.snapshotHash);
+  const candidateId = '99999999-9999-4999-8999-999999999999';
+  const metadata = { ok: true, organizationId: scope.organizationId, repositoryBindingId: scope.repositoryBindingId,
+    repositoryAgentId: scope.repositoryAgentId, policyGenerationId: authorization.generationId, workspaceBaseline: null,
+    source: { candidateId, workspaceId: '88888888-8888-4888-8888-888888888888',
+      sourceSnapshotHash: remote.manifest.snapshotHash,
+      sourceManifestHash: `sha256:${createHash('sha256').update(canonicalize(remote.manifest)).digest('hex')}`,
+      sourceFingerprint: remote.manifest.sourceFingerprint,
+      files: remote.manifest.files.filter(file => file.role !== 'knowledge'), skills: remote.manifest.skills } };
+  const transport = { signedGet: async (route: string) => {
+    if (route.startsWith('/agent-fabric/repository-source-policy')) return response();
+    if (!route.includes('/blobs/')) return metadata;
+    const path = new URL('https://fixture.invalid' + route).searchParams.get('path');
+    const file = remote.manifest.files.find(file => file.path === path)!;
+    const blob = remote.blobs.find(blob => blob.sha256 === file.sha256)!;
+    return { ok: true, organizationId: scope.organizationId, repositoryBindingId: scope.repositoryBindingId,
+      repositoryAgentId: scope.repositoryAgentId, candidateId, sourceSnapshotHash: remote.manifest.snapshotHash,
+      sourceFingerprint: remote.manifest.sourceFingerprint, path, role: file.role,
+      sha256: file.sha256, sizeBytes: file.sizeBytes, contentBase64: blob.contentBase64 };
+  } };
+  let submitted: Awaited<ReturnType<typeof inventoryRepositoryPackage>> | null = null;
+  const input = { ...f.input, transport, loadPublishedLocalBaseline: () => readRepositoryPackageSnapshot(f.input.workspace, comparison!),
+    submitCandidate: async (snapshot: Awaited<ReturnType<typeof inventoryRepositoryPackage>>) => {
+      submitted = snapshot;
+      return { state: 'accepted', candidateId, operationId: A, snapshotHash: snapshot.manifest.snapshotHash };
+    } };
+  assert.equal((await scanRepositorySourceChanges(input)).state, 'debouncing');
+  f.setNow(1000);
+  assert.equal((await scanRepositorySourceChanges(input)).state, 'local_candidate_collected');
+  assert.ok(submitted);
+  const files = (submitted as Awaited<ReturnType<typeof inventoryRepositoryPackage>>).manifest.files;
+  assert.equal(files.find(file => file.path === '.codex/skills/review/SKILL.md')?.sha256,
+    remote.manifest.files.find(file => file.path === '.codex/skills/review/SKILL.md')?.sha256);
+  assert.ok(files.some(file => file.path === '.codex/skills/reservation/SKILL.md'));
+  assert.ok(files.some(file => file.path === 'output/approved/new.md'));
+  await assert.rejects(seedRepositorySourceWatcher({ ...scope, workspace: f.input.workspace,
+    workspaceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', publishedHash: comparison!, localHash: comparison,
+    watcher: new RepositorySourceWatcher(1000) }), /scope/);
 });
 test('blocked source retries once only after a distinct verified knowledge release is installed', () => {
   const gate = new BlockedRepositorySourceRetry();
