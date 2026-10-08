@@ -55,7 +55,7 @@ import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
-import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
+import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
 import { captureRepositoryInstallerInput, prepareRepositoryInstallerWorkspace, writeRepositoryInstallerFile,
   type RepositoryInstallerInput } from './repositoryInstallerFiles.js';
@@ -7886,22 +7886,24 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       }
     } catch { repositorySourceBaselineAvailable = false; }
   }
-  if (publishedLocalSnapshotHash) {
-    try {
-      await readRepositoryPackageSnapshot(canonicalWorkspace.path, publishedLocalSnapshotHash);
+  try {
+    const comparisonBaselineHash = canonicalWorkspace.repositoryPackage
+      ? repositorySourceComparisonBaseline(canonicalWorkspace.repositoryPackage, publishedLocalSnapshotHash) : null;
+    if (comparisonBaselineHash) {
+      await readRepositoryPackageSnapshot(canonicalWorkspace.path, comparisonBaselineHash);
       const localHash = canonicalWorkspace.repositoryPackage?.localBaselineSnapshotHash;
-      if (localHash && (localHash === publishedLocalSnapshotHash
+      if (localHash && (localHash === comparisonBaselineHash
         || canonicalWorkspace.repositoryPackage?.pendingLocalSnapshotHash === localHash)) {
         await seedRepositorySourceWatcher({ workspace: canonicalWorkspace.path,
           organizationId: canonicalWorkspace.organizationId, workspaceId: canonicalWorkspace.workspaceId,
           repositoryBindingId: canonicalWorkspace.repositoryBindingId!,
           repositoryAgentId: canonicalWorkspace.repositoryAgentId!,
-          publishedHash: publishedLocalSnapshotHash,
+          publishedHash: comparisonBaselineHash,
           localHash,
           watcher: repositorySourceWatcher });
       }
-    } catch { repositorySourceBaselineAvailable = false; }
-  }
+    }
+  } catch { repositorySourceBaselineAvailable = false; }
   let nextRepositorySourceScanAt = 0;
   let repositorySourceCandidates = 0;
   let repositorySourceFailures = 0;
@@ -8157,9 +8159,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       if (canonicalWorkspace.accessMode !== 'knowledge_only' && !stopping && !sourceScanFlight
         && performance.now() >= nextRepositorySourceScanAt) {
         const sourceWorkspace = canonicalWorkspace;
-        const sourceBaselineHash = publishedLocalSnapshotHash;
         sourceScanFlight = (async () => {
           try {
+            const sourceBaselineHash = sourceWorkspace.repositoryPackage
+              ? repositorySourceComparisonBaseline(sourceWorkspace.repositoryPackage, publishedLocalSnapshotHash) : null;
             if (!repositorySourceBaselineAvailable) {
               throw new Error('Repository source baseline is unavailable; refusing an unanchored update.');
             }
