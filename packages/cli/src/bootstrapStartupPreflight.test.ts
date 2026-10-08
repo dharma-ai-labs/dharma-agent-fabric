@@ -52,8 +52,10 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false, an
   const anchor = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'assertBootstrapStartupAnchor');
   const anchorDependencies = {
     ...dependencies,
-    relayAutostartStatus: async () => anchorFailure ? { state: 'enabled', backend: 'systemd-user' }
-      : { state: 'disabled', backend: null },
+    relayAutostartStatus: async () => anchorFailure === 'manager-unavailable'
+      ? { state: 'unavailable', backend: 'systemd-user', reason: 'systemd_user_unavailable' }
+      : anchorFailure === 'legacy' ? { state: 'unavailable', backend: 'systemd-user', reason: 'autostart_conflict' }
+      : anchorFailure ? { state: 'enabled', backend: 'systemd-user' } : { state: 'disabled', backend: null },
     inspectOwnedRelayAutostart: async () => ({ workspace: '/fixture/anchor',
       policy: '/fixture/anchor/.dharma/approved-policy.json', version: '0.2.174' }),
     registry: async () => [{ workspaceId: 'anchor', organizationId: 'org_demo', path: '/fixture/anchor',
@@ -148,6 +150,22 @@ for (const kind of ['missing-workspace', 'missing-policy', 'foreign-route', 'inv
 
 test('source-connected bootstrap admits an existing valid standard anchor before claim', async () => {
   const f = await fixture('reference', undefined, false, 'valid');
+  assert.deepEqual(await f.run(), { reachedClaimBoundary: true });
+  assert.deepEqual(f.effects, ['startup_preflight']);
+});
+
+test('source-connected bootstrap rejects unavailable startup manager before claim', async () => {
+  const f = await fixture('reference', undefined, false, 'manager-unavailable');
+  const result = await f.run();
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'startup_preflight_unavailable');
+  assert.equal(result.grantRedeemed, false);
+  assert.equal(result.enrollmentChanged, false);
+  assert.deepEqual(f.effects, ['startup_preflight']);
+});
+
+test('source-connected bootstrap retains exact owned legacy migration despite conflict status', async () => {
+  const f = await fixture('reference', undefined, false, 'legacy');
   assert.deepEqual(await f.run(), { reachedClaimBoundary: true });
   assert.deepEqual(f.effects, ['startup_preflight']);
 });

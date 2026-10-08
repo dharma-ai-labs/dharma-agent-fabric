@@ -2924,6 +2924,10 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
   const home = dharmaHome();
   const existing = await step(() => relayAutostartStatus({ home }));
   if (existing.backend === null && existing.state === 'disabled') return;
+  if (existing.state === 'unavailable'
+    && !(existing.backend === 'systemd-user' && existing.reason === 'autostart_conflict')) {
+    throw new Error('startup_preflight_unavailable: the owned startup manager is unavailable.');
+  }
   const anchor = await step(() => inspectOwnedRelayAutostart({ home }, { allowLegacy: true }));
   if (anchor.policy === null) return;
   const current = await step(() => readDeviceConfig());
