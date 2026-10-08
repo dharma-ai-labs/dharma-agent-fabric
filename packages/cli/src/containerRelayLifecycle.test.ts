@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as lifecycle from './containerRelayLifecycle.js';
-import { enableRelayAutostart, relayAutostartStatus, startRelayAutostart,
+import { assertRelayStartupOwnership, enableRelayAutostart, relayAutostartStatus, startRelayAutostart,
   stopRelayAutostart, disableRelayAutostart } from './relayAutostart.js';
 
 // The filesystem and lifecycle receipts are real. Only PID1 identity and the OS
@@ -41,6 +41,27 @@ async function fixture() {
 // Container PID1 and child identity are Linux /proc contracts. Other hosts
 // qualify rejection/schema behavior through the public command tests.
 const posix = { skip: process.platform !== 'linux' };
+
+test('startup preflight uses a verified container entrypoint without touching the user systemd slot', posix, async () => {
+  const f = await fixture();
+  const unit = join(f.root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  await mkdir(join(f.root, '.config', 'systemd', 'user'), { recursive: true });
+  await writeFile(unit, 'existing host service', { mode: 0o600 });
+  await assertRelayStartupOwnership(f.options);
+  assert.equal(await readFile(unit, 'utf8'), 'existing host service');
+  assert.deepEqual(f.calls, []);
+  await assert.rejects(readFile(join(f.home, 'relay', 'autostart.json')), { code: 'ENOENT' });
+});
+
+test('startup preflight rejects stale or foreign container context without systemd fallback', posix, async () => {
+  const f = await fixture();
+  f.identity.startTicks = '99999';
+  await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+  assert.deepEqual(f.calls, []);
+  await writeFile(join(f.home, 'relay', 'container-entrypoint.json'), JSON.stringify({ ...f.marker, home: '/foreign' }));
+  await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+  assert.deepEqual(f.calls, []);
+});
 
 test('owned container PID1 enables startup without claiming or modifying the OS-user systemd slot', posix, async () => {
   const f = await fixture();

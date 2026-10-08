@@ -241,6 +241,27 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
       registration.workspace, options.home, true));
 }
 
+// A fresh device home is not a fresh OS-user startup context. Check before
+// enrollment; the existing enable-time guard still protects against races.
+export async function assertRelayStartupOwnership(options: RelayAutostartOptions): Promise<void> {
+  if ((options.platform || process.platform) !== 'linux' || await containerEntrypointAvailable(options)) return;
+  const registration = await readRegistration(options);
+  if (registration && registration.backend !== 'systemd-user') {
+    throw new Error('autostart_conflict: startup ownership does not match this platform.');
+  }
+  const path = unitPath(options.userHome || homedir());
+  let stat;
+  try { stat = await lstat(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32_768
+    || !registration || !await ownsStartupFile(options, registration, true)) {
+    throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
+  }
+}
+
 function windowsTaskGuard(registration: Registration, home: string) {
   return `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); `
     + `$principalMatches = $false; try { `

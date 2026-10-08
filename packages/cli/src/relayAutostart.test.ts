@@ -4,11 +4,74 @@ import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
 import test from 'node:test';
+import * as startup from './relayAutostart.js';
+import type { RelayAutostartOptions } from './relayAutostart.js';
 import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
   startRelayAutostart, stopRelayAutostart, inspectOwnedRelayAutostart, macRelayLaunchAgent,
 } from './relayAutostart.js';
+
+const startupPreflight = async (options: RelayAutostartOptions) => {
+  const check = Reflect.get(startup, 'assertRelayStartupOwnership');
+  assert.equal(typeof check, 'function', 'startup ownership must be checked before enrollment');
+  await check(options);
+};
+
+test('Linux startup preflight rejects a second device home without modifying its existing anchor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-'));
+  const calls: string[] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'accepted'), userHome: root,
+    workspace: '/fixtures/accepted', launcher: '/fixtures/accepted/.dharma/bin/dharma',
+    policy: '/fixtures/accepted/.dharma/approved-policy.json', version: '0.2.174',
+    run: async (file: string) => { calls.push(file); return { stdout: 'enabled\n' }; } };
+  await enableRelayAutostart(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = join(options.home, 'relay', 'autostart.json');
+  const before = await readFile(unit, 'utf8'), registration = await readFile(receipt, 'utf8');
+  calls.length = 0;
+  await assert.rejects(startupPreflight({ ...options, home: join(root, 'fresh') }), /autostart_conflict/);
+  assert.equal(await readFile(unit, 'utf8'), before);
+  assert.equal(await readFile(receipt, 'utf8'), registration);
+  await assert.rejects(readFile(join(root, 'fresh', 'relay', 'autostart.json')), { code: 'ENOENT' });
+  assert.deepEqual(calls, [], 'preflight may not run any startup control');
+});
+
+test('Linux startup preflight permits an absent or exactly owned current and legacy anchor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-owned-'));
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: null, version: '0.2.174', run: async () => ({ stdout: 'enabled\n' }) };
+  await startupPreflight(options);
+  await enableRelayAutostart(options);
+  await startupPreflight(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const current = await readFile(unit, 'utf8');
+  const legacy = current.replace(/^WorkingDirectory=.*$/m, `WorkingDirectory="${options.workspace}"`);
+  await writeFile(unit, legacy);
+  await startupPreflight(options);
+  assert.equal(await readFile(unit, 'utf8'), legacy, 'preflight does not migrate the anchor');
+  await writeFile(unit, `${current}# unowned modification\n`);
+  await assert.rejects(startupPreflight(options), /autostart_conflict/);
+});
+
+test('Linux startup preflight fails closed on invalid receipts and unreadable anchors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-invalid-'));
+  const home = join(root, 'device'), options = { platform: 'linux' as const, home, userHome: root };
+  await mkdir(join(home, 'relay'), { recursive: true });
+  await writeFile(join(home, 'relay', 'autostart.json'), '{broken');
+  await assert.rejects(startupPreflight(options), /autostart_receipt_invalid/);
+  const fresh = { ...options, home: join(root, 'fresh') };
+  await mkdir(join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service'), { recursive: true });
+  await assert.rejects(startupPreflight(fresh));
+});
+
+test('Linux-only startup preflight leaves Windows and macOS registration behavior unchanged', async () => {
+  for (const platform of ['win32', 'darwin'] as const) {
+    await startupPreflight({ platform, home: '/not-read', userHome: '/not-read',
+      run: async () => { throw new Error('preflight must not execute an OS command'); } });
+  }
+});
 
 async function macFixture() {
   const root = await mkdtemp(join(tmpdir(), 'dharma-mac-startup-'));

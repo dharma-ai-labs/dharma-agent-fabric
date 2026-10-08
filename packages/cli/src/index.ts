@@ -43,7 +43,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
-import { disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { assertRelayStartupOwnership, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
@@ -3020,6 +3020,18 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   if (resuming) assertBootstrapResumeAuthority({ flags, existing, organizationId, hqUrl });
   if (enrollmentMismatch && !flags.has('replace-existing-enrollment')) {
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
+  }
+  if (grantMode === 'reference') {
+    try { await step(() => assertRelayStartupOwnership({ home: dharmaHome() })); }
+    catch (error) {
+      await hostScope?.assert();
+      const code = error instanceof Error && error.message.startsWith('autostart_conflict:')
+        ? 'autostart_conflict' : 'startup_preflight_unavailable';
+      return { ok: false, stage: 'startup_preflight', code, grantRedeemed: false, enrollmentChanged: false,
+        message: code === 'autostart_conflict'
+          ? 'This Linux user already has a startup entry owned by another installation. Use the existing enrolled installation or an eligible clean client; setup has not redeemed authority or changed enrollment.'
+          : 'Startup ownership could not be verified. Resolve the supported startup prerequisite before retrying; setup has not redeemed authority or changed enrollment.' };
+    }
   }
   if (grantMode === 'prompt') bootstrapToken = await readPrivateBootstrapGrant();
   let config: DeviceConfig;
