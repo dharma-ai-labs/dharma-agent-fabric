@@ -243,10 +243,11 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
 
 // A fresh device home is not a fresh OS-user startup context. Check before
 // enrollment; the existing enable-time guard still protects against races.
-export async function assertRelayStartupOwnership(options: RelayAutostartOptions): Promise<void> {
+export async function assertRelayStartupOwnership(options: RelayAutostartOptions & { version?: string }): Promise<void> {
   if ((options.platform || process.platform) !== 'linux') return;
+  if (options.version !== undefined && !VERSION.test(options.version)) throw new Error('Invalid startup runtime version.');
   if (await containerEntrypointAvailable(options)) {
-    await assertContainerStartupOwnership(options);
+    await assertContainerStartupOwnership(options, options.version);
     return;
   }
   const registration = await readRegistration(options);
@@ -266,6 +267,9 @@ export async function assertRelayStartupOwnership(options: RelayAutostartOptions
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32_768
     || !registration || !await ownsStartupFile(options, registration, true)) {
     throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
+  }
+  if (options.version && registration.policy !== null && registration.version !== options.version) {
+    throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
   }
 }
 

@@ -98,6 +98,17 @@ test('startup preflight accepts an exactly owned paused container registration w
   assert.deepEqual(f.calls, []);
 });
 
+test('startup version preflight rejects an outdated owned container registration without mutation', posix, async () => {
+  const f = await fixture();
+  await enableRelayAutostart(f.options);
+  const paths = ['autostart.json', 'container-control.json'].map(name => join(f.home, 'relay', name));
+  const before = await Promise.all(paths.map(path => readFile(path, 'utf8')));
+  const candidate = { ...f.options, version: '0.2.175' };
+  await assert.rejects(assertRelayStartupOwnership(candidate), /relay_runtime_upgrade_required/);
+  assert.deepEqual(await Promise.all(paths.map(path => readFile(path, 'utf8'))), before);
+  assert.deepEqual(f.calls, []);
+});
+
 for (const [name, configured] of [
   ['container-entrypoint.json', false], ['autostart.json', false], ['container-control.json', false],
   ['autostart.json', true], ['container-control.json', true],

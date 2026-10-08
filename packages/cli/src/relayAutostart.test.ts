@@ -12,7 +12,7 @@ import {
   startRelayAutostart, stopRelayAutostart, inspectOwnedRelayAutostart, macRelayLaunchAgent,
 } from './relayAutostart.js';
 
-const startupPreflight = async (options: RelayAutostartOptions) => {
+const startupPreflight = async (options: RelayAutostartOptions & { version?: string }) => {
   const check = Reflect.get(startup, 'assertRelayStartupOwnership');
   assert.equal(typeof check, 'function', 'startup ownership must be checked before enrollment');
   await check(options);
@@ -84,6 +84,26 @@ test('Linux startup preflight rejects an orphaned systemd receipt without recrea
   await assert.rejects(readFile(unit), { code: 'ENOENT' });
   assert.deepEqual(calls, []);
 });
+
+for (const policy of [null, '/fixtures/repository/.dharma/approved-policy.json']) {
+  test(`startup version preflight preserves migration semantics for policy=${policy === null ? 'demo' : 'standard'}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-startup-version-'));
+    const calls: string[][] = [];
+    const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+      workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+      policy, version: '0.2.174',
+      run: async (file: string, args: string[]) => { calls.push([file, ...args]); return { stdout: 'enabled\n' }; } };
+    await enableRelayAutostart(options);
+    const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+    const receipt = join(options.home, 'relay', 'autostart.json');
+    const before = await Promise.all([unit, receipt].map(path => readFile(path, 'utf8')));
+    calls.length = 0;
+    if (policy === null) await startupPreflight({ ...options, version: '0.2.175' });
+    else await assert.rejects(startupPreflight({ ...options, version: '0.2.175' }), /relay_runtime_upgrade_required/);
+    assert.deepEqual(await Promise.all([unit, receipt].map(path => readFile(path, 'utf8'))), before);
+    assert.deepEqual(calls, []);
+  });
+}
 
 test('bootstrap may inspect an exact owned legacy anchor for migration without admitting legacy start', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-legacy-'));

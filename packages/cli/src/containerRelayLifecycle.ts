@@ -369,11 +369,14 @@ export async function readContainerRegistration(options: ContainerLifecycleOptio
   return value;
 }
 
-export async function assertContainerStartupOwnership(options: ContainerLifecycleOptions): Promise<void> {
+export async function assertContainerStartupOwnership(options: ContainerLifecycleOptions, version?: string): Promise<void> {
   if (!await containerEntrypointAvailable(options)) throw unavailable();
   const registration = await readContainerRegistration(options);
   if (registration ? !await ownsContainerStartup(options, registration)
     : await privateJson(options, 'container-control.json') !== null) throw unavailable();
+  if (registration && version && registration.version !== version) {
+    throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
+  }
 }
 
 async function readConfiguration(options: ContainerLifecycleOptions) {

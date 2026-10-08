@@ -3022,13 +3022,16 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
   }
   if (grantMode === 'reference') {
-    try { await step(() => assertRelayStartupOwnership({ home: dharmaHome() })); }
+    try { await step(() => assertRelayStartupOwnership({ home: dharmaHome(), version: VERSION })); }
     catch (error) {
       await hostScope?.assert();
       const code = error instanceof Error && error.message.startsWith('autostart_conflict:')
-        ? 'autostart_conflict' : 'startup_preflight_unavailable';
+        ? 'autostart_conflict' : error instanceof Error && error.message.startsWith('relay_runtime_upgrade_required:')
+          ? 'relay_runtime_upgrade_required' : 'startup_preflight_unavailable';
       return { ok: false, stage: 'startup_preflight', code, grantRedeemed: false, enrollmentChanged: false,
-        message: code === 'autostart_conflict'
+        message: code === 'relay_runtime_upgrade_required'
+          ? 'Upgrade the existing enrolled startup runtime through the supported same-device update flow before retrying; setup has not redeemed authority or changed enrollment.'
+          : code === 'autostart_conflict'
           ? 'This Linux user already has a startup entry owned by another installation. Use the existing enrolled installation or an eligible clean client; setup has not redeemed authority or changed enrollment.'
           : 'Startup ownership could not be verified. Resolve the supported startup prerequisite before retrying; setup has not redeemed authority or changed enrollment.' };
     }

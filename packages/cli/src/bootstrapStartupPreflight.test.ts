@@ -30,6 +30,7 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false) {
     return value;
   } };
   const dependencies = {
+    VERSION: '0.2.174',
     flags, hostScope, portalUrl: () => 'https://hq.example', normalizeHqUrl: (url: string) => url,
     required: (input: typeof flags, key: string) => input.get(key), bootstrapGrantMode: () => mode,
     UUID_PATTERN: /^[a-f0-9-]{36}$/,
@@ -38,7 +39,9 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false) {
     realpath: async () => '/fixture/repository', preflightBootstrapWorkspaceIdentity: async () => ({ fingerprint: 'source' }),
     assertBootstrapHostSource: async () => {}, isLocalProviderId: () => true,
     readDeviceConfig: async () => null,
-    assertRelayStartupOwnership: async () => {
+    assertRelayStartupOwnership: async (options: { home: string; version: string }) => {
+      assert.equal(options.home, '/fixture/device');
+      assert.equal(options.version, '0.2.174');
       effects.push('startup_preflight');
       if (failure) throw failure;
       if (withdraw) withdrawn = true;
@@ -79,6 +82,17 @@ test('startup preflight read failure has a sanitized typed blocker rather than c
   assert.equal(result.code, 'startup_preflight_unavailable');
   assert.equal(result.grantRedeemed, false);
   assert.equal(JSON.stringify(result).includes('private unreadable path'), false);
+});
+
+test('startup version mismatch is an actionable preclaim blocker without authority consumption', async () => {
+  const f = await fixture('reference', new Error('relay_runtime_upgrade_required: private path'));
+  const result = await f.run();
+  assert.equal(result.code, 'relay_runtime_upgrade_required');
+  assert.equal(result.grantRedeemed, false);
+  assert.equal(result.enrollmentChanged, false);
+  assert.match(result.message, /upgrade/i);
+  assert.equal(JSON.stringify(result).includes('private path'), false);
+  assert.deepEqual(f.effects, ['startup_preflight']);
 });
 
 test('preflight preserves native host withdrawal instead of proceeding to claim installation', async () => {
