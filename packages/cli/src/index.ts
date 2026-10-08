@@ -133,7 +133,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.176';
+const VERSION = '0.2.177';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3226,9 +3226,10 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
   onboardFlags.set('provider', provider);
-  // The standing lifecycle owner must be registered before a setup turn can
-  // request relay startup; it cannot own a detached supervisor itself.
-  if (hostScope) onboardFlags.set('no-relay-daemon', true);
+  // Interactive source claims also need the standing lifecycle owner first;
+  // native per-command approval does not necessarily establish a host scope.
+  const deferSetupRelay = Boolean(hostScope) || flags.has('setup-reference');
+  if (deferSetupRelay) onboardFlags.set('no-relay-daemon', true);
   const onboarded = await step(() => retryBootstrapOnboarding(async () => joinedBindingId
     ? await step(() => joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!)) as Record<string, unknown>
     : await step(() => onboard(onboardFlags)) as Record<string, unknown>));
@@ -3293,7 +3294,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     };
   }
 
-  const setupRelay = hostScope && !flags.has('no-relay-daemon')
+  const setupRelay = deferSetupRelay && !flags.has('no-relay-daemon')
     ? await step(() => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')))
     : null;
   const skill = await step(() => verifyAgentFabricSkillInstallation({ provider, workspace }));
