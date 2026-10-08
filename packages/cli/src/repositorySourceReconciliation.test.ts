@@ -9,7 +9,7 @@ import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, rebuildRepositoryPackageSnapshot,
   serializeRepositoryPackageSnapshot, type RepositoryPackageFile,
   type RepositoryPackageSnapshot } from './repositoryPackage.js';
-import { reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
+import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
 import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
 import type { RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 
@@ -61,7 +61,7 @@ async function fixture(t: TestContext) {
       blobs: [...new Map(blobs.map(blob => [blob.sha256, blob])).values()],
     });
   };
-  return { snapshot };
+  return { snapshot, workspace };
 }
 
 function published(value: RepositoryPackageSnapshot) {
@@ -110,6 +110,92 @@ test('rejects concurrent conflicting modifications to the same source path', asy
   const remote = f.snapshot(file('README.md', '# Remote revision\n'));
   assert.throws(() => reconcileRepositorySourceSnapshot({ local, previousLocal: base,
     published: published(remote) }), /changed concurrently at readme.md/);
+});
+
+test('an explicit exact-source resolution preserves independent remote changes without weakening default conflict rejection', async t => {
+  const f = await fixture(t), now = new Date('2026-10-08T03:00:00.000Z');
+  const base = f.snapshot(readme);
+  const local = f.snapshot(file('README.md', '# Reviewed merged revision\n'), localReport);
+  const remote = f.snapshot(file('README.md', '# Remote revision\n'), remoteReport);
+  const input = { local, previousLocal: base, published: published(remote) };
+  assert.throws(() => reconcileRepositorySourceSnapshot(input), /changed concurrently/);
+  const resolution = { ...planRepositorySourceResolution({ ...input, now }), now };
+  const result = reconcileRepositorySourceSnapshot({ ...input, resolution });
+  assert.equal(result.manifest.files.find(f => f.path === 'README.md')?.sha256, local.manifest.files.find(f => f.path === 'README.md')?.sha256);
+  assert.ok(result.manifest.files.some(f => f.path === remoteReport.entry.path));
+  assert.ok(result.manifest.files.some(f => f.path === localReport.entry.path));
+  assert.throws(() => reconcileRepositorySourceSnapshot(input), /changed concurrently/, 'Approval must not carry to another call.');
+});
+
+test('resolution approval rejects expired, future-dated and tampered plans', async t => {
+  const f = await fixture(t), now = new Date('2026-10-08T03:00:00.000Z');
+  const input = { local: f.snapshot(file('README.md', '# Local\n')), previousLocal: f.snapshot(readme),
+    published: published(f.snapshot(file('README.md', '# Remote\n'))) };
+  const proposed = planRepositorySourceResolution({ ...input, now });
+  for (const at of [new Date(now.getTime() - 1), new Date(now.getTime() + 900000)]) {
+    assert.throws(() => reconcileRepositorySourceSnapshot({ ...input, resolution: { ...proposed, now: at } }), /expired_or_invalid/);
+  }
+  for (const field of ['organizationId', 'workspaceId', 'repositoryBindingId', 'repositoryAgentId', 'policyGenerationId',
+    'policyHash', 'baselineSnapshotHash', 'localSnapshotHash', 'publishedFingerprint', 'publishedInventoryHash', 'expiresAt'] as const) {
+    const plan = { ...proposed.plan, [field]: 'tampered' };
+    assert.throws(() => reconcileRepositorySourceSnapshot({ ...input, resolution: { ...proposed, plan, now } }), /context_changed/);
+  }
+  assert.throws(() => reconcileRepositorySourceSnapshot({ ...input,
+    resolution: { ...proposed, plan: { ...proposed.plan, conflicts: [] }, now } }), /context_changed/);
+});
+
+test('an approved plan refuses local, remote or baseline changes after review', async t => {
+  const f = await fixture(t), now = new Date('2026-10-08T03:00:00.000Z');
+  const input = { local: f.snapshot(file('README.md', '# Local\n')), previousLocal: f.snapshot(readme),
+    published: published(f.snapshot(file('README.md', '# Remote\n'))) };
+  const resolution = { ...planRepositorySourceResolution({ ...input, now }), now };
+  const changed = f.snapshot(file('README.md', '# Changed after review\n'));
+  for (const value of [{ ...input, local: changed }, { ...input, previousLocal: changed },
+    { ...input, published: published(changed) }, { ...input, published: { ...input.published,
+      sourceFingerprint: `sha256:${'a'.repeat(64)}` } }]) {
+    assert.throws(() => reconcileRepositorySourceSnapshot({ ...value, resolution }), /context_changed/);
+  }
+});
+
+test('resolution plans require a retained baseline, published source and actual conflict', async t => {
+  const f = await fixture(t), base = f.snapshot(readme);
+  const local = f.snapshot(file('README.md', '# Local\n'));
+  const remote = published(f.snapshot(file('README.md', '# Remote\n')));
+  assert.throws(() => planRepositorySourceResolution({ local, previousLocal: null, published: remote }), /prerequisite_missing/);
+  assert.throws(() => planRepositorySourceResolution({ local, previousLocal: base, published: null }), /prerequisite_missing/);
+  assert.throws(() => planRepositorySourceResolution({ local: base, previousLocal: base, published: remote }), /not_required/);
+});
+
+test('explicit local deletion is pinned and resolution metadata contains no source content', async t => {
+  const f = await fixture(t), marker = 'SYNTHETIC_PRIVATE_CONTENT_NOT_A_REAL_SECRET';
+  const input = { local: f.snapshot(localReport), previousLocal: f.snapshot(readme, localReport),
+    published: published(f.snapshot(file('README.md', marker), localReport)) };
+  const now = new Date('2026-10-08T03:00:00.000Z');
+  const proposed = planRepositorySourceResolution({ ...input, now });
+  assert.equal(JSON.stringify(proposed).includes(marker), false);
+  assert.equal(JSON.stringify(proposed).includes(Buffer.from(marker).toString('base64')), false);
+  const result = reconcileRepositorySourceSnapshot({ ...input, resolution: { ...proposed, now } });
+  assert.equal(result.manifest.files.some(f => f.path === 'README.md'), false);
+});
+
+test('skill conflicts require exact approval of both the skill descriptor and its source file', async t => {
+  const f = await fixture(t), path = '.codex/skills/review/SKILL.md';
+  await mkdir(resolve(f.workspace, '.codex/skills/review'), { recursive: true });
+  const collect = async (content: string) => {
+    await writeFile(resolve(f.workspace, path), content);
+    return inventoryRepositoryPackage({ organizationId, workspaceId, repositoryBindingId,
+      repositoryAgentId, workspace: f.workspace, sourceAuthorization: authorization });
+  };
+  const base = await collect('# Original review\n'), local = await collect('# Reviewed merged review\n');
+  const remote = await collect('# Remote review\n');
+  const input = { local, previousLocal: base, published: published(remote) }, now = new Date();
+  const proposed = planRepositorySourceResolution({ ...input, now });
+  assert.deepEqual(proposed.plan.conflicts.map(entry => entry.kind), ['file', 'skill']);
+  const result = reconcileRepositorySourceSnapshot({ ...input, resolution: { ...proposed, now } });
+  assert.equal(result.manifest.skills[0]!.contentHash, local.manifest.skills[0]!.contentHash);
+  const incomplete = { ...proposed.plan, conflicts: proposed.plan.conflicts.filter(entry => entry.kind === 'file') };
+  assert.throws(() => reconcileRepositorySourceSnapshot({ ...input,
+    resolution: { plan: incomplete, planHash: digest(canonicalize(incomplete)), now } }), /context_changed/);
 });
 
 test('fresh workspaces preserve remote-only source and reject conflicting same-path content', async t => {

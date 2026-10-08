@@ -5,7 +5,7 @@ import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readReposito
 import { parseRepositorySourcePolicyResponse, validateRepositorySourceAuthorization, type RepositorySourceScope } from './repositorySourceAuthorization.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
-import { reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
+import { reconcileRepositorySourceSnapshot, RepositorySourceConflictError, type RepositorySourceResolution } from './repositorySourceReconciliation.js';
 
 type SourceTransport = { signedGet(route: string): Promise<Record<string, unknown>> };
 export type BoundRepositorySource = RepositorySourceScope & {
@@ -170,6 +170,7 @@ export async function scanRepositorySourceChanges(input: BoundRepositorySource &
   monotonicNow?: () => number;
   loadRetainedKnowledge?: () => Promise<{ catalogBytes: Buffer; manifestBytes: Buffer } | null>;
   loadPublishedLocalBaseline?: () => Promise<RepositoryPackageSnapshot | null>;
+  loadResolution?: () => Promise<RepositorySourceResolution | null>;
   submitCandidate?: (snapshot: RepositoryPackageSnapshot,
     expectedLatestSourceFingerprint?: string) => Promise<Record<string, unknown>>;
 }) {
@@ -198,9 +199,26 @@ export async function scanRepositorySourceChanges(input: BoundRepositorySource &
     const published = input.loadPublishedLocalBaseline
       ? await fetchPublishedRepositorySource({ transport: input.transport, scope: input,
         authorization, local }) : null;
-    const snapshot = input.loadPublishedLocalBaseline
-      ? reconcileRepositorySourceSnapshot({ local,
-        previousLocal: await input.loadPublishedLocalBaseline(), published }) : local;
+    const previousLocal = input.loadPublishedLocalBaseline ? await input.loadPublishedLocalBaseline() : null;
+    const sourceInput = { local, previousLocal, published };
+    let resolution: RepositorySourceResolution | null = null;
+    let snapshot = local;
+    if (input.loadPublishedLocalBaseline) {
+      try { snapshot = reconcileRepositorySourceSnapshot(sourceInput); }
+      catch (error) {
+        if (!(error instanceof RepositorySourceConflictError)) throw error;
+        resolution = await input.loadResolution?.() ?? null;
+        if (!resolution) throw error;
+        snapshot = reconcileRepositorySourceSnapshot({ ...sourceInput, resolution });
+      }
+    }
+    if (resolution) {
+      const active = await input.loadResolution?.();
+      if (!active || active.planHash !== resolution.planHash || canonicalize(active.plan) !== canonicalize(resolution.plan)) {
+        throw new Error('repository_source_resolution_withdrawn');
+      }
+      reconcileRepositorySourceSnapshot({ ...sourceInput, resolution: active });
+    }
     const persisted = await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot: local,
       candidateOnly: true });
     if (published && snapshot.manifest.sourceFingerprint === published.sourceFingerprint) {
@@ -211,6 +229,14 @@ export async function scanRepositorySourceChanges(input: BoundRepositorySource &
     }
     if (snapshot.manifest.snapshotHash !== local.manifest.snapshotHash) {
       await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot, candidateOnly: true });
+    }
+    if (resolution) {
+      const active = await input.loadResolution?.();
+      if (!active || active.planHash !== resolution.planHash || canonicalize(active.plan) !== canonicalize(resolution.plan)) {
+        throw new Error('repository_source_resolution_withdrawn');
+      }
+      const latestLocal = await inventoryRepositoryPackage({ ...input, retainedKnowledge, sourceAuthorization: authorization });
+      reconcileRepositorySourceSnapshot({ local: latestLocal, previousLocal, published, resolution: active });
     }
     const candidate = input.submitCandidate
       ? await input.submitCandidate(snapshot, published?.sourceFingerprint) : null;
