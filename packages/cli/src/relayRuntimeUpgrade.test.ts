@@ -93,6 +93,26 @@ test('legacy upgrade journals remain recoverable without inventing a provider co
   assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, f.deps)).state, 'rolled_back');
 });
 
+test('legacy-journal rollback explicitly clears the current shell profile rather than inheriting it', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const f = await fixture('0.2.175', '0.2.176');
+  let version = '0.2.175', codexHome: string | undefined;
+  const restored: Array<string | null | undefined> = [];
+  const deps = {...f.deps, inspectStartup: async () => ({version, workspace: f.input.workspace, codexHome}),
+    configureStartup: async (next: string, restore?: {codexHome: string | null}) => {
+      restored.push(restore?.codexHome);version = next;
+      codexHome = restore ? restore.codexHome ?? undefined : '/fixtures/shell-selected-codex';
+    },
+  };
+  await upgradeRelayRuntime(f.input, {...deps, configureStartup: async (next: string) => {version = next;}});
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  const journal = JSON.parse(await readFile(path, 'utf8'));
+  delete journal.previousCodexHome;journal.schema = 'dharma.local-relay-upgrade/v1';
+  await writeFile(path, JSON.stringify(journal));
+  assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, deps)).state, 'rolled_back');
+  assert.deepEqual(restored, [null]);assert.equal(codexHome, undefined);
+});
+
 test('upgrade recovery rejects malformed profile context and undeclared fields before owned controls', async () => {
   const {upgradeRelayRuntime} = await import(modulePath);
   for (const change of [{previousCodexHome: '/fixtures/../other'}, {previousCodexHome: '/private\nTOKEN=bad'},

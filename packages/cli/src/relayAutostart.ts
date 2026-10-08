@@ -404,6 +404,9 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   const codexHome = backend === 'systemd-user' && policy !== null
     ? options.restoreCodexHome !== undefined ? options.restoreCodexHome === null ? undefined : codexProfilePath(options.restoreCodexHome)
       : options.codexHome === undefined ? previousCodexHome : codexProfilePath(options.codexHome) : undefined;
+  if (preserve && options.workspace !== previous!.workspace && codexHome !== previousCodexHome) {
+    throw new Error('relay_startup_provider_context_conflict');
+  }
   const workspace = preserve || (options.policy === null && previous?.policy) ? previous!.workspace : options.workspace;
   const fields: RegistrationFields = {
     backend,

@@ -100,6 +100,26 @@ test('Linux startup context tampering cannot be adopted, started or disabled', a
   await assert.rejects(startupPreflight(options), /autostart_conflict/);
 });
 
+test('a sibling repository cannot replace an absent/default Codex profile on the existing startup anchor', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-codex-sibling-anchor-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const calls: string[] = [];
+  const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repo-a', launcher: '/fixtures/repo-a/.dharma/bin/dharma',
+    policy: '/fixtures/repo-a/.dharma/approved-policy.json', version: '0.2.175',
+    run: async (file: string) => {calls.push(file);return {stdout: 'enabled\n'};}};
+  await enableRelayAutostart(options);
+  const receiptPath = join(options.home, 'relay', 'autostart.json');
+  const unitPath = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = await readFile(receiptPath, 'utf8'), unit = await readFile(unitPath, 'utf8');
+  calls.length = 0;
+  await assert.rejects(enableRelayAutostart({...options, workspace: '/fixtures/repo-b',
+    launcher: '/fixtures/repo-b/.dharma/bin/dharma', policy: '/fixtures/repo-b/.dharma/approved-policy.json',
+    codexHome: '/fixtures/repo-b-profile', preserveStandardAnchor: true}), /relay_startup_provider_context_conflict/);
+  assert.equal(await readFile(receiptPath, 'utf8'), receipt);
+  assert.equal(await readFile(unitPath, 'utf8'), unit);assert.deepEqual(calls, []);
+});
+
 test('Linux startup preflight rejects a second device home without modifying its existing anchor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-'));
   const calls: string[] = [];

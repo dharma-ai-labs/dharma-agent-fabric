@@ -167,7 +167,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
         || ![journal.previous.windows, next.windows].includes(actual.windows)) fail('launcher_conflict');
       await installLaunchers(input.workspace, journal.previous);
       await deps.configureStartup(journal.previousVersion, journal.schema === 'dharma.local-relay-upgrade-journal/v2'
-        ? {codexHome: journal.previousCodexHome!} : undefined);
+        ? {codexHome: journal.previousCodexHome!} : {codexHome: null});
       const since = new Date().toISOString();
       await deps.start(); await deps.verify(journal.previousVersion, since);
       await save('rolled_back');
