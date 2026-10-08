@@ -242,15 +242,25 @@ test('invalid explicit scope cannot downgrade installation to legacy authority',
 });
 
 test('detached provider work retains the closed installation scope instead of falling back to legacy reads', async t => {
-  const f = await fixture(t), api = await module(); let late: Promise<unknown> | undefined;
-  await api.installSkillBundle({...f.input, hostScope: f.hostScope, providerActivationCheck: async () => {
-    late = new Promise((accept, reject) => setTimeout(() => {
-      api.contentHash(path.join(f.input.sourceDirectory, 'skill')).then(accept, reject);
-    }, 200));
-    void late.catch(() => {});
-    return {name: 'provider:codex:activation', status: 'pass', details: null};
-  }});
-  await assert.rejects(late!, {message: 'skill_installation_scope_unavailable'});
+  for (const delay of [0, 400]) await t.test(`post-activation writes delayed ${delay}ms`, async t => {
+    const f = await fixture(t); let slowWrites = false, late: Promise<unknown> | undefined;
+    const api = await module({writeFile: async (...args: Parameters<typeof fs.writeFile>) => {
+      if (slowWrites && delay) await new Promise(accept => setTimeout(accept, delay));
+      return fs.writeFile(...args);
+    }});
+    let release!: () => void;
+    const installationFinished = new Promise<void>(accept => {release = accept;});
+    try {
+      await api.installSkillBundle({...f.input, hostScope: f.hostScope, providerActivationCheck: async () => {
+        slowWrites = true;
+        late = installationFinished.then(() => api.contentHash(path.join(f.input.sourceDirectory, 'skill')));
+        void late.catch(() => {});
+        return {name: 'provider:codex:activation', status: 'pass', details: null};
+      }});
+    } finally {release();}
+    assert.ok(late);
+    await assert.rejects(late, {message: 'skill_installation_scope_unavailable'});
+  });
 });
 
 test('scoped smoke execution is refused before any unqualified child launch', async t => {
