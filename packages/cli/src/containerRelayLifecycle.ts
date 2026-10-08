@@ -65,7 +65,10 @@ async function privateJson(options: ContainerLifecycleOptions, name: string): Pr
         || current.size > 32_768) throw unavailable();
       const text = await file.readFile('utf8');
       if (Buffer.byteLength(text) > 32_768) throw unavailable();
-      return JSON.parse(text) as unknown;
+      const value: unknown = JSON.parse(text);
+      // Only ENOENT denotes absence; a present JSON null is an invalid receipt.
+      if (value === null) throw unavailable();
+      return value;
     } finally { await file.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;

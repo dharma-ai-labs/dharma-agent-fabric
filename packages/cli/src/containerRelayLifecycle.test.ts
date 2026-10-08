@@ -98,6 +98,21 @@ test('startup preflight accepts an exactly owned paused container registration w
   assert.deepEqual(f.calls, []);
 });
 
+for (const [name, configured] of [
+  ['container-entrypoint.json', false], ['autostart.json', false], ['container-control.json', false],
+  ['autostart.json', true], ['container-control.json', true],
+] as const) {
+  test(`startup preflight rejects JSON null in ${name} with configured=${configured}`, posix, async () => {
+    const f = await fixture();
+    if (configured) await enableRelayAutostart(f.options);
+    const path = join(f.home, 'relay', name);
+    await writeFile(path, 'null\n', { mode: 0o600 });
+    await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+    assert.equal(await readFile(path, 'utf8'), 'null\n');
+    assert.deepEqual(f.calls, []);
+  });
+}
+
 test('owned container PID1 enables startup without claiming or modifying the OS-user systemd slot', posix, async () => {
   const f = await fixture();
   const friday = join(f.root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
