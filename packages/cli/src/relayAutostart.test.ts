@@ -365,6 +365,56 @@ test('startup status never calls a missing OS registration healthy', async () =>
   assert.equal(result.state, 'disabled');
 });
 
+test('Linux status distinguishes a disabled owned unit from a failed user manager', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-autostart-disabled-'));
+  const calls: string[][] = [];
+  let disabled = false;
+  let failure: Record<string, unknown> | null = null;
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: '/fixtures/repository/.dharma/approved-policy.json', version: '0.2.175',
+    run: async (file: string, args: string[]) => {
+      assert.equal(file, 'systemctl');
+      calls.push(args);
+      if (args.includes('is-enabled')) {
+        if (failure) throw Object.assign(new Error('synthetic manager failure'), failure);
+        if (disabled) throw Object.assign(new Error('synthetic disabled exit'), {
+          code: 1, stdout: 'disabled\n', stderr: '', killed: false, signal: null,
+        });
+        return { stdout: 'enabled\n' };
+      }
+      if (args.includes('enable')) disabled = false;
+      return { stdout: '' };
+    } };
+  await enableRelayAutostart(options);
+  disabled = true;
+  calls.length = 0;
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = join(options.home, 'relay', 'autostart.json');
+  const before = await Promise.all([unit, receipt].map(path => readFile(path, 'utf8')));
+  assert.deepEqual(await relayAutostartStatus(options), {
+    state: 'disabled', backend: 'systemd-user', version: options.version,
+  });
+  assert.deepEqual(calls, [['--user', 'is-enabled', 'dharma-agent-fabric.service']]);
+  assert.deepEqual(await Promise.all([unit, receipt].map(path => readFile(path, 'utf8'))), before);
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  assert.ok(calls.some(args => args.includes('enable')));
+  for (const invalid of [
+    { code: 1, stdout: '', stderr: 'Failed to connect to bus' },
+    { code: 1, stdout: 'disabled\n', stderr: 'Failed to connect to bus' },
+    { code: 2, stdout: 'disabled\n', stderr: '' },
+    { code: 1, stdout: 'masked\n', stderr: '' },
+    { code: 1, stdout: 'disabled\n', stderr: '', killed: true, signal: 'SIGTERM' },
+    { code: 'ENOENT', stdout: 'disabled\n', stderr: '' },
+  ]) {
+    failure = invalid;
+    const status = await relayAutostartStatus(options);
+    assert.equal(status.state, 'unavailable');
+    assert.equal(status.reason, 'systemd_user_unavailable');
+  }
+  assert.deepEqual(await Promise.all([unit, receipt].map(path => readFile(path, 'utf8'))), before);
+});
+
 test('a second standard repository preserves the verified user startup anchor on Linux and Windows', async () => {
   for (const platform of ['linux', 'win32'] as const) {
     const root = await mkdtemp(join(tmpdir(), 'dharma-startup-anchor-'));

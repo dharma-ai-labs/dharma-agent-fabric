@@ -330,6 +330,13 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
     return { state: result.stdout.trim() === 'enabled' ? 'enabled' : 'disabled',
       backend: registration.backend, version: registration.version };
   } catch (error) {
+    // is-enabled exits 1 for a disabled unit; transport failures are not disablement.
+    const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; killed?: unknown; signal?: unknown };
+    if (registration.backend === 'systemd-user' && failure?.code === 1
+      && typeof failure.stdout === 'string' && failure.stdout.trim() === 'disabled'
+      && failure.stderr === '' && !failure.killed && !failure.signal) {
+      return { state: 'disabled', backend: registration.backend, version: registration.version };
+    }
     return { state: 'unavailable', backend: registration.backend, version: registration.version,
       reason: error instanceof Error && error.message.startsWith('autostart_conflict:') ? 'autostart_conflict'
         : registration.backend === 'container-entrypoint' ? 'container_startup_unavailable'
