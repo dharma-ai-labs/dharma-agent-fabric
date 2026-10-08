@@ -73,7 +73,7 @@ async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: b
     flags, hostScope: options.host === false ? undefined : {step}, step,
     hqUrl: 'https://hq.example', organizationId: 'org_demo', workspace: '/synthetic/repository',
     policyRevision: 'policy-v1', provider: 'codex', joinedBindingId: null, joinedFingerprint: null,
-    repositorySelection: {}, config: {}, organizationApiTokenStored: true, scopes: [], recipientApproval: {}, rebind: {},
+    repositorySelection: {}, config: {deviceId: 'device'}, organizationApiTokenStored: true, scopes: [], recipientApproval: {}, rebind: {},
     retryBootstrapOnboarding: async (run: () => Promise<unknown>) => run(),
     onboard: async (input: Map<string, unknown>) => {
       effects.push('onboard');
@@ -90,7 +90,7 @@ async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: b
       return {state: 'disabled', backend: null};
     },
     inspectOwnedRelayAutostart: async () => ({workspace, policy: policyPath, version: options.previousVersion}),
-    readDeviceConfig: async () => ({organizationId: 'org_demo'}),
+    readDeviceConfig: async () => ({organizationId: 'org_demo', deviceId: 'device'}),
     registry: async () => [{workspaceId: 'workspace', organizationId: 'org_demo', path: workspace}],
     selectDeviceWorkspace: () => ({workspaceId: 'workspace', organizationId: 'org_demo', path: workspace}),
     loadOrganizationPolicy: async () => ({serverAuthorization: {workspaceId: 'workspace'}}),
@@ -105,6 +105,7 @@ async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: b
     resolve: (...parts: string[]) => parts.join('/'), process: {platform: 'linux'},
     VERSION: 'test', String, Map,
   };
+  dependencies.assertBootstrapStartupAnchor = await actual('assertBootstrapStartupAnchor', dependencies);
   const block = statements.slice(start, end).map(node => node.getText(ast)).join('\n');
   const compiled = ts.transpileModule(`async function run(){${block}\nreturn {onboarded,autostart};}`, {
     compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true,

@@ -22,7 +22,9 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const nodes = source.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.equal(nodes.length, 1, 'The named source function must resolve exactly once.');
-  const compiled = ts.transpileModule(nodes[0]!.getText(source), {
+  const anchor = name === 'bootstrap' ? source.statements.find(node => ts.isFunctionDeclaration(node)
+    && node.name?.text === 'assertBootstrapStartupAnchor') : undefined;
+  const compiled = ts.transpileModule([anchor?.getText(source), nodes[0]!.getText(source)].filter(Boolean).join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
     reportDiagnostics: true,
   });

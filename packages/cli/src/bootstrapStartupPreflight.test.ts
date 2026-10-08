@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 // Execute the actual bootstrap prefix through the first claim-installation
 // boundary. Synthetic dependencies never enroll, access credentials or start a relay.
-async function fixture(mode = 'reference', failure?: Error, withdraw = false) {
+async function fixture(mode = 'reference', failure?: Error, withdraw = false, anchorFailure?: string) {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const bootstrap = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'bootstrap');
@@ -38,7 +38,7 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false) {
     originalCodexSetupSessionSender: async () => ({}), dharmaHome: () => '/fixture/device',
     realpath: async () => '/fixture/repository', preflightBootstrapWorkspaceIdentity: async () => ({ fingerprint: 'source' }),
     assertBootstrapHostSource: async () => {}, isLocalProviderId: () => true,
-    readDeviceConfig: async () => null,
+    readDeviceConfig: async () => anchorFailure ? { organizationId: 'org_demo', deviceId: 'device', hqUrl: 'https://hq.example' } : null,
     assertRelayStartupOwnership: async (options: { home: string; version: string }) => {
       assert.equal(options.home, '/fixture/device');
       assert.equal(options.version, '0.2.174');
@@ -49,12 +49,39 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false) {
     readPrivateBootstrapGrant: async () => { effects.push('private_input'); return 'fixture'; },
     process: { stderr: { write: () => { throw new Error('unexpected stderr'); } } },
   };
+  const anchor = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'assertBootstrapStartupAnchor');
+  const anchorDependencies = {
+    ...dependencies,
+    relayAutostartStatus: async () => anchorFailure ? { state: 'enabled', backend: 'systemd-user' }
+      : { state: 'disabled', backend: null },
+    inspectOwnedRelayAutostart: async () => ({ workspace: '/fixture/anchor',
+      policy: '/fixture/anchor/.dharma/approved-policy.json', version: '0.2.174' }),
+    registry: async () => [{ workspaceId: 'anchor', organizationId: 'org_demo', path: '/fixture/anchor',
+      routeHash: 'route', repositoryRemoteHash: 'remote' }],
+    selectDeviceWorkspace: () => anchorFailure === 'missing-workspace' ? null
+      : { routeHash: 'route', repositoryRemoteHash: 'remote' },
+    resolve: (...parts: string[]) => parts.join('/'),
+    loadOrganizationPolicy: async () => {
+      if (anchorFailure === 'missing-policy') throw new Error('private policy path unreadable');
+      return { serverAuthorization: { workspaceId: anchorFailure === 'foreign-route' ? 'foreign' : 'anchor' } };
+    },
+    loadVerifiedWorkspacePolicy: async () => {
+      if (anchorFailure === 'invalid-policy') throw new Error('private policy authorization invalid');
+      return {};
+    },
+  };
+  const anchorBody = ts.transpileModule(anchor?.getText(ast) ?? 'async function assertBootstrapStartupAnchor() {}', {
+    compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const assertBootstrapStartupAnchor = compileFunction(anchorBody + '\nreturn assertBootstrapStartupAnchor;',
+    Object.keys(anchorDependencies))(...Object.values(anchorDependencies));
   const prefix = bootstrap.body.statements.slice(0, prefixEnd).map(node => node.getText(ast)).join('\n');
   const compiled = ts.transpileModule(`async function run(){${prefix}\nreturn {reachedClaimBoundary:true};}`, {
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true,
   });
   assert.equal(compiled.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
-  const run = compileFunction(compiled.outputText + '\nreturn run;', Object.keys(dependencies))(...Object.values(dependencies));
+  const allDependencies = { ...dependencies, assertBootstrapStartupAnchor };
+  const run = compileFunction(compiled.outputText + '\nreturn run;', Object.keys(allDependencies))(...Object.values(allDependencies));
   return { run, effects };
 }
 
@@ -104,4 +131,23 @@ test('legacy private-input bootstrap behavior is unchanged', async () => {
   const f = await fixture('prompt');
   assert.deepEqual(await f.run(), { reachedClaimBoundary: true });
   assert.deepEqual(f.effects, ['private_input']);
+});
+
+for (const kind of ['missing-workspace', 'missing-policy', 'foreign-route', 'invalid-policy']) {
+  test(`source-connected bootstrap rejects ${kind} standard anchor before claim`, async () => {
+    const f = await fixture('reference', undefined, false, kind);
+    const result = await f.run();
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, 'startup_preflight');
+    assert.equal(result.grantRedeemed, false);
+    assert.equal(result.enrollmentChanged, false);
+    assert.equal(JSON.stringify(result).includes('private policy'), false);
+    assert.deepEqual(f.effects, ['startup_preflight']);
+  });
+}
+
+test('source-connected bootstrap admits an existing valid standard anchor before claim', async () => {
+  const f = await fixture('reference', undefined, false, 'valid');
+  assert.deepEqual(await f.run(), { reachedClaimBoundary: true });
+  assert.deepEqual(f.effects, ['startup_preflight']);
 });

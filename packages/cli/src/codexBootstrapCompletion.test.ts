@@ -43,7 +43,9 @@ async function declaration(name: string, dependencies: Record<string, unknown>) 
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const matches = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.equal(matches.length, 1);
-  const output = ts.transpileModule(matches[0]!.getText(ast), {compilerOptions: {
+  const anchor = name === 'bootstrap' ? ast.statements.find(node => ts.isFunctionDeclaration(node)
+    && node.name?.text === 'assertBootstrapStartupAnchor') : undefined;
+  const output = ts.transpileModule([anchor?.getText(ast), matches[0]!.getText(ast)].filter(Boolean).join('\n'), {compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});
   assert.equal(output.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
   const body = output.outputText.replaceAll('import.meta.url', 'ENTRY_URL');

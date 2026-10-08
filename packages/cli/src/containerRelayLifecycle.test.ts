@@ -98,6 +98,38 @@ test('startup preflight accepts an exactly owned paused container registration w
   assert.deepEqual(f.calls, []);
 });
 
+for (const configured of [false, true]) {
+  for (const kind of ['malformed', 'stale', 'future', 'foreign-start']) {
+    test(`startup preflight rejects ${kind} heartbeat with configured=${configured}`, posix, async () => {
+      const f = await fixture();
+      if (configured) await enableRelayAutostart(f.options);
+      const heartbeat = join(f.home, 'relay', 'container-heartbeat.json');
+      const value = { schema: 'dharma.container-relay-heartbeat/v1', home: f.home,
+        startTicks: kind === 'foreign-start' ? '99999' : f.marker.startTicks,
+        polledAt: Date.now() + (kind === 'stale' ? -60_000 : kind === 'future' ? 60_000 : 0),
+        lifecycle: 'unconfigured', reason: null, registrationHash: null, childPid: null, childStartTicks: null };
+      const bytes = kind === 'malformed' ? '{broken' : JSON.stringify(value);
+      await writeFile(heartbeat, bytes, { mode: 0o600 });
+      await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+      assert.equal(await readFile(heartbeat, 'utf8'), bytes);
+      assert.deepEqual(f.calls, []);
+    });
+  }
+}
+
+test('startup preflight accepts the live unconfigured heartbeat without creating registration', posix, async () => {
+  const f = await fixture();
+  const heartbeat = join(f.home, 'relay', 'container-heartbeat.json');
+  const bytes = JSON.stringify({ schema: 'dharma.container-relay-heartbeat/v1', home: f.home,
+    startTicks: f.marker.startTicks, polledAt: Date.now(), lifecycle: 'unconfigured', reason: null,
+    registrationHash: null, childPid: null, childStartTicks: null });
+  await writeFile(heartbeat, bytes, { mode: 0o600 });
+  await assertRelayStartupOwnership(f.options);
+  assert.equal(await readFile(heartbeat, 'utf8'), bytes);
+  await assert.rejects(readFile(join(f.home, 'relay', 'autostart.json')), { code: 'ENOENT' });
+  assert.deepEqual(f.calls, []);
+});
+
 test('startup version preflight rejects an outdated owned container registration without mutation', posix, async () => {
   const f = await fixture();
   await enableRelayAutostart(f.options);
