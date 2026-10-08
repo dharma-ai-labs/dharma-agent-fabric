@@ -9,7 +9,7 @@ import ts from 'typescript';
 
 // Execute the actual post-enrollment caller with synthetic lifecycle boundaries.
 // No fixture starts a daemon, accesses credentials, or contacts the platform.
-async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean; previousVersion?: string} = {}) {
+async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean; previousVersion?: string} = {}) {
   const baseline = process.env.DHARMA_BOOTSTRAP_ORDER_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('bootstrap_order_baseline_invalid');
   const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`], {
@@ -25,6 +25,7 @@ async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: b
   const effects: string[] = [];
   let enabled = false, withdrawn = false, running = false;
   const flags = new Map<string, string | boolean>([['complete', true], ['setup-reference', 'public-reference']]);
+  if (options.sourceClaim === false) flags.delete('setup-reference');
   if (options.noRelay) flags.set('no-relay-daemon', true);
   const step = async <T>(operation: () => Promise<T>) => {
     if (withdrawn) throw new Error('codex_setup_host_scope_unavailable');
@@ -122,6 +123,23 @@ test('fresh native bootstrap registers its owned startup before starting a relay
   assert.equal(f.flags.has('no-relay-daemon'), false, 'internal deferral must not change customer flags');
 });
 
+test('interactive source claim without a host scope registers startup before relay admission', async () => {
+  const f = await fixture({host: false}); await f.run();
+  assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable', 'start']);
+  assert.equal(f.flags.has('no-relay-daemon'), false);
+});
+
+test('interactive source claim preserves explicit no-relay mode', async () => {
+  const f = await fixture({host: false, noRelay: true}); await f.run();
+  assert.deepEqual(f.effects, ['onboard', 'launcher']);
+});
+
+test('interactive source claim does not fall back after a startup ownership conflict', async () => {
+  const f = await fixture({host: false, conflict: true});
+  await assert.rejects(f.run(), /autostart_conflict: foreign registration/);
+  assert.equal(f.effects.includes('start'), false);
+});
+
 test('native bootstrap keeps explicit no-relay mode free of startup effects', async () => {
   const f = await fixture({noRelay: true}); await f.run();
   assert.deepEqual(f.effects, ['onboard', 'launcher']);
@@ -152,6 +170,6 @@ test('explicit no-relay bootstrap does not try to upgrade or inspect startup', a
 });
 
 test('legacy unscoped onboarding retains its original relay-start order', async () => {
-  const f = await fixture({host: false}); await f.run();
+  const f = await fixture({host: false, sourceClaim: false}); await f.run();
   assert.deepEqual(f.effects, ['onboard', 'start', 'launcher', 'enable']);
 });
