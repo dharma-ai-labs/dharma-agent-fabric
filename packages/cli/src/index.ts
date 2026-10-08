@@ -66,6 +66,10 @@ import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInp
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
+import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
+import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
+import { activateRepositorySourceResolution, readActiveRepositorySourceResolution,
+  readRepositorySourceResolutionPlan, saveRepositorySourceResolutionPlan } from './repositorySourceResolutionStore.js';
 import { prepareProvidersIndependently, startSkillPreparationPump } from './skillPreparationPump.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
@@ -129,7 +133,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.173';
+const VERSION = '0.2.174';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5498,6 +5502,68 @@ async function repositoryInstallerRecoveryCommand(flags: Map<string, string | bo
     nextAction: 'Resume pinned onboarding; recovery is not signed skill installation or activation.' };
 }
 
+export async function repositorySourceResolutionCommand(flags: Map<string, string | boolean>) {
+  flags = new Map(flags);
+  const allowed = new Set(['workspace-id', 'dry-run', 'prepare', 'apply', 'plan-hash', 'choose-reviewed-local', 'json']);
+  if ([...flags].some(([key, value]) => !allowed.has(key)
+    || (['workspace-id', 'plan-hash'].includes(key) ? typeof value !== 'string' || !value : value !== true))) {
+    throw new Error('repository_source_resolution_option_invalid');
+  }
+  const prepare = flags.get('prepare') === true, apply = flags.get('apply') === true;
+  if ([flags.get('dry-run') === true, prepare, apply].filter(Boolean).length > 1
+    || apply !== (typeof flags.get('plan-hash') === 'string')
+    || apply !== (flags.get('choose-reviewed-local') === true)) {
+    throw new Error('repository_source_resolution_option_conflict');
+  }
+  const workspaceId = required(flags, 'workspace-id');
+  const config = await readDeviceConfig();
+  const workspace = (await registry()).find(row => row.workspaceId === workspaceId && row.organizationId === config?.organizationId);
+  if (!config || !workspace || !workspace.repositoryBindingId || !workspace.repositoryAgentId
+    || workspace.accessMode === 'knowledge_only' || !workspace.repositoryPackage) {
+    throw new Error('repository_source_resolution_workspace_not_authorized');
+  }
+  if (workspace.repositoryPackage.state !== 'published' || workspace.repositoryPackage.pendingLocalOperationId) {
+    throw new Error('repository_source_resolution_publication_pending');
+  }
+  const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(), readOnly: true });
+  await fabric.openSession(VERSION);
+  const scope = { organizationId: workspace.organizationId, workspaceId, repositoryBindingId: workspace.repositoryBindingId,
+    repositoryAgentId: workspace.repositoryAgentId };
+  const authorization = await fetchRepositorySourceAuthorization(fabric, scope);
+  const retainedKnowledge = await installedRepositoryKnowledge(workspace);
+  if (!retainedKnowledge) throw new Error('repository_source_resolution_signed_knowledge_missing');
+  const local = await inventoryRepositoryPackage({ ...scope, workspace: workspace.path, sourceAuthorization: authorization, retainedKnowledge });
+  const published = await fetchPublishedRepositorySource({ transport: fabric, scope, authorization, local });
+  const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
+    workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
+  const previousLocal = baseline ? await readRepositoryPackageSnapshot(workspace.path, baseline) : null;
+  const input = { local, previousLocal, published };
+  const proposed = apply ? await readRepositorySourceResolutionPlan(workspace.path, required(flags, 'plan-hash'))
+    : planRepositorySourceResolution(input);
+  const resolved = reconcileRepositorySourceSnapshot({ ...input, resolution: proposed });
+  if (canonicalize(await fetchRepositorySourceAuthorization(fabric, scope)) !== canonicalize(authorization)) {
+    throw new Error('repository_source_resolution_policy_changed');
+  }
+  const currentKnowledge = await installedRepositoryKnowledge(workspace);
+  if (!currentKnowledge || !retainedKnowledge.catalogBytes.equals(currentKnowledge.catalogBytes)
+    || !retainedKnowledge.manifestBytes.equals(currentKnowledge.manifestBytes)) {
+    throw new Error('repository_source_resolution_knowledge_changed');
+  }
+  const currentLocal = await inventoryRepositoryPackage({ ...scope, workspace: workspace.path,
+    sourceAuthorization: authorization, retainedKnowledge: currentKnowledge });
+  if (currentLocal.manifest.snapshotHash !== local.manifest.snapshotHash) {
+    throw new Error('repository_source_resolution_local_changed');
+  }
+  if (prepare) await saveRepositorySourceResolutionPlan(workspace.path, proposed);
+  if (apply) await activateRepositorySourceResolution(workspace.path, proposed);
+  return { ok: true, stage: apply ? 'resolution_approved_for_relay' : prepare ? 'resolution_prepared' : 'resolution_preview',
+    dryRun: !prepare && !apply, localMutation: prepare || apply, serverMutation: true,
+    protocolSessionCreated: true, serverSourceMutation: false, durableRelayStateMutation: false,
+    authority: 'current_source_policy_only', plan: proposed.plan, planHash: proposed.planHash,
+    resolvedSnapshotHash: resolved.manifest.snapshotHash, published: false };
+}
+
 async function repositorySnapshotCommand(flags: Map<string, string | boolean>, outputs: Array<string | boolean>) {
   if (flags.has('apply') && flags.has('dry-run')) throw new Error('Choose --apply or --dry-run, not both.');
   if (outputs.some(value => typeof value !== 'string')) throw new Error('--approved-output requires a workspace-relative file path.');
@@ -8186,6 +8252,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 loadRetainedKnowledge: () => installedRepositoryKnowledge(sourceWorkspace),
                 loadPublishedLocalBaseline: () => sourceBaselineHash
                   ? readRepositoryPackageSnapshot(sourceWorkspace.path, sourceBaselineHash) : Promise.resolve(null),
+                loadResolution: () => readActiveRepositorySourceResolution(sourceWorkspace.path),
                 submitCandidate: (snapshot, expectedLatestSourceFingerprint) => synchronizeRepositoryCandidate({ transport: fabric,
                   outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'),
                   scope: { organizationId: sourceWorkspace.organizationId,
@@ -8437,6 +8504,12 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'repositories' && subcommand === 'recover-installer') return repositoryInstallerRecoveryCommand(flags);
   if (command === 'repositories' && subcommand === 'snapshot') {
     return repositorySnapshotCommand(flags, repeated.get('approved-output') || []);
+  }
+  if (command === 'repositories' && subcommand === 'source-resolve') {
+    if (positional.length !== 2 || [...repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('repository_source_resolution_option_invalid');
+    }
+    return repositorySourceResolutionCommand(flags);
   }
   if (command === 'repositories' && ['role-register', 'role-discover', 'ask', 'reply'].includes(String(subcommand))) {
     const action = subcommand === 'role-register' ? 'register' : subcommand === 'role-discover' ? 'discover' : subcommand;

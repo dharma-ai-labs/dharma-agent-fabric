@@ -10,6 +10,9 @@ import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepos
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
+import { planRepositorySourceResolution, type RepositorySourceResolution } from './repositorySourceReconciliation.js';
+import { activateRepositorySourceResolution, readActiveRepositorySourceResolution,
+  saveRepositorySourceResolutionPlan } from './repositorySourceResolutionStore.js';
 
 const scope = { organizationId: 'org_source_sync_fixture', workspaceId: '056b63dc-ebed-48ed-85d8-02c72f623ea8',
   repositoryBindingId: '73a95988-fd64-41ba-a0b9-6c8867d03788', repositoryAgentId: '57f61652-a5eb-46e4-930c-9478cd4a9c31' };
@@ -94,6 +97,7 @@ test('relay merges another workspace report before signing its own candidate', a
   const submissions: Array<{ paths: string[]; parent: string | undefined; hash: string }> = [];
   const input = { ...f.input, transport,
     loadPublishedLocalBaseline: async () => baseline,
+    loadResolution: async () => { throw new Error('Nonconflicting updates must not consult stale approvals.'); },
     submitCandidate: async (snapshot: Awaited<ReturnType<typeof inventoryRepositoryPackage>>,
       parent?: string) => {
       submissions.push({ paths: snapshot.manifest.files.filter(file => file.role !== 'knowledge').map(file => file.path),
@@ -115,6 +119,99 @@ test('an incomplete repository identity cannot dispatch a source-policy read', a
   await assert.rejects(fetchRepositorySourceAuthorization({ signedGet: async () => { calls++; return response(); } },
     { ...scope, repositoryBindingId: '' }), /complete bound identity/);
   assert.equal(calls, 0);
+});
+
+async function conflictFixture(t: TestContext) {
+  const f = await fixture(t);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const baseline = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace, sourceAuthorization: authorization });
+  const remoteBytes = Buffer.from('# Remote reviewed version\n');
+  const remoteFile = { path: 'README.md', role: 'repository_content' as const,
+    sha256: `sha256:${createHash('sha256').update(remoteBytes).digest('hex')}`, sizeBytes: remoteBytes.length };
+  const remote = rebuildRepositoryPackageSnapshot(baseline, {
+    files: baseline.manifest.files.map(file => file.path === remoteFile.path ? remoteFile : file), skills: baseline.manifest.skills,
+    blobs: [...baseline.blobs.filter(blob => blob.sha256 !== baseline.manifest.files.find(file => file.path === remoteFile.path)!.sha256),
+      { sha256: remoteFile.sha256, contentBase64: remoteBytes.toString('base64') }],
+  });
+  await f.put('README.md', '# Reviewed local merge\n');
+  const local = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace, sourceAuthorization: authorization });
+  const candidateId = '99999999-9999-4999-8999-999999999999';
+  const files = remote.manifest.files.filter(file => file.role !== 'knowledge');
+  const published = { files, skills: remote.manifest.skills, blobs: remote.blobs.filter(blob => files.some(file => file.sha256 === blob.sha256)),
+    sourceFingerprint: remote.manifest.sourceFingerprint! };
+  const metadata = { ok: true, organizationId: scope.organizationId, repositoryBindingId: scope.repositoryBindingId,
+    repositoryAgentId: scope.repositoryAgentId, policyGenerationId: authorization.generationId, workspaceBaseline: null,
+    source: { candidateId, workspaceId: '88888888-8888-4888-8888-888888888888', sourceSnapshotHash: remote.manifest.snapshotHash,
+      sourceManifestHash: `sha256:${createHash('sha256').update(canonicalize(remote.manifest)).digest('hex')}`,
+      sourceFingerprint: remote.manifest.sourceFingerprint, files, skills: remote.manifest.skills } };
+  const transport = { signedGet: async (route: string) => {
+    if (route.startsWith('/agent-fabric/repository-source-policy')) return response();
+    if (route.includes('/blobs/')) return { ok: true, organizationId: scope.organizationId,
+      repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+      candidateId, sourceSnapshotHash: remote.manifest.snapshotHash, sourceFingerprint: remote.manifest.sourceFingerprint,
+      ...remoteFile, contentBase64: remoteBytes.toString('base64') };
+    return metadata;
+  } };
+  const approved = planRepositorySourceResolution({ local, previousLocal: baseline, published });
+  let active: RepositorySourceResolution | null = approved;
+  const submitted: Array<{ hash: string; parent: string | undefined }> = [];
+  const input = { ...f.input, transport, loadPublishedLocalBaseline: async () => baseline,
+    loadResolution: async () => active,
+    submitCandidate: async (snapshot: typeof local, parent?: string) => {
+      submitted.push({ hash: snapshot.manifest.snapshotHash, parent });return { state: 'accepted' };
+    } };
+  return { ...f, input, local, remote, approved, submitted, setActive: (value: RepositorySourceResolution | null) => { active = value; } };
+}
+
+test('relay accepts only the exact active resolution and keeps the remote CAS precondition', async t => {
+  const f = await conflictFixture(t);
+  assert.equal((await scanRepositorySourceChanges(f.input)).state, 'debouncing');
+  f.setNow(1000);
+  assert.equal((await scanRepositorySourceChanges(f.input)).state, 'local_candidate_collected');
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0]!.parent, f.remote.manifest.sourceFingerprint);
+  assert.equal((await scanRepositorySourceChanges(f.input)).state, 'unchanged');
+  assert.equal(f.submitted.length, 1, 'Completed local fingerprints must not be resubmitted.');
+});
+
+test('prepared metadata stays inactive and durable activation survives a fresh reader without changing source inventory', async t => {
+  const f = await conflictFixture(t);
+  await saveRepositorySourceResolutionPlan(f.input.workspace, f.approved);
+  assert.equal(await readActiveRepositorySourceResolution(f.input.workspace), null);
+  const authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const after = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace, sourceAuthorization: authorization });
+  assert.equal(after.manifest.snapshotHash, f.local.manifest.snapshotHash);
+  await activateRepositorySourceResolution(f.input.workspace, f.approved);
+  f.input.loadResolution = () => readActiveRepositorySourceResolution(f.input.workspace);
+  await scanRepositorySourceChanges(f.input);f.setNow(1000);
+  assert.equal((await scanRepositorySourceChanges(f.input)).state, 'local_candidate_collected');
+  assert.equal(f.submitted.length, 1);
+});
+
+test('relay cannot submit missing, expired, modified or withdrawn resolution plans', async t => {
+  for (const mode of ['missing', 'expired', 'modified', 'withdrawn']) await t.test(mode, async t => {
+    const f = await conflictFixture(t);
+    if (mode === 'missing') f.setActive(null);
+    if (mode === 'expired') f.setActive({ ...f.approved, now: new Date(Date.parse(f.approved.plan.expiresAt)) });
+    if (mode === 'modified') f.setActive({ ...f.approved, plan: { ...f.approved.plan, workspaceId: 'different' } });
+    let reads = 0;
+    if (mode === 'withdrawn') f.input.loadResolution = async () => ++reads === 1 ? f.approved : null;
+    await scanRepositorySourceChanges(f.input);f.setNow(1000);
+    await assert.rejects(scanRepositorySourceChanges(f.input), /changed concurrently|expired_or_invalid|context_changed|withdrawn/);
+    assert.deepEqual(f.submitted, []);
+    await assert.rejects(readRepositoryPackageSnapshot(f.input.workspace, f.local.manifest.snapshotHash), /ENOENT/);
+  });
+});
+
+test('source changes during approval readback cannot be submitted', async t => {
+  const f = await conflictFixture(t);let reads = 0;
+  f.input.loadResolution = async () => {
+    if (++reads === 2) await f.put('README.md', '# Changed after approval\n');
+    return f.approved;
+  };
+  await scanRepositorySourceChanges(f.input);f.setNow(1000);
+  await assert.rejects(scanRepositorySourceChanges(f.input), /context_changed/);
+  assert.deepEqual(f.submitted, []);
 });
 test('source policy fetch rejects a foreign repository binding', async () => {
   const view = response(); view.policy.repositoryBindingId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';

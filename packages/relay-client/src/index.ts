@@ -909,12 +909,14 @@ export class AgentFabricClient {
   readonly #directTransport: boolean;
   readonly #hostFence?: HostOperationFence;
   readonly #hostBinding: string;
+  readonly #readOnly: boolean;
+  #readSessionAdmissionUsed = false;
   #state: ProtocolState;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
-    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence;
+    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -926,6 +928,7 @@ export class AgentFabricClient {
     this.#directTransport = Boolean(input.fetcher);
     this.#hostFence = input.hostFence;
     this.#hostBinding = this.#binding();
+    this.#readOnly = input.readOnly === true;
   }
 
   #binding() {
@@ -943,14 +946,22 @@ export class AgentFabricClient {
   }
 
   static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch;
-    hostScope?: HostOperationScope }) {
-    const {configPath, statePath, store: suppliedStore, fetcher, hostScope} = input;
+    hostScope?: HostOperationScope;
+    /** Isolated in-memory protocol session; no enrollment repair, durable outbox replay or application POSTs. */
+    readOnly?: boolean }) {
+    const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly} = input;
+    if (readOnly !== undefined && typeof readOnly !== 'boolean') throw new Error('relay_read_only_option_invalid');
     const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
     const rawStore = fence ? await fence.step(async () => suppliedStore ?? await createSystemSecureStore())
       : suppliedStore ?? await createSystemSecureStore();
-    const store = fence ? fence.store(rawStore) : rawStore;
-    const config = await recoverEnrollmentWithFence({configPath, store, hostFence: fence});
-    const identity = fence ? await existingHostDeviceIdentity(config, store) : await loadOrCreateDeviceIdentity({
+    const safeStore: SecureSecretStore = readOnly ? { backend: rawStore.backend,
+      get: account => rawStore.get(account),
+      put: async () => { throw new Error('relay_read_only_secure_store_write_denied'); },
+      delete: async () => { throw new Error('relay_read_only_secure_store_write_denied'); } } : rawStore;
+    const store = fence ? fence.store(safeStore) : safeStore;
+    const config = readOnly ? (fence ? await fence.step(() => loadDeviceConfig(configPath)) : await loadDeviceConfig(configPath))
+      : await recoverEnrollmentWithFence({configPath, store, hostFence: fence});
+    const identity = fence || readOnly ? await existingHostDeviceIdentity(config, store) : await loadOrCreateDeviceIdentity({
       hqUrl: config.hqUrl,
       organizationId: config.organizationId,
       installationId: config.installationId,
@@ -967,7 +978,7 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       recoveredTaskCompletions: [],
     };
-    try {
+    if (!readOnly) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
@@ -982,12 +993,15 @@ export class AgentFabricClient {
     await fence?.assert();
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
-      statePath, state, store, fetcher, hostFence: fence,
+      statePath, state, store, fetcher, hostFence: fence, readOnly,
     });
   }
 
   async openSession(relayVersion = '0.1.0') {
     await this.#assertHostScope();
+    if (this.#readOnly && (this.#state.sessionId || this.#readSessionAdmissionUsed)) {
+      throw new Error('relay_read_only_session_already_started');
+    }
     if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
       // Content-bearing requests require refreshed consent. Repository connect
       // requests depend on current workspace registration. Both are rebuilt by
@@ -1048,6 +1062,7 @@ export class AgentFabricClient {
   acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
     const operation = this.#serial.then(async () => {
       await this.#assertHostScope();
+      if (this.#readOnly) throw new Error('relay_read_only_mutation_denied');
       const current = this.#state.recoveredTaskCompletions || [];
       const matching = current.find((item) => item.taskId === taskId);
       if (!matching) return;
@@ -1099,6 +1114,15 @@ export class AgentFabricClient {
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
+    if (this.#readOnly) {
+      if (this.#state.pending) throw new Error('relay_read_only_pending_request');
+      if (method !== 'GET') {
+        if (route !== '/agent-fabric/sessions' || this.#readSessionAdmissionUsed || this.#state.nextSequence !== 1) {
+          throw new Error('relay_read_only_mutation_denied');
+        }
+        this.#readSessionAdmissionUsed = true;
+      }
+    }
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
     const serialized = method === 'GET' ? '' : canonicalize(body);
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
@@ -1386,6 +1410,7 @@ export class AgentFabricClient {
   }
 
   async #persist() {
+    if (this.#readOnly) { await this.#assertHostScope();return; }
     await this.#assertHostScope();
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay

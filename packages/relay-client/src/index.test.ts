@@ -165,6 +165,74 @@ async function anchorConfig(configPath: string, store: SecureSecretStore) {
   await saveDeviceEnrollmentAnchor({ config, store });
 }
 
+test('isolated read client preserves durable pending mutations and cannot replay or submit application writes', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-isolated-read-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, { schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString() });
+  await anchorConfig(configPath, store);
+  const original = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: 'original-session', nextSequence: 3,
+    pending: { method: 'POST', pathname: '/api/v1/orgs/org_a/agent-fabric/tasks/poll', body: '{"leaseSeconds":120}', headers: {} } });
+  await writeFile(statePath, original);
+  const calls: Array<{ path: string; method: string }> = [];
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ path: new URL(String(url)).pathname, method: String(init?.method) });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  const readOnlyStore: SecureSecretStore = { backend: store.backend, get: store.get,
+    put: async () => { throw new Error('unexpected_store_write'); }, delete: async () => { throw new Error('unexpected_store_delete'); } };
+  const client = await AgentFabricClient.open({ configPath, statePath, store: readOnlyStore, fetcher,
+    ...{ readOnly: true } });
+  await client.openSession();
+  await client.signedGet('/agent-fabric/repository-source-policy?workspaceId=fixture');
+  assert.deepEqual(calls.map(call => [call.method, call.path.split('/').at(-1)]),
+    [['POST', 'sessions'], ['GET', 'repository-source-policy']]);
+  assert.equal(await readFile(statePath, 'utf8'), original);
+  await assert.rejects(client.pollTask(), /read_only/);
+  await assert.rejects(client.openSession(), /read_only/);
+  assert.equal(calls.length, 2);
+  const unavailable: SecureSecretStore = { ...readOnlyStore, get: async () => null };
+  await assert.rejects(AgentFabricClient.open({ configPath, statePath, store: unavailable, fetcher, readOnly: true }),
+    /relay_host_device_identity_unavailable/);
+  assert.equal(calls.length, 2);
+  const abort = new AbortController();
+  const scoped = await AgentFabricClient.open({ configPath, statePath, store: readOnlyStore, fetcher, readOnly: true,
+    hostScope: { signal: abort.signal, current: async () => !abort.signal.aborted } });
+  await scoped.openSession();abort.abort();
+  await assert.rejects(scoped.signedGet('/agent-fabric/repository-source-policy'), /relay_host_scope_unavailable/);
+  assert.equal(calls.length, 3, 'Withdrawn read-only host must not admit another request.');
+  assert.equal(await readFile(statePath, 'utf8'), original);
+});
+
+test('isolated reads do not implicitly retry an ambiguous response or persist it into another session', async () => {
+  const store = memoryStore(), root = await mkdtemp(resolve(tmpdir(), 'fabric-isolated-read-failure-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, { schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString() });
+  await anchorConfig(configPath, store);
+  await writeFile(statePath, 'preserve-unrelated-durable-state-byte-for-byte');
+  const calls: string[] = [];
+  const client = await AgentFabricClient.open({ configPath, statePath, store, readOnly: true, fetcher: async (url, init) => {
+    calls.push(String(init?.method));
+    if (init?.method === 'GET') throw new Error('synthetic_ambiguous_read');
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  } });
+  await client.openSession();
+  await assert.rejects(client.signedGet('/agent-fabric/repository-source-policy'), /synthetic_ambiguous_read/);
+  await assert.rejects(client.signedGet('/agent-fabric/repository-source-policy'), /read_only_pending/);
+  await assert.rejects(client.openSession(), /read_only/);
+  await assert.rejects(client.acknowledgeRecoveredTaskCompletion('fixture', 'fixture'), /read_only/);
+  assert.deepEqual(calls, ['POST', 'GET']);
+  assert.equal(await readFile(statePath, 'utf8'), 'preserve-unrelated-durable-state-byte-for-byte');
+});
+
 function keysetFixture(now: Date) {
   const first = generateKeyPairSync('ed25519');
   const second = generateKeyPairSync('ed25519');
