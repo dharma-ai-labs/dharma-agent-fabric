@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2",
+  "title": "Owned local runtime upgrade journal with reversible Codex profile context",
+  "description": "Private local rollback metadata, not a server authorization or public completion receipt. Runtime additionally binds the enrolled device, workspace, owned startup and launcher hashes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "upgradeId", "organizationId", "deviceId", "workspaceId", "workspace", "previousVersion", "version", "startedAt", "updatedAt", "state", "previous", "previousHash", "previousCodexHome"],
+  "properties": {
+    "schema": {"const": "dharma.local-relay-upgrade-journal/v2"},
+    "upgradeId": {"type": "string", "format": "uuid"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "workspace": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "previousVersion": {"type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$(?![\\s\\S])"},
+    "version": {"type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$(?![\\s\\S])"},
+    "startedAt": {"type": "string", "format": "date-time"},
+    "updatedAt": {"type": "string", "format": "date-time"},
+    "state": {"enum": ["prepared", "installed", "completed", "rolled_back", "rollback_failed"]},
+    "previous": {
+      "type": "object", "additionalProperties": false, "required": ["shell", "windows"],
+      "properties": {"shell": {"type": "string", "maxLength": 16384}, "windows": {"type": "string", "maxLength": 16384}}
+    },
+    "previousHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "previousCodexHome": {"anyOf": [
+      {"type": "null"},
+      {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/[^\u0000-\u001f\u007f]+$(?![\\s\\S])"}
+    ]}
+  }
+}

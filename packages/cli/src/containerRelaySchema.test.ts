@@ -8,6 +8,18 @@ async function validator(name: string) {
   return new Ajv2020({ strict: true, strictRequired: false }).compile(schema);
 }
 
+test('Linux Codex startup schema admits only a non-secret profile location and fixed backend', async () => {
+  const validate = await validator('relay-autostart.v4');
+  const value = {schema: 'dharma.relay-autostart/v4', backend: 'systemd-user', launcher: '/repo/.dharma/bin/dharma',
+    workspace: '/repo', policy: '/repo/.dharma/approved-policy.json', version: '0.2.175', taskName: null, codexHome: '/private/codex'};
+  assert.equal(validate(value), true);
+  for (const change of [{codexHome: '/'}, {codexHome: 'relative'}, {codexHome: '/private/codex\nTOKEN=bad'},
+    {codexHome: 'x'.repeat(4097)}, {backend: 'container-entrypoint'}, {taskName: 'other'}, {version: '0.2.175\n'},
+    {grant: 'CANARY_PRIVATE_INPUT'}, {environment: {OPENAI_API_KEY: 'CANARY_PRIVATE_INPUT'}}]) {
+    assert.equal(validate({...value, ...change}), false);
+  }
+});
+
 test('container startup schema rejects credentials, arbitrary backends and malformed authority paths', async () => {
   const validate = await validator('relay-autostart.v3');
   const value = { schema: 'dharma.relay-autostart/v3', backend: 'container-entrypoint', launcher: '/repo/.dharma/bin/dharma',

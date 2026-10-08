@@ -95,14 +95,15 @@ async function fixture(options: {host?: boolean; noRelay?: boolean; withdraw?: b
     selectDeviceWorkspace: () => ({workspaceId: 'workspace', organizationId: 'org_demo', path: workspace}),
     loadOrganizationPolicy: async () => ({serverAuthorization: {workspaceId: 'workspace'}}),
     loadVerifiedWorkspacePolicy: async () => ({}),
-    enableRelayAutostart: async () => {
+    enableRelayAutostart: async (input: {codexHome?: string}) => {
       if (options.previousVersion) throw new Error('relay_runtime_upgrade_required');
+      assert.equal(input.codexHome, '/synthetic/native-codex');
       effects.push('enable'); enabled = true;
       if (options.withdraw) withdrawn = true;
       return {state: 'enabled', backend: 'systemd-user'};
     },
     startRelayDaemon: () => startRelay(policyPath),
-    resolve: (...parts: string[]) => parts.join('/'), process: {platform: 'linux'},
+    resolve: (...parts: string[]) => parts.join('/'), process: {platform: 'linux', env: {CODEX_HOME: '/synthetic/native-codex'}},
     VERSION: 'test', String, Map,
   };
   dependencies.assertBootstrapStartupAnchor = await actual('assertBootstrapStartupAnchor', dependencies);

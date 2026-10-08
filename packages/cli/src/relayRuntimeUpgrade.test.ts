@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import {enableRelayAutostart, inspectOwnedRelayAutostart} from './relayAutostart.js';
 
 const modulePath = './relayRuntimeUpgrade.js';
 const contents = (version: string) => ({ shell: `#!/bin/sh\nexec npm exec --yes -- @dharma-ai-labs/agent-fabric@${version} "$@"\n`,
@@ -33,6 +34,101 @@ async function fixture(initialVersion = '0.2.116', targetVersion = '0.2.118') {
   };
   return { input: { home, workspace, version: targetVersion, ...identity }, deps, calls, old };
 }
+
+test('runtime rollback restores the pre-upgrade Codex profile disposition, including an absent legacy context', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  for (const original of [null, '/fixtures/existing-codex']) {
+    const f = await fixture('0.2.175', '0.2.176');
+    let codexHome: string | undefined = original ?? undefined, version = '0.2.175';
+    const deps = {...f.deps,
+      inspectStartup: async () => ({version, workspace: f.input.workspace, codexHome}),
+      configureStartup: async (next: string, restore?: {codexHome: string | null}) => {
+        version = next; codexHome = restore ? restore.codexHome ?? undefined : original ?? '/fixtures/selected-codex';
+      },
+    };
+    assert.equal((await upgradeRelayRuntime(f.input, deps)).state, 'completed');
+    assert.equal(codexHome, original ?? '/fixtures/selected-codex');
+    const journal = JSON.parse(await readFile(join(f.input.home, 'relay', 'runtime-upgrade.json'), 'utf8'));
+    assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+      'https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2', journal)).ok, true);
+    const rollback = await upgradeRelayRuntime({...f.input, rollback: true}, deps);
+    assert.equal(rollback.state, 'rolled_back');
+    assert.equal(codexHome, original ?? undefined);
+    assert.equal(version, '0.2.175');
+  }
+});
+
+test('runtime rollback restores the exact legacy Linux unit and receipt after adding a Codex context', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const f = await fixture('0.2.175', '0.2.176');
+  const options = {home: f.input.home, userHome: f.input.home, workspace: f.input.workspace,
+    launcher: join(f.input.workspace, '.dharma', 'bin', 'dharma'), policy: join(f.input.workspace, '.dharma', 'approved-policy.json'),
+    version: '0.2.175', platform: 'linux' as const, run: async () => ({stdout: 'enabled\n'})};
+  await enableRelayAutostart(options);
+  const receiptPath = join(f.input.home, 'relay', 'autostart.json');
+  const unitPath = join(f.input.home, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = await readFile(receiptPath, 'utf8'), unit = await readFile(unitPath, 'utf8');
+  const deps = {...f.deps, inspectStartup: () => inspectOwnedRelayAutostart(options),
+    configureStartup: (version: string, restore?: {codexHome: string | null}) => enableRelayAutostart({...options, version,
+      ...(restore ? {restoreCodexHome: restore.codexHome} : {codexHome: '/fixtures/selected-codex'})}),
+  };
+  assert.equal((await upgradeRelayRuntime(f.input, deps)).state, 'completed');
+  assert.match(await readFile(unitPath, 'utf8'), /CODEX_HOME/);
+  assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, deps)).state, 'rolled_back');
+  assert.equal(await readFile(receiptPath, 'utf8'), receipt);
+  assert.equal(await readFile(unitPath, 'utf8'), unit);
+});
+
+test('legacy upgrade journals remain recoverable without inventing a provider context', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const f = await fixture();
+  await upgradeRelayRuntime(f.input, f.deps);
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  const journal = JSON.parse(await readFile(path, 'utf8'));
+  delete journal.previousCodexHome;
+  journal.schema = 'dharma.local-relay-upgrade/v1';
+  await writeFile(path, JSON.stringify(journal));
+  assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, f.deps)).state, 'rolled_back');
+});
+
+test('legacy-journal rollback explicitly clears the current shell profile rather than inheriting it', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const f = await fixture('0.2.175', '0.2.176');
+  let version = '0.2.175', codexHome: string | undefined;
+  const restored: Array<string | null | undefined> = [];
+  const deps = {...f.deps, inspectStartup: async () => ({version, workspace: f.input.workspace, codexHome}),
+    configureStartup: async (next: string, restore?: {codexHome: string | null}) => {
+      restored.push(restore?.codexHome);version = next;
+      codexHome = restore ? restore.codexHome ?? undefined : '/fixtures/shell-selected-codex';
+    },
+  };
+  await upgradeRelayRuntime(f.input, {...deps, configureStartup: async (next: string) => {version = next;}});
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  const journal = JSON.parse(await readFile(path, 'utf8'));
+  delete journal.previousCodexHome;journal.schema = 'dharma.local-relay-upgrade/v1';
+  await writeFile(path, JSON.stringify(journal));
+  assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, deps)).state, 'rolled_back');
+  assert.deepEqual(restored, [null]);assert.equal(codexHome, undefined);
+});
+
+test('upgrade recovery rejects malformed profile context and undeclared fields before owned controls', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  for (const change of [{previousCodexHome: '/fixtures/../other'}, {previousCodexHome: '/private\nTOKEN=bad'},
+    {previousCodexHome: '/'}, {environment: {OPENAI_API_KEY: 'CANARY_NOT_ALLOWED'}}]) {
+    const f = await fixture();
+    await upgradeRelayRuntime(f.input, f.deps);
+    const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+    const journal = JSON.parse(await readFile(path, 'utf8'));
+    await writeFile(path, JSON.stringify({...journal, ...change}));
+    const before = await readFile(path, 'utf8');
+    const effects: string[] = [];
+    await assert.rejects(upgradeRelayRuntime({...f.input, rollback: true}, {...f.deps,
+      stop: async () => {effects.push('stop');}, configureStartup: async () => {effects.push('configure');}}), /journal_invalid/);
+    assert.deepEqual(effects, []);assert.equal(await readFile(path, 'utf8'), before);
+  }
+});
 
 test('a newer recovery manager rolls back an explicitly admitted interrupted journal without relabelling its version', async () => {
   const { upgradeRelayRuntime } = await import(modulePath);

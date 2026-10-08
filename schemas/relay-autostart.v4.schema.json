@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/relay-autostart/v4",
+  "title": "Owned Linux relay startup with an existing Codex profile",
+  "description": "Local non-secret profile location only. Runtime additionally verifies canonical paths, exact startup-file ownership and OS registration. This is not a credential or proof of restart readiness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "backend", "launcher", "workspace", "policy", "version", "taskName", "codexHome"],
+  "properties": {
+    "schema": {"const": "dharma.relay-autostart/v4"},
+    "backend": {"const": "systemd-user"},
+    "launcher": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\u0000-\u001f\u007f]+$(?![\\s\\S])"},
+    "workspace": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\u0000-\u001f\u007f]+$(?![\\s\\S])"},
+    "policy": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\u0000-\u001f\u007f]+$(?![\\s\\S])"},
+    "codexHome": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/[^\u0000-\u001f\u007f]+$(?![\\s\\S])"},
+    "version": {"type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$(?![\\s\\S])"},
+    "taskName": {"type": "null"}
+  }
+}

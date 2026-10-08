@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
@@ -7,6 +8,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import { relayRuntimeObservationReady } from './relayRuntimeUpgrade.js';
 import { verifyRecordedRepositoryLaunchers } from './repositoryLaunchers.js';
+import { enableRelayAutostart } from './relayAutostart.js';
 
 async function fixture() {
   const workspace = '/fixtures/repository', calls: string[] = [];
@@ -17,7 +19,7 @@ async function fixture() {
     readDeviceConfig: async () => ({ organizationId: selected.organizationId, deviceId: selected.deviceId }),
     registry: async () => [selected], selectDeviceWorkspace: () => selected,
     realpath: async (path: string) => path, dharmaHome: () => '/fixtures/profile', resolve, dirname,
-    process: { platform: 'linux', execPath: '/fixtures/node/bin/node' },
+    process: { platform: 'linux', execPath: '/fixtures/node/bin/node', env: {CODEX_HOME: '/fixtures/selected-codex'} },
     inspectOwnedRelayAutostart: async () => startup,
     relaySupervisorProcessState: async () => 'stopped', relayProcessState: async () => 'stopped',
     readdir: async () => [], pidProcessState: async () => 'stopped',
@@ -78,6 +80,50 @@ test('actual upgrade caller binds the reviewed recorded-runtime verifier without
   await f.run()(f.flags);
   assert.deepEqual(f.calls, ['lock']);
 });
+
+test('actual upgrade caller retains the selected profile and passes only verified rollback context to startup', async () => {
+  const f = await fixture();
+  const contexts: Array<{codexHome?: string; restoreCodexHome?: string | null}> = [];
+  f.deps.enableRelayAutostart = async (input: {codexHome?: string; restoreCodexHome?: string | null}) => {contexts.push(input);};
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {
+    configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
+  }) => {
+    await hooks.configureStartup('0.2.118');
+    await hooks.configureStartup('0.2.116', {codexHome: null});
+    return {state: 'planned'};
+  };
+  await f.run()(f.flags);
+  assert.equal(contexts[0]!.codexHome, '/fixtures/selected-codex');
+  assert.equal(Object.hasOwn(contexts[0]!, 'restoreCodexHome'), false);
+  assert.equal(contexts[1]!.restoreCodexHome, null);
+  assert.equal(Object.hasOwn(contexts[1]!, 'codexHome'), false);
+});
+
+test('actual rollback caller and startup writer restore context-free legacy bytes despite ambient CODEX_HOME',
+  {skip: process.platform !== 'linux'}, async () => {
+    const f = await fixture();
+    const root = await mkdtemp(resolve(tmpdir(), 'dharma-legacy-caller-'));
+    const home = resolve(root, 'profile');
+    const run = async () => ({stdout: 'enabled\n'});
+    try {
+      await enableRelayAutostart({platform: 'linux', home, userHome: root, ...f.startup, run});
+      const unit = resolve(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+      const receipt = resolve(home, 'relay', 'autostart.json');
+      const before = await Promise.all([readFile(unit), readFile(receipt)]);
+      f.deps.dharmaHome = () => home;
+      f.deps.enableRelayAutostart = async (input: Parameters<typeof enableRelayAutostart>[0]) =>
+        enableRelayAutostart({...input, userHome: root, run});
+      f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {
+        configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
+      }) => {
+        await hooks.configureStartup(f.startup.version, {codexHome: null});
+        return {state: 'rolled_back'};
+      };
+      await f.run()(f.flags);
+      assert.deepEqual(await Promise.all([readFile(unit), readFile(receipt)]), before);
+      assert.doesNotMatch((await readFile(unit)).toString(), /CODEX_HOME/);
+    } finally { await rm(root, {recursive: true, force: true}); }
+  });
 
 test('actual upgrade caller requires matching enrollment workspace and owned startup', async () => {
   const f = await fixture();
