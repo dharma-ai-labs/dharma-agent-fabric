@@ -18,6 +18,88 @@ const startupPreflight = async (options: RelayAutostartOptions & { version?: str
   await check(options);
 };
 
+test('Linux startup retains only the selected nondefault Codex home in an owned versioned receipt', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-codex-startup-context-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
+    policy: '/fixtures/repo/.dharma/approved-policy.json', version: '0.2.175',
+    codexHome: '/fixtures/private Codex%home', run: async () => ({stdout: 'enabled\n'})};
+  await enableRelayAutostart(options);
+  const receipt = JSON.parse(await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8'));
+  assert.equal(receipt.schema, 'dharma.relay-autostart/v4');
+  assert.equal(receipt.codexHome, options.codexHome);
+  assert.deepEqual(Object.keys(receipt).sort(), ['schema','backend','launcher','policy','workspace','version','taskName','codexHome'].sort());
+  const unit = await readFile(join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service'), 'utf8');
+  assert.match(unit, /Environment="CODEX_HOME=\/fixtures\/private Codex%%home"\n/);
+  assert.doesNotMatch(unit, /OPENAI_API_KEY|TOKEN|PASSWORD|--grant|EnvironmentFile/);
+  assert.equal((await relayAutostartStatus(options)).state, 'enabled');
+  await startupPreflight(options);
+  assert.equal((await inspectOwnedRelayAutostart(options)).schema, 'dharma.relay-autostart/v4');
+});
+
+test('Linux startup upgrades its owned legacy context and preserves it when called outside Codex', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-codex-context-upgrade-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
+    policy: '/fixtures/repo/.dharma/approved-policy.json', version: '0.2.175', run: async () => ({stdout: 'enabled\n'})};
+  await enableRelayAutostart(options);
+  await enableRelayAutostart({...options, codexHome: '/fixtures/selected-codex', preserveStandardAnchor: true});
+  const unitPath = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receiptPath = join(options.home, 'relay', 'autostart.json');
+  const before = await readFile(unitPath, 'utf8');
+  assert.match(before, /CODEX_HOME=\/fixtures\/selected-codex/);
+  await enableRelayAutostart({...options, version: '0.2.176'});
+  assert.equal(JSON.parse(await readFile(receiptPath, 'utf8')).codexHome, '/fixtures/selected-codex');
+  assert.match(await readFile(unitPath, 'utf8'), /CODEX_HOME=\/fixtures\/selected-codex/);
+  const owned = await readFile(unitPath, 'utf8');
+  await assert.rejects(enableRelayAutostart({...options, version: '0.2.176', codexHome: '/fixtures/other-codex',
+    preserveStandardAnchor: true}), /relay_startup_provider_context_conflict/);
+  assert.equal(await readFile(unitPath, 'utf8'), owned);
+  await enableRelayAutostart({...options, version: '0.2.176', policy: null});
+  assert.match(await readFile(unitPath, 'utf8'), /CODEX_HOME=\/fixtures\/selected-codex/);
+  await enableRelayAutostart({...options, restoreCodexHome: null});
+  assert.doesNotMatch(await readFile(unitPath, 'utf8'), /CODEX_HOME/);
+  assert.equal(JSON.parse(await readFile(receiptPath, 'utf8')).schema, 'dharma.relay-autostart/v1');
+});
+
+test('Linux startup refuses malformed Codex homes before writing or controlling a service', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-codex-context-invalid-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
+    policy: '/fixtures/repo/.dharma/approved-policy.json', version: '0.2.175',
+    run: async () => {throw new Error('No OS control for invalid context');}};
+  for (const codexHome of ['relative', '/fixtures/../other', '/', '/fixtures/codex\nTOKEN=private', '/fixtures/codex\0', 'x'.repeat(4097)]) {
+    await assert.rejects(enableRelayAutostart({...options, codexHome}), /relay_startup_provider_context_invalid/);
+  }
+  await assert.rejects(readFile(join(options.home, 'relay', 'autostart.json')), {code: 'ENOENT'});
+});
+
+test('Linux startup context tampering cannot be adopted, started or disabled', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-codex-context-tamper-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
+    policy: '/fixtures/repo/.dharma/approved-policy.json', version: '0.2.175',
+    codexHome: '/fixtures/private-codex', run: async () => ({stdout: 'enabled\n'})};
+  await enableRelayAutostart(options);
+  const receiptPath = join(options.home, 'relay', 'autostart.json');
+  const receipt = JSON.parse(await readFile(receiptPath, 'utf8'));
+  await writeFile(receiptPath, JSON.stringify({...receipt, environment: {OPENAI_API_KEY: 'CANARY_NOT_ALLOWED'}}));
+  assert.equal((await relayAutostartStatus(options)).reason, 'autostart_receipt_invalid');
+  await assert.rejects(startRelayAutostart(options), /autostart_receipt_invalid/);
+  await writeFile(receiptPath, JSON.stringify(receipt));
+  const unitPath = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const unit = await readFile(unitPath, 'utf8');
+  await writeFile(unitPath, unit.replace(/Environment="CODEX_HOME=[^\n]+\n/, ''));
+  assert.equal((await relayAutostartStatus(options)).reason, 'autostart_conflict');
+  await assert.rejects(startRelayAutostart(options), /autostart_conflict/);
+  await assert.rejects(disableRelayAutostart(options), /autostart_conflict/);
+  await assert.rejects(startupPreflight(options), /autostart_conflict/);
+});
+
 test('Linux startup preflight rejects a second device home without modifying its existing anchor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-'));
   const calls: string[] = [];
@@ -294,7 +376,7 @@ test('Linux generated unit passes the actual systemd parser with spaces and lite
   const workspace = join(root, 'repo space % quote"');
   await mkdir(workspace);
   const file = join(root, 'dharma-parser-test.service');
-  await writeFile(file, linuxRelayUnit('/bin/true', null, workspace, join(root, 'private home')));
+  await writeFile(file, linuxRelayUnit('/bin/true', null, workspace, join(root, 'private home'), join(root, 'selected Codex%home')));
   const result = spawnSync('systemd-analyze', ['--user', 'verify', file], { encoding: 'utf8', timeout: 15_000 });
   assert.equal(result.status, 0, result.stderr || String(result.error));
 });

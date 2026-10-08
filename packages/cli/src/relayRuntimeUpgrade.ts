@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 
 type Launchers = { shell: string; windows: string };
 type State = 'prepared' | 'installed' | 'completed' | 'rolled_back' | 'rollback_failed';
@@ -12,19 +12,22 @@ export type RelayUpgradeDependencies = {
   legacyLauncherContents?(version: string): Launchers;
   verifyPriorLaunchers?(version: string, contents: Launchers): Promise<boolean>;
   assertStopped(): Promise<void>;
-  inspectStartup(): Promise<{ version: string; workspace: string }>;
-  configureStartup(version: string): Promise<unknown>;
+  inspectStartup(): Promise<{ version: string; workspace: string; codexHome?: string }>;
+  configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
   start(): Promise<unknown>;
   stop(): Promise<unknown>;
   verify(version: string, since: string): Promise<void>;
 };
-type Journal = { schema: 'dharma.local-relay-upgrade/v1'; upgradeId: string; organizationId: string;
+type Journal = { schema: 'dharma.local-relay-upgrade/v1' | 'dharma.local-relay-upgrade-journal/v2'; upgradeId: string; organizationId: string;
   deviceId: string; workspaceId: string; workspace: string; previousVersion: string; version: string;
-  startedAt: string; updatedAt: string; state: State; previous: Launchers; previousHash: string };
+  startedAt: string; updatedAt: string; state: State; previous: Launchers; previousHash: string;
+  previousCodexHome?: string | null };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 const hash = (value: Launchers) => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 const same = (left: Launchers, right: Launchers) => left.shell === right.shell && left.windows === right.windows;
 const fail = (code: string): never => { throw new Error(`relay_upgrade_${code}`); };
+const profilePath = (value: unknown): value is string => typeof value === 'string' && value.length <= 4096
+  && value.startsWith('/') && value !== '/' && !/[\x00-\x1f\x7f]|\s$|\\$/.test(value) && posix.resolve(value) === value;
 
 async function atomic(path: string, contents: string, mode: number) {
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -58,9 +61,12 @@ async function validateJournal(value: unknown, input: Input, deps: RelayUpgradeD
   const journal = value as Journal;
   const keys = ['schema', 'upgradeId', 'organizationId', 'deviceId', 'workspaceId', 'workspace',
     'previousVersion', 'version', 'startedAt', 'updatedAt', 'state', 'previous', 'previousHash'];
+  if (journal?.schema === 'dharma.local-relay-upgrade-journal/v2') keys.push('previousCodexHome');
   if (!journal || typeof journal !== 'object' || Array.isArray(journal)
     || Object.keys(journal).length !== keys.length || Object.keys(journal).some(key => !keys.includes(key))
-    || journal.schema !== 'dharma.local-relay-upgrade/v1'
+    || !['dharma.local-relay-upgrade/v1', 'dharma.local-relay-upgrade-journal/v2'].includes(journal.schema)
+    || journal.schema === 'dharma.local-relay-upgrade-journal/v2'
+      && journal.previousCodexHome !== null && !profilePath(journal.previousCodexHome)
     || journal.organizationId !== input.organizationId || journal.deviceId !== input.deviceId
     || journal.workspaceId !== input.workspaceId || journal.workspace !== input.workspace
     || typeof journal.version !== 'string' || !VERSION.test(journal.version)
@@ -107,10 +113,13 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
   if (input.rollback && !saved) fail('rollback_unavailable');
   const startup = await deps.inspectStartup();
   if (startup.workspace !== input.workspace) fail('workspace_conflict');
+  if (startup.codexHome !== undefined && !profilePath(startup.codexHome)) fail('startup_context_invalid');
   const previous = await readLaunchers(input.workspace);
   let journal: Journal;
   if (saved) {
     journal = saved as Journal;
+    if (journal.schema === 'dharma.local-relay-upgrade/v1' && startup.codexHome !== undefined
+      || journal.previousCodexHome && journal.previousCodexHome !== startup.codexHome) fail('journal_invalid');
     const next = deps.launcherContents(journal.version);
     if (![journal.version, journal.previousVersion].includes(startup.version)
       || ![journal.previous.shell, next.shell].includes(previous.shell)
@@ -125,15 +134,15 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       if (nextNumbers[index]! > previousNumbers[index]!) break;
       if (nextNumbers[index]! < previousNumbers[index]!) fail('downgrade_requires_rollback');
     }
-    journal = { schema: 'dharma.local-relay-upgrade/v1', upgradeId: randomUUID(),
+    journal = { schema: 'dharma.local-relay-upgrade-journal/v2', upgradeId: randomUUID(),
       organizationId: input.organizationId, deviceId: input.deviceId, workspaceId: input.workspaceId,
       workspace: input.workspace, previousVersion: startup.version, version: input.version,
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), state: 'prepared',
-      previous, previousHash: hash(previous) };
+      previous, previousHash: hash(previous), previousCodexHome: startup.codexHome ?? null };
     if (!await expectedPrevious(journal, deps)) fail('launcher_conflict');
   }
   const receipt = (state: State | 'planned') => ({ ok: state === 'completed' || state === 'planned',
-    schema: journal.schema, upgradeId: journal.upgradeId, organizationId: input.organizationId,
+    schema: 'dharma.local-relay-upgrade/v1', upgradeId: journal.upgradeId, organizationId: input.organizationId,
     deviceId: input.deviceId, workspaceId: input.workspaceId, previousVersion: journal.previousVersion,
     version: journal.version, state, createdAt: new Date().toISOString(), previousLauncherHash: journal.previousHash,
     enrollmentChanged: false, skillsChanged: false,
@@ -157,7 +166,8 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       if (![journal.previous.shell, next.shell].includes(actual.shell)
         || ![journal.previous.windows, next.windows].includes(actual.windows)) fail('launcher_conflict');
       await installLaunchers(input.workspace, journal.previous);
-      await deps.configureStartup(journal.previousVersion);
+      await deps.configureStartup(journal.previousVersion, journal.schema === 'dharma.local-relay-upgrade-journal/v2'
+        ? {codexHome: journal.previousCodexHome!} : undefined);
       const since = new Date().toISOString();
       await deps.start(); await deps.verify(journal.previousVersion, since);
       await save('rolled_back');

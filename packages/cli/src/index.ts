@@ -1971,8 +1971,10 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         { platform: process.platform, nodeDirectory: dirname(process.execPath) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
       verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
-      configureStartup: version => enableRelayAutostart({ ...startupOptions, workspace,
-        launcher: startup.launcher, policy: startup.policy, version }),
+      configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
+        launcher: startup.launcher, policy: startup.policy, version,
+        ...(restore ? {restoreCodexHome: restore.codexHome}
+          : {codexHome: process.platform === 'linux' ? process.env.CODEX_HOME : undefined}) }),
       start: () => startRelayAutostart(startupOptions),
       stop: async () => {
         await assertSessionsStopped();
@@ -2071,7 +2073,7 @@ async function startRelayDaemon(policyPath: string) {
   if (supervisorState === 'stopped') {
     const startupBackend = (await relayAutostartStatus({ home: dharmaHome() })).backend;
     // A setup turn cannot own a supervisor intended to outlive that turn.
-    if (hostScope || startupBackend === 'container-entrypoint') {
+    if (hostScope || startupBackend === 'container-entrypoint' || startupBackend === 'systemd-user') {
       await step(() => startRelayAutostart({ home: dharmaHome() }));
     } else {
       await step(async () => {
@@ -3263,7 +3265,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         const launcher = await step(() => installStableRepositoryLauncher(workspace));
         const autostart = await step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
-          version: VERSION, preserveStandardAnchor: true }));
+          version: VERSION, preserveStandardAnchor: true,
+          codexHome: process.platform === 'linux' && provider === 'codex' ? process.env.CODEX_HOME : undefined }));
         return {launcher, autostart};
       })));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;

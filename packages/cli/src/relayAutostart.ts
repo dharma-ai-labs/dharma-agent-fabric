@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { assertContainerStartupOwnership, containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
   writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
@@ -23,6 +23,10 @@ export interface RelayAutostartOptions {
   run?: Runner;
   containerRuntime?: ContainerRuntime;
   pinnedControllerRollback?: boolean;
+  /** Non-secret native profile location, never its contents or credentials. */
+  codexHome?: string;
+  /** Set only from the verified runtime-upgrade journal during rollback. */
+  restoreCodexHome?: string | null;
 }
 
 interface RegistrationFields {
@@ -35,7 +39,8 @@ interface RegistrationFields {
 
 export type RelayAutostartRegistration = RegistrationFields & ({ schema: 'dharma.relay-autostart/v1'; policy: string }
   | { schema: 'dharma.relay-autostart/v2'; mode: 'demo-only'; policy: null }
-  | { schema: 'dharma.relay-autostart/v3'; policy: string });
+  | { schema: 'dharma.relay-autostart/v3'; policy: string }
+  | { schema: 'dharma.relay-autostart/v4'; backend: 'systemd-user'; policy: string; codexHome: string });
 type Registration = RelayAutostartRegistration;
 
 export type RelayAutostartState = {
@@ -57,6 +62,18 @@ function safeLine(value: string) {
     throw new Error('Autostart paths must be bounded nonempty single lines.');
   }
   return value;
+}
+
+function codexProfilePath(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 4096 || !value.startsWith('/') || value === '/'
+    || /[\x00-\x1f\x7f]/.test(value) || posix.resolve(value) !== value || /\s$|\\$/.test(value)) {
+    throw new Error('relay_startup_provider_context_invalid');
+  }
+  return value;
+}
+
+function recordedCodexHome(registration: Registration) {
+  return registration.schema === 'dharma.relay-autostart/v4' ? registration.codexHome : undefined;
 }
 
 function systemdValue(value: string) {
@@ -115,7 +132,7 @@ function startupPath(options: RelayAutostartOptions, backend: Registration['back
 
 function startupContents(options: RelayAutostartOptions, registration: Registration) {
   return registration.backend === 'systemd-user'
-    ? linuxRelayUnit(registration.launcher, registration.policy, registration.workspace, options.home)
+    ? linuxRelayUnit(registration.launcher, registration.policy, registration.workspace, options.home, recordedCodexHome(registration))
     : registration.backend === 'launchd-user'
       ? macRelayLaunchAgent(registration.launcher, registration.policy, registration.workspace, options.home)
       : windowsRelayStartupScript(registration.launcher, registration.policy, options.home);
@@ -148,12 +165,12 @@ async function macLoaded(options: RelayAutostartOptions, registration: Registrat
   return true;
 }
 
-export function linuxRelayUnit(launcher: string, policy: string | null, workspace: string, home?: string) {
-  return renderLinuxRelayUnit(launcher, policy, workspace, home, false);
+export function linuxRelayUnit(launcher: string, policy: string | null, workspace: string, home?: string, codexHome?: string) {
+  return renderLinuxRelayUnit(launcher, policy, workspace, home, false, codexHome);
 }
 
 function renderLinuxRelayUnit(launcher: string, policy: string | null, workspace: string,
-  home: string | undefined, legacy: boolean) {
+  home: string | undefined, legacy: boolean, codexHome?: string) {
   // WorkingDirectory is a literal path, unlike ExecStart/Environment word lists.
   const directory = legacy ? systemdValue(workspace) : safeLine(workspace).replace(/%/g, '%%');
   if (!legacy && (!workspace.startsWith('/') || /[\x00-\x1f]|\s$|\\$/.test(workspace))) {
@@ -162,6 +179,7 @@ function renderLinuxRelayUnit(launcher: string, policy: string | null, workspace
   return `[Unit]\nDescription=Dharma Agent Fabric relay\nAfter=network-online.target\nWants=network-online.target\n\n`
     + `[Service]\nType=simple\nWorkingDirectory=${directory}\n`
     + (home ? `Environment=${systemdValue(`DHARMA_HOME=${home}`)}\n` : '')
+    + (codexHome === undefined ? '' : `Environment=${systemdValue(`CODEX_HOME=${codexProfilePath(codexHome)}`)}\n`)
     + `ExecStart=${systemdValue(launcher)} relay supervise `
     + (policy === null ? '--demo-only\n' : `--policy ${systemdValue(policy)}\n`)
     + `Restart=on-failure\nRestartSec=10s\nTimeoutStopSec=30s\n\n`
@@ -202,9 +220,15 @@ async function readRegistration(options: RelayAutostartOptions): Promise<Registr
       throw new Error('Invalid startup receipt.');
     }
     const keys = ['schema', 'backend', 'launcher', 'policy', 'workspace', 'version', 'taskName'];
-    if (value.schema === 'dharma.relay-autostart/v1' || value.schema === 'dharma.relay-autostart/v3') {
+    if (value.schema === 'dharma.relay-autostart/v1' || value.schema === 'dharma.relay-autostart/v3'
+      || value.schema === 'dharma.relay-autostart/v4') {
       if (typeof value.policy !== 'string') throw new Error('Invalid startup receipt.');
       safeLine(value.policy);
+      if (value.schema === 'dharma.relay-autostart/v4') {
+        if (value.backend !== 'systemd-user') throw new Error('Invalid startup receipt.');
+        codexProfilePath(value.codexHome);
+        keys.push('codexHome');
+      }
     } else if (value.schema === 'dharma.relay-autostart/v2') {
       if (value.policy !== null || value.mode !== 'demo-only') throw new Error('Invalid startup receipt.');
       keys.push('mode');
@@ -237,6 +261,7 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
   const expected = startupContents(options, registration);
   const actual = await readFile(path, 'utf8').catch(() => null);
   return actual === expected || (allowLegacy && registration.backend === 'systemd-user'
+    && registration.schema !== 'dharma.relay-autostart/v4'
     && actual === renderLinuxRelayUnit(registration.launcher, registration.policy,
       registration.workspace, options.home, true));
 }
@@ -363,22 +388,33 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   if (previous && previous.backend !== backend) {
     throw new Error('Existing relay autostart belongs to a different operating system.');
   }
+  const previousCodexHome = previous && recordedCodexHome(previous);
+  if (options.restoreCodexHome !== undefined && (options.codexHome !== undefined || options.preserveStandardAnchor)) {
+    throw new Error('relay_startup_provider_context_conflict');
+  }
+  if (previousCodexHome && options.codexHome !== undefined && options.codexHome !== previousCodexHome) {
+    throw new Error('relay_startup_provider_context_conflict');
+  }
   // Demo scopes share a standard service when one already owns this user's startup entry.
   const preserve = options.preserveStandardAnchor && previous?.policy !== null && Boolean(previous);
   if (preserve && previous!.version !== options.version) {
     throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
   }
   const policy = preserve ? previous!.policy : options.policy ?? previous?.policy ?? null;
+  const codexHome = backend === 'systemd-user' && policy !== null
+    ? options.restoreCodexHome !== undefined ? options.restoreCodexHome === null ? undefined : codexProfilePath(options.restoreCodexHome)
+      : options.codexHome === undefined ? previousCodexHome : codexProfilePath(options.codexHome) : undefined;
   const workspace = preserve || (options.policy === null && previous?.policy) ? previous!.workspace : options.workspace;
-  const registration: Registration = {
-    ...(policy === null ? { schema: 'dharma.relay-autostart/v2' as const, mode: 'demo-only' as const, policy: null }
-      : { schema: backend === 'container-entrypoint' ? 'dharma.relay-autostart/v3' as const : 'dharma.relay-autostart/v1' as const,
-        policy: safeLine(policy) }),
+  const fields: RegistrationFields = {
     backend,
     launcher: safeLine(preserve ? previous!.launcher : options.launcher),
     workspace: safeLine(workspace), version: options.version,
     taskName: platform === 'win32' ? taskName(options.home) : null,
   };
+  const registration: Registration = codexHome
+    ? {...fields, schema: 'dharma.relay-autostart/v4', backend: 'systemd-user', policy: safeLine(policy!), codexHome}
+    : {...fields, ...(policy === null ? {schema: 'dharma.relay-autostart/v2', mode: 'demo-only', policy: null}
+      : {schema: backend === 'container-entrypoint' ? 'dharma.relay-autostart/v3' : 'dharma.relay-autostart/v1', policy: safeLine(policy)})};
   if (backend === 'container-entrypoint') {
     if (registration.schema !== 'dharma.relay-autostart/v3' || !isAbsolute(registration.launcher)
       || !isAbsolute(registration.workspace) || registration.policy !== join(registration.workspace, '.dharma', 'approved-policy.json')) {
@@ -415,7 +451,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     throw error;
   });
   const ownedContents = previous && startupContents(options, previous);
-  const ownedLegacyContents = previous && platform === 'linux'
+  const ownedLegacyContents = previous && platform === 'linux' && previous.schema !== 'dharma.relay-autostart/v4'
     ? renderLinuxRelayUnit(previous.launcher, previous.policy, previous.workspace, options.home, true) : null;
   if (existingContents !== null && existingContents !== ownedContents && existingContents !== ownedLegacyContents) {
     throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
@@ -426,7 +462,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   }
   if (preserve) {
     const status = await relayAutostartStatus(options);
-    if (status.state === 'enabled') return status;
+    if (status.state === 'enabled' && codexHome === previousCodexHome) return status;
   }
   if (platform === 'darwin') {
     const loaded = await macLoaded(options, previous || registration);

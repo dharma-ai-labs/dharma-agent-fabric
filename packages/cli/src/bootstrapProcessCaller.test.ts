@@ -31,7 +31,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const children: ChildProcess[] = [], serviceChildren: ChildProcess[] = [], effects: string[] = [], spawnCalls: Array<{argv: string[]; options: Record<string, unknown>}> = [];
   let running = false, preexisting = false, withdrawInSpawn = false, withdrawInStatus = false;
   let container = false, withdrawInBackend = false, withdrawInContainerStart = false;
-  let standingService = false;
+  let standingService = false, startupRegistered = true;
   let serviceUnavailable = false;
   t.after(async () => {
     await drainBootstrapHostChildren(prepared.scope);
@@ -52,7 +52,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     relaySupervisorProcessState: async () => running || preexisting ? 'running' : 'stopped',
     relayAutostartStatus: async () => {
       if (withdrawInBackend) prepared.scope.close();
-      return {backend: container ? 'container-entrypoint' : 'systemd-user'};
+      return {backend: container ? 'container-entrypoint' : startupRegistered ? 'systemd-user' : null};
     },
     startRelayAutostart: async () => {
       if (serviceUnavailable) throw new Error('autostart_conflict: owned service unavailable');
@@ -112,6 +112,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   return {prepared, call, session, children, serviceChildren, effects, spawnCalls, item, workspace, entry, policyPath,
     useStandingService: () => {standingService = true;},
     denyStandingService: () => {serviceUnavailable = true;},
+    withoutStartup: () => {startupRegistered = false;},
     legacyRelay: () => relay(policyPath),
     preexisting: () => {preexisting = true;}, cancelInSpawn: () => {withdrawInSpawn = true; withdrawInContainerStart = true;},
     cancelInStatus: () => {withdrawInStatus = true;}, useContainer: () => {container = true;},
@@ -170,9 +171,22 @@ test('actual relay caller refuses an unavailable owned user service without deta
 });
 
 test('actual legacy relay caller retains its unscoped detached supervisor startup', async t => {
-  const f = await fixture(t); await f.legacyRelay();
+  const f = await fixture(t); f.withoutStartup(); await f.legacyRelay();
   assert.equal(f.spawnCalls.length, 1); assert.equal(f.spawnCalls[0]!.options.detached, true);
   assert.equal(f.effects.includes('user_service_start'), false);
+});
+
+test('actual unscoped relay recovery uses its registered Linux owner instead of a detached supervisor', async t => {
+  const f = await fixture(t); f.useStandingService(); await f.legacyRelay();
+  assert.equal(f.effects.filter(effect => effect === 'user_service_start').length, 1);
+  assert.equal(f.spawnCalls.length, 0); assert.equal(f.children.length, 0);
+  assert.equal(f.serviceChildren.length, 1);
+});
+
+test('actual unscoped relay recovery cannot bypass a failed registered Linux owner', async t => {
+  const f = await fixture(t); f.denyStandingService();
+  await assert.rejects(f.legacyRelay(), /autostart_conflict/);
+  assert.equal(f.spawnCalls.length, 0); assert.equal(f.children.length, 0);
 });
 
 for (const kind of ['relay'] as const) {

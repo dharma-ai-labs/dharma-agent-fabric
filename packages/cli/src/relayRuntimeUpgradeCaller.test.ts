@@ -17,7 +17,7 @@ async function fixture() {
     readDeviceConfig: async () => ({ organizationId: selected.organizationId, deviceId: selected.deviceId }),
     registry: async () => [selected], selectDeviceWorkspace: () => selected,
     realpath: async (path: string) => path, dharmaHome: () => '/fixtures/profile', resolve, dirname,
-    process: { platform: 'linux', execPath: '/fixtures/node/bin/node' },
+    process: { platform: 'linux', execPath: '/fixtures/node/bin/node', env: {CODEX_HOME: '/fixtures/selected-codex'} },
     inspectOwnedRelayAutostart: async () => startup,
     relaySupervisorProcessState: async () => 'stopped', relayProcessState: async () => 'stopped',
     readdir: async () => [], pidProcessState: async () => 'stopped',
@@ -77,6 +77,24 @@ test('actual upgrade caller binds the reviewed recorded-runtime verifier without
   };
   await f.run()(f.flags);
   assert.deepEqual(f.calls, ['lock']);
+});
+
+test('actual upgrade caller retains the selected profile and passes only verified rollback context to startup', async () => {
+  const f = await fixture();
+  const contexts: Array<{codexHome?: string; restoreCodexHome?: string | null}> = [];
+  f.deps.enableRelayAutostart = async (input: {codexHome?: string; restoreCodexHome?: string | null}) => {contexts.push(input);};
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {
+    configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
+  }) => {
+    await hooks.configureStartup('0.2.118');
+    await hooks.configureStartup('0.2.116', {codexHome: null});
+    return {state: 'planned'};
+  };
+  await f.run()(f.flags);
+  assert.equal(contexts[0]!.codexHome, '/fixtures/selected-codex');
+  assert.equal(Object.hasOwn(contexts[0]!, 'restoreCodexHome'), false);
+  assert.equal(contexts[1]!.restoreCodexHome, null);
+  assert.equal(Object.hasOwn(contexts[1]!, 'codexHome'), false);
 });
 
 test('actual upgrade caller requires matching enrollment workspace and owned startup', async () => {
