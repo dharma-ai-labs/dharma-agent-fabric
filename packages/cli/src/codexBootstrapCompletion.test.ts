@@ -434,8 +434,8 @@ test('actual completion composition denies copied leases and retains the incompl
   } finally {owner.close(); await owner.settled;}
 });
 
-for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
-  ...['source', 'device-config', 'claim', 'credentials', 'onboard', 'launcher', 'startup', 'skill', 'relay', 'api', 'named']
+for (const disposition of ['complete', 'package-pending', 'foreign-recipient', 'startup-conflict',
+  ...['source', 'device-config', 'startup-preflight', 'claim', 'credentials', 'onboard', 'launcher', 'startup', 'skill', 'relay', 'api', 'named']
     .map(stage => `withdrawn-${stage}`)] as const) {
   test(`actual bootstrap composition admits only the original lease (${disposition})`, async t => {
     const f = await fixture(t); f.enableHandoff();
@@ -457,6 +457,10 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
       bootstrapGrantMode: () => 'reference', realpath: async (path: string) => path,
       readDeviceConfig: async () => effect('device-config', config),
       preflightBootstrapWorkspaceIdentity: async () => effect('source', source),
+      assertRelayStartupOwnership: async () => {
+        effect('startup-preflight', undefined);
+        if (disposition === 'startup-conflict') throw new Error('autostart_conflict: synthetic startup owner');
+      },
       isLocalProviderId: (provider: string) => provider === 'codex',
       process: {platform: 'linux', env: {}, stderr: {write() {throw new Error('fixture_unexpected_output');}}},
       configPath: () => 'synthetic-config', platform: async () => 'linux',
@@ -527,8 +531,13 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient',
         callId: 'original_bootstrap', tool: 'dharma_setup_reference', namespace: null,
         arguments: {operationId: id(1), setupReference: id(2)}}, {signal: new AbortController().signal});
       await admission.settled;
-      assert.equal(claims, ['withdrawn-source', 'withdrawn-device-config'].includes(disposition) ? 0 : 1,
+      assert.equal(claims, ['withdrawn-source', 'withdrawn-device-config', 'withdrawn-startup-preflight', 'startup-conflict'].includes(disposition) ? 0 : 1,
         'the actual bootstrap must reach only a still-admitted bound claim');
+      if (disposition === 'startup-conflict') {
+        assert.deepEqual(effects, ['source', 'device-config', 'startup-preflight']);
+        assert.equal(onboards, 0); assert.equal(starts, 0);
+      }
+      if (claims) assert.ok(effects.indexOf('startup-preflight') < effects.indexOf('claim'));
       assert.equal(onboards, effects.filter(stage => stage === 'onboard').length);
       if (disposition === 'package-pending') assert.equal(starts, 0);
       if (disposition.startsWith('withdrawn-')) {

@@ -52,6 +52,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     },
     isLocalProviderId: (provider: string) => provider === 'codex',
     readDeviceConfig: async () => null,
+    assertRelayStartupOwnership: async () => record('startup_preflight'),
     configPath: () => '/fixture-config/device.json',
     process: { platform: 'linux', env: { USER: 'fixture' }, stderr: { write: () => true } },
     platform: async () => 'linux',
@@ -443,6 +444,8 @@ test('public claim approval prints the validated device fingerprint rather than 
     assert.ok(output.includes(approval.url));
     assert.doesNotMatch(output, /fixture_token|fixture_private_grant|privateJwk|authenticator/);
     assert.equal(f.calls.filter(name => name === 'open_approval').length, noBrowser ? 0 : 1);
+    assert.equal(f.calls.filter(name => name === 'startup_preflight').length, 1);
+    if (!noBrowser) assert.ok(f.calls.indexOf('startup_preflight') < f.calls.indexOf('open_approval'));
     assert.equal(f.calls.includes('save_token'), false);
     assert.equal(f.calls.includes('onboard'), false);
   }
