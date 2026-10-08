@@ -66,6 +66,32 @@ test('Linux startup preflight fails closed on invalid receipts and unreadable an
   await assert.rejects(startupPreflight(fresh));
 });
 
+test('bootstrap may inspect an exact owned legacy anchor for migration without admitting legacy start', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-legacy-'));
+  const calls: string[][] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: null, version: '0.2.174',
+    run: async (file: string, args: string[]) => { calls.push([file, ...args]); return { stdout: 'enabled\n' }; } };
+  await enableRelayAutostart(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const legacy = (await readFile(unit, 'utf8')).replace(/^WorkingDirectory=.*$/m, `WorkingDirectory="${options.workspace}"`);
+  await writeFile(unit, legacy);
+  calls.length = 0;
+  await startupPreflight(options);
+  assert.equal((await relayAutostartStatus(options)).state, 'unavailable');
+  await assert.rejects(inspectOwnedRelayAutostart(options), /autostart_conflict/);
+  const registration = await Reflect.apply(inspectOwnedRelayAutostart, undefined, [options, { allowLegacy: true }]);
+  assert.equal(registration.workspace, options.workspace);
+  await assert.rejects(startRelayAutostart(options), /autostart_conflict/);
+  assert.equal(await readFile(unit, 'utf8'), legacy);
+  assert.deepEqual(calls, [], 'inspection cannot migrate, enable or start the legacy unit');
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  assert.match(await readFile(unit, 'utf8'), /^WorkingDirectory=\//m);
+  await writeFile(unit, `${legacy}# foreign modification\n`);
+  await assert.rejects(Reflect.apply(inspectOwnedRelayAutostart, undefined, [options, { allowLegacy: true }]), /autostart_conflict/);
+});
+
 test('Linux-only startup preflight leaves Windows and macOS registration behavior unchanged', async () => {
   for (const platform of ['win32', 'darwin'] as const) {
     await startupPreflight({ platform, home: '/not-read', userHome: '/not-read',

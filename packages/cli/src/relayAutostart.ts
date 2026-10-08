@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
-import { containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
+import { assertContainerStartupOwnership, containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
   writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
@@ -244,7 +244,11 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
 // A fresh device home is not a fresh OS-user startup context. Check before
 // enrollment; the existing enable-time guard still protects against races.
 export async function assertRelayStartupOwnership(options: RelayAutostartOptions): Promise<void> {
-  if ((options.platform || process.platform) !== 'linux' || await containerEntrypointAvailable(options)) return;
+  if ((options.platform || process.platform) !== 'linux') return;
+  if (await containerEntrypointAvailable(options)) {
+    await assertContainerStartupOwnership(options);
+    return;
+  }
   const registration = await readRegistration(options);
   if (registration && registration.backend !== 'systemd-user') {
     throw new Error('autostart_conflict: startup ownership does not match this platform.');
@@ -505,9 +509,9 @@ export async function startRelayAutostart(options: RelayAutostartOptions) {
   return { state: 'start_requested' as const, backend: registration.backend, version: registration.version };
 }
 
-export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions) {
+export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions, inspection: { allowLegacy?: boolean } = {}) {
   const registration = await readRegistration(options);
-  if (!registration || !await ownsStartupFile(options, registration)) {
+  if (!registration || !await ownsStartupFile(options, registration, inspection.allowLegacy === true)) {
     throw new Error('autostart_conflict: a verified owned startup entry is required.');
   }
   const platform = options.platform || process.platform;

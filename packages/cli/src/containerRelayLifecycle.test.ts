@@ -63,6 +63,41 @@ test('startup preflight rejects stale or foreign container context without syste
   assert.deepEqual(f.calls, []);
 });
 
+test('startup preflight rejects invalid existing container registrations and controls without mutation', posix, async () => {
+  for (const kind of ['malformed-registration', 'missing-control', 'mismatched-control', 'malformed-control', 'orphan-control']) {
+    const f = await fixture();
+    await enableRelayAutostart(f.options);
+    const registration = join(f.home, 'relay', 'autostart.json');
+    const control = join(f.home, 'relay', 'container-control.json');
+    if (kind === 'malformed-registration') await writeFile(registration, '{broken');
+    if (kind === 'missing-control') await rm(control);
+    if (kind === 'mismatched-control') {
+      const value = JSON.parse(await readFile(control, 'utf8'));
+      await writeFile(control, JSON.stringify({ ...value, registrationHash: '0'.repeat(64) }));
+    }
+    if (kind === 'malformed-control') await writeFile(control, '{broken');
+    if (kind === 'orphan-control') await rm(registration);
+    const snapshot = async () => Promise.all([registration, control].map(path => readFile(path, 'utf8')
+      .catch(error => { if (error.code === 'ENOENT') return null; throw error; })));
+    const before = await snapshot();
+    await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable|autostart_conflict/, kind);
+    assert.deepEqual(await snapshot(), before, kind);
+    assert.deepEqual(f.calls, [], kind);
+  }
+});
+
+test('startup preflight accepts an exactly owned paused container registration without resuming it', posix, async () => {
+  const f = await fixture();
+  await enableRelayAutostart(f.options);
+  await stopRelayAutostart(f.options);
+  const control = join(f.home, 'relay', 'container-control.json');
+  const before = await readFile(control, 'utf8');
+  await assertRelayStartupOwnership(f.options);
+  assert.equal(await readFile(control, 'utf8'), before);
+  assert.equal(JSON.parse(before).running, false);
+  assert.deepEqual(f.calls, []);
+});
+
 test('owned container PID1 enables startup without claiming or modifying the OS-user systemd slot', posix, async () => {
   const f = await fixture();
   const friday = join(f.root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');

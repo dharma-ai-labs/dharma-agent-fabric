@@ -366,6 +366,13 @@ export async function readContainerRegistration(options: ContainerLifecycleOptio
   return value;
 }
 
+export async function assertContainerStartupOwnership(options: ContainerLifecycleOptions): Promise<void> {
+  if (!await containerEntrypointAvailable(options)) throw unavailable();
+  const registration = await readContainerRegistration(options);
+  if (registration ? !await ownsContainerStartup(options, registration)
+    : await privateJson(options, 'container-control.json') !== null) throw unavailable();
+}
+
 async function readConfiguration(options: ContainerLifecycleOptions) {
   const value = await privateJson(options, 'autostart.json');
   if (value === null) return null;

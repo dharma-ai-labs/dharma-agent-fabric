@@ -3218,7 +3218,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         const home = dharmaHome();
         const existing = await step(() => relayAutostartStatus({ home }));
         if (existing.backend !== null || existing.state !== 'disabled') {
-          const anchor = await step(() => inspectOwnedRelayAutostart({ home }));
+          const anchor = await step(() => inspectOwnedRelayAutostart({ home }, { allowLegacy: true }));
           if (anchor.policy !== null) {
             const current = await step(() => readDeviceConfig());
             if (!current || current.organizationId !== organizationId || current.deviceId !== config.deviceId) {

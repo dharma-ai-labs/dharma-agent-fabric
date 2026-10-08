@@ -219,6 +219,19 @@ test('bootstrap preserves only a verified current-device startup anchor before e
   assert.ok(f.calls.indexOf('verify_existing_anchor') < f.calls.indexOf('autostart'));
 });
 
+test('bootstrap explicitly inspects an owned legacy anchor before its supported migration', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.relayAutostartStatus = async () => ({ state: 'unavailable', backend: 'systemd-user', reason: 'autostart_conflict' });
+  f.dependencies.inspectOwnedRelayAutostart = async (options: { home: string }, inspection: { allowLegacy?: boolean }) => {
+    assert.equal(options.home, '/fixture-home');
+    assert.equal(inspection.allowLegacy, true);
+    f.calls.push('inspect_legacy');
+    return { workspace: '/first', policy: null, version: '0.2.102' };
+  };
+  await (await caller('bootstrap', f.dependencies))(bootstrapFlags());
+  assert.ok(f.calls.indexOf('inspect_legacy') < f.calls.indexOf('autostart'));
+});
+
 test('bootstrap selects the authorized remote before redeeming and reports its actual checkout', async () => {
   const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
   f.dependencies.resolveBootstrapRepositoryWorkspace = async () => {
