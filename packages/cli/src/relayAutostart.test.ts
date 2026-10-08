@@ -1,14 +1,142 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
 import test from 'node:test';
+import * as startup from './relayAutostart.js';
+import type { RelayAutostartOptions } from './relayAutostart.js';
 import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
   startRelayAutostart, stopRelayAutostart, inspectOwnedRelayAutostart, macRelayLaunchAgent,
 } from './relayAutostart.js';
+
+const startupPreflight = async (options: RelayAutostartOptions & { version?: string }) => {
+  const check = Reflect.get(startup, 'assertRelayStartupOwnership');
+  assert.equal(typeof check, 'function', 'startup ownership must be checked before enrollment');
+  await check(options);
+};
+
+test('Linux startup preflight rejects a second device home without modifying its existing anchor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-'));
+  const calls: string[] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'accepted'), userHome: root,
+    workspace: '/fixtures/accepted', launcher: '/fixtures/accepted/.dharma/bin/dharma',
+    policy: '/fixtures/accepted/.dharma/approved-policy.json', version: '0.2.174',
+    run: async (file: string) => { calls.push(file); return { stdout: 'enabled\n' }; } };
+  await enableRelayAutostart(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = join(options.home, 'relay', 'autostart.json');
+  const before = await readFile(unit, 'utf8'), registration = await readFile(receipt, 'utf8');
+  calls.length = 0;
+  await assert.rejects(startupPreflight({ ...options, home: join(root, 'fresh') }), /autostart_conflict/);
+  assert.equal(await readFile(unit, 'utf8'), before);
+  assert.equal(await readFile(receipt, 'utf8'), registration);
+  await assert.rejects(readFile(join(root, 'fresh', 'relay', 'autostart.json')), { code: 'ENOENT' });
+  assert.deepEqual(calls, [], 'preflight may not run any startup control');
+});
+
+test('Linux startup preflight permits an absent or exactly owned current and legacy anchor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-owned-'));
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: null, version: '0.2.174', run: async () => ({ stdout: 'enabled\n' }) };
+  await startupPreflight(options);
+  await enableRelayAutostart(options);
+  await startupPreflight(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const current = await readFile(unit, 'utf8');
+  const legacy = current.replace(/^WorkingDirectory=.*$/m, `WorkingDirectory="${options.workspace}"`);
+  await writeFile(unit, legacy);
+  await startupPreflight(options);
+  assert.equal(await readFile(unit, 'utf8'), legacy, 'preflight does not migrate the anchor');
+  await writeFile(unit, `${current}# unowned modification\n`);
+  await assert.rejects(startupPreflight(options), /autostart_conflict/);
+});
+
+test('Linux startup preflight fails closed on invalid receipts and unreadable anchors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-invalid-'));
+  const home = join(root, 'device'), options = { platform: 'linux' as const, home, userHome: root };
+  await mkdir(join(home, 'relay'), { recursive: true });
+  await writeFile(join(home, 'relay', 'autostart.json'), '{broken');
+  await assert.rejects(startupPreflight(options), /autostart_receipt_invalid/);
+  const fresh = { ...options, home: join(root, 'fresh') };
+  await mkdir(join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service'), { recursive: true });
+  await assert.rejects(startupPreflight(fresh));
+});
+
+test('Linux startup preflight rejects an orphaned systemd receipt without recreating its missing unit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-orphan-'));
+  const calls: string[][] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: null, version: '0.2.174',
+    run: async (file: string, args: string[]) => { calls.push([file, ...args]); return { stdout: 'enabled\n' }; } };
+  await enableRelayAutostart(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = join(options.home, 'relay', 'autostart.json');
+  const before = await readFile(receipt, 'utf8');
+  await rm(unit);
+  calls.length = 0;
+  await assert.rejects(startupPreflight(options), /autostart_conflict/);
+  assert.equal(await readFile(receipt, 'utf8'), before);
+  await assert.rejects(readFile(unit), { code: 'ENOENT' });
+  assert.deepEqual(calls, []);
+});
+
+for (const policy of [null, '/fixtures/repository/.dharma/approved-policy.json']) {
+  test(`startup version preflight preserves migration semantics for policy=${policy === null ? 'demo' : 'standard'}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-startup-version-'));
+    const calls: string[][] = [];
+    const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+      workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+      policy, version: '0.2.174',
+      run: async (file: string, args: string[]) => { calls.push([file, ...args]); return { stdout: 'enabled\n' }; } };
+    await enableRelayAutostart(options);
+    const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+    const receipt = join(options.home, 'relay', 'autostart.json');
+    const before = await Promise.all([unit, receipt].map(path => readFile(path, 'utf8')));
+    calls.length = 0;
+    if (policy === null) await startupPreflight({ ...options, version: '0.2.175' });
+    else await assert.rejects(startupPreflight({ ...options, version: '0.2.175' }), /relay_runtime_upgrade_required/);
+    assert.deepEqual(await Promise.all([unit, receipt].map(path => readFile(path, 'utf8'))), before);
+    assert.deepEqual(calls, []);
+  });
+}
+
+test('bootstrap may inspect an exact owned legacy anchor for migration without admitting legacy start', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-legacy-'));
+  const calls: string[][] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: null, version: '0.2.174',
+    run: async (file: string, args: string[]) => { calls.push([file, ...args]); return { stdout: 'enabled\n' }; } };
+  await enableRelayAutostart(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const legacy = (await readFile(unit, 'utf8')).replace(/^WorkingDirectory=.*$/m, `WorkingDirectory="${options.workspace}"`);
+  await writeFile(unit, legacy);
+  calls.length = 0;
+  await startupPreflight(options);
+  assert.equal((await relayAutostartStatus(options)).state, 'unavailable');
+  await assert.rejects(inspectOwnedRelayAutostart(options), /autostart_conflict/);
+  const registration = await Reflect.apply(inspectOwnedRelayAutostart, undefined, [options, { allowLegacy: true }]);
+  assert.equal(registration.workspace, options.workspace);
+  await assert.rejects(startRelayAutostart(options), /autostart_conflict/);
+  assert.equal(await readFile(unit, 'utf8'), legacy);
+  assert.deepEqual(calls, [], 'inspection cannot migrate, enable or start the legacy unit');
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  assert.match(await readFile(unit, 'utf8'), /^WorkingDirectory=\//m);
+  await writeFile(unit, `${legacy}# foreign modification\n`);
+  await assert.rejects(Reflect.apply(inspectOwnedRelayAutostart, undefined, [options, { allowLegacy: true }]), /autostart_conflict/);
+});
+
+test('Linux-only startup preflight leaves Windows and macOS registration behavior unchanged', async () => {
+  for (const platform of ['win32', 'darwin'] as const) {
+    await startupPreflight({ platform, home: '/not-read', userHome: '/not-read',
+      run: async () => { throw new Error('preflight must not execute an OS command'); } });
+  }
+});
 
 async function macFixture() {
   const root = await mkdtemp(join(tmpdir(), 'dharma-mac-startup-'));
@@ -235,6 +363,56 @@ test('startup status never calls a missing OS registration healthy', async () =>
     run: async () => { throw new Error('No systemd user bus'); },
   });
   assert.equal(result.state, 'disabled');
+});
+
+test('Linux status distinguishes a disabled owned unit from a failed user manager', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-autostart-disabled-'));
+  const calls: string[][] = [];
+  let disabled = false;
+  let failure: Record<string, unknown> | null = null;
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: '/fixtures/repository/.dharma/approved-policy.json', version: '0.2.175',
+    run: async (file: string, args: string[]) => {
+      assert.equal(file, 'systemctl');
+      calls.push(args);
+      if (args.includes('is-enabled')) {
+        if (failure) throw Object.assign(new Error('synthetic manager failure'), failure);
+        if (disabled) throw Object.assign(new Error('synthetic disabled exit'), {
+          code: 1, stdout: 'disabled\n', stderr: '', killed: false, signal: null,
+        });
+        return { stdout: 'enabled\n' };
+      }
+      if (args.includes('enable')) disabled = false;
+      return { stdout: '' };
+    } };
+  await enableRelayAutostart(options);
+  disabled = true;
+  calls.length = 0;
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = join(options.home, 'relay', 'autostart.json');
+  const before = await Promise.all([unit, receipt].map(path => readFile(path, 'utf8')));
+  assert.deepEqual(await relayAutostartStatus(options), {
+    state: 'disabled', backend: 'systemd-user', version: options.version,
+  });
+  assert.deepEqual(calls, [['--user', 'is-enabled', 'dharma-agent-fabric.service']]);
+  assert.deepEqual(await Promise.all([unit, receipt].map(path => readFile(path, 'utf8'))), before);
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  assert.ok(calls.some(args => args.includes('enable')));
+  for (const invalid of [
+    { code: 1, stdout: '', stderr: 'Failed to connect to bus' },
+    { code: 1, stdout: 'disabled\n', stderr: 'Failed to connect to bus' },
+    { code: 2, stdout: 'disabled\n', stderr: '' },
+    { code: 1, stdout: 'masked\n', stderr: '' },
+    { code: 1, stdout: 'disabled\n', stderr: '', killed: true, signal: 'SIGTERM' },
+    { code: 'ENOENT', stdout: 'disabled\n', stderr: '' },
+  ]) {
+    failure = invalid;
+    const status = await relayAutostartStatus(options);
+    assert.equal(status.state, 'unavailable');
+    assert.equal(status.reason, 'systemd_user_unavailable');
+  }
+  assert.deepEqual(await Promise.all([unit, receipt].map(path => readFile(path, 'utf8'))), before);
 });
 
 test('a second standard repository preserves the verified user startup anchor on Linux and Windows', async () => {

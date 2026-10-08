@@ -22,7 +22,9 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const nodes = source.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   assert.equal(nodes.length, 1, 'The named source function must resolve exactly once.');
-  const compiled = ts.transpileModule(nodes[0]!.getText(source), {
+  const anchor = name === 'bootstrap' ? source.statements.find(node => ts.isFunctionDeclaration(node)
+    && node.name?.text === 'assertBootstrapStartupAnchor') : undefined;
+  const compiled = ts.transpileModule([anchor?.getText(source), nodes[0]!.getText(source)].filter(Boolean).join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
     reportDiagnostics: true,
   });
@@ -52,6 +54,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     },
     isLocalProviderId: (provider: string) => provider === 'codex',
     readDeviceConfig: async () => null,
+    assertRelayStartupOwnership: async () => record('startup_preflight'),
     configPath: () => '/fixture-config/device.json',
     process: { platform: 'linux', env: { USER: 'fixture' }, stderr: { write: () => true } },
     platform: async () => 'linux',
@@ -216,6 +219,19 @@ test('bootstrap preserves only a verified current-device startup anchor before e
   };
   await (await caller('bootstrap', f.dependencies))(bootstrapFlags());
   assert.ok(f.calls.indexOf('verify_existing_anchor') < f.calls.indexOf('autostart'));
+});
+
+test('bootstrap explicitly inspects an owned legacy anchor before its supported migration', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'ready', localStage: 'ready', sharedRepositoryReady: true });
+  f.dependencies.relayAutostartStatus = async () => ({ state: 'unavailable', backend: 'systemd-user', reason: 'autostart_conflict' });
+  f.dependencies.inspectOwnedRelayAutostart = async (options: { home: string }, inspection: { allowLegacy?: boolean }) => {
+    assert.equal(options.home, '/fixture-home');
+    assert.equal(inspection.allowLegacy, true);
+    f.calls.push('inspect_legacy');
+    return { workspace: '/first', policy: null, version: '0.2.102' };
+  };
+  await (await caller('bootstrap', f.dependencies))(bootstrapFlags());
+  assert.ok(f.calls.indexOf('inspect_legacy') < f.calls.indexOf('autostart'));
 });
 
 test('bootstrap selects the authorized remote before redeeming and reports its actual checkout', async () => {
@@ -443,6 +459,8 @@ test('public claim approval prints the validated device fingerprint rather than 
     assert.ok(output.includes(approval.url));
     assert.doesNotMatch(output, /fixture_token|fixture_private_grant|privateJwk|authenticator/);
     assert.equal(f.calls.filter(name => name === 'open_approval').length, noBrowser ? 0 : 1);
+    assert.equal(f.calls.filter(name => name === 'startup_preflight').length, 1);
+    if (!noBrowser) assert.ok(f.calls.indexOf('startup_preflight') < f.calls.indexOf('open_approval'));
     assert.equal(f.calls.includes('save_token'), false);
     assert.equal(f.calls.includes('onboard'), false);
   }

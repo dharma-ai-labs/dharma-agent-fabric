@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
-import { containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
+import { assertContainerStartupOwnership, containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
   writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 
@@ -241,6 +241,38 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
       registration.workspace, options.home, true));
 }
 
+// A fresh device home is not a fresh OS-user startup context. Check before
+// enrollment; the existing enable-time guard still protects against races.
+export async function assertRelayStartupOwnership(options: RelayAutostartOptions & { version?: string }): Promise<void> {
+  if ((options.platform || process.platform) !== 'linux') return;
+  if (options.version !== undefined && !VERSION.test(options.version)) throw new Error('Invalid startup runtime version.');
+  if (await containerEntrypointAvailable(options)) {
+    await assertContainerStartupOwnership(options, options.version);
+    return;
+  }
+  const registration = await readRegistration(options);
+  if (registration && registration.backend !== 'systemd-user') {
+    throw new Error('autostart_conflict: startup ownership does not match this platform.');
+  }
+  const path = unitPath(options.userHome || homedir());
+  let stat;
+  try { stat = await lstat(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (registration) throw new Error('autostart_conflict: the registered user startup entry is missing.');
+      return;
+    }
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32_768
+    || !registration || !await ownsStartupFile(options, registration, true)) {
+    throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
+  }
+  if (options.version && registration.policy !== null && registration.version !== options.version) {
+    throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
+  }
+}
+
 function windowsTaskGuard(registration: Registration, home: string) {
   return `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); `
     + `$principalMatches = $false; try { `
@@ -298,6 +330,13 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
     return { state: result.stdout.trim() === 'enabled' ? 'enabled' : 'disabled',
       backend: registration.backend, version: registration.version };
   } catch (error) {
+    // is-enabled exits 1 for a disabled unit; transport failures are not disablement.
+    const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; killed?: unknown; signal?: unknown };
+    if (registration.backend === 'systemd-user' && failure?.code === 1
+      && typeof failure.stdout === 'string' && failure.stdout.trim() === 'disabled'
+      && failure.stderr === '' && !failure.killed && !failure.signal) {
+      return { state: 'disabled', backend: registration.backend, version: registration.version };
+    }
     return { state: 'unavailable', backend: registration.backend, version: registration.version,
       reason: error instanceof Error && error.message.startsWith('autostart_conflict:') ? 'autostart_conflict'
         : registration.backend === 'container-entrypoint' ? 'container_startup_unavailable'
@@ -484,9 +523,9 @@ export async function startRelayAutostart(options: RelayAutostartOptions) {
   return { state: 'start_requested' as const, backend: registration.backend, version: registration.version };
 }
 
-export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions) {
+export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions, inspection: { allowLegacy?: boolean } = {}) {
   const registration = await readRegistration(options);
-  if (!registration || !await ownsStartupFile(options, registration)) {
+  if (!registration || !await ownsStartupFile(options, registration, inspection.allowLegacy === true)) {
     throw new Error('autostart_conflict: a verified owned startup entry is required.');
   }
   const platform = options.platform || process.platform;

@@ -65,7 +65,10 @@ async function privateJson(options: ContainerLifecycleOptions, name: string): Pr
         || current.size > 32_768) throw unavailable();
       const text = await file.readFile('utf8');
       if (Buffer.byteLength(text) > 32_768) throw unavailable();
-      return JSON.parse(text) as unknown;
+      const value: unknown = JSON.parse(text);
+      // Only ENOENT denotes absence; a present JSON null is an invalid receipt.
+      if (value === null) throw unavailable();
+      return value;
     } finally { await file.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -304,16 +307,9 @@ export async function containerStartupControl(options: ContainerLifecycleOptions
   } satisfies Control));
 }
 
-export async function containerStartupState(options: ContainerLifecycleOptions, registration: ContainerRelayRegistration) {
-  if (!await containerEntrypointAvailable(options)) throw unavailable();
-  const value = await privateJson(options, 'container-control.json');
-  if (!exactObject(value, ['schema', 'home', 'registrationHash', 'running'])
-    || value.schema !== 'dharma.container-relay-control/v1' || value.home !== options.home
-    || value.registrationHash !== registrationHash(options.home, registration) || typeof value.running !== 'boolean') throw unavailable();
-  // Stop pauses the owned relay; it does not unregister its persistent lifecycle.
+async function readContainerHeartbeat(options: ContainerLifecycleOptions, running: boolean) {
   const heartbeat = await privateJson(options, 'container-heartbeat.json');
   const marker = await privateJson(options, 'container-entrypoint.json') as Marker;
-  let lifecycle: Heartbeat['lifecycle'] | 'configured' = 'configured';
   if (heartbeat !== null) {
     if (!exactObject(heartbeat, ['schema', 'home', 'startTicks', 'polledAt', 'lifecycle', 'reason', 'registrationHash', 'childPid', 'childStartTicks'])
       || heartbeat.schema !== 'dharma.container-relay-heartbeat/v1' || heartbeat.home !== options.home
@@ -323,12 +319,24 @@ export async function containerStartupState(options: ContainerLifecycleOptions, 
       || heartbeat.reason !== null && heartbeat.reason !== 'consumer_store_locked_or_unavailable' && heartbeat.reason !== 'relay_runtime_upgrade_required'
       || heartbeat.registrationHash !== null && !/^[a-f0-9]{64}$/.test(String(heartbeat.registrationHash))) throw unavailable();
     if (heartbeat.lifecycle === 'running') {
-      if (!value.running || !Number.isSafeInteger(heartbeat.childPid) || Number(heartbeat.childPid) <= 1
+      if (!running || !Number.isSafeInteger(heartbeat.childPid) || Number(heartbeat.childPid) <= 1
         || typeof heartbeat.childStartTicks !== 'string') throw unavailable();
       await ownedChild(options, Number(heartbeat.childPid), heartbeat.childStartTicks);
     } else if (heartbeat.childPid !== null || heartbeat.childStartTicks !== null) throw unavailable();
-    if (heartbeat.registrationHash === registrationHash(options.home, registration)) lifecycle = heartbeat.lifecycle as Heartbeat['lifecycle'];
   }
+  return heartbeat as Heartbeat | null;
+}
+
+export async function containerStartupState(options: ContainerLifecycleOptions, registration: ContainerRelayRegistration) {
+  if (!await containerEntrypointAvailable(options)) throw unavailable();
+  const value = await privateJson(options, 'container-control.json');
+  if (!exactObject(value, ['schema', 'home', 'registrationHash', 'running'])
+    || value.schema !== 'dharma.container-relay-control/v1' || value.home !== options.home
+    || value.registrationHash !== registrationHash(options.home, registration) || typeof value.running !== 'boolean') throw unavailable();
+  // Stop pauses the owned relay; it does not unregister its persistent lifecycle.
+  const heartbeat = await readContainerHeartbeat(options, value.running);
+  const lifecycle: Heartbeat['lifecycle'] | 'configured' = heartbeat?.registrationHash === registrationHash(options.home, registration)
+    ? heartbeat.lifecycle : 'configured';
   return { state: 'enabled' as const, backend: 'container-entrypoint' as const, version: registration.version,
     lifecycle, restartCoverage: 'container-entrypoint-only' as const };
 }
@@ -364,6 +372,18 @@ export async function readContainerRegistration(options: ContainerLifecycleOptio
   if (value === null) return null;
   if (!validRegistration(value)) throw unavailable();
   return value;
+}
+
+export async function assertContainerStartupOwnership(options: ContainerLifecycleOptions, version?: string): Promise<void> {
+  if (!await containerEntrypointAvailable(options)) throw unavailable();
+  const registration = await readContainerRegistration(options);
+  if (registration ? !await ownsContainerStartup(options, registration)
+    : await privateJson(options, 'container-control.json') !== null) throw unavailable();
+  if (registration) await containerStartupState(options, registration);
+  else await readContainerHeartbeat(options, false);
+  if (registration && version && registration.version !== version) {
+    throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
+  }
 }
 
 async function readConfiguration(options: ContainerLifecycleOptions) {

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as lifecycle from './containerRelayLifecycle.js';
-import { enableRelayAutostart, relayAutostartStatus, startRelayAutostart,
+import { assertRelayStartupOwnership, enableRelayAutostart, relayAutostartStatus, startRelayAutostart,
   stopRelayAutostart, disableRelayAutostart } from './relayAutostart.js';
 
 // The filesystem and lifecycle receipts are real. Only PID1 identity and the OS
@@ -41,6 +41,120 @@ async function fixture() {
 // Container PID1 and child identity are Linux /proc contracts. Other hosts
 // qualify rejection/schema behavior through the public command tests.
 const posix = { skip: process.platform !== 'linux' };
+
+test('startup preflight uses a verified container entrypoint without touching the user systemd slot', posix, async () => {
+  const f = await fixture();
+  const unit = join(f.root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  await mkdir(join(f.root, '.config', 'systemd', 'user'), { recursive: true });
+  await writeFile(unit, 'existing host service', { mode: 0o600 });
+  await assertRelayStartupOwnership(f.options);
+  assert.equal(await readFile(unit, 'utf8'), 'existing host service');
+  assert.deepEqual(f.calls, []);
+  await assert.rejects(readFile(join(f.home, 'relay', 'autostart.json')), { code: 'ENOENT' });
+});
+
+test('startup preflight rejects stale or foreign container context without systemd fallback', posix, async () => {
+  const f = await fixture();
+  f.identity.startTicks = '99999';
+  await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+  assert.deepEqual(f.calls, []);
+  await writeFile(join(f.home, 'relay', 'container-entrypoint.json'), JSON.stringify({ ...f.marker, home: '/foreign' }));
+  await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+  assert.deepEqual(f.calls, []);
+});
+
+test('startup preflight rejects invalid existing container registrations and controls without mutation', posix, async () => {
+  for (const kind of ['malformed-registration', 'missing-control', 'mismatched-control', 'malformed-control', 'orphan-control']) {
+    const f = await fixture();
+    await enableRelayAutostart(f.options);
+    const registration = join(f.home, 'relay', 'autostart.json');
+    const control = join(f.home, 'relay', 'container-control.json');
+    if (kind === 'malformed-registration') await writeFile(registration, '{broken');
+    if (kind === 'missing-control') await rm(control);
+    if (kind === 'mismatched-control') {
+      const value = JSON.parse(await readFile(control, 'utf8'));
+      await writeFile(control, JSON.stringify({ ...value, registrationHash: '0'.repeat(64) }));
+    }
+    if (kind === 'malformed-control') await writeFile(control, '{broken');
+    if (kind === 'orphan-control') await rm(registration);
+    const snapshot = async () => Promise.all([registration, control].map(path => readFile(path, 'utf8')
+      .catch(error => { if (error.code === 'ENOENT') return null; throw error; })));
+    const before = await snapshot();
+    await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable|autostart_conflict/, kind);
+    assert.deepEqual(await snapshot(), before, kind);
+    assert.deepEqual(f.calls, [], kind);
+  }
+});
+
+test('startup preflight accepts an exactly owned paused container registration without resuming it', posix, async () => {
+  const f = await fixture();
+  await enableRelayAutostart(f.options);
+  await stopRelayAutostart(f.options);
+  const control = join(f.home, 'relay', 'container-control.json');
+  const before = await readFile(control, 'utf8');
+  await assertRelayStartupOwnership(f.options);
+  assert.equal(await readFile(control, 'utf8'), before);
+  assert.equal(JSON.parse(before).running, false);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const configured of [false, true]) {
+  for (const kind of ['malformed', 'stale', 'future', 'foreign-start']) {
+    test(`startup preflight rejects ${kind} heartbeat with configured=${configured}`, posix, async () => {
+      const f = await fixture();
+      if (configured) await enableRelayAutostart(f.options);
+      const heartbeat = join(f.home, 'relay', 'container-heartbeat.json');
+      const value = { schema: 'dharma.container-relay-heartbeat/v1', home: f.home,
+        startTicks: kind === 'foreign-start' ? '99999' : f.marker.startTicks,
+        polledAt: Date.now() + (kind === 'stale' ? -60_000 : kind === 'future' ? 60_000 : 0),
+        lifecycle: 'unconfigured', reason: null, registrationHash: null, childPid: null, childStartTicks: null };
+      const bytes = kind === 'malformed' ? '{broken' : JSON.stringify(value);
+      await writeFile(heartbeat, bytes, { mode: 0o600 });
+      await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+      assert.equal(await readFile(heartbeat, 'utf8'), bytes);
+      assert.deepEqual(f.calls, []);
+    });
+  }
+}
+
+test('startup preflight accepts the live unconfigured heartbeat without creating registration', posix, async () => {
+  const f = await fixture();
+  const heartbeat = join(f.home, 'relay', 'container-heartbeat.json');
+  const bytes = JSON.stringify({ schema: 'dharma.container-relay-heartbeat/v1', home: f.home,
+    startTicks: f.marker.startTicks, polledAt: Date.now(), lifecycle: 'unconfigured', reason: null,
+    registrationHash: null, childPid: null, childStartTicks: null });
+  await writeFile(heartbeat, bytes, { mode: 0o600 });
+  await assertRelayStartupOwnership(f.options);
+  assert.equal(await readFile(heartbeat, 'utf8'), bytes);
+  await assert.rejects(readFile(join(f.home, 'relay', 'autostart.json')), { code: 'ENOENT' });
+  assert.deepEqual(f.calls, []);
+});
+
+test('startup version preflight rejects an outdated owned container registration without mutation', posix, async () => {
+  const f = await fixture();
+  await enableRelayAutostart(f.options);
+  const paths = ['autostart.json', 'container-control.json'].map(name => join(f.home, 'relay', name));
+  const before = await Promise.all(paths.map(path => readFile(path, 'utf8')));
+  const candidate = { ...f.options, version: '0.2.175' };
+  await assert.rejects(assertRelayStartupOwnership(candidate), /relay_runtime_upgrade_required/);
+  assert.deepEqual(await Promise.all(paths.map(path => readFile(path, 'utf8'))), before);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const [name, configured] of [
+  ['container-entrypoint.json', false], ['autostart.json', false], ['container-control.json', false],
+  ['autostart.json', true], ['container-control.json', true],
+] as const) {
+  test(`startup preflight rejects JSON null in ${name} with configured=${configured}`, posix, async () => {
+    const f = await fixture();
+    if (configured) await enableRelayAutostart(f.options);
+    const path = join(f.home, 'relay', name);
+    await writeFile(path, 'null\n', { mode: 0o600 });
+    await assert.rejects(assertRelayStartupOwnership(f.options), /container_startup_unavailable/);
+    assert.equal(await readFile(path, 'utf8'), 'null\n');
+    assert.deepEqual(f.calls, []);
+  });
+}
 
 test('owned container PID1 enables startup without claiming or modifying the OS-user systemd slot', posix, async () => {
   const f = await fixture();
