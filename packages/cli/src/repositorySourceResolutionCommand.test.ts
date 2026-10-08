@@ -122,7 +122,8 @@ test('flags are captured before asynchronous work; callers cannot switch preview
 });
 
 test('actual command wiring cannot replay pending task polls in preview, prepare, apply or later validation failure', async t => {
-  for (const mode of ['default', 'dry-run', 'prepare', 'apply', 'validation-failure']) await t.test(mode, async t => {
+  for (const mode of ['default', 'dry-run', 'prepare', 'apply', 'validation-failure']) {
+    for (const protocol of ['absent', 'empty', 'existing', 'pending']) await t.test(`${mode}:${protocol}`, async t => {
     const f = fixture(), root = await mkdtemp(resolve(tmpdir(), 'source-resolution-command-wire-'));
     t.after(() => rm(root, { recursive: true, force: true }));
     const values = new Map<string, string>();
@@ -135,10 +136,11 @@ test('actual command wiring cannot replay pending task polls in preview, prepare
       publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
       relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString() };
     await saveDeviceConfig(configPath, config);await saveDeviceEnrollmentAnchor({ config, store });
-    const original = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: 'retained-session', nextSequence: 7,
-      pending: { method: 'POST', pathname: '/api/v1/orgs/org_fixture/agent-fabric/tasks/poll',
-        body: '{"leaseSeconds":120}', headers: {} } });
-    await writeFile(statePath, original);
+    const original = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: protocol === 'empty' ? null : 'retained-session',
+      nextSequence: protocol === 'empty' ? 1 : 7,
+      pending: protocol === 'pending' ? { method: 'POST', pathname: '/api/v1/orgs/org_fixture/agent-fabric/tasks/poll',
+        body: '{"leaseSeconds":120}', headers: {} } : null });
+    if (protocol !== 'absent') await writeFile(statePath, original);
     const requests: Array<{ method: string; path: string }> = [];
     f.overrides.AgentFabricClient = { open: async (options: Parameters<typeof AgentFabricClient.open>[0]) => {
       assert.equal(options.readOnly, true);
@@ -157,7 +159,9 @@ test('actual command wiring cannot replay pending task polls in preview, prepare
     else assert.equal((await f.run(flags)).durableRelayStateMutation, false);
     assert.deepEqual(requests.filter(request => request.method === 'POST').map(request => request.path),
       ['/api/v1/orgs/org_fixture/agent-fabric/sessions']);
-    assert.equal(await readFile(statePath, 'utf8'), original);
+    if (protocol === 'absent') await assert.rejects(readFile(statePath, 'utf8'), /ENOENT/);
+    else assert.equal(await readFile(statePath, 'utf8'), original);
     assert.equal(requests.some(request => request.path.endsWith('/tasks/poll')), false);
   });
+  }
 });
