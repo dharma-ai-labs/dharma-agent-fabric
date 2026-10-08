@@ -257,7 +257,10 @@ export async function assertRelayStartupOwnership(options: RelayAutostartOptions
   let stat;
   try { stat = await lstat(path); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (registration) throw new Error('autostart_conflict: the registered user startup entry is missing.');
+      return;
+    }
     throw error;
   }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32_768

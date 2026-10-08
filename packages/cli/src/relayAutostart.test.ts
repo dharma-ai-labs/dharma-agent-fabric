@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
 import test from 'node:test';
@@ -64,6 +64,25 @@ test('Linux startup preflight fails closed on invalid receipts and unreadable an
   const fresh = { ...options, home: join(root, 'fresh') };
   await mkdir(join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service'), { recursive: true });
   await assert.rejects(startupPreflight(fresh));
+});
+
+test('Linux startup preflight rejects an orphaned systemd receipt without recreating its missing unit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-orphan-'));
+  const calls: string[][] = [];
+  const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repository', launcher: '/fixtures/repository/.dharma/bin/dharma',
+    policy: null, version: '0.2.174',
+    run: async (file: string, args: string[]) => { calls.push([file, ...args]); return { stdout: 'enabled\n' }; } };
+  await enableRelayAutostart(options);
+  const unit = join(root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = join(options.home, 'relay', 'autostart.json');
+  const before = await readFile(receipt, 'utf8');
+  await rm(unit);
+  calls.length = 0;
+  await assert.rejects(startupPreflight(options), /autostart_conflict/);
+  assert.equal(await readFile(receipt, 'utf8'), before);
+  await assert.rejects(readFile(unit), { code: 'ENOENT' });
+  assert.deepEqual(calls, []);
 });
 
 test('bootstrap may inspect an exact owned legacy anchor for migration without admitting legacy start', async () => {
