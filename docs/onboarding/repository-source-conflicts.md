@@ -11,7 +11,7 @@ dharma repositories source-resolve --workspace-id <workspace-id> --dry-run
 dharma repositories source-resolve --workspace-id <workspace-id> --prepare
 ```
 
-The dry run changes nothing. Preparation saves an immutable, metadata-only plan locally and returns its `planHash`, conflict paths and expiry. The plan pins the organization, workspace, repository, policy generation, baseline, reviewed local snapshot and published inventory. It contains no source bodies or credentials. Preparation alone does not approve or publish anything.
+The dry run does not change repository source, plans, credentials or the durable relay session. Each invocation opens a separate, memory-only authenticated protocol session and makes signed reads; this creates a server authentication/audit record, which the result reports explicitly. It cannot replay unrelated pending requests, migrate credentials or submit application writes. Preparation saves an immutable, metadata-only plan locally and returns its `planHash`, conflict paths and expiry. The plan pins the organization, workspace, repository, policy generation, baseline, reviewed local snapshot and published inventory. It contains no source bodies or credentials. Preparation alone does not approve or publish anything.
 
 After reviewing that exact plan, explicitly choose the reviewed local versions for the listed conflicts:
 

@@ -5525,7 +5525,9 @@ export async function repositorySourceResolutionCommand(flags: Map<string, strin
   if (workspace.repositoryPackage.state !== 'published' || workspace.repositoryPackage.pendingLocalOperationId) {
     throw new Error('repository_source_resolution_publication_pending');
   }
-  const fabric = await client();
+  const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(), readOnly: true });
+  await fabric.openSession(VERSION);
   const scope = { organizationId: workspace.organizationId, workspaceId, repositoryBindingId: workspace.repositoryBindingId,
     repositoryAgentId: workspace.repositoryAgentId };
   const authorization = await fetchRepositorySourceAuthorization(fabric, scope);
@@ -5556,7 +5558,8 @@ export async function repositorySourceResolutionCommand(flags: Map<string, strin
   if (prepare) await saveRepositorySourceResolutionPlan(workspace.path, proposed);
   if (apply) await activateRepositorySourceResolution(workspace.path, proposed);
   return { ok: true, stage: apply ? 'resolution_approved_for_relay' : prepare ? 'resolution_prepared' : 'resolution_preview',
-    dryRun: !prepare && !apply, localMutation: prepare || apply, serverMutation: false,
+    dryRun: !prepare && !apply, localMutation: prepare || apply, serverMutation: true,
+    protocolSessionCreated: true, serverSourceMutation: false, durableRelayStateMutation: false,
     authority: 'current_source_policy_only', plan: proposed.plan, planHash: proposed.planHash,
     resolvedSnapshotHash: resolved.manifest.snapshotHash, published: false };
 }

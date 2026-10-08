@@ -95,6 +95,19 @@ test('resolution directories cannot redirect writes through junctions or symboli
   assert.deepEqual(await readdir(outside.workspace), []);
 });
 
+test('canonical parent aliases are accepted without accepting a symbolic workspace leaf', async t => {
+  const f = await fixture(t), value = proposed();
+  const physical = resolve(f.workspace, 'physical');
+  await mkdir(resolve(physical, 'checkout'), { recursive: true });
+  const alias = resolve(f.workspace, 'parent-alias');
+  await symlink(physical, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  await saveRepositorySourceResolutionPlan(resolve(alias, 'checkout'), value);
+  assert.equal((await readRepositorySourceResolutionPlan(resolve(physical, 'checkout'), value.planHash)).planHash, value.planHash);
+  const leaf = resolve(f.workspace, 'workspace-alias');
+  await symlink(resolve(physical, 'checkout'), leaf, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(saveRepositorySourceResolutionPlan(leaf, value), /path_invalid/);
+});
+
 test('an existing plan filename is never overwritten with untrusted bytes', async t => {
   const f = await fixture(t), value = proposed();
   await mkdir(f.root, { recursive: true });

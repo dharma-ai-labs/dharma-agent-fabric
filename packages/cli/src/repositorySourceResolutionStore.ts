@@ -33,9 +33,18 @@ async function step<T>(fn: () => Promise<T>): Promise<T> {
   return scope ? scope.step(fn) : fn();
 }
 async function directory(workspace: string, create: boolean): Promise<string | null> {
-  const anchor = resolve(workspace);
-  if (await step(() => realpath(anchor)) !== anchor || !(await step(() => lstat(anchor))).isDirectory()) {
+  const requested = resolve(workspace);
+  const workspaceEntry = await step(() => lstat(requested));
+  if (!workspaceEntry.isDirectory() || workspaceEntry.isSymbolicLink()) {
     throw new Error('repository_source_resolution_path_invalid');
+  }
+  // Canonicalize OS parent aliases (for example macOS /var -> /private/var),
+  // then reject every redirected component underneath the workspace itself.
+  const anchor = await step(() => realpath(requested));
+  const canonicalEntry = await step(() => lstat(anchor));
+  if (!canonicalEntry.isDirectory() || canonicalEntry.isSymbolicLink()
+    || canonicalEntry.dev !== workspaceEntry.dev || canonicalEntry.ino !== workspaceEntry.ino) {
+    throw new Error('repository_source_resolution_path_changed');
   }
   let path = anchor;
   for (const part of ['.dharma', 'repository-source', 'resolutions']) {

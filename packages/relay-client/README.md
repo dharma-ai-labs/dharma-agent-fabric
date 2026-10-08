@@ -33,6 +33,18 @@ This diagnostic does not provide a trusted pre-enrollment host callback, relax
 the coding sandbox, or make an unavailable OS-backed store usable. Qualify
 those runtime boundaries independently before actual onboarding.
 
+`AgentFabricClient.open({ ...paths, readOnly: true })` uses the already accepted
+device key and enrollment anchor without repairing or migrating them. Its one
+`openSession()` creates a separate authenticated server protocol session; its
+sequence and pending read remain in memory. It neither reads nor rewrites the
+durable relay outbox and cannot replay its pending work. Subsequent application
+POSTs, session replacement and implicit retry after an ambiguous read are denied.
+Signed GETs retain normal device/session/nonce/sequence validation. This is not
+an anonymous or server-side permission bypass: opening the session creates the
+ordinary authentication/audit record. Report that effect separately from source,
+plan and credential mutations. Unavailable or inconsistent protected identity
+fails closed instead of enrolling or generating a replacement key.
+
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
 - [Security boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/10-security-privacy-and-threat-model.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/relay-client)
