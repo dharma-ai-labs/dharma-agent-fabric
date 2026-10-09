@@ -1,5 +1,7 @@
 import {readFile} from 'node:fs/promises';
-import {canonicalize, validateDeviceAdmissionContract, validateTrustedServerSigningKeysetContract} from '@dharma-ai-labs/agent-fabric-contracts';
+import {createPublicKey} from 'node:crypto';
+import {canonicalize, validateDeviceAdmissionContract, validateTrustedServerSigningKeysetContract,
+  verifyInitialServerSigningKeyset, type TrustedServerSigningKeyset} from '@dharma-ai-labs/agent-fabric-contracts';
 import {AgentFabricClient, AgentFabricRequestError, parseDeviceConfig, readDeviceConnectionPreference,
   type DeviceConfig, type HostOperationScope} from '@dharma-ai-labs/agent-fabric-relay-client';
 
@@ -63,6 +65,27 @@ function assertCurrentTrust(config: DeviceConfig) {
     || !keys.keys.some(key => key.status === 'active' && Date.parse(key.notBefore) <= now && Date.parse(key.notAfter) > now)) {
     throw new Error('connection_trust_requires_recovery');
   }
+}
+
+/** Approval verifies current trust without silently migrating a historical config. */
+export function assertReauthenticationSigningTrust(config: DeviceConfig, approvedKeyset: unknown) {
+  if (config.serverSigningKeyset) {
+    assertCurrentTrust(config);
+    if (canonicalize(approvedKeyset ?? null) !== canonicalize(config.serverSigningKeyset)) {
+      throw new Error('connection_reauthentication_identity_mismatch');
+    }
+    return;
+  }
+  // Historical servers may return no keyset. Current servers must return one
+  // signed by this exact legacy root; accepting it never installs new trust.
+  if (approvedKeyset === undefined) return;
+  try {
+    const verification = verifyInitialServerSigningKeyset(approvedKeyset as TrustedServerSigningKeyset,
+      createPublicKey({key: {kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519}, format: 'jwk'}),
+      config.organizationId);
+    if (verification.ok) return;
+  } catch { /* Invalid keys or schema remain a closed recovery boundary. */ }
+  throw new Error('connection_reauthentication_trust_rejected');
 }
 
 export type ConnectionProbeClient = Pick<AgentFabricClient, 'config' | 'openSession'>;

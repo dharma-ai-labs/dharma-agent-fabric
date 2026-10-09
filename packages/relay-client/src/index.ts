@@ -316,15 +316,36 @@ export interface ActiveSkillAuthorizationAnchor {
   expiresAt: string | null;
 }
 
+/** Missing-anchor recovery must prove both current and historical slots absent. */
+export async function assertDeviceEnrollmentAnchorAbsent(input: {
+  config: DeviceConfig;
+  store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
+}): Promise<void> {
+  const config = input.config;
+  let values: Array<string | null>;
+  try {
+    const store = await protectedStore(input.store, input.hostScope);
+    const get = (account: string) => store.getFresh ? store.getFresh(account) : store.get(account);
+    values = await Promise.all([
+      get(enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId)),
+      get(legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)),
+    ]);
+  } catch {throw new Error('connection_anchor_store_unavailable');}
+  if (values.some(value => value !== null)) throw new Error('connection_existing_anchor_requires_recovery');
+}
+
 export async function saveDeviceEnrollmentAnchor(input: {
   config: DeviceConfig;
   store?: SecureSecretStore;
   hostScope?: HostOperationScope;
+  requireAbsent?: boolean;
 }): Promise<DeviceEnrollmentAnchor> {
   const anchor = enrollmentAnchorFromConfig(input.hostScope ? structuredClone(input.config) : input.config);
   const serialized = JSON.stringify(anchor);
   const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId, anchor.deviceId);
   const store = await protectedStore(input.store, input.hostScope);
+  if (input.requireAbsent) await assertDeviceEnrollmentAnchorAbsent({...input, store});
   await store.put(account, serialized);
   if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
   return anchor;

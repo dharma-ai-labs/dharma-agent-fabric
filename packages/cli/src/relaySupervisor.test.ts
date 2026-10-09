@@ -175,7 +175,12 @@ test('a detached supervisor records its workspace and relay stop shuts it down',
   await mkdir(join(workspace, '.dharma'), { recursive: true });
   await mkdir(join(home, 'registry'), { recursive: true });
   await writeFile(policyPath, '{}\n');
-  await writeFile(join(home, 'device.json'), JSON.stringify({ organizationId: 'org_test', deviceId: 'device_test' }));
+  await writeFile(join(home, 'device.json'), JSON.stringify({
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_test',
+    deviceId: 'device_test', deviceName: 'Synthetic supervisor', platform: 'linux',
+    publicKeyEd25519: 'A'.repeat(43), serverPublicKeyEd25519: 'B'.repeat(43),
+    relayUrl: 'wss://relay.example', enrolledAt: '2026-10-01T00:00:00.000Z',
+  }));
   await writeFile(join(home, 'registry', 'workspaces.json'), JSON.stringify([
     { path: workspace, workspaceId: 'historical_workspace', organizationId: 'org_test', repositoryRemoteHash: null },
     { path: workspace, workspaceId, organizationId: 'org_test', repositoryRemoteHash: null },

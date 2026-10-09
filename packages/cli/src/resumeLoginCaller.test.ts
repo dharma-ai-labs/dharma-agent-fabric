@@ -10,7 +10,7 @@ import {generateKeyPairSync, sign, randomUUID} from 'node:crypto';
 import {verifyServerAuthorizedPolicy} from '@dharma-ai-labs/agent-fabric-policy';
 import {AgentFabricClient, parseDeviceConfig, readDeviceConnectionPreference, saveDeviceConnectionPreference, loadOrCreateDeviceIdentity, saveDeviceEnrollmentAnchor, installTrustedServerSigningKeyset, type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
-import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, connectionPreference, resumeDeviceConnection} from './deviceConnection.js';
+import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, connectionPreference, resumeDeviceConnection} from './deviceConnection.js';
 import {automaticBootstrapResume} from './deviceConnection.js';
 import {bootstrapGrantMode} from './privateGrantInput.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
@@ -50,7 +50,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     workspaceRegistryPath: () => join(home, 'workspaces.json'), dharmaHome: () => home,
     currentBootstrapHostScope: () => undefined,
     installationIdentityPath: () => installationPath, protocolStatePath: () => join(home, 'state.json'),
-    connectionPreference, assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, canonicalize,
+    connectionPreference, assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, canonicalize,
     VERSION: '0.1.synthetic',
     resumeDeviceConnection: (input: Parameters<typeof resumeDeviceConnection>[0]) => resumeDeviceConnection({...input,
       openClient: async () => {
@@ -61,6 +61,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
             ownerMembershipId: '44444444-4444-4444-8444-444444444444', deviceStatus: 'active', memberStatus: 'active'}})};
       }}),
     acquirePidLock: async () => async () => {},
+    assertDeviceEnrollmentAnchorAbsent: async () => {},
     normalizeHqUrl: (url: string) => url.replace(/\/$/, ''),
     portalUrl: () => config.hqUrl,
     required: (flags: Map<string, unknown>, key: string) => {
@@ -355,4 +356,95 @@ test('concurrent actual bootstrap-to-onboard clients preserve a sibling durable 
   assert.equal(await readFile(statePath, 'utf8'), pending);
   assert.deepEqual(values, protectedBefore);
   assert.deepEqual(f.effects, []);
+});
+
+test('a surviving preference sidecar prevents first enrollment after a legacy config disappears', async t => {
+  const f = await fixture(t);
+  await saveDeviceConnectionPreference({configPath: f.configPath, config: f.config as DeviceConfig, connectionMode: 'resume'});
+  const preference = await readFile(f.configPath + '.connection.json', 'utf8');
+  await rm(f.configPath);
+  await rm(join(f.home, 'installation.json'));
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['organization-id', f.config.organizationId]])), /connection_prior_state_requires_recovery/);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.configPath + '.connection.json', 'utf8'), preference);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
+test('explicit reauthentication preserves every pre-existing or unavailable protected anchor', async t => {
+  for (const state of ['existing', 'mismatched', 'corrupt', 'unavailable']) {
+    const f = await fixture(t), before = await readFile(f.configPath, 'utf8');
+    f.deps.enrolledDeviceIdentity = async () => ({publicKeyEd25519: f.config.publicKeyEd25519});
+    f.deps.pollEnrollment = async () => ({status: 'approved', organizationId: f.config.organizationId,
+      deviceId: f.config.deviceId, relayUrl: f.config.relayUrl, serverPublicKeyEd25519: f.config.serverPublicKeyEd25519});
+    f.deps.assertDeviceEnrollmentAnchorAbsent = async () => {throw Error('connection_existing_anchor_requires_recovery');};
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['reauthenticate', true]])), /connection_existing_anchor_requires_recovery/);
+    assert.equal(await readFile(f.configPath, 'utf8'), before);
+    assert.deepEqual(f.effects, [], state);
+  }
+});
+
+test('a protected anchor appearing during browser approval is preserved', async t => {
+  const f = await fixture(t), before = await readFile(f.configPath, 'utf8');
+  let present = false;
+  f.deps.enrolledDeviceIdentity = async () => ({publicKeyEd25519: f.config.publicKeyEd25519});
+  f.deps.assertDeviceEnrollmentAnchorAbsent = async () => {
+    if (present) throw Error('connection_existing_anchor_requires_recovery');
+  };
+  f.deps.pollEnrollment = async () => {
+    present = true;
+    return {status: 'approved', organizationId: f.config.organizationId, deviceId: f.config.deviceId,
+      relayUrl: f.config.relayUrl, serverPublicKeyEd25519: f.config.serverPublicKeyEd25519};
+  };
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['reauthenticate', true]])), /connection_existing_anchor_requires_recovery/);
+  assert.equal(await readFile(f.configPath, 'utf8'), before);
+  assert.equal(f.effects.includes('anchor-write'), false);
+});
+
+test('legacy no-keyset recovery accepts a current root-signed approval without replacing legacy trust', async t => {
+  const f = await fixture(t), root = generateKeyPairSync('ed25519'), now = Date.now();
+  const config = {...f.config, serverPublicKeyEd25519: root.publicKey.export({format: 'jwk'}).x!};
+  await writeFile(f.configPath, JSON.stringify(config));
+  const before = await readFile(f.configPath, 'utf8');
+  const unsigned = {schema: 'dharma.server-signing-keyset/v1', organizationId: config.organizationId, generation: 1,
+    keys: [{keyVersion: 'origin', publicKeyEd25519: config.serverPublicKeyEd25519, status: 'active',
+      notBefore: new Date(now - 1000).toISOString(), notAfter: new Date(now + 60_000).toISOString()}],
+    signedByKeyVersion: 'origin', issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString()};
+  const keyset = {...unsigned, signature: sign(null, Buffer.from(canonicalize(unsigned)), root.privateKey).toString('base64url')};
+  f.deps.enrolledDeviceIdentity = async () => ({publicKeyEd25519: config.publicKeyEd25519});
+  f.deps.pollEnrollment = async () => ({status: 'approved', organizationId: config.organizationId,
+    deviceId: config.deviceId, relayUrl: config.relayUrl, serverPublicKeyEd25519: config.serverPublicKeyEd25519,
+    serverSigningKeyset: keyset});
+  const login = await caller('login', f.deps);
+  assert.equal((await login(new Map([['reauthenticate', true]])))?.status, 'reauthenticated');
+  assert.equal(await readFile(f.configPath, 'utf8'), before);
+  assert.equal(f.effects.includes('anchor-write'), true);
+});
+
+test('legacy recovery rejects untrusted approval keysets before writing an anchor', async t => {
+  for (const state of ['signature', 'organization', 'expired', 'root', 'malformed']) {
+    const f = await fixture(t), root = generateKeyPairSync('ed25519'), now = Date.now();
+    const config = {...f.config, serverPublicKeyEd25519: root.publicKey.export({format: 'jwk'}).x!};
+    await writeFile(f.configPath, JSON.stringify(config));
+    const before = await readFile(f.configPath, 'utf8');
+    const unsigned = {schema: 'dharma.server-signing-keyset/v1', organizationId: config.organizationId, generation: 1,
+      keys: [{keyVersion: 'origin', publicKeyEd25519: config.serverPublicKeyEd25519, status: 'active',
+        notBefore: new Date(now - 1000).toISOString(), notAfter: new Date(now + 60_000).toISOString()}],
+      signedByKeyVersion: 'origin', issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString()};
+    if (state === 'organization') unsigned.organizationId = 'org_other';
+    if (state === 'expired') {unsigned.issuedAt = new Date(now - 60_000).toISOString(); unsigned.expiresAt = new Date(now - 1000).toISOString();}
+    if (state === 'root') unsigned.keys[0]!.publicKeyEd25519 = generateKeyPairSync('ed25519').publicKey.export({format: 'jwk'}).x!;
+    let keyset: unknown = {...unsigned, signature: sign(null, Buffer.from(canonicalize(unsigned)), root.privateKey).toString('base64url')};
+    if (state === 'signature') keyset = {...keyset as object, signature: 'A'.repeat(86)};
+    if (state === 'malformed') keyset = {};
+    f.deps.enrolledDeviceIdentity = async () => ({publicKeyEd25519: config.publicKeyEd25519});
+    f.deps.pollEnrollment = async () => ({status: 'approved', organizationId: config.organizationId, deviceId: config.deviceId,
+      relayUrl: config.relayUrl, serverPublicKeyEd25519: config.serverPublicKeyEd25519, serverSigningKeyset: keyset});
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['reauthenticate', true]])), /connection_reauthentication_trust_rejected/);
+    assert.equal(await readFile(f.configPath, 'utf8'), before);
+    assert.equal(f.effects.includes('anchor-write'), false);
+  }
 });

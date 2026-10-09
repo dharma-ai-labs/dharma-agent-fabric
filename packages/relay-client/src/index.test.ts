@@ -16,6 +16,7 @@ import {
   isDefinitiveAgentFabricRejection,
   installTrustedServerSigningKeyset,
   loadDeviceEnrollmentAnchor,
+  assertDeviceEnrollmentAnchorAbsent,
   recoverDeviceEnrollmentConsistency,
   normalizeHqUrl,
   normalizeRelayUrl,
@@ -1735,4 +1736,31 @@ test('relay acknowledgement settles once when close emits another socket event',
 
 test('relay acknowledgement timeout accommodates managed runtime cold starts', () => {
   assert.equal(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS, 90_000);
+});
+
+test('missing-anchor restoration preserves current, legacy, corrupt, cached and unavailable protected state', async () => {
+  const config = {schema: 'dharma.device-config/v1' as const, hqUrl: 'https://hq.example', organizationId: 'org_fixture',
+    deviceId: '22222222-2222-4222-8222-222222222222', deviceName: 'Synthetic', platform: 'linux' as const,
+    publicKeyEd25519: 'A'.repeat(43), serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example',
+    enrolledAt: '2026-10-01T00:00:00.000Z'};
+  const slot = (parts: string[]) => 'device-enrollment-' + createHash('sha256').update(parts.join(':')).digest('hex').slice(0, 32);
+  const current = slot([config.hqUrl, config.organizationId, config.deviceId]), legacy = slot([config.hqUrl, config.organizationId]);
+  for (const state of ['current', 'legacy', 'corrupt', 'empty', 'unavailable', 'missing']) {
+    const values = new Map<string, string>(), writes: string[] = [];
+    if (state !== 'missing' && state !== 'unavailable') values.set(state === 'legacy' ? legacy : current,
+      state === 'empty' ? '' : state === 'corrupt' ? '{broken' : 'preexisting-protected-receipt');
+    const before = new Map(values);
+    const store: SecureSecretStore = {backend: 'windows-credential-manager',
+      get: async () => null, // stale cache must never establish absence
+      getFresh: async account => {if (state === 'unavailable') throw Error('private OS detail'); return values.get(account) ?? null;},
+      put: async (account, value) => {writes.push(account); values.set(account, value);}, delete: async () => {}};
+    if (state === 'missing') {
+      await assertDeviceEnrollmentAnchorAbsent({config, store});
+    } else {
+      await assert.rejects(saveDeviceEnrollmentAnchor({config, store, requireAbsent: true}),
+        state === 'unavailable' ? /connection_anchor_store_unavailable/ : /connection_existing_anchor_requires_recovery/);
+      assert.deepEqual(values, before, state);
+      assert.deepEqual(writes, [], state);
+    }
+  }
 });

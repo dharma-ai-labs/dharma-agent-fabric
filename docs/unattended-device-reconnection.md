@@ -81,13 +81,20 @@ dharma login --reauthenticate
 This requires the existing protected private key and fresh browser approval. It accepts
 only the original device ID, public key, portal, organization, relay and signing trust,
 then restores that exact enrollment anchor without replacing configuration or keys.
+Both current and historical protected anchor slots must be verifiably absent before
+approval starts and again before restoration. Existing, mismatched, corrupt or
+unavailable protected state requires supported recovery and is preserved.
+For a legacy configuration without a keyset, a current approval's keyset must verify
+under the same original root and organization with valid dates and signature. It is
+checked as approval evidence and is not installed into the legacy configuration.
+An existing keyset must match exactly; this path does not rotate or repair trust.
 A missing private key or changed server identity requires device-bound support recovery.
 This recovery does not establish connection readiness; run the normal resume afterward.
 
 | Failure | Supported next step |
 | --- | --- |
 | Absent configuration in a genuinely new home | Normal first setup and browser approval |
-| Existing installation/pending/registry without completed configuration | Preserve state; resume its supported pending setup or recover the installation |
+| Existing preference/installation/pending/registry without completed configuration | Preserve state; resume its supported pending setup or recover the installation |
 | Corrupt/empty/invalid or unreadable configuration | Preserve the file; restore or recover the same installation |
 | Missing/corrupt private key or locked/unavailable store | Restore availability or use device-bound support recovery; no plaintext or replacement-key fallback |
 | Anchor mismatch or expired signing trust | Supported trust/device recovery; no manual trust edit or reenrollment retry |

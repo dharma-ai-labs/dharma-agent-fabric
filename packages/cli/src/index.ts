@@ -18,7 +18,7 @@ import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, typ
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
-  deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
+  assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type SecureSecretStore,
@@ -63,7 +63,7 @@ import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInput.js';
-import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, automaticBootstrapResume,
+import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, automaticBootstrapResume,
   connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
@@ -3859,14 +3859,14 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
   }
   if (flags.has('reauthenticate')) throw new Error('connection_reauthentication_existing_identity_required');
   if (flags.has('dry-run')) {
-    if (!flags.has('resume')) await assertUnenrolledHome([installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
+    if (!flags.has('resume')) await assertUnenrolledHome([`${configPath()}.connection.json`, installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
     return {ok: true, status: 'plan', effects: false, action: flags.has('resume') ? 'resume_pending_approval' : 'request_first_enrollment'};
   }
   const releaseEnrollment = await acquirePidLock(`${configPath()}.enrollment.lock`, 10_000, 'connection_enrollment_busy');
   try {
     // A competing first caller may have completed while this caller waited.
     if (await readDeviceConfig()) return await login(flags);
-    if (!flags.has('resume')) await assertUnenrolledHome([installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
+    if (!flags.has('resume')) await assertUnenrolledHome([`${configPath()}.connection.json`, installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
     type PendingEnrollment = {
       hqUrl: string;
       organizationId: string;
@@ -3986,6 +3986,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
 async function reauthenticateExistingDevice(config: DeviceConfig, flags: Map<string, string | boolean>): Promise<Record<string, unknown>> {
   const release = await acquirePidLock(`${configPath()}.enrollment.lock`, 10_000, 'connection_enrollment_busy');
   try {
+    await assertDeviceEnrollmentAnchorAbsent({config, hostScope: currentBootstrapHostScope()});
     const identity = await enrolledDeviceIdentity(config).catch(() => {throw new Error('connection_identity_requires_recovery');});
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('connection_identity_requires_recovery');
     const fetcher: typeof fetch = (url, init) => fetch(url, {...init, redirect: 'error', signal: AbortSignal.timeout(30_000)});
@@ -4007,14 +4008,15 @@ async function reauthenticateExistingDevice(config: DeviceConfig, flags: Map<str
         // Browser approval can restore this exact identity's missing anchor. A
         // replacement identity, endpoint or trust root requires separate recovery.
         if (result.organizationId !== config.organizationId || result.deviceId !== config.deviceId || result.relayUrl !== config.relayUrl
-          || result.serverPublicKeyEd25519 !== config.serverPublicKeyEd25519
-          || canonicalize(result.serverSigningKeyset ?? null) !== canonicalize(config.serverSigningKeyset ?? null)) {
+          || result.serverPublicKeyEd25519 !== config.serverPublicKeyEd25519) {
           throw new Error('connection_reauthentication_identity_mismatch');
         }
+        assertReauthenticationSigningTrust(config, result.serverSigningKeyset);
         const current = await readDeviceConfig();
         if (!current || canonicalize(current) !== canonicalize(config)) throw new Error('connection_state_changed');
         await assertInstallationContinuity(config, installationIdentityPath());
-        await saveDeviceEnrollmentAnchor({config, hostScope: currentBootstrapHostScope()});
+        await assertDeviceEnrollmentAnchorAbsent({config, hostScope: currentBootstrapHostScope()});
+        await saveDeviceEnrollmentAnchor({config, hostScope: currentBootstrapHostScope(), requireAbsent: true});
         return {ok: true, status: 'reauthenticated', deviceId: config.deviceId, organizationId: config.organizationId,
           connected: false, browserOpened, providerAuthentication: 'not_checked'};
       }
