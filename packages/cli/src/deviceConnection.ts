@@ -1,6 +1,6 @@
 import {readFile} from 'node:fs/promises';
-import {canonicalize, validateTrustedServerSigningKeysetContract} from '@dharma-ai-labs/agent-fabric-contracts';
-import {AgentFabricClient, AgentFabricRequestError, parseDeviceConfig,
+import {canonicalize, validateDeviceAdmissionContract, validateTrustedServerSigningKeysetContract} from '@dharma-ai-labs/agent-fabric-contracts';
+import {AgentFabricClient, AgentFabricRequestError, parseDeviceConfig, readDeviceConnectionPreference,
   type DeviceConfig, type HostOperationScope} from '@dharma-ai-labs/agent-fabric-relay-client';
 
 export type ConnectionFlags = Map<string, string | boolean>;
@@ -13,7 +13,7 @@ export async function readExistingDeviceConfig(path: string): Promise<DeviceConf
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw new Error('connection_config_unreadable');
   }
-  return parseDeviceConfig(bytes);
+  return readDeviceConnectionPreference(path, parseDeviceConfig(bytes));
 }
 
 export function connectionPreference(flags: ConnectionFlags): DeviceConfig['connectionMode'] {
@@ -92,7 +92,13 @@ export async function resumeDeviceConnection(input: {
   if (canonicalize(instance.config) !== expected) throw new Error('connection_state_changed');
   try {
     const acknowledgement = await instance.openSession(input.version) as Record<string, unknown>;
-    if (acknowledgement.ok !== true) throw new Error('connection_authority_unconfirmed');
+    if (!validateDeviceAdmissionContract(acknowledgement)
+      || acknowledgement.organizationId !== input.config.organizationId
+      || acknowledgement.deviceAuthority.deviceId !== input.config.deviceId
+      || acknowledgement.relayUrl !== input.config.relayUrl
+      || acknowledgement.serverPublicKeyEd25519 !== input.config.serverPublicKeyEd25519) {
+      throw new Error('connection_authority_unconfirmed');
+    }
   } catch (error) {
     if (error instanceof AgentFabricRequestError && error.definitive) throw new Error('connection_authority_rejected: use supported approval or recovery.');
     if (error instanceof Error && error.message === 'connection_authority_unconfirmed') throw error;
@@ -111,6 +117,7 @@ export async function resumeDeviceConnection(input: {
 export function automaticBootstrapResume(flags: ConnectionFlags, config: DeviceConfig | null): boolean {
   connectionPreference(flags);
   if (!config || config.connectionMode !== 'resume' || flags.has('resume')) return false;
+  if (flags.has('no-unattended')) throw new Error('connection_resume_opt_in_required');
   if (flags.has('grant') || flags.has('grant-prompt') || flags.has('setup-reference')
     || flags.has('replace-existing-enrollment')) return false;
   if (!flags.has('complete') || flags.has('join-repository-binding-id') || flags.has('repository-url-base64url')) {

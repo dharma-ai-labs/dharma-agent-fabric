@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-admission/v1",
+  "title": "Current protected HQ device and member admission",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "ok",
+    "organizationId",
+    "relayUrl",
+    "serverPublicKeyEd25519",
+    "deviceAuthority"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "relayUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "serverPublicKeyEd25519": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "deviceAuthority": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "schema",
+        "deviceId",
+        "ownerMembershipId",
+        "deviceStatus",
+        "memberStatus"
+      ],
+      "properties": {
+        "schema": {
+          "const": "dharma.device-admission/v1"
+        },
+        "deviceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerMembershipId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "deviceStatus": {
+          "const": "active"
+        },
+        "memberStatus": {
+          "const": "active"
+        }
+      }
+    }
+  }
+}

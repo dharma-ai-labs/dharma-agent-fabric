@@ -8,6 +8,8 @@ import {
   verifyInitialServerSigningKeyset,
   verifyServerSigningKeysetUpdate,
   validateDeviceConfigContract,
+  validateDeviceConnectionPreferenceContract,
+  type DeviceConnectionPreference,
   type ActionDecisionAcknowledgement,
   type ProviderId,
   type TrustedServerSigningKeyset,
@@ -332,6 +334,8 @@ export async function loadDeviceEnrollmentAnchor(input: {
   config: DeviceConfig;
   store?: SecureSecretStore;
   hostScope?: HostOperationScope;
+  /** Validate a legacy anchor in place; do not migrate it during a read-only operation. */
+  readOnly?: boolean;
 }): Promise<DeviceEnrollmentAnchor> {
   const {hostScope, store: suppliedStore} = input;
   const config = hostScope ? structuredClone(input.config) : input.config;
@@ -354,7 +358,7 @@ export async function loadDeviceEnrollmentAnchor(input: {
   ) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
-  if (migratedLegacy) {
+  if (migratedLegacy && !input.readOnly) {
     await store.put(account, serialized);
     if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
@@ -911,7 +915,42 @@ export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
     throw new Error('connection_config_unreadable');
   }
-  return parseDeviceConfig(bytes);
+  return readDeviceConnectionPreference(path, parseDeviceConfig(bytes));
+}
+
+function connectionPreferenceBinding(config: DeviceConfig) {
+  const {schema, hqUrl, organizationId, installationId, deviceId, publicKeyEd25519,
+    serverPublicKeyEd25519, relayUrl, enrolledAt} = config;
+  return sha256(canonicalize({schema, hqUrl, organizationId, installationId: installationId ?? null,
+    deviceId, publicKeyEd25519, serverPublicKeyEd25519, relayUrl, enrolledAt}));
+}
+
+/** Separate local preference from trust snapshots so a delayed keyset write cannot overwrite opt-out. */
+export async function readDeviceConnectionPreference(path: string, config: DeviceConfig): Promise<DeviceConfig> {
+  const binding = connectionPreferenceBinding(config);
+  let bytes: string;
+  try {bytes = await readFile(`${path}.connection.${binding}.json`, 'utf8');}
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return config;
+    throw new Error('connection_preference_unreadable');
+  }
+  let value: DeviceConnectionPreference;
+  try {value = JSON.parse(bytes) as DeviceConnectionPreference;} catch {throw new Error('connection_preference_corrupt');}
+  if (!validateDeviceConnectionPreferenceContract(value) || value.binding !== binding) throw new Error('connection_preference_invalid');
+  return {...config, connectionMode: value.connectionMode};
+}
+
+export async function saveDeviceConnectionPreference(input: {
+  configPath: string; config: DeviceConfig; connectionMode: 'manual' | 'resume'; hostScope?: HostOperationScope;
+}): Promise<void> {
+  if (input.connectionMode !== 'manual' && input.connectionMode !== 'resume') throw new Error('connection_preference_invalid');
+  const fence = input.hostScope === undefined ? undefined : new HostOperationFence(input.hostScope);
+  const binding = connectionPreferenceBinding(input.config);
+  const current = fence ? await fence.step(() => loadDeviceConfig(input.configPath)) : await loadDeviceConfig(input.configPath);
+  if (connectionPreferenceBinding(current) !== binding) throw new Error('connection_state_changed');
+  const preference: DeviceConnectionPreference = {schema: 'dharma.device-connection-preference/v1',
+    binding, connectionMode: input.connectionMode};
+  await atomicJson(`${input.configPath}.connection.${binding}.json`, preference, fence);
 }
 
 export class AgentFabricClient {
@@ -925,13 +964,14 @@ export class AgentFabricClient {
   readonly #hostFence?: HostOperationFence;
   readonly #hostBinding: string;
   readonly #readOnly: boolean;
+  readonly #isolatedSession: boolean;
   #readSessionAdmissionUsed = false;
   #state: ProtocolState;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
-    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean;
+    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -944,6 +984,7 @@ export class AgentFabricClient {
     this.#hostFence = input.hostFence;
     this.#hostBinding = this.#binding();
     this.#readOnly = input.readOnly === true;
+    this.#isolatedSession = input.isolatedSession === true;
   }
 
   #binding() {
@@ -963,9 +1004,12 @@ export class AgentFabricClient {
   static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch;
     hostScope?: HostOperationScope;
     /** Isolated in-memory protocol session; no enrollment repair, durable outbox replay or application POSTs. */
-    readOnly?: boolean }) {
-    const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly} = input;
+    readOnly?: boolean;
+    /** Fresh in-memory protocol state for an explicit workflow; application requests retain their normal authorization. */
+    isolatedSession?: boolean }) {
+    const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly, isolatedSession} = input;
     if (readOnly !== undefined && typeof readOnly !== 'boolean') throw new Error('relay_read_only_option_invalid');
+    if (isolatedSession !== undefined && typeof isolatedSession !== 'boolean') throw new Error('relay_isolated_session_option_invalid');
     const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
     const rawStore = fence ? await fence.step(async () => suppliedStore ?? await createSystemSecureStore())
       : suppliedStore ?? await createSystemSecureStore();
@@ -974,12 +1018,12 @@ export class AgentFabricClient {
       put: async () => { throw new Error('relay_read_only_secure_store_write_denied'); },
       delete: async () => { throw new Error('relay_read_only_secure_store_write_denied'); } } : rawStore;
     const store = fence ? fence.store(safeStore) : safeStore;
-    const config = readOnly ? (fence ? await fence.step(() => loadDeviceConfig(configPath)) : await loadDeviceConfig(configPath))
+    const config = readOnly || isolatedSession ? (fence ? await fence.step(() => loadDeviceConfig(configPath)) : await loadDeviceConfig(configPath))
       : await recoverEnrollmentWithFence({configPath, store, hostFence: fence});
     const identity = await existingHostDeviceIdentity(config, store);
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
     try {
-      await loadDeviceEnrollmentAnchor({ config, store });
+      await loadDeviceEnrollmentAnchor({ config, store, readOnly: readOnly || isolatedSession });
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes('not anchored in secure storage')) throw error;
       throw new Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.');
@@ -988,7 +1032,7 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       recoveredTaskCompletions: [],
     };
-    if (!readOnly) try {
+    if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
@@ -1003,7 +1047,7 @@ export class AgentFabricClient {
     await fence?.assert();
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
-      statePath, state, store, fetcher, hostFence: fence, readOnly,
+      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession,
     });
   }
 
@@ -1420,7 +1464,7 @@ export class AgentFabricClient {
   }
 
   async #persist() {
-    if (this.#readOnly) { await this.#assertHostScope();return; }
+    if (this.#readOnly || this.#isolatedSession) { await this.#assertHostScope();return; }
     await this.#assertHostScope();
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay

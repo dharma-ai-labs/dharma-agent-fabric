@@ -11,6 +11,8 @@ import serverSigningKeysetSchema from './server-signing-keyset.schema.json' with
 import taskActionSchema from './task-action.schema.json' with { type: 'json' };
 import taskEnvelopeSchema from './task-envelope.schema.json' with { type: 'json' };
 import deviceConfigSchema from './device-config.schema.json' with { type: 'json' };
+import deviceAdmissionSchema from './device-admission.schema.json' with { type: 'json' };
+import deviceConnectionPreferenceSchema from './device-connection-preference.schema.json' with { type: 'json' };
 
 export * from './codex-task-observation.js';
 export * from './setupClaim.js';
@@ -29,6 +31,25 @@ addFormats(deviceConfigAjv);
 const deviceConfigValidator = deviceConfigAjv.compile(deviceConfigSchema);
 export function validateDeviceConfigContract(value: unknown): boolean {
   return deviceConfigValidator(value);
+}
+export interface DeviceAdmissionAcknowledgement {
+  ok: true;
+  organizationId: string;
+  relayUrl: string;
+  serverPublicKeyEd25519: string;
+  deviceAuthority: {schema: 'dharma.device-admission/v1'; deviceId: string; ownerMembershipId: string;
+    deviceStatus: 'active'; memberStatus: 'active'};
+}
+export interface DeviceConnectionPreference {
+  schema: 'dharma.device-connection-preference/v1'; binding: string; connectionMode: 'manual' | 'resume';
+}
+const deviceAdmissionValidator = deviceConfigAjv.compile(deviceAdmissionSchema);
+const deviceConnectionPreferenceValidator = deviceConfigAjv.compile(deviceConnectionPreferenceSchema);
+export function validateDeviceAdmissionContract(value: unknown): value is DeviceAdmissionAcknowledgement {
+  return deviceAdmissionValidator(value);
+}
+export function validateDeviceConnectionPreferenceContract(value: unknown): value is DeviceConnectionPreference {
+  return deviceConnectionPreferenceValidator(value);
 }
 
 export type EvidenceState =

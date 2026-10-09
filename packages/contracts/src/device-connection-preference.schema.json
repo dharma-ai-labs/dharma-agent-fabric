@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-connection-preference/v1",
+  "title": "Identity-bound local reconnection preference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "binding",
+    "connectionMode"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-connection-preference/v1"
+    },
+    "binding": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "connectionMode": {
+      "enum": [
+        "manual",
+        "resume"
+      ]
+    }
+  }
+}

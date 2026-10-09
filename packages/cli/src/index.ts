@@ -21,7 +21,7 @@ import {
   deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
-  saveOrganizationApiToken, type DeviceConfig, type SecureSecretStore,
+  saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
   AgentFabricClient as AgentFabricApiClient,
@@ -65,6 +65,7 @@ import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } 
 import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInput.js';
 import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, automaticBootstrapResume,
   connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
+import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -1668,7 +1669,7 @@ async function gitValue(workspace: string, argv: string[]) {
 
 async function client() {
   const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
-    hostScope: currentBootstrapHostScope() });
+    hostScope: currentBootstrapHostScope(), isolatedSession: isIsolatedDeviceSession() });
   await instance.openSession(VERSION);
   return instance;
 }
@@ -2968,6 +2969,9 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   // keeps its existing, separately approved setup flow.
   const automaticallyResuming = !['resume', 'grant', 'grant-prompt', 'setup-reference', 'replace-existing-enrollment'].some(key => flags.has(key))
     && automaticBootstrapResume(flags, await step(() => readDeviceConfig()));
+  if ((automaticallyResuming || flags.has('resume')) && !isIsolatedDeviceSession()) {
+    return runInIsolatedDeviceSession(() => bootstrap(flags, hostScope));
+  }
   if (automaticallyResuming) {flags = new Map(flags); flags.set('resume', true);}
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
@@ -3822,6 +3826,9 @@ export async function runAssistantCommand(
 
 async function login(flags: Map<string, string | boolean>): Promise<Output> {
   const preference = connectionPreference(flags);
+  if (flags.has('reauthenticate') && (flags.get('reauthenticate') !== true || flags.has('resume') || flags.has('no-wait'))) {
+    throw new Error('connection_reauthentication_options_invalid');
+  }
   const existing = await readDeviceConfig();
   if (existing) {
     const hqUrl = normalizeHqUrl(portalUrl(flags, existing.hqUrl));
@@ -3829,11 +3836,13 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     assertConnectionScope(existing, organizationId, hqUrl);
     await assertInstallationContinuity(existing, installationIdentityPath());
     if (flags.has('dry-run')) return {ok: true, status: 'plan', effects: false,
-      action: preference === 'manual' ? 'disable_unattended' : 'resume_existing_device', deviceId: existing.deviceId};
-    if (preference !== 'manual' && preference !== 'resume' && !flags.has('resume') && existing.connectionMode !== 'resume') {
+      action: flags.has('reauthenticate') ? 'reauthenticate_existing_device'
+        : preference === 'manual' ? 'disable_unattended' : 'resume_existing_device', deviceId: existing.deviceId};
+    if (!flags.has('reauthenticate') && preference !== 'manual' && preference !== 'resume' && !flags.has('resume') && existing.connectionMode !== 'resume') {
       throw new Error('connection_resume_opt_in_required: use login --resume once or login --unattended to opt in.');
     }
-    const result = preference === 'manual'
+    const result = flags.has('reauthenticate') ? await reauthenticateExistingDevice(existing, flags)
+      : preference === 'manual'
       ? {ok: true, status: 'preference_saved', connected: false, deviceId: existing.deviceId, providerAuthentication: 'not_checked'}
       : await resumeDeviceConnection({config: existing, configPath: configPath(), statePath: protocolStatePath(),
         installationPath: installationIdentityPath(), version: VERSION, hostScope: currentBootstrapHostScope()});
@@ -3842,11 +3851,13 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
       try {
         const current = await readDeviceConfig();
         if (!current || canonicalize(current) !== canonicalize(existing)) throw new Error('connection_state_changed');
-        await saveDeviceConfig(configPath(), {...current, connectionMode: preference}, currentBootstrapHostScope());
+        await saveDeviceConnectionPreference({configPath: configPath(), config: current, connectionMode: preference,
+          hostScope: currentBootstrapHostScope()});
       } finally {await release();}
     }
     return {...result, connectionMode: preference ?? existing.connectionMode ?? 'manual'};
   }
+  if (flags.has('reauthenticate')) throw new Error('connection_reauthentication_existing_identity_required');
   if (flags.has('dry-run')) {
     if (!flags.has('resume')) await assertUnenrolledHome([installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
     return {ok: true, status: 'plan', effects: false, action: flags.has('resume') ? 'resume_pending_approval' : 'request_first_enrollment'};
@@ -3968,6 +3979,48 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     }
     throw new Error(`Enrollment timed out. Approve it at ${pending.verificationUri}`);
   } finally {await releaseEnrollment();}
+}
+
+async function reauthenticateExistingDevice(config: DeviceConfig, flags: Map<string, string | boolean>): Promise<Record<string, unknown>> {
+  const release = await acquirePidLock(`${configPath()}.enrollment.lock`, 10_000, 'connection_enrollment_busy');
+  try {
+    const identity = await enrolledDeviceIdentity(config).catch(() => {throw new Error('connection_identity_requires_recovery');});
+    if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('connection_identity_requires_recovery');
+    const fetcher: typeof fetch = (url, init) => fetch(url, {...init, redirect: 'error', signal: AbortSignal.timeout(30_000)});
+    const approval = await beginEnrollment({hqUrl: config.hqUrl, organizationId: config.organizationId,
+      name: config.deviceName, platform: config.platform, publicKeyEd25519: identity.publicKeyEd25519,
+      idempotencyKey: randomUUID(), fetcher}).catch(() => {throw new Error('connection_reauthentication_transport_unavailable');});
+    const approvalUrl = new URL(approval.verificationUri);
+    if (approvalUrl.origin !== config.hqUrl || approvalUrl.username || approvalUrl.password
+      || !Number.isFinite(approval.expiresInSeconds) || approval.expiresInSeconds <= 0) {
+      throw new Error('connection_reauthentication_approval_invalid');
+    }
+    const browserOpened = flags.has('no-browser') ? false : await openVerificationUri(approval.verificationUri);
+    process.stderr.write(`Approve the existing device in your browser: ${approval.verificationUri}\n`);
+    const deadline = Date.now() + Math.min(approval.expiresInSeconds * 1000, 300_000);
+    while (Date.now() < deadline) {
+      const result = await pollEnrollment({hqUrl: config.hqUrl, deviceCode: approval.deviceCode, fetcher})
+        .catch(() => {throw new Error('connection_reauthentication_transport_unavailable');});
+      if (result.status === 'approved') {
+        // Browser approval can restore this exact identity's missing anchor. A
+        // replacement identity, endpoint or trust root requires separate recovery.
+        if (result.organizationId !== config.organizationId || result.deviceId !== config.deviceId || result.relayUrl !== config.relayUrl
+          || result.serverPublicKeyEd25519 !== config.serverPublicKeyEd25519
+          || canonicalize(result.serverSigningKeyset ?? null) !== canonicalize(config.serverSigningKeyset ?? null)) {
+          throw new Error('connection_reauthentication_identity_mismatch');
+        }
+        const current = await readDeviceConfig();
+        if (!current || canonicalize(current) !== canonicalize(config)) throw new Error('connection_state_changed');
+        await assertInstallationContinuity(config, installationIdentityPath());
+        await saveDeviceEnrollmentAnchor({config, hostScope: currentBootstrapHostScope()});
+        return {ok: true, status: 'reauthenticated', deviceId: config.deviceId, organizationId: config.organizationId,
+          connected: false, browserOpened, providerAuthentication: 'not_checked'};
+      }
+      if (result.status === 'denied' || result.status === 'expired') throw new Error('connection_reauthentication_rejected');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    throw new Error('connection_reauthentication_expired');
+  } finally {await release();}
 }
 
 type AcceptedTrajectoryHead = { revision: number; capsuleHash: string } | null;
