@@ -40,7 +40,9 @@ test('actual Linux launcher starts with no npm on PATH and preserves argument bo
   const npmCliPath = join(bin, 'npm-cli.js');
   await writeFile(npmCliPath, 'process.stdout.write(JSON.stringify(process.argv.slice(2)))', {mode: 0o600});
   await writeFile(join(root, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
-  const runtime = {platform: 'linux' as const, nodeDirectory: dirname(process.execPath), npmCliPath};
+  const nodeDirectory = join(root, 'node-only'); await mkdir(nodeDirectory, {mode: 0o700});
+  await copyFile(process.execPath, join(nodeDirectory, 'node')); await chmod(join(nodeDirectory, 'node'), 0o700);
+  const runtime = {platform: 'linux' as const, nodeDirectory, npmCliPath};
   const old = join(root, 'old.sh'), fixed = join(root, 'fixed.sh');
   await writeFile(old, stableRepositoryLauncherContents('0.2.177', {platform: 'linux', nodeDirectory: runtime.nodeDirectory}).shell);
   const launchers = stableRepositoryLauncherContents('0.2.177', runtime);

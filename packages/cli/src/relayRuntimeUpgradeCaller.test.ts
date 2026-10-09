@@ -101,6 +101,7 @@ test('actual Linux upgrade records npm while rollback does not require a replace
 
 test('actual Linux caller and real runtime journal restore exact bytes on a fresh rollback without npm resolution',
   {skip: process.platform !== 'linux'}, async t => {
+    for (const fixedPrevious of [false, true]) {
     const f = await fixture(), root = await realpath(await mkdtemp(resolve(tmpdir(), 'dharma-real-upgrade-caller-')));
     t.after(() => rm(root, {recursive: true, force: true}));
     const workspace = resolve(root, 'repo'), home = resolve(root, 'profile'), bin = resolve(workspace, '.dharma', 'bin');
@@ -108,15 +109,24 @@ test('actual Linux caller and real runtime journal restore exact bytes on a fres
     await mkdir(bin, {recursive: true}); await mkdir(dirname(npmCliPath), {recursive: true, mode: 0o700});
     await writeFile(npmCliPath, 'synthetic npm', {mode: 0o600});
     await writeFile(resolve(npmRoot, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
-    const previous = stableRepositoryLauncherContents('0.2.177', {platform: 'linux', nodeDirectory: dirname(process.execPath)});
+    const initialVersion = fixedPrevious ? '0.2.178' : '0.2.177', targetVersion = fixedPrevious ? '0.2.179' : '0.2.178';
+    const previousNpm = resolve(root, 'previous-npm', 'bin', 'npm-cli.js');
+    if (fixedPrevious) {
+      await mkdir(dirname(previousNpm), {recursive: true, mode: 0o700});
+      await writeFile(previousNpm, 'synthetic old npm', {mode: 0o600});
+      await writeFile(resolve(dirname(dirname(previousNpm)), 'package.json'),
+        JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+    }
+    const previous = stableRepositoryLauncherContents(initialVersion, {platform: 'linux', nodeDirectory: dirname(process.execPath),
+      ...(fixedPrevious ? {npmCliPath: previousNpm} : {})});
     await writeFile(resolve(bin, 'dharma'), previous.shell); await writeFile(resolve(bin, 'dharma.cmd'), previous.windows);
     const selected = {workspaceId: '22222222-2222-4222-8222-222222222222', organizationId: 'org_fixture',
       deviceId: '11111111-1111-4111-8111-111111111111', path: workspace};
-    Object.assign(f.startup, {workspace, version: '0.2.177', launcher: resolve(bin, 'dharma'),
+    Object.assign(f.startup, {workspace, version: initialVersion, launcher: resolve(bin, 'dharma'),
       policy: resolve(workspace, '.dharma', 'approved-policy.json')});
     let running = false, resolutions = 0;
     Object.assign(f.deps, {
-      process: {platform: 'linux', execPath: process.execPath, env: {}}, VERSION: '0.2.178',
+      process: {platform: 'linux', execPath: process.execPath, env: {}}, VERSION: targetVersion,
       dharmaHome: () => home, registry: async () => [selected], selectDeviceWorkspace: () => selected,
       readDeviceConfig: async () => ({organizationId: selected.organizationId, deviceId: selected.deviceId}),
       stableRepositoryLauncherContents, upgradeRelayRuntime,
@@ -144,7 +154,8 @@ test('actual Linux caller and real runtime journal restore exact bytes on a fres
     assert.equal((await f.run()(f.flags) as {state: string}).state, 'rolled_back');
     assert.equal(await readFile(resolve(bin, 'dharma'), 'utf8'), previous.shell);
     assert.equal(await readFile(resolve(bin, 'dharma.cmd'), 'utf8'), previous.windows);
-    assert.equal(f.startup.version, '0.2.177');
+    assert.equal(f.startup.version, initialVersion);
+    }
   });
 
 test('actual upgrade caller retains the selected profile and passes only verified rollback context to startup', async () => {

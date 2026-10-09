@@ -56,6 +56,8 @@ async function installLaunchers(workspace: string, contents: Launchers) {
 async function expectedPrevious(journal: Journal, deps: RelayUpgradeDependencies) {
   return same(journal.previous, deps.launcherContents(journal.previousVersion))
     || Boolean(deps.legacyLauncherContents && same(journal.previous, deps.legacyLauncherContents(journal.previousVersion)))
+    || Boolean(journal.schema === 'dharma.local-relay-upgrade-journal/v3' && deps.verifyRecoveryLaunchers
+      && await deps.verifyRecoveryLaunchers(journal.previousVersion, journal.previous))
     || Boolean(deps.verifyPriorLaunchers && await deps.verifyPriorLaunchers(journal.previousVersion, journal.previous));
 }
 
