@@ -142,3 +142,49 @@ test('unattended is explicit opt-in, absent preference is manual, and new bootst
   assert.equal(automaticBootstrapResume(new Map<string, string | boolean>([['setup-reference', 'reference'], ['complete', true]]), f.config), false);
   assert.throws(() => automaticBootstrapResume(new Map<string, string | boolean>([['complete', true], ['join-repository-binding-id', 'new']]), f.config), /connection_new_scope_requires_approval/);
 });
+
+test('actual default factory cannot accept a saved relay acknowledgement when protected HQ rejects authority', async t => {
+  const f = await fixture(t);
+  const config = {...f.config, relayUrl: 'wss://untrusted-relay.example'};
+  await saveDeviceConfig(f.configPath, config);
+  const relayCalls: string[] = [], hqCalls: Array<{url: string; redirect: RequestInit['redirect']; signal: AbortSignal | null | undefined}> = [];
+  const originalOpen = AgentFabricClient.open, originalFetch = globalThis.fetch, OriginalWebSocket = globalThis.WebSocket;
+  class UntrustedRelay {
+    static CLOSING = 2;
+    readyState = 1;
+    message?: (event: {data: string}) => void;
+    constructor(url: string | URL) {relayCalls.push(String(url));}
+    addEventListener(type: string, callback: (event: {data: string}) => void) {
+      if (type === 'open') queueMicrotask(() => callback({data: ''}));
+      if (type === 'message') this.message = callback;
+    }
+    send(bytes: string) {
+      const request = JSON.parse(bytes) as {requestId: string};
+      this.message!({data: JSON.stringify({requestId: request.requestId, status: 201, body: JSON.stringify({ok: true})})});
+    }
+    close() {this.readyState = 3;}
+  }
+  AgentFabricClient.open = input => originalOpen({...input, store: f.store});
+  globalThis.WebSocket = UntrustedRelay as unknown as typeof WebSocket;
+  globalThis.fetch = async (url, init) => {
+    hqCalls.push({url: String(url), redirect: init?.redirect, signal: init?.signal});
+    return new Response(JSON.stringify({ok: false}), {status: 403});
+  };
+  try {
+    await assert.rejects(resumeDeviceConnection({...f.input, config, openClient: undefined}), /connection_authority_rejected/);
+    assert.equal(relayCalls.length, 0);
+    assert.equal(hqCalls.length, 1);
+    assert.equal(new URL(hqCalls[0]!.url).origin, f.config.hqUrl);
+    assert.equal(hqCalls[0]!.redirect, 'error');
+    assert.ok(hqCalls[0]!.signal instanceof AbortSignal);
+    assert.deepEqual(f.writes, []);
+    assert.equal(await readFile(f.statePath, 'utf8'), f.state);
+    globalThis.fetch = async () => new Response(JSON.stringify({ok: true}), {status: 201});
+    const admitted = await resumeDeviceConnection({...f.input, config, openClient: undefined});
+    assert.equal(admitted.deviceId, f.config.deviceId);
+    assert.equal(admitted.admissionTransport, 'anchored_hq_https');
+    assert.equal(admitted.relayTransport, 'not_checked');
+    assert.equal(relayCalls.length, 0);
+    assert.deepEqual(f.writes, []);
+  } finally {AgentFabricClient.open = originalOpen;globalThis.fetch = originalFetch;globalThis.WebSocket = OriginalWebSocket;}
+});

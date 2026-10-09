@@ -77,7 +77,11 @@ export async function resumeDeviceConnection(input: {
   let instance: ConnectionProbeClient;
   try {
     instance = await (input.openClient ?? (() => AgentFabricClient.open({configPath: input.configPath,
-      statePath: input.statePath, hostScope: input.hostScope, readOnly: true})))();
+      statePath: input.statePath, hostScope: input.hostScope, readOnly: true,
+      // Admission must come from the protected HQ origin. A mutable saved relay
+      // endpoint cannot establish current member/device authority.
+      fetcher: (url, init) => fetch(url, {...init, redirect: 'error',
+        signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)})})))();
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (message.startsWith('connection_config_')) throw error;
@@ -99,7 +103,8 @@ export async function resumeDeviceConnection(input: {
   await assertInstallationContinuity(input.config, input.installationPath);
   return {ok: true, status: 'resumed', connected: true, deviceId: input.config.deviceId,
     organizationId: input.config.organizationId, installationId: input.config.installationId,
-    relayUrl: input.config.relayUrl, relayVersion: input.version, providerAuthentication: 'not_checked'};
+    relayUrl: input.config.relayUrl, relayVersion: input.version, providerAuthentication: 'not_checked',
+    admissionTransport: 'anchored_hq_https', relayTransport: 'not_checked'};
 }
 
 /** Automatic bootstrap may reuse device authority only without new authority input. */

@@ -25,7 +25,10 @@ exists, the existing pending-approval resume flow remains available.
 
 A returning login inherits the saved organization and portal. Explicit conflicting
 options fail closed. It checks the installation marker, protected private key and
-enrollment anchor, cached signing-trust validity, and a new server session admission.
+enrollment anchor, cached signing-trust validity, and a new server session admission
+over HTTPS to the protected portal origin. Redirects are disabled and the admission
+request has a 30-second deadline. The saved relay endpoint cannot supply this proof;
+its transport readiness is reported separately as `not_checked`.
 It never generates a replacement key, starts enrollment, opens a browser, redeems a
 grant, repairs signing trust, or replays the enrolled relay's durable outbox.
 
