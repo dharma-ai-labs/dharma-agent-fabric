@@ -34,7 +34,7 @@ test('npm resolution validates the selected protected package without falling ba
 });
 
 test('actual Linux launcher starts with no npm on PATH and preserves argument boundaries', {skip: process.platform !== 'linux'}, async () => {
-  const {stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers} = await import('./repositoryLaunchers.js');
+  const {stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers} = await import('./repositoryLaunchers.js');
   const root = await realpath(await mkdtemp(join(tmpdir(), "dharma-npm ' startup-")));
   const bin = join(root, 'bin'); await mkdir(bin, {mode: 0o700});
   const npmCliPath = join(bin, 'npm-cli.js');
@@ -53,9 +53,12 @@ test('actual Linux launcher starts with no npm on PATH and preserves argument bo
     {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.177', launchers,
     {platform: 'linux', nodePath: process.execPath, npmCliPath: join(root, 'absent')}), false);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.177', launchers), true);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.177', {...launchers, shell: `${launchers.shell}# foreign\n`}), false);
   await chmod(npmCliPath, 0o666);
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.177', launchers,
     {platform: 'linux', nodePath: process.execPath, npmCliPath}), false);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.177', launchers), false);
 });
 
 test('a recorded pinned directory is accepted only for the identical protected Node binary', async () => {

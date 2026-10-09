@@ -131,6 +131,16 @@ async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
 
 export async function verifyRecordedRepositoryLaunchers(version: string, launchers: Launchers,
   runtime: {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string} = { platform: process.platform, nodePath: process.execPath }): Promise<boolean> {
+  return verifyRecordedRuntime(version, launchers, runtime, 'active');
+}
+
+// Recovery compares stored bytes but never executes the recorded replacement launcher.
+export async function verifyRollbackRepositoryLaunchers(version: string, launchers: Launchers): Promise<boolean> {
+  return verifyRecordedRuntime(version, launchers, {platform: process.platform, nodePath: process.execPath}, 'recorded');
+}
+
+async function verifyRecordedRuntime(version: string, launchers: Launchers,
+  runtime: {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string}, npmContext: 'active' | 'recorded'): Promise<boolean> {
   const recorded = recordedRuntime(version, launchers, runtime.platform);
   if (!recorded) return false;
   const directory = recorded.nodeDirectory;
@@ -138,7 +148,8 @@ export async function verifyRecordedRepositoryLaunchers(version: string, launche
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
     if (recorded.npmCliPath !== undefined) {
-      const activeNpm = await resolveRepositoryNpmCli({npmExecPath: runtime.npmCliPath, platform: runtime.platform});
+      const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)
+        : await resolveRepositoryNpmCli({npmExecPath: runtime.npmCliPath, platform: runtime.platform});
       if (activeNpm !== recorded.npmCliPath) return false;
     }
     if (directory === dirname(runtime.nodePath)) {

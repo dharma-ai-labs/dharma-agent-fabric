@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, resolveRepositoryNpmCli } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -1975,6 +1975,8 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
       verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
+      recordNextLaunchers: process.platform === 'linux',
+      verifyRecoveryLaunchers: verifyRollbackRepositoryLaunchers,
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
