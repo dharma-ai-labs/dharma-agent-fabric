@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile} from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
+import {dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {runInNewContext} from 'node:vm';
+import ts from 'typescript';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -163,5 +169,67 @@ test('abandoned or invalid recovery ownership preserves the mutex and primary lo
       assert.equal(after.dev, before.dev);
       assert.deepEqual((await readdir(f.root)).sort(), ['anchor.lock', 'anchor.lock.recovery']);
     } finally {await f.cleanup();}
+  }
+});
+
+test('a replacement process cannot publish during stale primary inspection and retains live ownership', async () => {
+  const f = await fixture(), releaseOld = resolve(f.root, 'release-old'), releaseNew = resolve(f.root, 'release-new');
+  const readyOld = resolve(f.root, 'old-ready'), readyNew = resolve(f.root, 'new-ready');
+  const script = `import {acquireEnrollmentAnchorLock} from ${JSON.stringify(moduleUrl)};
+    import {readFile,writeFile} from 'node:fs/promises';
+    const [path,ready,releasePath]=process.argv.slice(1);
+    const release=await acquireEnrollmentAnchorLock(path);
+    await writeFile(ready,String(process.pid));
+    const deadline=Date.now()+10000;
+    try {
+      while(true) {
+        try {await readFile(releasePath);break;}
+        catch(error) {if(error.code!=='ENOENT'||Date.now()>deadline)throw error;}
+        await new Promise(resolve=>setTimeout(resolve,10));
+      }
+    } finally {await release();}`;
+  const waitReady = async (path: string) => {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      try {return await readFile(path, 'utf8');}
+      catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() > deadline) throw error;}
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+    }
+  };
+  const oldOwner = child(script, f.path, readyOld, releaseOld);
+  let newOwner: Promise<void> | undefined, interleaved = false;
+  try {
+    await waitReady(readyOld);
+    const source = await readFile(fileURLToPath(new URL('../src/enrollmentAnchorLock.ts', import.meta.url)), 'utf8');
+    const ast = ts.createSourceFile('lock.ts', source, ts.ScriptTarget.Latest, true);
+    const node = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'acquireEnrollmentAnchorLock')!;
+    const compiled = ts.transpileModule(node.getText(ast).replace('export async', 'async'), {
+      compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None},
+    }).outputText;
+    // Only the read boundary is controlled; all lock logic and competing
+    // process acquisition execute the actual source.
+    const acquire = runInNewContext(compiled + '\nacquireEnrollmentAnchorLock', {...fs, dirname, randomUUID,
+      process, Date, setTimeout, readFile: async (path: string, encoding: string) => {
+        const text = await readFile(path, encoding as BufferEncoding);
+        if (path === f.path && !interleaved) {
+          interleaved = true;
+          await writeFile(releaseOld, 'release'); await oldOwner;
+          newOwner = child(script, f.path, readyNew, releaseNew);
+          newOwner.catch(() => undefined);
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 500));
+          await assert.rejects(readFile(readyNew), {code: 'ENOENT'},
+            'a replacement must wait while the stale inspector owns the recovery mutex');
+        }
+        return text;
+      }}) as typeof acquireEnrollmentAnchorLock;
+    await assert.rejects(acquire(f.path, undefined, 1500), /connection_anchor_busy/);
+    const replacementPid = await waitReady(readyNew);
+    assert.equal(await readFile(f.path, 'utf8'), replacementPid + '\n');
+    assert.equal(interleaved, true);
+    assert.equal((await readdir(f.root)).some(path => path.includes('.dead.')), false);
+  } finally {
+    await writeFile(releaseOld, 'release'); await oldOwner;
+    if (newOwner) {await writeFile(releaseNew, 'release'); await newOwner;}
+    await f.cleanup();
   }
 });

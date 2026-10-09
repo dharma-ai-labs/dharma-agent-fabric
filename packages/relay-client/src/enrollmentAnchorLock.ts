@@ -68,13 +68,9 @@ export async function acquireEnrollmentAnchorLock(
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (Date.now() >= deadline) throw Error('connection_anchor_busy');
-      try {
-        await publish(lockPath);
-        let released: Promise<void> | undefined;
-        return () => released ??= cleanup(lockPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      }
+      // Every primary publication participates in this mutex. An exiting owner
+      // may release its primary during inspection, but no replacement can publish
+      // until the inspector releases the mutex.
       const recovery = lockPath + '.recovery';
       let recovering = false;
       try {await publish(recovery); recovering = true;}
@@ -88,16 +84,27 @@ export async function acquireEnrollmentAnchorLock(
       }
       if (recovering) {
         try {
+          try {
+            await publish(lockPath);
+            let released: Promise<void> | undefined;
+            return () => released ??= cleanup(lockPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          }
           let current: Awaited<ReturnType<typeof owner>> | undefined;
           try {current = await owner(lockPath);}
           catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
           if (current && !current.alive) {
             const quarantine = `${lockPath}.dead.${randomUUID()}`;
-            await step(async () => {
-              await rename(lockPath, quarantine);
-              owned.set(quarantine, current!.identity);
-            });
-            await cleanup(quarantine);
+            try {
+              await step(async () => {
+                await rename(lockPath, quarantine);
+                owned.set(quarantine, current!.identity);
+              });
+              await cleanup(quarantine);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            }
           }
         } finally {await cleanup(recovery);}
       }
