@@ -288,7 +288,12 @@ test('a delayed protected keyset installation cannot undo actual CLI opt-out', a
   const values = new Map<string, string>();
   let notify!: () => void, unblock!: () => void;
   const delayed = new Promise<void>(resolve => {notify = resolve;}), released = new Promise<void>(resolve => {unblock = resolve;});
-  const store: SecureSecretStore = {backend: 'windows-credential-manager', get: async account => values.get(account) ?? null,
+  const store: SecureSecretStore = {backend: 'windows-credential-manager',
+    compareAndPutEnrollmentAnchor: async input => {
+      if ((values.get(input.account) ?? null) !== input.expectedCurrent
+        || (values.get(input.legacyAccount) ?? null) !== input.expectedLegacy) return false;
+      await store.put(input.account, input.secret); return true;
+    }, get: async account => values.get(account) ?? null,
     delete: async account => {values.delete(account);},
     put: async (account, value) => {
       if (JSON.parse(value).serverSigningKeyset) {notify(); await released;}
@@ -316,7 +321,12 @@ test('a delayed protected keyset installation cannot undo actual CLI opt-out', a
 
 test('concurrent actual bootstrap-to-onboard clients preserve a sibling durable outbox', async t => {
   const f = await bootstrapFixture(t), values = new Map<string, string>();
-  const store: SecureSecretStore = {backend: 'windows-credential-manager', get: async account => values.get(account) ?? null,
+  const store: SecureSecretStore = {backend: 'windows-credential-manager',
+    compareAndPutEnrollmentAnchor: async input => {
+      if ((values.get(input.account) ?? null) !== input.expectedCurrent
+        || (values.get(input.legacyAccount) ?? null) !== input.expectedLegacy) return false;
+      await store.put(input.account, input.secret); return true;
+    }, get: async account => values.get(account) ?? null,
     put: async (account, value) => {values.set(account, value);}, delete: async account => {values.delete(account);}};
   const identity = await loadOrCreateDeviceIdentity({hqUrl: f.config.hqUrl, organizationId: f.config.organizationId,
     installationId: f.config.installationId, store});

@@ -339,6 +339,17 @@ async function freshAnchorValue(store: SecureSecretStore, account: string): Prom
   return (store.getFresh ?? store.get).call(store, account);
 }
 
+async function writeEnrollmentAnchor(store: SecureSecretStore, config: DeviceConfig, secret: string,
+  expectedCurrent: string | null, expectedLegacy: string | null): Promise<void> {
+  const account = enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId);
+  if (store.backend === 'windows-credential-manager') {
+    if (!store.compareAndPutEnrollmentAnchor) throw Error('connection_anchor_store_unavailable');
+    const written = await store.compareAndPutEnrollmentAnchor({account, secret, expectedCurrent, expectedLegacy,
+      legacyAccount: legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)});
+    if (!written) throw Error('connection_existing_anchor_requires_recovery');
+  } else {await store.put(account, secret);}
+}
+
 /** Missing-anchor recovery must prove both current and historical slots absent. */
 export async function assertDeviceEnrollmentAnchorAbsent(input: {
   config: DeviceConfig;
@@ -377,9 +388,18 @@ async function saveEnrollmentAnchorLocked(input: {
   const serialized = JSON.stringify(anchor);
   const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId, anchor.deviceId);
   const store = await protectedStore(input.store, input.hostScope);
-  if (input.requireAbsent) await assertDeviceEnrollmentAnchorAbsent({...input, store});
-  else {
-    const previous = await freshAnchorValue(store, account);
+  let previous: string | null, legacy: string | null;
+  try {
+    previous = await freshAnchorValue(store, account);
+    legacy = input.requireAbsent || store.backend === 'windows-credential-manager'
+      ? await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId)) : null;
+  } catch (error) {
+    if (input.requireAbsent) throw Error('connection_anchor_store_unavailable');
+    throw error;
+  }
+  if (input.requireAbsent) {
+    if (previous !== null || legacy !== null) throw Error('connection_existing_anchor_requires_recovery');
+  } else {
     if (previous !== null) {
       const existing = parseProtectedAnchor<DeviceEnrollmentAnchor>(previous, input.hostScope, 'Protected enrollment anchor is corrupt.');
       if (!enrollmentAnchorHasBaseIdentity(existing, input.config)) {
@@ -393,7 +413,7 @@ async function saveEnrollmentAnchorLocked(input: {
       }
     }
   }
-  await store.put(account, serialized);
+  await writeEnrollmentAnchor(store, input.config, serialized, previous, legacy);
   if (await freshAnchorValue(store, account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
   return anchor;
 }
@@ -436,7 +456,7 @@ async function loadEnrollmentAnchorLocked(input: {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
   if (migratedLegacy && !input.readOnly) {
-    await store.put(account, serialized);
+    await writeEnrollmentAnchor(store, config, serialized, null, serialized);
     if (await freshAnchorValue(store, account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
   return anchor;
@@ -928,7 +948,7 @@ async function recoverEnrollmentLocked(input: {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
   if (migratedLegacy) {
-    await store.put(account, serialized);
+    await writeEnrollmentAnchor(store, config, serialized, null, serialized);
     if (await freshAnchorValue(store, account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
   if (canonicalize(anchor.serverSigningKeyset ?? null) === canonicalize(config.serverSigningKeyset ?? null)) {

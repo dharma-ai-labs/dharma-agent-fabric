@@ -85,10 +85,16 @@ Both current and historical protected anchor slots must be verifiably absent bef
 approval starts and again before restoration. Existing, mismatched, corrupt or
 unavailable protected state requires supported recovery and is preserved.
 Restoration, setup claims, legacy migration, consistency recovery and signing-keyset
-installation share an OS-user and protected-account process lock. The lock is
-independent of configured homes and temporary-directory overrides. Writers read
-fresh protected state while holding it; stale writers cannot replace an existing
-identity or roll back signing trust. Read-only probes do not create or migrate anchors.
+installation share an OS-user and protected-account process lock, independent of
+configured homes and temporary-directory overrides. POSIX lock directories must
+be private, owned by the current OS user, and regular directories without a symlink.
+Windows-backed writes additionally compare both current and legacy slots and write
+inside one Windows helper, using a user-restricted kernel mutex keyed by the actual
+Windows SID and legacy vault account. Native Windows and WSL callers therefore use
+the same vault exclusion boundary. A conflicting slot, unavailable mutex/store or
+unconfirmed write fails closed; the helper never removes an anchor before updating.
+Read-only probes do not create or migrate anchors. Synthetic helper tests do not
+qualify live Windows/WSL credential replacement or native device readiness.
 Keep concurrent CLI callers on the same reviewed release. Mixed versions require
 serialized supported recovery. A busy, corrupt or inaccessible lock fails closed. A verified dead primary process
 can be recovered automatically. An abandoned recovery mutex is preserved and returns

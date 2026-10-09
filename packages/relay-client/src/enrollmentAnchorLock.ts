@@ -14,6 +14,18 @@ export async function acquireEnrollmentAnchorLock(
   const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
   type Owned = {dev: bigint; ino: bigint};
   const owned = new Map<string, Owned | null>();
+  const directory = dirname(lockPath);
+  let namespace: Owned | undefined;
+  const assertNamespace = async () => {
+    if (process.platform === 'win32') return;
+    const value = await lstat(directory, {bigint: true});
+    if (!value.isDirectory() || value.isSymbolicLink() || typeof process.getuid !== 'function'
+      || value.uid !== BigInt(process.getuid()) || (value.mode & 0o077n) !== 0n
+      || namespace && (value.dev !== namespace.dev || value.ino !== namespace.ino)) {
+      throw Error('connection_anchor_lock_invalid');
+    }
+    namespace ??= {dev: value.dev, ino: value.ino};
+  };
   const metadata = async (path: string): Promise<Owned> => {
     const value = await lstat(path, {bigint: true});
     if (!value.isFile() || value.isSymbolicLink()) throw Error('connection_anchor_lock_invalid');
@@ -22,6 +34,7 @@ export async function acquireEnrollmentAnchorLock(
   const cleanup = async (path: string) => {
     if (!owned.has(path)) return;
     try {
+      await assertNamespace();
       const expected = owned.get(path);
       if (!expected) throw Error();
       let current: Owned;
@@ -39,6 +52,7 @@ export async function acquireEnrollmentAnchorLock(
     const candidate = `${path}.${process.pid}.${randomUUID()}.candidate`;
     try {
       await step(async () => {
+        await assertNamespace();
         await writeFile(candidate, `${process.pid}\n`, {flag: 'wx', mode: 0o600});
         owned.set(candidate, null);
         owned.set(candidate, await metadata(candidate));
@@ -64,7 +78,8 @@ export async function acquireEnrollmentAnchorLock(
     return {identity, alive};
   };
   try {
-    await step(() => mkdir(dirname(lockPath), {recursive: true, mode: 0o700}));
+    await step(() => mkdir(directory, {recursive: true, mode: 0o700}));
+    await step(assertNamespace);
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (Date.now() >= deadline) throw Error('connection_anchor_busy');

@@ -20,6 +20,11 @@ async function fixture(t: TestContext) {
   const values = new Map<string, string>();
   const writes: string[] = [], requests: Array<{path: string; headers: Headers; body: string}> = [];
   const store: SecureSecretStore = {backend: 'windows-credential-manager',
+    compareAndPutEnrollmentAnchor: async input => {
+      if ((values.get(input.account) ?? null) !== input.expectedCurrent
+        || (values.get(input.legacyAccount) ?? null) !== input.expectedLegacy) return false;
+      await store.put(input.account, input.secret); return true;
+    },
     get: async account => values.get(account) ?? null,
     put: async (account, value) => {writes.push(account); values.set(account, value);},
     delete: async account => {writes.push(account); values.delete(account);}};

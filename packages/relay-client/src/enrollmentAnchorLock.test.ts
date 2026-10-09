@@ -198,6 +198,7 @@ test('a replacement process cannot publish during stale primary inspection and r
   };
   const oldOwner = child(script, f.path, readyOld, releaseOld);
   let newOwner: Promise<void> | undefined, interleaved = false;
+  let releaseInspector: (() => Promise<void>) | undefined;
   try {
     await waitReady(readyOld);
     const source = await readFile(fileURLToPath(new URL('../src/enrollmentAnchorLock.ts', import.meta.url)), 'utf8');
@@ -206,10 +207,14 @@ test('a replacement process cannot publish during stale primary inspection and r
     const compiled = ts.transpileModule(node.getText(ast).replace('export async', 'async'), {
       compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None},
     }).outputText;
-    // Only the read boundary is controlled; all lock logic and competing
-    // process acquisition execute the actual source.
+    // Control the stale read and the inspector's next retry, so the replacement
+    // gets the next turn after mutex release. Both children run the real helper;
+    // the preservation assertion below remains at the held-mutex boundary.
     const acquire = runInNewContext(compiled + '\nacquireEnrollmentAnchorLock', {...fs, dirname, randomUUID,
-      process, Date, setTimeout, readFile: async (path: string, encoding: string) => {
+      process, Date, setTimeout: (callback: () => void, delay: number) => {
+        if (interleaved && delay === 25) {void waitReady(readyNew).then(callback); return;}
+        return setTimeout(callback, delay);
+      }, readFile: async (path: string, encoding: string) => {
         const text = await readFile(path, encoding as BufferEncoding);
         if (path === f.path && !interleaved) {
           interleaved = true;
@@ -222,12 +227,13 @@ test('a replacement process cannot publish during stale primary inspection and r
         }
         return text;
       }}) as typeof acquireEnrollmentAnchorLock;
-    await assert.rejects(acquire(f.path, undefined, 1500), /connection_anchor_busy/);
+    await assert.rejects(async () => {releaseInspector = await acquire(f.path, undefined, 1500);}, /connection_anchor_busy/);
     const replacementPid = await waitReady(readyNew);
     assert.equal(await readFile(f.path, 'utf8'), replacementPid + '\n');
     assert.equal(interleaved, true);
     assert.equal((await readdir(f.root)).some(path => path.includes('.dead.')), false);
   } finally {
+    await releaseInspector?.();
     await writeFile(releaseOld, 'release'); await oldOwner;
     if (newOwner) {await writeFile(releaseNew, 'release'); await newOwner;}
     await f.cleanup();

@@ -1,11 +1,22 @@
 import { spawn } from 'node:child_process';
 import { lstat, readFile } from 'node:fs/promises';
 import { createWindowsFreshReader } from './windowsFreshRead.js';
+import { windowsEnrollmentAnchorWrite } from './windowsEnrollmentAnchor.js';
+
+export interface EnrollmentAnchorWrite {
+  account: string;
+  legacyAccount: string;
+  expectedCurrent: string | null;
+  expectedLegacy: string | null;
+  secret: string;
+}
 
 export interface SecureSecretStore {
   backend: 'windows-credential-manager' | 'macos-keychain' | 'linux-secret-service';
   get(account: string): Promise<string | null>;
   getFresh?(account: string): Promise<string | null>;
+  /** Atomic at the shared Windows vault, including native Windows/WSL callers. */
+  compareAndPutEnrollmentAnchor?(input: EnrollmentAnchorWrite): Promise<boolean>;
   put(account: string, secret: string): Promise<void>;
   delete(account: string): Promise<void>;
 }
@@ -13,32 +24,48 @@ export interface SecureSecretStore {
 function processCachedStore(store: SecureSecretStore): SecureSecretStore {
   const values = new Map<string, string>();
   const pending = new Map<string, Promise<string | null>>();
+  const revisions = new Map<string, number>();
+  const invalidate = (account: string) => {
+    revisions.set(account, (revisions.get(account) ?? 0) + 1);
+    values.delete(account); pending.delete(account);
+  };
   return {
     backend: store.backend,
     async get(account) {
       if (values.has(account)) return values.get(account)!;
       const current = pending.get(account);
       if (current) return current;
+      const revision = revisions.get(account) ?? 0;
       const request = store.get(account).then((value) => {
-        if (value !== null) values.set(account, value);
+        if (value !== null && (revisions.get(account) ?? 0) === revision) values.set(account, value);
         return value;
-      }).finally(() => pending.delete(account));
+      }).finally(() => {if (pending.get(account) === request) pending.delete(account);});
       pending.set(account, request);
       return request;
     },
     async getFresh(account) {
-      const value = await store.get(account);
-      if (value === null) values.delete(account);
-      else values.set(account, value);
+      invalidate(account);
+      const revision = revisions.get(account)!;
+      const value = await (store.getFresh ?? store.get).call(store, account);
+      if (revisions.get(account) === revision && value !== null) values.set(account, value);
       return value;
     },
+    ...(store.compareAndPutEnrollmentAnchor ? {async compareAndPutEnrollmentAnchor(input: EnrollmentAnchorWrite) {
+      const snapshot = structuredClone(input);
+      invalidate(snapshot.account); invalidate(snapshot.legacyAccount);
+      try {return await store.compareAndPutEnrollmentAnchor!(snapshot);}
+      finally {invalidate(snapshot.account); invalidate(snapshot.legacyAccount);}
+    }} : {}),
     async put(account, secret) {
-      await store.put(account, secret);
+      invalidate(account);
+      try {await store.put(account, secret);}
+      finally {invalidate(account);}
       values.set(account, secret);
     },
     async delete(account) {
-      await store.delete(account);
-      values.delete(account);
+      invalidate(account);
+      try {await store.delete(account);}
+      finally {invalidate(account);}
     },
   };
 }
@@ -111,7 +138,7 @@ function assertAccount(account: string): void {
 }
 
 const windowsPreamble = '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Runtime.WindowsRuntime; $vault=[Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]::new(); ';
-const windowsRead = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $credential.RetrievePassword(); [Console]::Out.Write($credential.Password)} catch {exit 3}`;
+const windowsRead = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $credential.RetrievePassword(); [Console]::Out.Write($credential.Password)} catch {if ($_.Exception.GetBaseException().HResult -eq -2147023728) {exit 3}; [Console]::Error.Write("Credential read unavailable."); exit 1}`;
 const windowsWrite = `${windowsPreamble}$value=[Console]::In.ReadToEnd(); try {$old=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($old)} catch {}; $credential=[Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime]::new("Dharma Agent Fabric",$args[0],$value); $vault.Add($credential)`;
 const windowsDelete = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharma Agent Fabric",$args[0]); $vault.Remove($credential)} catch {exit 3}`;
 
@@ -170,8 +197,28 @@ function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec
       if (result.code !== 0) throw new Error(`Windows Credential Manager failed: ${result.stderr.trim()}`);
       return result.stdout;
     },
+    async compareAndPutEnrollmentAnchor(input) {
+      const snapshot = structuredClone(input);
+      if (!/^device-enrollment-[a-f0-9]{32}$/.test(snapshot.account)
+        || !/^device-enrollment-[a-f0-9]{32}$/.test(snapshot.legacyAccount)
+        || snapshot.account === snapshot.legacyAccount
+        || [snapshot.expectedCurrent, snapshot.expectedLegacy].some(value => value !== null && typeof value !== 'string')
+        || typeof snapshot.secret !== 'string' || snapshot.secret.length === 0) {
+        throw new Error('Invalid enrollment anchor operation.');
+      }
+      const request = JSON.stringify(snapshot);
+      if (Buffer.byteLength(request, 'utf8') > 1_048_576) throw new Error('Invalid enrollment anchor operation.');
+      // Never retry an uncertain mutation, including an interop timeout.
+      const result = await run(commandSpec.command, [...commandSpec.prefixArgs, '-NoProfile', '-NonInteractive',
+        '-Command', `& { ${windowsEnrollmentAnchorWrite} }`], request, Math.max(commandSpec.timeoutMs, 15_000));
+      if (result.code !== 0 || !['written', 'conflict'].includes(result.stdout)) {
+        throw new Error('Windows enrollment anchor operation unavailable or unconfirmed.');
+      }
+      return result.stdout === 'written';
+    },
     async put(account, secret) {
       assertAccount(account);
+      if (/^device-enrollment-/.test(account)) throw new Error('Enrollment anchors require a conditional write.');
       const result = await invoke(windowsWrite, account, secret);
       if (result.code !== 0) throw new Error(`Windows Credential Manager failed: ${result.stderr.trim()}`);
     },
