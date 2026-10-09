@@ -9,6 +9,7 @@ import ts from 'typescript';
 import {currentBootstrapHostScope, runCodexBootstrapHost} from './bootstrapHostScope.js';
 import {writeBootstrapHostText} from './bootstrapHostFiles.js';
 import {stableRepositoryLauncherContents} from './repositoryLaunchers.js';
+const npmCliPath = process.platform === 'linux' ? '/synthetic/npm/bin/npm-cli.js' : undefined;
 
 async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const root = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'dharma-launcher-caller-')));
@@ -33,7 +34,8 @@ async function caller() {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None}, reportDiagnostics: true});
   assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${output.outputText}\ninstallStableRepositoryLauncher`, {...fs, process, resolve, dirname,
-    currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents, VERSION: '0.2.153'},
+    currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents,
+    resolveRepositoryNpmCli: async () => npmCliPath, VERSION: '0.2.153'},
     {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as (workspace: string) => Promise<{shell: string; windows: string}>;
 }
 
@@ -49,7 +51,8 @@ test('actual launcher installer publishes exact pinned bytes under the original 
   const f = await fixture(t), install = await caller();
   const result = await runCodexBootstrapHost(f.input, () => install(f.root));
   assert.equal(result.shell, '.dharma/bin/dharma'); assert.equal(result.windows, '.dharma/bin/dharma.cmd');
-  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform, nodeDirectory: dirname(process.execPath)});
+  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath})});
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma.cmd'), 'utf8'), expected.windows);
   assert.deepEqual((await fs.readdir(f.bin)).sort(), ['dharma', 'dharma.cmd']);

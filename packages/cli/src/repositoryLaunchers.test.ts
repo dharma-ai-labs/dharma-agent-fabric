@@ -1,8 +1,62 @@
 import assert from 'node:assert/strict';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+
+test('Linux startup records npm explicitly instead of relying on the service PATH', async () => {
+  const { stableRepositoryLauncherContents, recordedRepositoryNodeDirectory } = await import('./repositoryLaunchers.js');
+  const runtime = { platform: 'linux' as const, nodeDirectory: '/approved/node/bin',
+    npmCliPath: "/approved/npm ' tools/bin/npm-cli.js" };
+  const launchers = stableRepositoryLauncherContents('0.2.177', runtime);
+  assert.ok(launchers.shell.includes("exec '/approved/node/bin/node' '/approved/npm '\\'' tools/bin/npm-cli.js' exec --yes -- @dharma-ai-labs/agent-fabric@0.2.177"));
+  assert.equal(recordedRepositoryNodeDirectory('0.2.177', launchers, 'linux'), runtime.nodeDirectory);
+  assert.equal(recordedRepositoryNodeDirectory('0.2.177', { ...launchers,
+    shell: launchers.shell.replace('npm-cli.js', 'unapproved.js') }, 'linux'), undefined);
+  for (const npmCliPath of ['relative/npm-cli.js', '/approved/npm\n-cli.js', '/approved/npm\0-cli.js']) {
+    assert.throws(() => stableRepositoryLauncherContents('0.2.177', { ...runtime, npmCliPath }));
+  }
+});
+
+test('npm resolution validates the selected protected package without falling back from invalid state', async () => {
+  const { resolveRepositoryNpmCli } = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-startup-npm-')));
+  const bin = join(root, 'bin'); await mkdir(bin);
+  const npmCliPath = join(bin, 'npm-cli.js');
+  await writeFile(npmCliPath, 'synthetic npm entry', {mode: 0o600});
+  await writeFile(join(root, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+  assert.equal(await resolveRepositoryNpmCli({npmExecPath: npmCliPath, searchPath: ''}), npmCliPath);
+  await assert.rejects(() => resolveRepositoryNpmCli({npmExecPath: join(bin, 'absent'), searchPath: ''}), /relay_startup_npm_unavailable/);
+  await writeFile(join(root, 'package.json'), '{"name":"not-npm"}', {mode: 0o600});
+  await assert.rejects(() => resolveRepositoryNpmCli({npmExecPath: npmCliPath, searchPath: ''}), /relay_startup_npm_unavailable/);
+});
+
+test('actual Linux launcher starts with no npm on PATH and preserves argument boundaries', {skip: process.platform !== 'linux'}, async () => {
+  const {stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers} = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), "dharma-npm ' startup-")));
+  const bin = join(root, 'bin'); await mkdir(bin, {mode: 0o700});
+  const npmCliPath = join(bin, 'npm-cli.js');
+  await writeFile(npmCliPath, 'process.stdout.write(JSON.stringify(process.argv.slice(2)))', {mode: 0o600});
+  await writeFile(join(root, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+  const runtime = {platform: 'linux' as const, nodeDirectory: dirname(process.execPath), npmCliPath};
+  const old = join(root, 'old.sh'), fixed = join(root, 'fixed.sh');
+  await writeFile(old, stableRepositoryLauncherContents('0.2.177', {platform: 'linux', nodeDirectory: runtime.nodeDirectory}).shell);
+  const launchers = stableRepositoryLauncherContents('0.2.177', runtime);
+  await writeFile(fixed, launchers.shell);
+  const run = promisify(execFile), env = {PATH: join(root, 'absent'), HOME: root};
+  await assert.rejects(run('/bin/sh', [old, 'status'], {env}), (error: unknown) => (error as {code: number}).code === 127);
+  const result = await run('/bin/sh', [fixed, 'status', 'space and ; $argument'], {env});
+  assert.deepEqual(JSON.parse(result.stdout), ['exec', '--yes', '--', '@dharma-ai-labs/agent-fabric@0.2.177', 'status', 'space and ; $argument']);
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.177', launchers,
+    {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.177', launchers,
+    {platform: 'linux', nodePath: process.execPath, npmCliPath: join(root, 'absent')}), false);
+  await chmod(npmCliPath, 0o666);
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.177', launchers,
+    {platform: 'linux', nodePath: process.execPath, npmCliPath}), false);
+});
 
 test('a recorded pinned directory is accepted only for the identical protected Node binary', async () => {
   const { stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers } = await import('./repositoryLaunchers.js');

@@ -24,6 +24,7 @@ async function fixture() {
     relaySupervisorProcessState: async () => 'stopped', relayProcessState: async () => 'stopped',
     readdir: async () => [], pidProcessState: async () => 'stopped',
     VERSION: '0.2.118', stableRepositoryLauncherContents: (version: string) => ({ version }),
+    resolveRepositoryNpmCli: async () => '/fixtures/npm/bin/npm-cli.js',
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => { calls.push('lock'); return operation(); },
     upgradeRelayRuntime: async (_input: unknown, hooks: { assertStopped(): Promise<void>; inspectStartup(): Promise<unknown> }) => {
       await hooks.assertStopped(); await hooks.inspectStartup(); return { state: 'planned' };
@@ -79,6 +80,23 @@ test('actual upgrade caller binds the reviewed recorded-runtime verifier without
   };
   await f.run()(f.flags);
   assert.deepEqual(f.calls, ['lock']);
+});
+
+test('actual Linux upgrade records npm while rollback does not require a replacement npm installation', async () => {
+  const f = await fixture();
+  let resolutions = 0;
+  f.deps.resolveRepositoryNpmCli = async () => {resolutions++; return '/fixtures/npm/bin/npm-cli.js';};
+  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {npmCliPath?: string}) => ({runtime});
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {npmCliPath?: string}}}) => {
+    assert.equal(hooks.launcherContents('0.2.118').runtime?.npmCliPath,
+      f.flags.has('rollback') ? undefined : '/fixtures/npm/bin/npm-cli.js');
+    return {state: 'planned'};
+  };
+  await f.run()(f.flags);
+  assert.equal(resolutions, 1);
+  f.flags.set('rollback', true);
+  await f.run()(f.flags);
+  assert.equal(resolutions, 1);
 });
 
 test('actual upgrade caller retains the selected profile and passes only verified rollback context to startup', async () => {

@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, resolveRepositoryNpmCli } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -1885,7 +1885,7 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 }
 
 export function stableRepositoryLauncherContents(version = VERSION,
-  runtime?: { platform: NodeJS.Platform; nodeDirectory: string }) {
+  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string }) {
   return repositoryLauncherContents(version, runtime);
 }
 
@@ -1894,8 +1894,11 @@ async function installStableRepositoryLauncher(workspace: string) {
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
   const shellPath = resolve(launcherRoot, 'dharma');
   const cmdPath = resolve(launcherRoot, 'dharma.cmd');
+  await scope?.assert();
+  const npmCliPath = process.platform === 'linux' ? await (scope
+    ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
   const contents = stableRepositoryLauncherContents(VERSION,
-    { platform: process.platform, nodeDirectory: dirname(process.execPath) });
+    { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}) });
   if (scope) {
     await scope.assert();
     if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
@@ -1956,6 +1959,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     await assertSessionsStopped();
   };
   return withRelayStartupMutation(async () => {
+    const npmCliPath = process.platform === 'linux' && !flags.has('rollback') ? await resolveRepositoryNpmCli() : undefined;
     const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
       dryRun: !flags.has('apply'), rollback: flags.has('rollback') }, {
@@ -1968,7 +1972,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         return current;
       },
       launcherContents: version => stableRepositoryLauncherContents(version,
-        { platform: process.platform, nodeDirectory: dirname(process.execPath) }),
+        { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
       verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
