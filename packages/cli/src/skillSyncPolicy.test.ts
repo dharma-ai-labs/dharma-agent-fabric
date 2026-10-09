@@ -32,6 +32,7 @@ async function fixture() {
     schema: 'dharma.device-config/v1', organizationId: 'org_test', deviceId: '22222222-2222-4222-8222-222222222222',
     hqUrl: 'https://example.invalid', relayUrl: 'wss://example.invalid', serverPublicKeyEd25519: publicKey,
     publicKeyEd25519: publicKey, enrolledAt: new Date().toISOString(),
+    deviceName: 'Synthetic policy test device', platform: 'linux',
   }));
   const statePath = join(home, 'registry', 'workspace-authorizations', 'workspace-test.json');
   await writeFile(statePath, JSON.stringify({ issuedAt: authorization.issuedAt, signature: authorization.signature }));

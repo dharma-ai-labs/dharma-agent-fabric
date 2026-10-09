@@ -7,6 +7,7 @@ import {
   validateActionDecisionAcknowledgementContract,
   verifyInitialServerSigningKeyset,
   verifyServerSigningKeysetUpdate,
+  validateDeviceConfigContract,
   type ActionDecisionAcknowledgement,
   type ProviderId,
   type TrustedServerSigningKeyset,
@@ -31,6 +32,8 @@ export interface DeviceConfig {
   serverSigningKeyset?: TrustedServerSigningKeyset;
   relayUrl: string;
   enrolledAt: string;
+  /** Local unattended reconnection preference, never an authority grant. Absent means manual. */
+  connectionMode?: 'manual' | 'resume';
   evidenceQuotaLedgerInitializedAt?: string;
   /** Public dispatch metadata only; server verifies exact signed device/source authority. */
   setupClaimReference?: string;
@@ -890,13 +893,25 @@ async function installKeysetWithFence(input: {
   return next;
 }
 
+export function parseDeviceConfig(bytes: string): DeviceConfig {
+  let value: unknown;
+  try {value = JSON.parse(bytes);} catch {throw new Error('connection_config_corrupt');}
+  if (!validateDeviceConfigContract(value)) throw new Error('connection_config_invalid');
+  const config = value as DeviceConfig;
+  try {
+    assertInstallationId(config.installationId);
+    return {...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl)};
+  } catch {throw new Error('connection_config_invalid');}
+}
+
 export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
-  const config = JSON.parse(await readFile(path, 'utf8')) as DeviceConfig;
-  if (config.schema !== 'dharma.device-config/v1' || !config.deviceId || !config.organizationId || !config.hqUrl) {
-    throw new Error('Device is not enrolled. Run dharma login.');
+  let bytes: string;
+  try {bytes = await readFile(path, 'utf8');}
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    throw new Error('connection_config_unreadable');
   }
-  assertInstallationId(config.installationId);
-  return { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) };
+  return parseDeviceConfig(bytes);
 }
 
 export class AgentFabricClient {
@@ -961,12 +976,7 @@ export class AgentFabricClient {
     const store = fence ? fence.store(safeStore) : safeStore;
     const config = readOnly ? (fence ? await fence.step(() => loadDeviceConfig(configPath)) : await loadDeviceConfig(configPath))
       : await recoverEnrollmentWithFence({configPath, store, hostFence: fence});
-    const identity = fence || readOnly ? await existingHostDeviceIdentity(config, store) : await loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-      store,
-    });
+    const identity = await existingHostDeviceIdentity(config, store);
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
     try {
       await loadDeviceEnrollmentAnchor({ config, store });

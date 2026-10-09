@@ -63,6 +63,8 @@ import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
 import { recoverLegacyRepositoryInstaller, selectLegacyInstallerRecoveryWorkspace } from './legacyInstallerRecovery.js';
 import { onboardingResumeCommand, selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInput.js';
+import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, automaticBootstrapResume,
+  connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -2962,6 +2964,11 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
 async function bootstrap(flags: Map<string, string | boolean>, hostScope?: BootstrapHostScope): Promise<Output> {
   const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation) : operation();
   await hostScope?.assert();
+  // Select returning identity before the grant parser. Explicit authority input
+  // keeps its existing, separately approved setup flow.
+  const automaticallyResuming = !['resume', 'grant', 'grant-prompt', 'setup-reference', 'replace-existing-enrollment'].some(key => flags.has(key))
+    && automaticBootstrapResume(flags, await step(() => readDeviceConfig()));
+  if (automaticallyResuming) {flags = new Map(flags); flags.set('resume', true);}
   const hqUrl = normalizeHqUrl(portalUrl(flags));
   const organizationId = required(flags, 'organization-id');
   const resuming = flags.has('resume');
@@ -3058,6 +3065,26 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   const enrollmentMismatch = Boolean(existing
     && (existing.organizationId !== organizationId || normalizeHqUrl(existing.hqUrl) !== hqUrl));
   if (resuming) assertBootstrapResumeAuthority({ flags, existing, organizationId, hqUrl });
+  if (automaticallyResuming) {
+    const registered = selectDeviceWorkspace(await step(() => registry()), {
+      organizationId, deviceId: existing!.deviceId, path: workspace,
+      repositoryRemoteHash: repositoryIdentity.fingerprint,
+    });
+    if (!registered || !registered.repositoryBindingId || !registered.endpointId) {
+      throw new Error('connection_new_scope_requires_approval');
+    }
+    const approvedPolicy = await step(() => loadVerifiedWorkspacePolicy(resolve(workspace, '.dharma', 'approved-policy.json'), registered.workspaceId));
+    if (approvedPolicy.organizationId !== organizationId || approvedPolicy.revision !== policyRevision
+      || !approvedPolicy.serverAuthorization) throw new Error('connection_new_scope_requires_approval');
+    verifyServerAuthorizedPolicy({policy: approvedPolicy, publicKeyEd25519: existing!.serverPublicKeyEd25519,
+      organizationId, workspaceId: registered.workspaceId});
+    if (flags.has('dry-run')) return {ok: true, stage: 'plan', effects: false, grantRedeemed: false,
+      enrollmentChanged: false, deviceId: existing!.deviceId, workspaceId: registered.workspaceId,
+      action: 'resume_approved_repository'};
+    await step(() => assertWorkspaceAuthorizationCurrent(registered.workspaceId, approvedPolicy.serverAuthorization!));
+    await step(() => resumeDeviceConnection({config: existing!, configPath: configPath(), statePath: protocolStatePath(),
+      installationPath: installationIdentityPath(), version: VERSION, hostScope}));
+  }
   if (enrollmentMismatch && !flags.has('replace-existing-enrollment')) {
     throw new Error('This DHARMA_HOME is enrolled to another organization or portal. Use a separate DHARMA_HOME.');
   }
@@ -3794,107 +3821,153 @@ export async function runAssistantCommand(
 }
 
 async function login(flags: Map<string, string | boolean>): Promise<Output> {
-  type PendingEnrollment = {
-    hqUrl: string;
-    organizationId: string;
-    installationId?: string;
-    name: string;
-    platform: DeviceConfig['platform'];
-    publicKeyEd25519: string;
-    deviceCode: string;
-    verificationUri: string;
-    browserCode: string;
-    expiresAt: string;
-  };
-  async function assertEnrollmentHomeCompatible(hqUrl: string, organizationId: string): Promise<void> {
-    let existing: DeviceConfig | null = null;
-    try {
-      existing = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new Error(`Existing device enrollment could not be validated: ${error instanceof Error ? error.message : String(error)}`);
-      }
+  const preference = connectionPreference(flags);
+  const existing = await readDeviceConfig();
+  if (existing) {
+    const hqUrl = normalizeHqUrl(portalUrl(flags, existing.hqUrl));
+    const organizationId = String(flags.get('organization-id') || existing.organizationId);
+    assertConnectionScope(existing, organizationId, hqUrl);
+    await assertInstallationContinuity(existing, installationIdentityPath());
+    if (flags.has('dry-run')) return {ok: true, status: 'plan', effects: false,
+      action: preference === 'manual' ? 'disable_unattended' : 'resume_existing_device', deviceId: existing.deviceId};
+    if (preference !== 'manual' && preference !== 'resume' && !flags.has('resume') && existing.connectionMode !== 'resume') {
+      throw new Error('connection_resume_opt_in_required: use login --resume once or login --unattended to opt in.');
     }
-    if (existing && existing.organizationId !== organizationId) {
-      throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
+    const result = preference === 'manual'
+      ? {ok: true, status: 'preference_saved', connected: false, deviceId: existing.deviceId, providerAuthentication: 'not_checked'}
+      : await resumeDeviceConnection({config: existing, configPath: configPath(), statePath: protocolStatePath(),
+        installationPath: installationIdentityPath(), version: VERSION, hostScope: currentBootstrapHostScope()});
+    if (preference && preference !== existing.connectionMode) {
+      const release = await acquirePidLock(`${configPath()}.connection.lock`, 10_000, 'connection_preference_busy');
+      try {
+        const current = await readDeviceConfig();
+        if (!current || canonicalize(current) !== canonicalize(existing)) throw new Error('connection_state_changed');
+        await saveDeviceConfig(configPath(), {...current, connectionMode: preference}, currentBootstrapHostScope());
+      } finally {await release();}
     }
-    if (existing && normalizeHqUrl(existing.hqUrl) !== normalizeHqUrl(hqUrl)) {
-      throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
-    }
-    let registered: Array<{ organizationId?: unknown }> = [];
-    try {
-      const parsed = JSON.parse(await readFile(workspaceRegistryPath(), 'utf8')) as unknown;
-      if (!Array.isArray(parsed)) throw new Error('workspace registry must be an array');
-      registered = parsed as Array<{ organizationId?: unknown }>;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new Error(`Existing workspace registry could not be validated: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    if (registered.some((workspace) => workspace.organizationId !== organizationId)) {
-      throw new Error('This DHARMA_HOME contains workspaces from a different organization. Use a separate DHARMA_HOME for each organization.');
-    }
+    return {...result, connectionMode: preference ?? existing.connectionMode ?? 'manual'};
   }
-  let pending: PendingEnrollment;
-  if (flags.has('resume')) {
-    pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;
-    await assertEnrollmentHomeCompatible(pending.hqUrl, pending.organizationId);
-  } else {
-    const hqUrl = normalizeHqUrl(portalUrl(flags));
-    const organizationId = required(flags, 'organization-id');
-    await assertEnrollmentHomeCompatible(hqUrl, organizationId);
-    const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
-    const devicePlatform = await platform();
-    const installationId = await loadOrCreateInstallationId();
-    const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
-    const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519 });
-    pending = {
-      hqUrl, organizationId, installationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
-      deviceCode: enrollment.deviceCode, verificationUri: enrollment.verificationUri,
-      browserCode: enrollment.browserCode,
-      expiresAt: new Date(Date.now() + enrollment.expiresInSeconds * 1_000).toISOString(),
+  if (flags.has('dry-run')) {
+    if (!flags.has('resume')) await assertUnenrolledHome([installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
+    return {ok: true, status: 'plan', effects: false, action: flags.has('resume') ? 'resume_pending_approval' : 'request_first_enrollment'};
+  }
+  const releaseEnrollment = await acquirePidLock(`${configPath()}.enrollment.lock`, 10_000, 'connection_enrollment_busy');
+  try {
+    // A competing first caller may have completed while this caller waited.
+    if (await readDeviceConfig()) return await login(flags);
+    if (!flags.has('resume')) await assertUnenrolledHome([installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
+    type PendingEnrollment = {
+      hqUrl: string;
+      organizationId: string;
+      installationId?: string;
+      name: string;
+      platform: DeviceConfig['platform'];
+      publicKeyEd25519: string;
+      deviceCode: string;
+      verificationUri: string;
+      browserCode: string;
+      expiresAt: string;
+      connectionMode?: DeviceConfig['connectionMode'];
     };
-    await mkdir(dharmaHome(), { recursive: true, mode: 0o700 });
-    await writeFile(pendingEnrollmentPath(), `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 });
-    const browserOpened = flags.has('no-browser') ? false : await openVerificationUri(pending.verificationUri);
-    if (flags.has('no-wait')) {
-      return { ok: true, status: 'pending', deviceCode: pending.deviceCode, verificationUri: pending.verificationUri, browserCode: pending.browserCode, browserOpened, expiresAt: pending.expiresAt };
-    }
-    process.stderr.write(`Approve this device in your browser: ${pending.verificationUri}\n`);
-  }
-  const deadline = Date.parse(pending.expiresAt);
-  while (Date.now() < deadline) {
-    const result = await pollEnrollment({ hqUrl: pending.hqUrl, deviceCode: pending.deviceCode });
-    if (result.status === 'approved') {
-      if (typeof result.deviceId !== 'string' || typeof result.relayUrl !== 'string' || typeof result.serverPublicKeyEd25519 !== 'string') {
-        throw new Error('Enrollment was approved but the relay or server signing key is not configured.');
+    async function assertEnrollmentHomeCompatible(hqUrl: string, organizationId: string): Promise<void> {
+      let existing: DeviceConfig | null = null;
+      try {
+        existing = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error(`Existing device enrollment could not be validated: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-      const config: DeviceConfig = {
-        schema: 'dharma.device-config/v1', hqUrl: pending.hqUrl, organizationId: pending.organizationId, deviceId: result.deviceId,
-        ...(pending.installationId ? { installationId: pending.installationId } : {}),
-        deviceName: pending.name, platform: pending.platform, publicKeyEd25519: pending.publicKeyEd25519,
-        serverPublicKeyEd25519: result.serverPublicKeyEd25519, relayUrl: result.relayUrl, enrolledAt: new Date().toISOString(),
+      if (existing && existing.organizationId !== organizationId) {
+        throw new Error('This DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME for each organization.');
+      }
+      if (existing && normalizeHqUrl(existing.hqUrl) !== normalizeHqUrl(hqUrl)) {
+        throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
+      }
+      let registered: Array<{ organizationId?: unknown }> = [];
+      try {
+        const parsed = JSON.parse(await readFile(workspaceRegistryPath(), 'utf8')) as unknown;
+        if (!Array.isArray(parsed)) throw new Error('workspace registry must be an array');
+        registered = parsed as Array<{ organizationId?: unknown }>;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error(`Existing workspace registry could not be validated: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (registered.some((workspace) => workspace.organizationId !== organizationId)) {
+        throw new Error('This DHARMA_HOME contains workspaces from a different organization. Use a separate DHARMA_HOME for each organization.');
+      }
+    }
+    let pending: PendingEnrollment;
+    if (flags.has('resume')) {
+      try {pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;}
+      catch {throw new Error('connection_pending_state_unavailable');}
+      if (!pending || typeof pending.hqUrl !== 'string' || typeof pending.organizationId !== 'string'
+        || typeof pending.deviceCode !== 'string' || typeof pending.verificationUri !== 'string'
+        || !Number.isFinite(Date.parse(pending.expiresAt))
+        || pending.connectionMode !== undefined && pending.connectionMode !== 'manual' && pending.connectionMode !== 'resume') {
+        throw new Error('connection_pending_state_invalid');
+      }
+      await assertEnrollmentHomeCompatible(pending.hqUrl, pending.organizationId);
+    } else {
+      const hqUrl = normalizeHqUrl(portalUrl(flags));
+      const organizationId = required(flags, 'organization-id');
+      await assertEnrollmentHomeCompatible(hqUrl, organizationId);
+      const name = String(flags.get('device-name') || `${process.env.USER || process.env.USERNAME || 'developer'} device`);
+      const devicePlatform = await platform();
+      const installationId = await loadOrCreateInstallationId();
+      const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
+      const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519, idempotencyKey: installationId });
+      pending = {
+        hqUrl, organizationId, installationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
+        deviceCode: enrollment.deviceCode, verificationUri: enrollment.verificationUri,
+        browserCode: enrollment.browserCode,
+        expiresAt: new Date(Date.now() + enrollment.expiresInSeconds * 1_000).toISOString(),
+        ...(preference ? {connectionMode: preference} : {}),
       };
-      if (result.serverSigningKeyset) {
-        const candidate = result.serverSigningKeyset as TrustedServerSigningKeyset;
-        const verification = verifyInitialServerSigningKeyset(
-          candidate,
-          createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: result.serverPublicKeyEd25519 }, format: 'jwk' }),
-          pending.organizationId,
-        );
-        if (!verification.ok) throw new Error(`Enrollment signing keyset was rejected: ${verification.reason}.`);
-        config.serverSigningKeyset = candidate;
+      await mkdir(dharmaHome(), { recursive: true, mode: 0o700 });
+      await writeFile(pendingEnrollmentPath(), `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 });
+      const browserOpened = flags.has('no-browser') ? false : await openVerificationUri(pending.verificationUri);
+      if (flags.has('no-wait')) {
+        return { ok: true, status: 'pending', deviceCode: pending.deviceCode, verificationUri: pending.verificationUri, browserCode: pending.browserCode, browserOpened, expiresAt: pending.expiresAt };
       }
-      await saveDeviceConfig(configPath(), config);
-      await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
-      await rm(pendingEnrollmentPath(), { force: true });
-      return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
+      process.stderr.write(`Approve this device in your browser: ${pending.verificationUri}\n`);
     }
-    if (result.status === 'denied' || result.status === 'expired') throw new Error(`Enrollment ${result.status}.`);
-    if (flags.has('no-wait')) return { ok: true, status: 'pending', verificationUri: pending.verificationUri, expiresAt: pending.expiresAt };
-    await new Promise((accept) => setTimeout(accept, 2_000));
-  }
-  throw new Error(`Enrollment timed out. Approve it at ${pending.verificationUri}`);
+    const deadline = Date.parse(pending.expiresAt);
+    while (Date.now() < deadline) {
+      const result = await pollEnrollment({ hqUrl: pending.hqUrl, deviceCode: pending.deviceCode });
+      if (result.status === 'approved') {
+        if (typeof result.deviceId !== 'string' || typeof result.relayUrl !== 'string' || typeof result.serverPublicKeyEd25519 !== 'string') {
+          throw new Error('Enrollment was approved but the relay or server signing key is not configured.');
+        }
+        const config: DeviceConfig = {
+          schema: 'dharma.device-config/v1', hqUrl: pending.hqUrl, organizationId: pending.organizationId, deviceId: result.deviceId,
+          ...(pending.installationId ? { installationId: pending.installationId } : {}),
+          deviceName: pending.name, platform: pending.platform, publicKeyEd25519: pending.publicKeyEd25519,
+          serverPublicKeyEd25519: result.serverPublicKeyEd25519, relayUrl: result.relayUrl, enrolledAt: new Date().toISOString(),
+          ...(preference ?? pending.connectionMode ? {connectionMode: preference ?? pending.connectionMode} : {}),
+        };
+        if (result.serverSigningKeyset) {
+          const candidate = result.serverSigningKeyset as TrustedServerSigningKeyset;
+          const verification = verifyInitialServerSigningKeyset(
+            candidate,
+            createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: result.serverPublicKeyEd25519 }, format: 'jwk' }),
+            pending.organizationId,
+          );
+          if (!verification.ok) throw new Error(`Enrollment signing keyset was rejected: ${verification.reason}.`);
+          config.serverSigningKeyset = candidate;
+        }
+        await saveDeviceConfig(configPath(), config);
+        await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
+        await rm(pendingEnrollmentPath(), { force: true });
+        return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
+      }
+      if (result.status === 'denied' || result.status === 'expired') throw new Error(`Enrollment ${result.status}.`);
+      if (flags.has('no-wait')) return { ok: true, status: 'pending', verificationUri: pending.verificationUri, expiresAt: pending.expiresAt };
+      await new Promise((accept) => setTimeout(accept, 2_000));
+    }
+    throw new Error(`Enrollment timed out. Approve it at ${pending.verificationUri}`);
+  } finally {await releaseEnrollment();}
 }
 
 type AcceptedTrajectoryHead = { revision: number; capsuleHash: string } | null;
@@ -5294,16 +5367,12 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
   const scope = currentBootstrapHostScope();
-  try {
-    const bytes = scope ? await scope.step(() => readFile(configPath(), 'utf8')) : await readFile(configPath(), 'utf8');
-    return JSON.parse(bytes) as DeviceConfig;
-  } catch {await scope?.assert(); return null;}
+  return scope ? scope.step(() => readExistingDeviceConfig(configPath())) : readExistingDeviceConfig(configPath());
 }
 
 async function enrolledDeviceIdentity(config: DeviceConfig, store?: SecureSecretStore) {
   const hostScope = currentBootstrapHostScope();
-  return hostScope ? loadDeviceIdentity({config, store, hostScope}) : loadOrCreateDeviceIdentity({
-    hqUrl: config.hqUrl, organizationId: config.organizationId, installationId: config.installationId, store});
+  return loadDeviceIdentity({config, store, hostScope});
 }
 
 async function activeSkillAuthorization(

@@ -529,8 +529,8 @@ test('login fails closed before replacing an enrollment from another organizatio
     deviceId: 'device_existing',
     deviceName: 'existing device',
     platform: 'linux',
-    publicKeyEd25519: 'existing-public-key',
-    serverPublicKeyEd25519: 'existing-server-key',
+    publicKeyEd25519: 'A'.repeat(43),
+    serverPublicKeyEd25519: 'B'.repeat(43),
     relayUrl: 'wss://relay.dharma-ai.io',
     enrolledAt: '2026-08-20T00:00:00.000Z',
   };
@@ -555,7 +555,7 @@ test('login fails closed before replacing an enrollment from another organizatio
     }]));
     await assert.rejects(
       () => run(['login', '--organization-id', 'org_other', '--portal-url', 'https://www.dharma-ai.io', '--no-browser', '--no-wait']),
-      /contains workspaces from a different organization/,
+      /connection_prior_state_requires_recovery/,
     );
     await assert.rejects(readFile(join(home, 'pending-enrollment.json'), 'utf8'), { code: 'ENOENT' });
   } finally {

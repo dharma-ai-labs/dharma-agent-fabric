@@ -165,6 +165,23 @@ async function anchorConfig(configPath: string, store: SecureSecretStore) {
   await saveDeviceEnrollmentAnchor({ config, store });
 }
 
+test('opening an enrolled relay with a missing private key cannot create a replacement key', async () => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-enrolled-key-missing-'));
+  const identity = await loadOrCreateDeviceIdentity({hqUrl: 'https://hq.example', organizationId: 'org_a', store});
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, {schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString()});
+  await anchorConfig(configPath, store);
+  await store.delete(identity.account);
+  const writes: string[] = [];
+  const missing: SecureSecretStore = {...store, put: async account => {writes.push(account);}};
+  await assert.rejects(AgentFabricClient.open({configPath, statePath, store: missing}), /relay_host_device_identity_unavailable/);
+  assert.deepEqual(writes, [], 'A missing enrolled key is recovery state, never first enrollment');
+});
+
 test('isolated read client preserves durable pending mutations and cannot replay or submit application writes', async () => {
   const store = memoryStore();
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-isolated-read-'));

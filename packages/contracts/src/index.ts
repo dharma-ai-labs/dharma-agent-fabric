@@ -10,6 +10,7 @@ import sessionQuestionSchema from './session-question.schema.json' with { type: 
 import serverSigningKeysetSchema from './server-signing-keyset.schema.json' with { type: 'json' };
 import taskActionSchema from './task-action.schema.json' with { type: 'json' };
 import taskEnvelopeSchema from './task-envelope.schema.json' with { type: 'json' };
+import deviceConfigSchema from './device-config.schema.json' with { type: 'json' };
 
 export * from './codex-task-observation.js';
 export * from './setupClaim.js';
@@ -22,6 +23,13 @@ const Ajv2020 = require('ajv/dist/2020').default as new (options: Record<string,
   getSchema(id: string): ((value: unknown) => boolean) & { errors?: ErrorObject[] | null } | undefined;
 };
 const addFormats = require('ajv-formats').default as (ajv: unknown) => void;
+
+const deviceConfigAjv = new Ajv2020({allErrors: true, strict: true});
+addFormats(deviceConfigAjv);
+const deviceConfigValidator = deviceConfigAjv.compile(deviceConfigSchema);
+export function validateDeviceConfigContract(value: unknown): boolean {
+  return deviceConfigValidator(value);
+}
 
 export type EvidenceState =
   | 'observed'

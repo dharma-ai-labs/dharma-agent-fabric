@@ -1,0 +1,144 @@
+import assert from 'node:assert/strict';
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import test, {type TestContext} from 'node:test';
+import {AgentFabricClient, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor,
+  type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
+import {automaticBootstrapResume, connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
+
+async function fixture(t: TestContext) {
+  const home = await mkdtemp(join(tmpdir(), 'fabric-connection-matrix-'));
+  t.after(() => rm(home, {recursive: true, force: true}));
+  const values = new Map<string, string>();
+  const writes: string[] = [], requests: Array<{path: string; headers: Headers; body: string}> = [];
+  const store: SecureSecretStore = {backend: 'windows-credential-manager',
+    get: async account => values.get(account) ?? null,
+    put: async (account, value) => {writes.push(account); values.set(account, value);},
+    delete: async account => {writes.push(account); values.delete(account);}};
+  const installationId = '11111111-1111-4111-8111-111111111111';
+  const identity = await loadOrCreateDeviceIdentity({hqUrl: 'https://hq.example', organizationId: 'org_fixture', installationId, store});
+  const config: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_fixture',
+    deviceId: '22222222-2222-4222-8222-222222222222', installationId, deviceName: 'Synthetic', platform: 'windows',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: '2026-10-01T00:00:00.000Z', connectionMode: 'resume'};
+  const configPath = join(home, 'device.json'), statePath = join(home, 'state.json'), installationPath = join(home, 'installation.json');
+  await saveDeviceConfig(configPath, config);
+  await saveDeviceEnrollmentAnchor({config, store});
+  await writeFile(installationPath, JSON.stringify({schema: 'dharma.installation-identity/v1', installationId}));
+  const state = JSON.stringify({schema: 'dharma.protocol-state/v1', sessionId: 'old', nextSequence: 7,
+    pending: {method: 'POST', pathname: '/api/v1/orgs/org_fixture/agent-fabric/tasks/poll', body: '{}', headers: {}}});
+  await writeFile(statePath, state);
+  writes.length = 0;
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    requests.push({path: new URL(String(url)).pathname, headers: new Headers(init?.headers), body: String(init?.body)});
+    return new Response(JSON.stringify({ok: true}), {status: 201});
+  };
+  const input = {config, configPath, statePath, installationPath, version: '0.1.177',
+    openClient: () => AgentFabricClient.open({configPath, statePath, store, fetcher, readOnly: true})};
+  return {home, values, writes, requests, store, config, configPath, statePath, installationPath, identity, state, fetcher, input};
+}
+
+test('restart, outage recovery, upgrade and concurrent probes reuse the original accepted identity', async t => {
+  const f = await fixture(t), bytes = await readFile(f.configPath, 'utf8');
+  const before = new Map(f.values);
+  const first = await resumeDeviceConnection(f.input);
+  const restarted = await resumeDeviceConnection({...f.input, version: '0.1.178'});
+  const concurrent = await Promise.all(Array.from({length: 8}, () => resumeDeviceConnection(f.input)));
+  for (const result of [first, restarted, ...concurrent]) {
+    assert.equal(result.deviceId, f.config.deviceId);
+    assert.equal(result.installationId, f.config.installationId);
+    assert.equal(result.providerAuthentication, 'not_checked');
+  }
+  assert.equal(restarted.relayVersion, '0.1.178');
+  assert.equal(f.requests.length, 10);
+  for (const request of f.requests) {
+    assert.ok(request.path.endsWith('/agent-fabric/sessions'));
+    assert.equal(request.headers.get('x-dharma-device-id'), f.config.deviceId);
+    assert.equal(JSON.parse(request.body).relayVersion.startsWith('0.1.'), true);
+  }
+  assert.equal(new Set(f.requests.map(request => request.headers.get('x-dharma-session-id'))).size, 10);
+  assert.deepEqual(f.writes, []);
+  assert.deepEqual(f.values, before);
+  assert.equal(await readFile(f.configPath, 'utf8'), bytes);
+  assert.equal(await readFile(f.statePath, 'utf8'), f.state, 'No sibling outbox replay or protocol write');
+});
+
+for (const state of ['missing', 'corrupt', 'locked'] as const) test(`${state} protected identity fails without enrollment or key writes`, async t => {
+  const f = await fixture(t);
+  const store: SecureSecretStore = {...f.store, get: state === 'locked'
+    ? async () => {throw Error('private-credential-detail');}
+    : async account => account === f.identity.account ? state === 'missing' ? null : '{broken' : f.store.get(account)};
+  await assert.rejects(resumeDeviceConnection({...f.input,
+    openClient: () => AgentFabricClient.open({configPath: f.configPath, statePath: f.statePath, store, fetcher: f.fetcher, readOnly: true})}),
+    state === 'locked' ? /connection_identity_store_unavailable/ : /connection_identity_requires_recovery/);
+  assert.deepEqual(f.writes, []);
+  assert.deepEqual(f.requests, []);
+  assert.equal(await readFile(f.statePath, 'utf8'), f.state);
+});
+
+for (const status of [401, 403, 409]) test(`current server authority rejection ${status} fails closed`, async t => {
+  const f = await fixture(t);
+  const rejected = async () => new Response(JSON.stringify({ok: false, error: {message: 'private-server-detail'}}), {status});
+  await assert.rejects(resumeDeviceConnection({...f.input,
+    openClient: () => AgentFabricClient.open({configPath: f.configPath, statePath: f.statePath, store: f.store, fetcher: rejected, readOnly: true})}),
+    /connection_authority_rejected/);
+  assert.deepEqual(f.writes, []);
+  assert.equal(await readFile(f.statePath, 'utf8'), f.state);
+});
+
+test('temporary network failure preserves identity and the same invocation succeeds after connectivity returns', async t => {
+  const f = await fixture(t), before = new Map(f.values);
+  await assert.rejects(resumeDeviceConnection({...f.input,
+    openClient: () => AgentFabricClient.open({configPath: f.configPath, statePath: f.statePath, store: f.store,
+      fetcher: async () => {throw Error('fetch failed: private endpoint detail');}, readOnly: true})}), /connection_transport_unavailable/);
+  const result = await resumeDeviceConnection(f.input);
+  assert.equal(result.deviceId, f.config.deviceId);
+  assert.deepEqual(f.values, before);
+  assert.deepEqual(f.writes, []);
+});
+
+test('mismatched installation and changed enrollment during probe cannot report resumed', async t => {
+  const f = await fixture(t);
+  await writeFile(f.installationPath, JSON.stringify({schema: 'dharma.installation-identity/v1', installationId: '33333333-3333-4333-8333-333333333333'}));
+  await assert.rejects(resumeDeviceConnection(f.input), /connection_installation_mismatch/);
+  assert.deepEqual(f.requests, []);
+  await writeFile(f.installationPath, JSON.stringify({schema: 'dharma.installation-identity/v1', installationId: f.config.installationId}));
+  await assert.rejects(resumeDeviceConnection({...f.input, openClient: async () => ({config: f.config,
+    openSession: async () => {await writeFile(f.configPath, JSON.stringify({...f.config, deviceId: 'changed'})); return {ok: true};}})}), /connection_state_changed/);
+  assert.deepEqual(f.writes, []);
+});
+
+test('expired or malformed cached signing trust cannot reconnect or refresh itself', async t => {
+  const f = await fixture(t);
+  const config = {...f.config, serverSigningKeyset: {schema: 'dharma.server-signing-keyset/v1',
+    organizationId: f.config.organizationId, generation: 1, keys: [], signedByKeyVersion: 'old',
+    issuedAt: '2026-10-01T00:00:00.000Z', expiresAt: '2026-10-02T00:00:00.000Z', signature: 'old'}} as DeviceConfig;
+  await assert.rejects(resumeDeviceConnection({...f.input, config}), /connection_trust_requires_recovery/);
+  assert.deepEqual(f.requests, []);
+  assert.deepEqual(f.writes, []);
+});
+
+test('only ENOENT means absent; empty, invalid-schema, invalid preference and malformed config remain failures', async t => {
+  const f = await fixture(t);
+  assert.equal(await readExistingDeviceConfig(join(f.home, 'absent.json')), null);
+  for (const [bytes, code] of [['', 'corrupt'], ['{broken', 'corrupt'], ['{}', 'invalid'],
+    [JSON.stringify({...f.config, connectionMode: 'forever'}), 'invalid']] as const) {
+    await writeFile(f.configPath, bytes);
+    await assert.rejects(readExistingDeviceConfig(f.configPath), new RegExp(`connection_config_${code}`));
+    assert.equal(await readFile(f.configPath, 'utf8'), bytes);
+  }
+});
+
+test('unattended is explicit opt-in, absent preference is manual, and new bootstrap scope requires approval', async t => {
+  const f = await fixture(t);
+  assert.equal(connectionPreference(new Map()), undefined);
+  assert.equal(connectionPreference(new Map([['unattended', true]])), 'resume');
+  assert.equal(connectionPreference(new Map([['no-unattended', true]])), 'manual');
+  assert.throws(() => connectionPreference(new Map([['unattended', 'true']])), /connection_options_invalid/);
+  assert.throws(() => connectionPreference(new Map([['unattended', true], ['no-unattended', true]])), /connection_options_invalid/);
+  assert.equal(automaticBootstrapResume(new Map([['complete', true]]), f.config), true);
+  assert.equal(automaticBootstrapResume(new Map([['complete', true]]), {...f.config, connectionMode: undefined}), false);
+  assert.equal(automaticBootstrapResume(new Map<string, string | boolean>([['setup-reference', 'reference'], ['complete', true]]), f.config), false);
+  assert.throws(() => automaticBootstrapResume(new Map<string, string | boolean>([['complete', true], ['join-repository-binding-id', 'new']]), f.config), /connection_new_scope_requires_approval/);
+});
