@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp, readFile, readdir, rename, rm, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -143,4 +143,25 @@ test('actual anchor restoration preserves bytes across concurrent processes with
     assert.equal(writes.length, 1);
     assert.equal(Object.values(JSON.parse(await readFile(state, 'utf8')))[0], writes[0]);
   } finally {await f.cleanup();}
+});
+
+test('abandoned or invalid recovery ownership preserves the mutex and primary lock', async () => {
+  for (const kind of ['file', 'directory'] as const) {
+    const f = await fixture(), recovery = f.path + '.recovery';
+    try {
+      await writeFile(f.path, '2147483647\n');
+      if (kind === 'directory') await mkdir(recovery);
+      const ownerPath = kind === 'file' ? recovery : resolve(recovery, 'owner');
+      await writeFile(ownerPath, '2147483647\n');
+      const before = await stat(recovery, {bigint: true});
+      await assert.rejects(acquireEnrollmentAnchorLock(f.path, undefined, 100),
+        kind === 'file' ? /connection_anchor_recovery_required/ : /connection_anchor_lock_invalid/);
+      assert.equal(await readFile(f.path, 'utf8'), '2147483647\n');
+      assert.equal(await readFile(ownerPath, 'utf8'), '2147483647\n');
+      const after = await stat(recovery, {bigint: true});
+      assert.equal(after.ino, before.ino);
+      assert.equal(after.dev, before.dev);
+      assert.deepEqual((await readdir(f.root)).sort(), ['anchor.lock', 'anchor.lock.recovery']);
+    } finally {await f.cleanup();}
+  }
 });

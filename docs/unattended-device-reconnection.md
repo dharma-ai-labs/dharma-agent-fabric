@@ -89,7 +89,11 @@ installation share an OS-user and protected-account process lock. The lock is
 independent of configured homes and temporary-directory overrides. Writers read
 fresh protected state while holding it; stale writers cannot replace an existing
 identity or roll back signing trust. Read-only probes do not create or migrate anchors.
-A busy, corrupt or inaccessible lock fails closed; a verified dead process can be recovered.
+Keep concurrent CLI callers on the same reviewed release. Mixed versions require
+serialized supported recovery. A busy, corrupt or inaccessible lock fails closed. A verified dead primary process
+can be recovered automatically. An abandoned recovery mutex is preserved and returns
+`connection_anchor_recovery_required`; device-bound support must verify it before
+any cleanup. Do not manually remove locks or retry enrollment to clear this state.
 For a legacy configuration without a keyset, a current approval's keyset must verify
 under the same original root and organization with valid dates and signature. It is
 checked as approval evidence and is not installed into the legacy configuration.
