@@ -44,17 +44,30 @@ test('every protected helper denies a withdrawn scope before its first store eff
 
 test('protected helper writes retain a partial effect but do not read it back after withdrawal', async () => {
   for (const [name, input] of operations.filter(([name]) => name.startsWith('save'))) {
-    const f = fixture(); f.after(() => f.allow(false));
+    const f = fixture(); f.after(() => {if (f.calls.at(-1) === 'put') f.allow(false);});
     await assert.rejects(api[name]!({...input, store: f.store, hostScope: f.scope}), {message: 'relay_host_scope_unavailable'}, name);
-    assert.deepEqual(f.calls, ['put'], name); assert.equal(f.values.size, 1, name);
+    const beforeWrite = name === 'saveDeviceEnrollmentAnchor' ? ['getFresh'] : [];
+    assert.deepEqual(f.calls, [...beforeWrite, 'put'], name);
+    assert.equal(f.values.size, 1, name);
   }
 });
 
-test('enrollment fallback cannot migrate after losing authority during its first read', async () => {
+test('enrollment fallback cannot migrate after losing authority during its first fresh read', async () => {
   const f = fixture(); f.after(() => f.allow(false));
   await assert.rejects(api.loadDeviceEnrollmentAnchor!({config, store: f.store, hostScope: f.scope}),
     {message: 'relay_host_scope_unavailable'});
-  assert.deepEqual(f.calls, ['get']);
+  assert.deepEqual(f.calls, ['getFresh']);
+});
+
+test('enrollment preservation reads cannot write after host scope withdrawal', async () => {
+  for (const requireAbsent of [false, true]) {
+    const f = fixture(); f.after(() => f.allow(false));
+    await assert.rejects(api.saveDeviceEnrollmentAnchor!({config, store: f.store, hostScope: f.scope, requireAbsent}),
+      {message: 'relay_host_scope_unavailable'});
+    assert.ok(f.calls.length > 0);
+    assert.ok(f.calls.every(call => call === 'getFresh'));
+    assert.equal(f.values.size, 0);
+  }
 });
 
 test('fresh skill reads neither expose a result nor fallback to another store effect after withdrawal', async () => {
