@@ -8,6 +8,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import { appendRecoveredWorkspace, resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { bootstrapGrantMode } from './privateGrantInput.js';
+import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
 import { assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost } from './bootstrapHostScope.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 
@@ -30,7 +31,8 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
   });
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${compiled.outputText}\n${name}`, {
-    assertBootstrapHostSource, currentBootstrapHostScope, parseNamedCodexSkillObservation, ...dependencies,
+    assertBootstrapHostSource, currentBootstrapHostScope, parseNamedCodexSkillObservation,
+    isIsolatedDeviceSession, runInIsolatedDeviceSession, ...dependencies,
   }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;

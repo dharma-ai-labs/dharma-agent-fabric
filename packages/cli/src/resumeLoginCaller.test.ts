@@ -170,12 +170,12 @@ test('two first-login callers serialize enrollment and the second reuses its app
     await writeFile(join(f.home, 'installation.json'), JSON.stringify({schema: 'dharma.installation-identity/v1', installationId: f.config.installationId}));
     return f.config.installationId;
   };
-  let lock = Promise.resolve();
-  f.deps.acquirePidLock = async () => {
+  const locks = new Map<string, Promise<void>>();
+  f.deps.acquirePidLock = async (path: string) => {
     let release!: () => void;
     const next = new Promise<void>(resolve => {release = resolve;});
-    const previous = lock;
-    lock = previous.then(() => next);
+    const previous = locks.get(path) ?? Promise.resolve();
+    locks.set(path, previous.then(() => next));
     await previous;
     return async () => release();
   };

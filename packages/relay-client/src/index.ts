@@ -929,14 +929,16 @@ function connectionPreferenceBinding(config: DeviceConfig) {
 export async function readDeviceConnectionPreference(path: string, config: DeviceConfig): Promise<DeviceConfig> {
   const binding = connectionPreferenceBinding(config);
   let bytes: string;
-  try {bytes = await readFile(`${path}.connection.${binding}.json`, 'utf8');}
+  try {bytes = await readFile(`${path}.connection.json`, 'utf8');}
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return config;
     throw new Error('connection_preference_unreadable');
   }
   let value: DeviceConnectionPreference;
   try {value = JSON.parse(bytes) as DeviceConnectionPreference;} catch {throw new Error('connection_preference_corrupt');}
-  if (!validateDeviceConnectionPreferenceContract(value) || value.binding !== binding) throw new Error('connection_preference_invalid');
+  if (!validateDeviceConnectionPreferenceContract(value)) throw new Error('connection_preference_invalid');
+  // A changed scope cannot inherit consent or resurrect an older inline opt-in.
+  if (value.binding !== binding) return {...config, connectionMode: 'manual'};
   return {...config, connectionMode: value.connectionMode};
 }
 
@@ -950,7 +952,7 @@ export async function saveDeviceConnectionPreference(input: {
   if (connectionPreferenceBinding(current) !== binding) throw new Error('connection_state_changed');
   const preference: DeviceConnectionPreference = {schema: 'dharma.device-connection-preference/v1',
     binding, connectionMode: input.connectionMode};
-  await atomicJson(`${input.configPath}.connection.${binding}.json`, preference, fence);
+  await atomicJson(`${input.configPath}.connection.json`, preference, fence);
 }
 
 export class AgentFabricClient {

@@ -3846,7 +3846,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
       ? {ok: true, status: 'preference_saved', connected: false, deviceId: existing.deviceId, providerAuthentication: 'not_checked'}
       : await resumeDeviceConnection({config: existing, configPath: configPath(), statePath: protocolStatePath(),
         installationPath: installationIdentityPath(), version: VERSION, hostScope: currentBootstrapHostScope()});
-    if (preference && preference !== existing.connectionMode) {
+    if (preference) {
       const release = await acquirePidLock(`${configPath()}.connection.lock`, 10_000, 'connection_preference_busy');
       try {
         const current = await readDeviceConfig();
@@ -3970,6 +3970,8 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         }
         await saveDeviceConfig(configPath(), config);
         await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
+        if (config.connectionMode) await saveDeviceConnectionPreference({configPath: configPath(), config,
+          connectionMode: config.connectionMode, hostScope: currentBootstrapHostScope()});
         await rm(pendingEnrollmentPath(), { force: true });
         return { ok: true, status: 'approved', deviceId: config.deviceId, organizationId: pending.organizationId, relayUrl: config.relayUrl };
       }

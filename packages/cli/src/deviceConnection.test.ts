@@ -249,14 +249,14 @@ test('bound preference survives trust metadata updates and fails closed on corru
   assert.equal(await readFile(f.configPath, 'utf8'), configBytes, 'Preference does not rewrite trust metadata');
   const file = (await readdir(f.home)).find(name => name.startsWith('device.json.connection.'))!;
   const path = join(f.home, file), saved = JSON.parse(await readFile(path, 'utf8'));
-  for (const [bytes, code] of [['{broken', 'corrupt'], [JSON.stringify({...saved, binding: '0'.repeat(64)}), 'invalid'],
+  for (const [bytes, code] of [['{broken', 'corrupt'],
     [JSON.stringify({...saved, connectionMode: 'forever'}), 'invalid']] as const) {
     await writeFile(path, bytes);
     await assert.rejects(readExistingDeviceConfig(f.configPath), new RegExp(`connection_preference_${code}`));
     assert.equal(await readFile(path, 'utf8'), bytes);
   }
   await writeFile(path, JSON.stringify(saved));
-  await saveDeviceConfig(f.configPath, {...f.config, deviceId: '33333333-3333-4333-8333-333333333333', connectionMode: undefined});
-  assert.equal((await loadDeviceConfig(f.configPath)).connectionMode, undefined, 'Another identity cannot reuse this preference');
+  await saveDeviceConfig(f.configPath, {...f.config, relayUrl: 'wss://changed.example'});
+  assert.equal((await loadDeviceConfig(f.configPath)).connectionMode, 'manual', 'Changed scope cannot resurrect an inline opt-in');
   assert.deepEqual(f.writes, []);
 });
