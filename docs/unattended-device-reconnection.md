@@ -1,4 +1,4 @@
-# Returning device connection (DIA-1264 candidate)
+# Returning device connection (candidate)
 
 This guide describes the unreleased resume-first change. Use a CLI release containing
 this change after its independent review and release gates pass. A successful login
@@ -77,7 +77,7 @@ outboxes. Provider authentication remains `not_checked` by a device login probe.
 ## Acceptance evidence still required
 
 Synthetic caller, protected-store and transport fixtures verify source behavior.
-They are not live admission receipts. DIA-1264 remains NOT_READY until independently
+They are not live admission receipts. This feature remains NOT_READY until independently
 reviewed code/checks, a compatible released runtime, version-aligned guide rehearsal,
 and a real bounded post-restart authorized task demonstrate the same accepted
 identities, signed readiness, actual work diff and test evidence. No “forever” promise
