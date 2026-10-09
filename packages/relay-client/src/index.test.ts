@@ -779,7 +779,7 @@ test('interrupted keyset installation recovers either verified write order witho
   await saveKeysetConfig({ configPath: anchorAheadPath, publicKeyEd25519: fixture.firstPublic, keyset: fixture.initial, now });
   await anchorConfig(anchorAheadPath, anchorAheadStore);
   const anchorAheadConfig = JSON.parse(await readFile(anchorAheadPath, 'utf8'));
-  await saveDeviceEnrollmentAnchor({ config: { ...anchorAheadConfig, serverSigningKeyset: fixture.rotated }, store: anchorAheadStore });
+  await saveDeviceEnrollmentAnchor({ config: { ...anchorAheadConfig, serverSigningKeyset: fixture.rotated }, store: anchorAheadStore, now });
   const recoveredDisk = await recoverDeviceEnrollmentConsistency({ configPath: anchorAheadPath, store: anchorAheadStore, now });
   assert.equal(recoveredDisk.serverSigningKeyset?.generation, 2);
   assert.equal(JSON.parse(await readFile(anchorAheadPath, 'utf8')).serverSigningKeyset.generation, 2);
@@ -1762,5 +1762,139 @@ test('missing-anchor restoration preserves current, legacy, corrupt, cached and 
       assert.deepEqual(values, before, state);
       assert.deepEqual(writes, [], state);
     }
+  }
+});
+
+test('concurrent missing-anchor restoration preserves the first protected anchor', async () => {
+  const config = {schema: 'dharma.device-config/v1' as const, hqUrl: 'https://race.example',
+    organizationId: 'org_race', deviceId: '33333333-3333-4333-8333-333333333333',
+    deviceName: 'Synthetic', platform: 'linux' as const, publicKeyEd25519: 'A'.repeat(43),
+    serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example',
+    enrolledAt: '2026-10-01T00:00:00.000Z'};
+  const values = new Map<string, string>(), writes: string[] = [];
+  const store: SecureSecretStore = {backend: 'linux-secret-service',
+    get: async account => values.get(account) ?? null,
+    getFresh: async account => values.get(account) ?? null,
+    put: async (account, value) => {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 40));
+      writes.push(value); values.set(account, value);
+    }, delete: async () => {throw Error('unexpected delete');}};
+  const outcomes = await Promise.allSettled(['A', 'C'].map(key =>
+    saveDeviceEnrollmentAnchor({config: {...config, publicKeyEd25519: key.repeat(43)}, store, requireAbsent: true})));
+  assert.equal(writes.length, 1, 'a second writer must never overwrite the first protected anchor');
+  assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
+  const rejected = outcomes.find(outcome => outcome.status === 'rejected');
+  assert.equal(rejected?.status === 'rejected' && rejected.reason.message, 'connection_existing_anchor_requires_recovery');
+  assert.equal([...values.values()][0], writes[0]);
+});
+
+test('keyset installation and restoration serialize in both writer orderings', async () => {
+  const now = new Date(), keys = keysetFixture(now);
+  for (const first of ['restore', 'install'] as const) {
+    const root = await mkdtemp(resolve(tmpdir(), 'fabric-anchor-order-')), configPath = resolve(root, 'device.json');
+    await saveKeysetConfig({configPath, publicKeyEd25519: keys.firstPublic, keyset: keys.initial, now});
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    const values = new Map<string, string>(), writes: string[] = [];
+    let pause = false, reached!: () => void, resume!: () => void;
+    const entered = new Promise<void>(resolvePromise => reached = resolvePromise);
+    const released = new Promise<void>(resolvePromise => resume = resolvePromise);
+    const store: SecureSecretStore = {backend: 'linux-secret-service',
+      get: async account => values.get(account) ?? null, getFresh: async account => values.get(account) ?? null,
+      put: async (account, value) => {
+        if (pause) {pause = false; reached(); await released;}
+        writes.push(value); values.set(account, value);
+      }, delete: async () => {throw Error('unexpected delete');}};
+    if (first === 'install') await saveDeviceEnrollmentAnchor({config, store, now});
+    writes.length = 0; pause = true;
+    const operation = first === 'restore'
+      ? saveDeviceEnrollmentAnchor({config, store, now, requireAbsent: true})
+      : installTrustedServerSigningKeyset({configPath, candidate: keys.rotated, store, now});
+    await entered;
+    const competing = first === 'restore'
+      ? installTrustedServerSigningKeyset({configPath, candidate: keys.rotated, store, now})
+      : saveDeviceEnrollmentAnchor({config: {...config, publicKeyEd25519: 'C'.repeat(43)}, store, now, requireAbsent: true});
+    resume();
+    const outcomes = await Promise.allSettled([operation, competing]);
+    assert.equal(outcomes[0]!.status, 'fulfilled');
+    if (first === 'restore') {
+      assert.equal(outcomes[1]!.status, 'fulfilled');
+      assert.equal(writes.length, 2);
+    } else {
+      assert.equal(outcomes[1]!.status, 'rejected');
+      assert.equal(writes.length, 1, 'a competing restoration must preserve the newly installed anchor bytes');
+    }
+    const final = [...values.values()][0]!;
+    assert.equal(final, writes.at(-1));
+    assert.equal(JSON.parse(final).serverSigningKeyset.generation, 2);
+    await assert.rejects(saveDeviceEnrollmentAnchor({config, store, now}), /connection_existing_anchor_requires_recovery/);
+    assert.equal([...values.values()][0], final, 'a stale ordinary writer must not roll back signing trust');
+  }
+});
+
+test('legacy migration and restoration preserve both protected slots in either ordering', async () => {
+  for (const first of ['migration', 'restoration'] as const) {
+    const config = {schema: 'dharma.device-config/v1' as const, hqUrl: 'https://legacy-race.example',
+      organizationId: 'org_legacy_race', deviceId: '44444444-4444-4444-8444-444444444444',
+      deviceName: 'Synthetic', platform: 'linux' as const, publicKeyEd25519: 'A'.repeat(43),
+      serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example',
+      enrolledAt: '2026-10-01T00:00:00.000Z'};
+    const slot = (parts: string[]) => 'device-enrollment-' + createHash('sha256').update(parts.join(':')).digest('hex').slice(0, 32);
+    const current = slot([config.hqUrl, config.organizationId, config.deviceId]), legacy = slot([config.hqUrl, config.organizationId]);
+    const serialized = JSON.stringify({schema: 'dharma.device-enrollment-anchor/v1', hqUrl: config.hqUrl,
+      organizationId: config.organizationId, deviceId: config.deviceId, devicePublicKeyEd25519: config.publicKeyEd25519,
+      serverPublicKeyEd25519: config.serverPublicKeyEd25519, enrolledAt: config.enrolledAt});
+    const values = new Map([[legacy, serialized]]), writes: string[] = [];
+    const store: SecureSecretStore = {backend: 'linux-secret-service',
+      get: async account => values.get(account) ?? null, getFresh: async account => values.get(account) ?? null,
+      put: async (account, value) => {await new Promise(resolvePromise => setTimeout(resolvePromise, 25)); writes.push(value); values.set(account, value);},
+      delete: async () => {throw Error('unexpected delete');}};
+    const migrate = () => loadDeviceEnrollmentAnchor({config, store});
+    const restore = () => saveDeviceEnrollmentAnchor({config: {...config, publicKeyEd25519: 'C'.repeat(43)}, store, requireAbsent: true});
+    const outcomes = await Promise.allSettled(first === 'migration' ? [migrate(), restore()] : [restore(), migrate()]);
+    assert.equal(outcomes[first === 'migration' ? 0 : 1]!.status, 'fulfilled');
+    assert.equal(outcomes[first === 'migration' ? 1 : 0]!.status, 'rejected');
+    assert.equal(values.get(legacy), serialized);
+    assert.equal(values.get(current), serialized);
+    assert.deepEqual(writes, [serialized]);
+    const snapshot = new Map(values);
+    await loadDeviceEnrollmentAnchor({config, store, readOnly: true});
+    assert.deepEqual(values, snapshot); assert.deepEqual(writes, [serialized]);
+  }
+});
+
+test('consistency recovery and restoration preserve verified anchor bytes in either ordering', async () => {
+  const now = new Date(), keys = keysetFixture(now);
+  for (const first of ['recovery', 'restoration'] as const) {
+    const root = await mkdtemp(resolve(tmpdir(), 'fabric-recovery-order-')), configPath = resolve(root, 'device.json');
+    await saveKeysetConfig({configPath, publicKeyEd25519: keys.firstPublic, keyset: keys.initial, now});
+    const config = JSON.parse(await readFile(configPath, 'utf8')), values = new Map<string, string>();
+    let pause = false, entered!: () => void, resume!: () => void;
+    const reached = new Promise<void>(resolvePromise => entered = resolvePromise);
+    const released = new Promise<void>(resolvePromise => resume = resolvePromise);
+    const writes: string[] = [];
+    const store: SecureSecretStore = {backend: 'linux-secret-service',
+      get: async account => values.get(account) ?? null, getFresh: async account => values.get(account) ?? null,
+      put: async (account, value) => {if (pause) {pause = false; entered(); await released;} writes.push(value); values.set(account, value);},
+      delete: async () => {throw Error('unexpected delete');}};
+    await saveDeviceEnrollmentAnchor({config, store, now});
+    await saveKeysetConfig({configPath, publicKeyEd25519: keys.firstPublic, keyset: keys.rotated, now});
+    const before = [...values.values()][0]!;
+    writes.length = 0;
+    const restore = () => saveDeviceEnrollmentAnchor({config: {...config, publicKeyEd25519: 'C'.repeat(43)}, store, requireAbsent: true});
+    if (first === 'restoration') {
+      await assert.rejects(restore(), /connection_existing_anchor_requires_recovery/);
+      assert.equal([...values.values()][0], before);
+      await recoverDeviceEnrollmentConsistency({configPath, store, now});
+    } else {
+      pause = true;
+      const recovery = recoverDeviceEnrollmentConsistency({configPath, store, now});
+      await reached;
+      const competing = assert.rejects(restore(), /connection_existing_anchor_requires_recovery/);
+      resume(); await Promise.all([recovery, competing]);
+    }
+    assert.equal(writes.length, 1);
+    const final = [...values.values()][0]!;
+    assert.equal(final, writes[0]);
+    assert.equal(JSON.parse(final).serverSigningKeyset.generation, 2);
   }
 });

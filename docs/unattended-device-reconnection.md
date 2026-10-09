@@ -84,6 +84,12 @@ then restores that exact enrollment anchor without replacing configuration or ke
 Both current and historical protected anchor slots must be verifiably absent before
 approval starts and again before restoration. Existing, mismatched, corrupt or
 unavailable protected state requires supported recovery and is preserved.
+Restoration, setup claims, legacy migration, consistency recovery and signing-keyset
+installation share an OS-user and protected-account process lock. The lock is
+independent of configured homes and temporary-directory overrides. Writers read
+fresh protected state while holding it; stale writers cannot replace an existing
+identity or roll back signing trust. Read-only probes do not create or migrate anchors.
+A busy, corrupt or inaccessible lock fails closed; a verified dead process can be recovered.
 For a legacy configuration without a keyset, a current approval's keyset must verify
 under the same original root and organization with valid dates and signature. It is
 checked as approval evidence and is not installed into the legacy configuration.

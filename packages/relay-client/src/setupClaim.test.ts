@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimSourceRegistration } from './setupClaim.js';
-import { loadOrganizationApiToken } from './index.js';
+import {loadOrganizationApiToken, saveDeviceEnrollmentAnchor, type DeviceConfig} from './index.js';
 import { sealSetupClaimCredential, signCanonicalObject, setupClaimSigningPayload, validateContract,
   type SetupClaimChallenge, type SealedSetupClaimCredential, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
@@ -632,4 +632,51 @@ test('owning host cancellation interrupts the official approval sleep without an
     assert.equal(await loadOrganizationApiToken({...scope, store: f.memory}), null);
     await assert.rejects(readFile(f.input.configPath), {code: 'ENOENT'});
   } finally {controller.abort(); await rm(f.root, {recursive: true, force: true});}
+});
+
+test('actual setup claim and missing-anchor restoration preserve the first anchor in both orderings', async () => {
+  for (const first of ['claim', 'restoration'] as const) {
+    let approved!: Record<string, unknown>, entered!: () => void, resume!: () => void;
+    const reached = new Promise<void>(resolvePromise => entered = resolvePromise);
+    const released = new Promise<void>(resolvePromise => resume = resolvePromise);
+    const f = await fixture(payload => approved = payload), writes: Array<{account: string; bytes: string}> = [];
+    const put = f.memory.put, fetcher = f.input.fetcher;
+    f.memory.put = async (account, bytes) => {
+      if (account.startsWith('device-enrollment-') && first === 'claim') {entered(); await released;}
+      await put.call(f.memory, account, bytes);
+      if (account.startsWith('device-enrollment-')) writes.push({account, bytes});
+    };
+    try {
+      const claim = claimSetupReference({...f.input, fetcher: async (url, init) => {
+        const response = await fetcher(url, init);
+        if (JSON.parse(String(init?.body)).action === 'finalize' && first === 'restoration') {entered(); await released;}
+        return response;
+      }});
+      // Install rejection observation before the controlled interleaving.
+      const claimOutcome = claim.then(value => ({ok: true as const, value}), error => ({ok: false as const, error}));
+      await reached;
+      const competing: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl: scope.hqUrl,
+        organizationId: scope.organizationId, deviceId: String(approved.deviceId), deviceName: 'Synthetic competitor',
+        platform: 'linux', publicKeyEd25519: 'C'.repeat(43), serverPublicKeyEd25519: String(approved.serverPublicKeyEd25519),
+        serverSigningKeyset: approved.serverSigningKeyset as TrustedServerSigningKeyset,
+        relayUrl: String(approved.relayUrl), enrolledAt: new Date(f.input.now()).toISOString()};
+      const restoration = saveDeviceEnrollmentAnchor({config: competing, store: f.memory, requireAbsent: true});
+      const restorationOutcome = restoration.then(value => ({ok: true as const, value}), error => ({ok: false as const, error}));
+      if (first === 'restoration') await restorationOutcome;
+      resume();
+      const [claimed, restored] = await Promise.all([claimOutcome, restorationOutcome]);
+      assert.equal(writes.length, 1);
+      assert.equal(await f.memory.get(writes[0]!.account), writes[0]!.bytes);
+      if (first === 'claim') {
+        assert.equal(claimed.ok, true); assert.equal(restored.ok, false);
+        if (!restored.ok) assert.equal(restored.error.message, 'connection_existing_anchor_requires_recovery');
+        assert.equal(JSON.parse(writes[0]!.bytes).devicePublicKeyEd25519, approved.publicKeyEd25519);
+      } else {
+        assert.equal(restored.ok, true); assert.equal(claimed.ok, false);
+        if (!claimed.ok) assert.equal(claimed.error.message, 'setup_claim_failed');
+        assert.equal(JSON.parse(writes[0]!.bytes).devicePublicKeyEd25519, competing.publicKeyEd25519);
+        await assert.rejects(readFile(f.input.configPath), {code: 'ENOENT'});
+      }
+    } finally {resume(); await rm(f.root, {recursive: true, force: true});}
+  }
 });
