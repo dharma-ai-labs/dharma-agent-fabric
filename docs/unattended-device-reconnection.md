@@ -7,6 +7,29 @@ older servers fail with `connection_authority_unconfirmed`. A successful login
 probe confirms current Fabric device and owner membership admission; it does not confirm provider login,
 repository readiness, service restart, or task execution.
 
+## Candidate release alignment
+
+These versions are prepared in this draft and remain unpublished:
+
+| Package | Candidate version | Required direct pins |
+| --- | --- | --- |
+| contracts | 0.1.15 | Existing third-party dependencies |
+| secure-store | 0.1.9 | No first-party dependencies |
+| relay-client | 0.2.32 | contracts 0.1.15; secure-store 0.1.9 |
+| CLI | 0.2.179 | contracts 0.1.15; secure-store 0.1.9; relay-client 0.2.32 |
+
+The CLI retains exact pins for the other unchanged runtime packages. The private
+lifecycle reference pins contracts 0.1.15 and remains private. Existing registry
+CLI 0.2.178 cannot receive this source through an unchanged immutable version.
+
+Qualification requires the reviewed membership-guarded server migration and
+route, exact deployed readback and these immutable package contents before client
+activation. Treat an unverified server merge path as potentially activating. No
+tag, publish workflow, registry release, installation or rehearsal is authorized
+by this candidate guide. A server rollback after client activation fails closed;
+coordinate rollback and preserve identities, signing trust and durable outboxes.
+Keep concurrent enrollment writers on the same reviewed release.
+
 ## Opt in and reconnect
 
 Complete the normal supported setup and exact recipient browser approval first.
