@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
-import { relayRuntimeObservationReady } from './relayRuntimeUpgrade.js';
-import { verifyRecordedRepositoryLaunchers } from './repositoryLaunchers.js';
+import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
+import { stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers } from './repositoryLaunchers.js';
 import { enableRelayAutostart } from './relayAutostart.js';
 
 async function fixture() {
@@ -24,6 +24,7 @@ async function fixture() {
     relaySupervisorProcessState: async () => 'stopped', relayProcessState: async () => 'stopped',
     readdir: async () => [], pidProcessState: async () => 'stopped',
     VERSION: '0.2.118', stableRepositoryLauncherContents: (version: string) => ({ version }),
+    resolveRepositoryNpmCli: async () => '/fixtures/npm/bin/npm-cli.js',
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => { calls.push('lock'); return operation(); },
     upgradeRelayRuntime: async (_input: unknown, hooks: { assertStopped(): Promise<void>; inspectStartup(): Promise<unknown> }) => {
       await hooks.assertStopped(); await hooks.inspectStartup(); return { state: 'planned' };
@@ -33,7 +34,7 @@ async function fixture() {
     stopRelayAutostart: async () => { calls.push('os_stop'); },
     relayStop: async () => { calls.push('relay_stop'); return { ok: true }; },
     validateContract: async () => ({ ok: true }),
-    fileURLToPath, URL, relayRuntimeObservationReady, verifyRecordedRepositoryLaunchers,
+    fileURLToPath, URL, relayRuntimeObservationReady, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers,
     setTimeout: (callback: () => void) => { callback(); return 0; },
     readFile: async (path: string) => {
       const name = basename(path);
@@ -80,6 +81,82 @@ test('actual upgrade caller binds the reviewed recorded-runtime verifier without
   await f.run()(f.flags);
   assert.deepEqual(f.calls, ['lock']);
 });
+
+test('actual Linux upgrade records npm while rollback does not require a replacement npm installation', async () => {
+  const f = await fixture();
+  let resolutions = 0;
+  f.deps.resolveRepositoryNpmCli = async () => {resolutions++; return '/fixtures/npm/bin/npm-cli.js';};
+  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {npmCliPath?: string}) => ({runtime});
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {npmCliPath?: string}}}) => {
+    assert.equal(hooks.launcherContents('0.2.118').runtime?.npmCliPath,
+      f.flags.has('rollback') ? undefined : '/fixtures/npm/bin/npm-cli.js');
+    return {state: 'planned'};
+  };
+  await f.run()(f.flags);
+  assert.equal(resolutions, 1);
+  f.flags.set('rollback', true);
+  await f.run()(f.flags);
+  assert.equal(resolutions, 1);
+});
+
+test('actual Linux caller and real runtime journal restore exact bytes on a fresh rollback without npm resolution',
+  {skip: process.platform !== 'linux'}, async t => {
+    for (const fixedPrevious of [false, true]) {
+    const f = await fixture(), root = await realpath(await mkdtemp(resolve(tmpdir(), 'dharma-real-upgrade-caller-')));
+    t.after(() => rm(root, {recursive: true, force: true}));
+    const workspace = resolve(root, 'repo'), home = resolve(root, 'profile'), bin = resolve(workspace, '.dharma', 'bin');
+    const npmRoot = resolve(root, 'npm'), npmCliPath = resolve(npmRoot, 'bin', 'npm-cli.js');
+    await mkdir(bin, {recursive: true}); await mkdir(dirname(npmCliPath), {recursive: true, mode: 0o700});
+    await writeFile(npmCliPath, 'synthetic npm', {mode: 0o600});
+    await writeFile(resolve(npmRoot, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+    const initialVersion = fixedPrevious ? '0.2.178' : '0.2.177', targetVersion = fixedPrevious ? '0.2.179' : '0.2.178';
+    const previousNpm = resolve(root, 'previous-npm', 'bin', 'npm-cli.js');
+    if (fixedPrevious) {
+      await mkdir(dirname(previousNpm), {recursive: true, mode: 0o700});
+      await writeFile(previousNpm, 'synthetic old npm', {mode: 0o600});
+      await writeFile(resolve(dirname(dirname(previousNpm)), 'package.json'),
+        JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+    }
+    const previous = stableRepositoryLauncherContents(initialVersion, {platform: 'linux', nodeDirectory: dirname(process.execPath),
+      ...(fixedPrevious ? {npmCliPath: previousNpm} : {})});
+    await writeFile(resolve(bin, 'dharma'), previous.shell); await writeFile(resolve(bin, 'dharma.cmd'), previous.windows);
+    const selected = {workspaceId: '22222222-2222-4222-8222-222222222222', organizationId: 'org_fixture',
+      deviceId: '11111111-1111-4111-8111-111111111111', path: workspace};
+    Object.assign(f.startup, {workspace, version: initialVersion, launcher: resolve(bin, 'dharma'),
+      policy: resolve(workspace, '.dharma', 'approved-policy.json')});
+    let running = false, resolutions = 0;
+    Object.assign(f.deps, {
+      process: {platform: 'linux', execPath: process.execPath, env: {}}, VERSION: targetVersion,
+      dharmaHome: () => home, registry: async () => [selected], selectDeviceWorkspace: () => selected,
+      readDeviceConfig: async () => ({organizationId: selected.organizationId, deviceId: selected.deviceId}),
+      stableRepositoryLauncherContents, upgradeRelayRuntime,
+      resolveRepositoryNpmCli: async () => {resolutions++; return npmCliPath;},
+      enableRelayAutostart: async (input: {version: string}) => {f.startup.version = input.version;},
+      startRelayAutostart: async () => {running = true;}, stopRelayAutostart: async () => {running = false;},
+      relayStop: async () => ({ok: true}),
+      relayProcessState: async () => running ? 'running' : 'stopped',
+      relaySupervisorProcessState: async () => running ? 'running' : 'stopped',
+      readFile: async (path: string) => {
+        if (basename(path) === 'supervisor.pid') return '123';
+        if (basename(path) === 'relay.pid') return '456';
+        if (basename(path) === 'supervisor-workspace.json') return JSON.stringify({pid: 123,
+          workspaceId: selected.workspaceId, version: f.startup.version});
+        if (basename(path) === 'last-successful-poll.json') return JSON.stringify({pid: 456,
+          workspaceId: selected.workspaceId, version: f.startup.version, at: new Date().toISOString()});
+        throw new Error('unexpected read');
+      },
+    });
+    f.flags.set('workspace', workspace); f.flags.set('apply', true);
+    assert.equal((await f.run()(f.flags) as {state: string}).state, 'completed');
+    assert.equal(resolutions, 1);
+    f.deps.resolveRepositoryNpmCli = async () => {throw new Error('replacement npm must not be resolved');};
+    f.flags.set('rollback', true);
+    assert.equal((await f.run()(f.flags) as {state: string}).state, 'rolled_back');
+    assert.equal(await readFile(resolve(bin, 'dharma'), 'utf8'), previous.shell);
+    assert.equal(await readFile(resolve(bin, 'dharma.cmd'), 'utf8'), previous.windows);
+    assert.equal(f.startup.version, initialVersion);
+    }
+  });
 
 test('actual upgrade caller retains the selected profile and passes only verified rollback context to startup', async () => {
   const f = await fixture();

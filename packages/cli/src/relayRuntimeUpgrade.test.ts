@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -79,6 +80,85 @@ test('runtime rollback restores the exact legacy Linux unit and receipt after ad
   assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, deps)).state, 'rolled_back');
   assert.equal(await readFile(receiptPath, 'utf8'), receipt);
   assert.equal(await readFile(unitPath, 'utf8'), unit);
+});
+
+test('v3 journal freezes exact installed launchers and restores either interrupted half without a replacement factory', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  for (const half of ['none', 'shell', 'windows'] as const) {
+    const f = await fixture(), next = contents(f.input.version);
+    const deps = {...f.deps, recordNextLaunchers: true,
+      verifyRecoveryLaunchers: async (version: string, launchers: typeof next) =>
+        version === f.input.version && launchers.shell === next.shell && launchers.windows === next.windows};
+    assert.equal((await upgradeRelayRuntime(f.input, deps)).state, 'completed');
+    const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+    const journal = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(journal.schema, 'dharma.local-relay-upgrade-journal/v3');
+    assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+      'https://schemas.dharma-ai.io/local-relay-upgrade-journal/v3', journal)).ok, true);
+    if (half !== 'none') {
+      await writeFile(join(f.input.workspace, '.dharma', 'bin', half === 'shell' ? 'dharma' : 'dharma.cmd'), f.old[half]);
+      await writeFile(path, JSON.stringify({...journal, state: 'installed'}), {mode: 0o600});
+    }
+    const rollback = await upgradeRelayRuntime({...f.input, rollback: true}, {...deps,
+      launcherContents: (version: string) => {
+        if (version === f.input.version) throw new Error('replacement factory must not run');
+        return contents(version);
+      }});
+    assert.equal(rollback.state, 'rolled_back');
+    assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), f.old.shell);
+    assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma.cmd'), 'utf8'), f.old.windows);
+  }
+});
+
+test('v3 recovery rejects altered next bytes/hash, foreign current bytes and missing verifier before owned controls', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  for (const mode of ['next', 'rehash', 'hash', 'current', 'verifier', 'foreign', 'extra']) {
+    const f = await fixture(), next = contents(f.input.version), effects: string[] = [];
+    const deps = {...f.deps, recordNextLaunchers: true,
+      verifyRecoveryLaunchers: async (version: string, launchers: typeof next) =>
+        version === f.input.version && launchers.shell === next.shell && launchers.windows === next.windows};
+    await upgradeRelayRuntime(f.input, deps);
+    const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+    const journal = JSON.parse(await readFile(path, 'utf8'));
+    if (['next', 'rehash'].includes(mode)) journal.next.shell += '# foreign command\n';
+    if (mode === 'rehash') journal.nextHash = `sha256:${createHash('sha256').update(JSON.stringify(journal.next)).digest('hex')}`;
+    if (mode === 'hash') journal.nextHash = `sha256:${'0'.repeat(64)}`;
+    if (mode === 'foreign') journal.organizationId = 'org_other';
+    if (mode === 'extra') journal.environment = {TOKEN: 'SYNTHETIC_NOT_ALLOWED'};
+    await writeFile(path, JSON.stringify(journal), {mode: 0o600});
+    const launcher = join(f.input.workspace, '.dharma', 'bin', 'dharma');
+    if (mode === 'current') await writeFile(launcher, `${next.shell}# foreign\n`);
+    const before = await readFile(path, 'utf8'), beforeLauncher = await readFile(launcher, 'utf8');
+    await assert.rejects(upgradeRelayRuntime({...f.input, rollback: true}, {...deps,
+      ...(mode === 'verifier' ? {verifyRecoveryLaunchers: undefined} : {}),
+      stop: async () => {effects.push('stop');}, configureStartup: async () => {effects.push('configure');}}),
+    /journal_invalid|launcher_conflict/);
+    assert.deepEqual(effects, []); assert.equal(await readFile(path, 'utf8'), before);
+    assert.equal(await readFile(launcher, 'utf8'), beforeLauncher);
+  }
+});
+
+test('invalid next renderer is rejected before any new journal or launcher write', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const f = await fixture();
+  await assert.rejects(upgradeRelayRuntime(f.input, {...f.deps, recordNextLaunchers: true,
+    verifyRecoveryLaunchers: async () => false}), /launcher_conflict/);
+  await assert.rejects(readFile(join(f.input.home, 'relay', 'runtime-upgrade.json')), /ENOENT/);
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), f.old.shell);
+});
+
+test('v3 POSIX recovery rejects a non-private journal before stopping the runtime', {skip: process.platform === 'win32'}, async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const f = await fixture(), next = contents(f.input.version);
+  const deps = {...f.deps, recordNextLaunchers: true,
+    verifyRecoveryLaunchers: async (_version: string, value: typeof next) => value.shell === next.shell && value.windows === next.windows};
+  await upgradeRelayRuntime(f.input, deps);
+  const path = join(f.input.home, 'relay', 'runtime-upgrade.json');
+  await chmod(path, 0o644);
+  let stopped = false;
+  await assert.rejects(upgradeRelayRuntime({...f.input, rollback: true}, {...deps,
+    stop: async () => {stopped = true;}}), /journal_invalid/);
+  assert.equal(stopped, false);
 });
 
 test('legacy upgrade journals remain recoverable without inventing a provider context', async () => {

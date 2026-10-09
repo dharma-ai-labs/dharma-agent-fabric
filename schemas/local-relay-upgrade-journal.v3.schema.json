@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v3",
+  "title": "Owned local runtime upgrade journal with exact reversible launcher bytes",
+  "description": "Private local recovery metadata, not server authorization. Runtime validates protected storage, scoped identity and strict managed launcher/runtime shape before accepting previous or next bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "upgradeId", "organizationId", "deviceId", "workspaceId", "workspace", "previousVersion", "version", "startedAt", "updatedAt", "state", "previous", "previousHash", "previousCodexHome", "next", "nextHash"],
+  "properties": {
+    "schema": {"const": "dharma.local-relay-upgrade-journal/v3"},
+    "upgradeId": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/upgradeId"},
+    "organizationId": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/organizationId"},
+    "deviceId": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/deviceId"},
+    "workspaceId": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/workspaceId"},
+    "workspace": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/workspace"},
+    "previousVersion": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/previousVersion"},
+    "version": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/version"},
+    "startedAt": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/startedAt"},
+    "updatedAt": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/updatedAt"},
+    "state": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/state"},
+    "previous": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/previous"},
+    "previousHash": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/previousHash"},
+    "previousCodexHome": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/previousCodexHome"},
+    "next": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/previous"},
+    "nextHash": {"$ref": "https://schemas.dharma-ai.io/local-relay-upgrade-journal/v2#/properties/previousHash"}
+  }
+}
