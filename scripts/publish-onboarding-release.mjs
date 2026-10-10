@@ -6,14 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '68d61b4b8f5b96cc57e2df2d5acfd856282020ec';
-const tree = 'd80a643d2eedcacab3ffd0612fd9c8ee9af82389';
+const source = '7adee4e339e65a5b2340a02159002ac7294dac37';
+const tree = '06e98ae37ac6b83ce4d6f32f3b40fcd720134e95';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.15' },
-  { workspace: 'packages/secure-store', name: '@dharma-ai-labs/agent-fabric-secure-store', version: '0.1.9' },
-  { workspace: 'packages/relay-client', name: '@dharma-ai-labs/agent-fabric-relay-client', version: '0.2.32' },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.179' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.180' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -60,9 +57,11 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.equal(snapshot.lifecycleLauncher,
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
-  const allowed = new Set(['.github/workflows/publish.yml', 'package.json',
-    'scripts/publish-workflow.test.mjs', 'scripts/publish-onboarding-release.mjs',
-    'scripts/publish-onboarding-release.test.mjs', 'packages/lifecycle-adapter/bin/run.mjs']);
+  const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
+    'packages/cli/src/codexBoundSession.ts', 'packages/cli/src/codexInboxSession.ts',
+    'packages/cli/src/codexBoundSession.test.ts', 'docs/unattended-device-reconnection.md',
+    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
+    'scripts/publish-workflow.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   const baseline = structuredClone(snapshot.baselineManifest);
