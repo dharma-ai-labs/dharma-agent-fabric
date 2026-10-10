@@ -154,7 +154,7 @@ async function protectedCodexDirectory(directory: string) {
 export async function resolveRepositoryCodexDirectory(options: {searchPath?: string; platform?: NodeJS.Platform} = {}) {
   if ((options.platform ?? process.platform) !== 'linux') return undefined;
   for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
-    if (!directory || !posix.isAbsolute(directory)) continue;
+    if (!directory) continue;
     try {await lstat(join(directory, 'codex'));} catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new Error('relay_startup_codex_path_invalid');

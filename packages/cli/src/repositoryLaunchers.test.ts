@@ -3,7 +3,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import test from 'node:test';
 
 test('Linux launcher retains the selected Codex directory without copying the ambient environment', async () => {
@@ -45,6 +45,8 @@ test('Codex startup resolution is protected and does not skip an unsafe first ex
   await symlink(binary, join(unsafe, 'codex'));
   assert.equal(await resolveRepositoryCodexDirectory({searchPath: join(root, 'absent') + ':' + good}), good);
   assert.equal(await resolveRepositoryCodexDirectory({searchPath: ''}), undefined);
+  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: relative(process.cwd(), good) + ':' + good}),
+    /relay_startup_codex_path_invalid/);
   await chmod(unsafe, 0o777);
   await assert.rejects(resolveRepositoryCodexDirectory({searchPath: unsafe + ':' + good}), /relay_startup_codex_path_invalid/);
   await chmod(binary, 0o722);
