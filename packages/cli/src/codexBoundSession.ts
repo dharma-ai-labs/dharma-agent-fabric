@@ -14,6 +14,8 @@ interface CodexBoundSessionInput {
   localWriteRoots?: string[];
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   localToolHandler?: CodexToolHandler;
+  // Only the inbox may use the held owner to report failure before closing it.
+  retainTimedOutQuestion?: boolean;
 }
 
 export async function openCodexBoundSession(input: CodexBoundSessionInput) {
@@ -99,9 +101,10 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
         if (closing) throw new Error('codex_session_closed');
         return result;
       } catch (error) {
-        // Retain a completed rejected turn only until the inbox records its failure.
+        // Retain only the authority needed for the inbox's bounded failure report.
         const reason = error instanceof Error ? error.message : '';
-        if (!(error instanceof CodexSessionAnswerTooLargeError)
+        if (!(input.retainTimedOutQuestion && reason === 'codex_session_turn_timeout')
+          && !(error instanceof CodexSessionAnswerTooLargeError)
           && !['codex_session_budget_unavailable', 'replayed'].includes(reason)) {
           try { await close(); }
           catch { /* Keep the fence and disable dispatch until shutdown is confirmed. */ }

@@ -26,7 +26,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
   };
   let current: SessionQuestion | null = null;
   let channel: ReturnType<typeof createProviderSessionChannel>;
-  const owner = await openCodexBoundSession({ ...input,
+  const owner = await openCodexBoundSession({ ...input, retainTimedOutQuestion: true,
     localToolHandler: input.authorizeLocalTools ? createCodexPeerToolHandler({ channel: () => channel,
       maximumProviderCostCents: binding.maximumProviderCostCents, authorize: input.authorizeLocalTools,
       authorizeContent: content => input.authorizeContent(content, 'answer') }) : undefined,
@@ -100,6 +100,26 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
         let result: Awaited<ReturnType<typeof owner.runQuestion>>;
         try { result = await owner.runQuestion({ question: offer }); }
         catch (error) {
+          if (error instanceof Error && error.message === 'codex_session_turn_timeout') {
+            const failureEvidenceHash = await input.vault.putBlob(Buffer.from(canonicalize({
+              schema: 'dharma.provider-session-failed-turn/v1', organizationId: scope.organizationId,
+              repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId,
+              deviceId: scope.deviceId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
+              bindingId: scope.bindingId, questionId: offer.questionId, taskId: offer.taskId,
+              code: 'codex_session_turn_timeout',
+            }), 'utf8'), 'provider-session-failed-turn');
+            let receipt: Awaited<ReturnType<typeof channel.reply>> | undefined;
+            try {
+              receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
+                outcome: 'failed', answer: '', failureCode: 'execution_failed' });
+            } catch { /* Unconfirmed delivery is not a successful failure receipt. */ }
+            let providerShutdownConfirmed = false;
+            try { providerShutdownConfirmed = (await close()).providerClosed; }
+            catch { /* Preserve the owner fence when child termination is unconfirmed. */ }
+            return receipt ? { ...receipt, failureEvidenceHash, providerShutdownConfirmed }
+              : { state: 'failure_reply_pending' as const, questionId: offer.questionId,
+                taskId: offer.taskId, failureEvidenceHash, providerShutdownConfirmed };
+          }
           if (error instanceof CodexSessionAnswerTooLargeError) {
             // Rejected content stays encrypted locally, outside the answered-reply queue.
             const rejectedCompletionHash = await input.vault.putBlob(Buffer.from(canonicalize({
