@@ -10,6 +10,10 @@ on:
         description: Publish only contracts, secure-store, relay-client and CLI from reviewed main
         type: boolean
         default: false
+      expected_head:
+        description: Exact reviewed main SHA (required for onboarding-only publication)
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -23,6 +27,8 @@ jobs:
     environment: npm
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22.22.0"
@@ -47,7 +53,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
+          if [ "$ONBOARDING_ONLY" = "true" ]; then
+            npm run publish:onboarding -- --expected-head "$EXPECTED_HEAD"
+            exit 0
+          fi
+
           package_exists() {
             local package="$1"
             local attempt
@@ -74,10 +86,6 @@ jobs:
             packages/sdk
             packages/cli
           )
-          if [ "$ONBOARDING_ONLY" = "true" ]; then
-            workspaces=(packages/contracts packages/secure-store packages/relay-client packages/cli)
-          fi
-
           for workspace in "${workspaces[@]}"
           do
             name=$(node -p "require('./${workspace}/package.json').name")

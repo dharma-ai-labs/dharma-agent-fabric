@@ -16,11 +16,8 @@ test('bounded onboarding publication is explicit and opt-in', () => {
 
 test('bounded mode selects only the four onboarding packages in dependency order', () => {
   assert.equal(step.env.ONBOARDING_ONLY, "${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}");
-  const match = step.run.match(/if \[ "\$ONBOARDING_ONLY" = "true" \]; then\s+workspaces=\(([\s\S]*?)\)\s+fi/);
-  assert.ok(match, 'fixed bounded workspace selection');
-  assert.deepEqual(match[1].trim().split(/\s+/), [
-    'packages/contracts', 'packages/secure-store', 'packages/relay-client', 'packages/cli',
-  ]);
+  assert.equal(step.env.EXPECTED_HEAD, '${{ inputs.expected_head }}');
+  assert.match(step.run, /if \[ "\$ONBOARDING_ONLY" = "true" \]; then\s+npm run publish:onboarding -- --expected-head "\$EXPECTED_HEAD"\s+exit 0\s+fi/);
   assert.match(step.run, /for workspace in "\$\{workspaces\[@\]\}"/);
 });
 
