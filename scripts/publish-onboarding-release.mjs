@@ -57,9 +57,12 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.equal(snapshot.ref, 'refs/heads/main', 'main-only publication');
   assert.equal(snapshot.tree, tree, 'approved source tree mismatch');
   assert.equal(snapshot.dirty, '', 'tracked source is dirty');
+  assert.equal(snapshot.lifecycleLauncher,
+    '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
+    'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['.github/workflows/publish.yml', 'package.json',
     'scripts/publish-workflow.test.mjs', 'scripts/publish-onboarding-release.mjs',
-    'scripts/publish-onboarding-release.test.mjs']);
+    'scripts/publish-onboarding-release.test.mjs', 'packages/lifecycle-adapter/bin/run.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   const baseline = structuredClone(snapshot.baselineManifest);
@@ -108,6 +111,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
       assertSourceSnapshot(expected, {
         head: git('rev-parse', 'HEAD'), ref: process.env.GITHUB_REF,
         tree: git('rev-parse', `${source}^{tree}`), dirty: git('status', '--porcelain', '--untracked-files=no'),
+        lifecycleLauncher: git('ls-tree', 'HEAD', 'packages/lifecycle-adapter/bin/run.mjs'),
         changed: git('diff', '--name-only', source, 'HEAD').split('\n').filter(Boolean),
         untracked: git('ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean),
         baselineManifest: JSON.parse(git('show', `${source}:package.json`)),
