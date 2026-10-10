@@ -1,12 +1,17 @@
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import {userInfo} from 'node:os';
+import {acquireEnrollmentAnchorLock} from './enrollmentAnchorLock.js';
 import {
   canonicalize,
   refreshActionDecisionAcknowledgement,
   validateActionDecisionAcknowledgementContract,
   verifyInitialServerSigningKeyset,
   verifyServerSigningKeysetUpdate,
+  validateDeviceConfigContract,
+  validateDeviceConnectionPreferenceContract,
+  type DeviceConnectionPreference,
   type ActionDecisionAcknowledgement,
   type ProviderId,
   type TrustedServerSigningKeyset,
@@ -31,6 +36,8 @@ export interface DeviceConfig {
   serverSigningKeyset?: TrustedServerSigningKeyset;
   relayUrl: string;
   enrolledAt: string;
+  /** Local unattended reconnection preference, never an authority grant. Absent means manual. */
+  connectionMode?: 'manual' | 'resume';
   evidenceQuotaLedgerInitializedAt?: string;
   /** Public dispatch metadata only; server verifies exact signed device/source authority. */
   setupClaimReference?: string;
@@ -311,17 +318,103 @@ export interface ActiveSkillAuthorizationAnchor {
   expiresAt: string | null;
 }
 
+// The namespace follows the OS user and protected legacy account, rather than
+// DHARMA_HOME/configPath. Different configured homes share the same anchor lock.
+async function withEnrollmentAnchorLock<T>(config: DeviceConfig, fence: HostOperationFence | undefined,
+  operation: () => Promise<T>): Promise<T> {
+  const identity = userInfo();
+  const user = createHash('sha256').update(identity.homedir + ':' + identity.username).digest('hex').slice(0, 32);
+  const account = legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId);
+  // Use a stable OS-user path even when callers override HOME, TMPDIR or DHARMA_HOME.
+  const temporaryRoot = process.platform === 'win32' ? resolve(identity.homedir, 'AppData', 'Local', 'Temp') : '/tmp';
+  const path = resolve(temporaryRoot, `dharma-enrollment-locks-${user}`, `${account}.lock`);
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await acquireEnrollmentAnchorLock(path, fence);
+    return fence ? await fence.step(operation) : await operation();
+  } finally {await release?.();}
+}
+
+async function freshAnchorValue(store: SecureSecretStore, account: string): Promise<string | null> {
+  return (store.getFresh ?? store.get).call(store, account);
+}
+
+async function writeEnrollmentAnchor(store: SecureSecretStore, config: DeviceConfig, secret: string,
+  expectedCurrent: string | null, expectedLegacy: string | null): Promise<void> {
+  const account = enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId);
+  if (store.backend === 'windows-credential-manager') {
+    if (!store.compareAndPutEnrollmentAnchor) throw Error('connection_anchor_store_unavailable');
+    const written = await store.compareAndPutEnrollmentAnchor({account, secret, expectedCurrent, expectedLegacy,
+      legacyAccount: legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)});
+    if (!written) throw Error('connection_existing_anchor_requires_recovery');
+  } else {await store.put(account, secret);}
+}
+
+/** Missing-anchor recovery must prove both current and historical slots absent. */
+export async function assertDeviceEnrollmentAnchorAbsent(input: {
+  config: DeviceConfig;
+  store?: SecureSecretStore;
+  hostScope?: HostOperationScope;
+}): Promise<void> {
+  const config = input.config;
+  let values: Array<string | null>;
+  try {
+    const store = await protectedStore(input.store, input.hostScope);
+    const get = (account: string) => store.getFresh ? store.getFresh(account) : store.get(account);
+    values = await Promise.all([
+      get(enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId)),
+      get(legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)),
+    ]);
+  } catch {throw new Error('connection_anchor_store_unavailable');}
+  if (values.some(value => value !== null)) throw new Error('connection_existing_anchor_requires_recovery');
+}
+
 export async function saveDeviceEnrollmentAnchor(input: {
   config: DeviceConfig;
   store?: SecureSecretStore;
   hostScope?: HostOperationScope;
+  requireAbsent?: boolean;
+  now?: Date;
 }): Promise<DeviceEnrollmentAnchor> {
-  const anchor = enrollmentAnchorFromConfig(input.hostScope ? structuredClone(input.config) : input.config);
+  const config = structuredClone(input.config);
+  const fence = input.hostScope ? new HostOperationFence(input.hostScope) : undefined;
+  return withEnrollmentAnchorLock(config, fence, () => saveEnrollmentAnchorLocked({...input, config}));
+}
+
+async function saveEnrollmentAnchorLocked(input: {
+  config: DeviceConfig; store?: SecureSecretStore; hostScope?: HostOperationScope; requireAbsent?: boolean; now?: Date;
+}): Promise<DeviceEnrollmentAnchor> {
+  const anchor = enrollmentAnchorFromConfig(input.config);
   const serialized = JSON.stringify(anchor);
   const account = enrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId, anchor.deviceId);
   const store = await protectedStore(input.store, input.hostScope);
-  await store.put(account, serialized);
-  if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
+  let previous: string | null, legacy: string | null;
+  try {
+    previous = await freshAnchorValue(store, account);
+    legacy = input.requireAbsent || store.backend === 'windows-credential-manager'
+      ? await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(anchor.hqUrl, anchor.organizationId)) : null;
+  } catch (error) {
+    if (input.requireAbsent) throw Error('connection_anchor_store_unavailable');
+    throw error;
+  }
+  if (input.requireAbsent) {
+    if (previous !== null || legacy !== null) throw Error('connection_existing_anchor_requires_recovery');
+  } else {
+    if (previous !== null) {
+      const existing = parseProtectedAnchor<DeviceEnrollmentAnchor>(previous, input.hostScope, 'Protected enrollment anchor is corrupt.');
+      if (!enrollmentAnchorHasBaseIdentity(existing, input.config)) {
+        throw new Error('connection_existing_anchor_requires_recovery');
+      }
+      if (canonicalize(existing.serverSigningKeyset ?? null) !== canonicalize(anchor.serverSigningKeyset ?? null)) {
+        if (!anchor.serverSigningKeyset
+          || !verifyKeysetTransition(input.config, existing.serverSigningKeyset, anchor.serverSigningKeyset, input.now ?? new Date()).ok) {
+          throw new Error('connection_existing_anchor_requires_recovery');
+        }
+      }
+    }
+  }
+  await writeEnrollmentAnchor(store, input.config, serialized, previous, legacy);
+  if (await freshAnchorValue(store, account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor write.');
   return anchor;
 }
 
@@ -329,6 +422,17 @@ export async function loadDeviceEnrollmentAnchor(input: {
   config: DeviceConfig;
   store?: SecureSecretStore;
   hostScope?: HostOperationScope;
+  /** Validate a legacy anchor in place; do not migrate it during a read-only operation. */
+  readOnly?: boolean;
+}): Promise<DeviceEnrollmentAnchor> {
+  if (input.readOnly) return loadEnrollmentAnchorLocked(input);
+  const config = structuredClone(input.config);
+  const fence = input.hostScope ? new HostOperationFence(input.hostScope) : undefined;
+  return withEnrollmentAnchorLock(config, fence, () => loadEnrollmentAnchorLocked({...input, config}));
+}
+
+async function loadEnrollmentAnchorLocked(input: {
+  config: DeviceConfig; store?: SecureSecretStore; hostScope?: HostOperationScope; readOnly?: boolean;
 }): Promise<DeviceEnrollmentAnchor> {
   const {hostScope, store: suppliedStore} = input;
   const config = hostScope ? structuredClone(input.config) : input.config;
@@ -338,11 +442,11 @@ export async function loadDeviceEnrollmentAnchor(input: {
     config.deviceId,
   );
   const store = await protectedStore(suppliedStore, hostScope);
-  let serialized = await store.get(account);
+  let serialized = await freshAnchorValue(store, account);
   let migratedLegacy = false;
-  if (!serialized) {
-    serialized = await store.get(legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
-    migratedLegacy = Boolean(serialized);
+  if (serialized === null) {
+    serialized = await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
+    migratedLegacy = serialized !== null;
   }
   if (!serialized) throw new Error('Device enrollment is not anchored in secure storage. Run dharma login again.');
   const anchor = parseProtectedAnchor<DeviceEnrollmentAnchor>(serialized, hostScope, 'Protected enrollment anchor is corrupt.');
@@ -351,9 +455,9 @@ export async function loadDeviceEnrollmentAnchor(input: {
   ) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
-  if (migratedLegacy) {
-    await store.put(account, serialized);
-    if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
+  if (migratedLegacy && !input.readOnly) {
+    await writeEnrollmentAnchor(store, config, serialized, null, serialized);
+    if (await freshAnchorValue(store, account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
   return anchor;
 }
@@ -817,15 +921,26 @@ async function recoverEnrollmentWithFence(input: {
 }): Promise<DeviceConfig> {
   const config = input.hostFence ? await input.hostFence.step(() => loadDeviceConfig(input.configPath))
     : await loadDeviceConfig(input.configPath);
+  return withEnrollmentAnchorLock(config, input.hostFence, () => recoverEnrollmentLocked({...input, lockedConfig: config}));
+}
+
+async function recoverEnrollmentLocked(input: {
+  configPath: string; store?: SecureSecretStore; now?: Date; hostFence?: HostOperationFence; lockedConfig: DeviceConfig;
+}): Promise<DeviceConfig> {
+  const config = input.hostFence ? await input.hostFence.step(() => loadDeviceConfig(input.configPath))
+    : await loadDeviceConfig(input.configPath);
+  if (!enrollmentAnchorHasBaseIdentity(enrollmentAnchorFromConfig(input.lockedConfig), config)) {
+    throw new Error('connection_enrollment_changed');
+  }
   const rawStore = input.hostFence ? await input.hostFence.step(async () => input.store ?? await createSystemSecureStore())
     : input.store ?? await createSystemSecureStore();
   const store = input.hostFence ? input.hostFence.store(rawStore) : rawStore;
   const account = enrollmentAnchorAccountFor(config.hqUrl, config.organizationId, config.deviceId);
-  let serialized = await store.get(account);
+  let serialized = await freshAnchorValue(store, account);
   let migratedLegacy = false;
-  if (!serialized) {
-    serialized = await store.get(legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
-    migratedLegacy = Boolean(serialized);
+  if (serialized === null) {
+    serialized = await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId));
+    migratedLegacy = serialized !== null;
   }
   if (!serialized) return config;
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
@@ -833,8 +948,8 @@ async function recoverEnrollmentWithFence(input: {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
   }
   if (migratedLegacy) {
-    await store.put(account, serialized);
-    if (await store.get(account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
+    await writeEnrollmentAnchor(store, config, serialized, null, serialized);
+    if (await freshAnchorValue(store, account) !== serialized) throw new Error('Secure store did not confirm the enrollment anchor migration.');
   }
   if (canonicalize(anchor.serverSigningKeyset ?? null) === canonicalize(config.serverSigningKeyset ?? null)) {
     return config;
@@ -852,7 +967,7 @@ async function recoverEnrollmentWithFence(input: {
   if (config.serverSigningKeyset) {
     const verification = verifyKeysetTransition(config, anchor.serverSigningKeyset, config.serverSigningKeyset, now);
     if (verification.ok) {
-      await saveDeviceEnrollmentAnchor({ config, store });
+      await saveEnrollmentAnchorLocked({config, store, now});
       return config;
     }
   }
@@ -874,10 +989,20 @@ async function installKeysetWithFence(input: {
   configPath: string; candidate: TrustedServerSigningKeyset; store?: SecureSecretStore; now?: Date;
   hostFence?: HostOperationFence;
 }): Promise<DeviceConfig> {
+  const config = input.hostFence ? await input.hostFence.step(() => loadDeviceConfig(input.configPath))
+    : await loadDeviceConfig(input.configPath);
+  return withEnrollmentAnchorLock(config, input.hostFence, () => installKeysetLocked({...input, lockedConfig: config}));
+}
+
+async function installKeysetLocked(input: {
+  configPath: string; candidate: TrustedServerSigningKeyset; store?: SecureSecretStore; now?: Date;
+  hostFence?: HostOperationFence; lockedConfig: DeviceConfig;
+}): Promise<DeviceConfig> {
   const rawStore = input.hostFence ? await input.hostFence.step(async () => input.store ?? await createSystemSecureStore())
     : input.store ?? await createSystemSecureStore();
   const store = input.hostFence ? input.hostFence.store(rawStore) : rawStore;
-  const config = await recoverEnrollmentWithFence({configPath: input.configPath, store, now: input.now, hostFence: input.hostFence});
+  const config = await recoverEnrollmentLocked({configPath: input.configPath, store, now: input.now,
+    hostFence: input.hostFence, lockedConfig: input.lockedConfig});
   const now = input.now ?? new Date();
   if (canonicalize(config.serverSigningKeyset ?? null) === canonicalize(input.candidate)) return config;
   const verification = verifyKeysetTransition(config, config.serverSigningKeyset, input.candidate, now);
@@ -885,18 +1010,67 @@ async function installKeysetWithFence(input: {
   const next = { ...config, serverSigningKeyset: input.candidate };
   // The protected anchor is the write-ahead record. If the process stops before
   // the disk configuration is replaced, startup verifies and completes it.
-  await saveDeviceEnrollmentAnchor({ config: next, store });
+  await saveEnrollmentAnchorLocked({config: next, store, now});
   await atomicJson(input.configPath, next, input.hostFence);
   return next;
 }
 
+export function parseDeviceConfig(bytes: string): DeviceConfig {
+  let value: unknown;
+  try {value = JSON.parse(bytes);} catch {throw new Error('connection_config_corrupt');}
+  if (!validateDeviceConfigContract(value)) throw new Error('connection_config_invalid');
+  const config = value as DeviceConfig;
+  try {
+    assertInstallationId(config.installationId);
+    return {...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl)};
+  } catch {throw new Error('connection_config_invalid');}
+}
+
 export async function loadDeviceConfig(path: string): Promise<DeviceConfig> {
-  const config = JSON.parse(await readFile(path, 'utf8')) as DeviceConfig;
-  if (config.schema !== 'dharma.device-config/v1' || !config.deviceId || !config.organizationId || !config.hqUrl) {
-    throw new Error('Device is not enrolled. Run dharma login.');
+  let bytes: string;
+  try {bytes = await readFile(path, 'utf8');}
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    throw new Error('connection_config_unreadable');
   }
-  assertInstallationId(config.installationId);
-  return { ...config, hqUrl: normalizeHqUrl(config.hqUrl), relayUrl: normalizeRelayUrl(config.relayUrl) };
+  return readDeviceConnectionPreference(path, parseDeviceConfig(bytes));
+}
+
+function connectionPreferenceBinding(config: DeviceConfig) {
+  const {schema, hqUrl, organizationId, installationId, deviceId, publicKeyEd25519,
+    serverPublicKeyEd25519, relayUrl, enrolledAt} = config;
+  return sha256(canonicalize({schema, hqUrl, organizationId, installationId: installationId ?? null,
+    deviceId, publicKeyEd25519, serverPublicKeyEd25519, relayUrl, enrolledAt}));
+}
+
+/** Separate local preference from trust snapshots so a delayed keyset write cannot overwrite opt-out. */
+export async function readDeviceConnectionPreference(path: string, config: DeviceConfig): Promise<DeviceConfig> {
+  const binding = connectionPreferenceBinding(config);
+  let bytes: string;
+  try {bytes = await readFile(`${path}.connection.json`, 'utf8');}
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return config;
+    throw new Error('connection_preference_unreadable');
+  }
+  let value: DeviceConnectionPreference;
+  try {value = JSON.parse(bytes) as DeviceConnectionPreference;} catch {throw new Error('connection_preference_corrupt');}
+  if (!validateDeviceConnectionPreferenceContract(value)) throw new Error('connection_preference_invalid');
+  // A changed scope cannot inherit consent or resurrect an older inline opt-in.
+  if (value.binding !== binding) return {...config, connectionMode: 'manual'};
+  return {...config, connectionMode: value.connectionMode};
+}
+
+export async function saveDeviceConnectionPreference(input: {
+  configPath: string; config: DeviceConfig; connectionMode: 'manual' | 'resume'; hostScope?: HostOperationScope;
+}): Promise<void> {
+  if (input.connectionMode !== 'manual' && input.connectionMode !== 'resume') throw new Error('connection_preference_invalid');
+  const fence = input.hostScope === undefined ? undefined : new HostOperationFence(input.hostScope);
+  const binding = connectionPreferenceBinding(input.config);
+  const current = fence ? await fence.step(() => loadDeviceConfig(input.configPath)) : await loadDeviceConfig(input.configPath);
+  if (connectionPreferenceBinding(current) !== binding) throw new Error('connection_state_changed');
+  const preference: DeviceConnectionPreference = {schema: 'dharma.device-connection-preference/v1',
+    binding, connectionMode: input.connectionMode};
+  await atomicJson(`${input.configPath}.connection.json`, preference, fence);
 }
 
 export class AgentFabricClient {
@@ -910,13 +1084,14 @@ export class AgentFabricClient {
   readonly #hostFence?: HostOperationFence;
   readonly #hostBinding: string;
   readonly #readOnly: boolean;
+  readonly #isolatedSession: boolean;
   #readSessionAdmissionUsed = false;
   #state: ProtocolState;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
-    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean;
+    state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -929,6 +1104,7 @@ export class AgentFabricClient {
     this.#hostFence = input.hostFence;
     this.#hostBinding = this.#binding();
     this.#readOnly = input.readOnly === true;
+    this.#isolatedSession = input.isolatedSession === true;
   }
 
   #binding() {
@@ -948,9 +1124,12 @@ export class AgentFabricClient {
   static async open(input: { configPath: string; statePath: string; store?: SecureSecretStore; fetcher?: typeof fetch;
     hostScope?: HostOperationScope;
     /** Isolated in-memory protocol session; no enrollment repair, durable outbox replay or application POSTs. */
-    readOnly?: boolean }) {
-    const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly} = input;
+    readOnly?: boolean;
+    /** Fresh in-memory protocol state for an explicit workflow; application requests retain their normal authorization. */
+    isolatedSession?: boolean }) {
+    const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly, isolatedSession} = input;
     if (readOnly !== undefined && typeof readOnly !== 'boolean') throw new Error('relay_read_only_option_invalid');
+    if (isolatedSession !== undefined && typeof isolatedSession !== 'boolean') throw new Error('relay_isolated_session_option_invalid');
     const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
     const rawStore = fence ? await fence.step(async () => suppliedStore ?? await createSystemSecureStore())
       : suppliedStore ?? await createSystemSecureStore();
@@ -959,17 +1138,12 @@ export class AgentFabricClient {
       put: async () => { throw new Error('relay_read_only_secure_store_write_denied'); },
       delete: async () => { throw new Error('relay_read_only_secure_store_write_denied'); } } : rawStore;
     const store = fence ? fence.store(safeStore) : safeStore;
-    const config = readOnly ? (fence ? await fence.step(() => loadDeviceConfig(configPath)) : await loadDeviceConfig(configPath))
+    const config = readOnly || isolatedSession ? (fence ? await fence.step(() => loadDeviceConfig(configPath)) : await loadDeviceConfig(configPath))
       : await recoverEnrollmentWithFence({configPath, store, hostFence: fence});
-    const identity = fence || readOnly ? await existingHostDeviceIdentity(config, store) : await loadOrCreateDeviceIdentity({
-      hqUrl: config.hqUrl,
-      organizationId: config.organizationId,
-      installationId: config.installationId,
-      store,
-    });
+    const identity = await existingHostDeviceIdentity(config, store);
     if (identity.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('Enrolled device identity does not match the secure store.');
     try {
-      await loadDeviceEnrollmentAnchor({ config, store });
+      await loadDeviceEnrollmentAnchor({ config, store, readOnly: readOnly || isolatedSession });
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes('not anchored in secure storage')) throw error;
       throw new Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.');
@@ -978,7 +1152,7 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       recoveredTaskCompletions: [],
     };
-    if (!readOnly) try {
+    if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
@@ -993,7 +1167,7 @@ export class AgentFabricClient {
     await fence?.assert();
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
-      statePath, state, store, fetcher, hostFence: fence, readOnly,
+      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession,
     });
   }
 
@@ -1410,7 +1584,7 @@ export class AgentFabricClient {
   }
 
   async #persist() {
-    if (this.#readOnly) { await this.#assertHostScope();return; }
+    if (this.#readOnly || this.#isolatedSession) { await this.#assertHostScope();return; }
     await this.#assertHostScope();
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay

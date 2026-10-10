@@ -23,7 +23,11 @@ while ($null -ne ($line=[Console]::In.ReadLine())) {
     $credential=$vault.Retrieve("Dharma Agent Fabric",$request.account);
     $credential.RetrievePassword();
     $response=@{id=$request.id;status=0;value=$credential.Password};
-  } catch { $response=@{id=$request.id;status=3;value=$null} }
+  } catch {
+    $status=1;
+    if ($_.Exception.GetBaseException().HResult -eq -2147023728) {$status=3}
+    $response=@{id=$request.id;status=$status;value=$null}
+  }
   [Console]::Out.WriteLine(($response | ConvertTo-Json -Compress));
   [Console]::Out.Flush();
   $credential=$null; $response=$null; $request=$null; $line=$null;

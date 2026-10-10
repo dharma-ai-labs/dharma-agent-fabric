@@ -36,6 +36,10 @@ export class HostOperationFence {
     const guarded: SecureSecretStore = {backend: raw.backend,
       get: account => this.step(() => raw.get(account)),
       getFresh: account => this.step(() => (raw.getFresh ?? raw.get).call(raw, account)),
+      ...(raw.compareAndPutEnrollmentAnchor ? {compareAndPutEnrollmentAnchor: (input: Parameters<NonNullable<SecureSecretStore['compareAndPutEnrollmentAnchor']>>[0]) => {
+        const snapshot = structuredClone(input);
+        return this.step(() => raw.compareAndPutEnrollmentAnchor!(snapshot));
+      }} : {}),
       put: (account, value) => this.step(() => raw.put(account, value)),
       delete: account => this.step(() => raw.delete(account))};
     this.#stores.set(raw, guarded); this.#stores.set(guarded, guarded);

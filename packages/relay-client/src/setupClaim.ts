@@ -278,7 +278,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       await saveOrganizationApiToken({ hqUrl, organizationId: input.organizationId,
         installationId: input.installationId, token: approved.organizationApiToken, store });
       await assertCommit();
-      await saveDeviceEnrollmentAnchor({ config, store });
+      await saveDeviceEnrollmentAnchor({config, store, hostScope, now: new Date(now())});
       await assertCommit();
       await saveDeviceConfig(input.configPath, config, {signal: scopeSignal ?? new AbortController().signal,
         current: async () => {await assertCommit(); return true;}});

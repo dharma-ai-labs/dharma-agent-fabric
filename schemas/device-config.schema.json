@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-config/v1",
+  "title": "Enrolled device configuration",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "hqUrl", "organizationId", "deviceId", "deviceName", "platform", "publicKeyEd25519", "serverPublicKeyEd25519", "relayUrl", "enrolledAt"],
+  "properties": {
+    "schema": {"const": "dharma.device-config/v1"},
+    "hqUrl": {"type": "string", "format": "uri"},
+    "organizationId": {"type": "string", "minLength": 1},
+    "installationId": {"type": "string", "format": "uuid"},
+    "deviceId": {"type": "string", "minLength": 1},
+    "deviceName": {"type": "string", "minLength": 1},
+    "platform": {"enum": ["windows", "wsl", "macos", "linux"]},
+    "publicKeyEd25519": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+    "serverPublicKeyEd25519": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+    "serverSigningKeyset": {"type": "object"},
+    "relayUrl": {"type": "string", "format": "uri"},
+    "enrolledAt": {"type": "string", "format": "date-time"},
+    "connectionMode": {"enum": ["manual", "resume"], "description": "Local opt-in preference; conveys no server or provider authority."},
+    "evidenceQuotaLedgerInitializedAt": {"type": "string", "format": "date-time"},
+    "setupClaimReference": {"type": "string", "minLength": 1},
+    "setupClaimRepositoryFingerprint": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  }
+}
