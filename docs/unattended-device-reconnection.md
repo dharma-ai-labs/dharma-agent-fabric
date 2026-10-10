@@ -1,7 +1,9 @@
 # Returning device connection (candidate)
 
-This guide describes the unreleased resume-first change. Use a CLI release containing
-this change after its independent review and release gates pass. The server must
+This guide describes the resume-first change released in CLI 0.2.179. Its bounded
+peer-timeout failure-reporting correction is prepared as CLI 0.2.180, not yet a
+published or activated release. Use that correction only after its independent
+review and release gates pass. The server must
 also implement the membership-guarded `dharma.device-admission/v1` session response;
 older servers fail with `connection_authority_unconfirmed`. A successful login
 probe confirms current Fabric device and owner membership admission; it does not confirm provider login,
@@ -9,18 +11,18 @@ repository readiness, service restart, or task execution.
 
 ## Candidate release alignment
 
-These versions are prepared in this draft and remain unpublished:
+The dependencies below are published; CLI 0.2.180 is the pending correction:
 
 | Package | Candidate version | Required direct pins |
 | --- | --- | --- |
 | contracts | 0.1.15 | Existing third-party dependencies |
 | secure-store | 0.1.9 | No first-party dependencies |
 | relay-client | 0.2.32 | contracts 0.1.15; secure-store 0.1.9 |
-| CLI | 0.2.179 | contracts 0.1.15; secure-store 0.1.9; relay-client 0.2.32 |
+| CLI | 0.2.180 (pending) | contracts 0.1.15; secure-store 0.1.9; relay-client 0.2.32 |
 
 The CLI retains exact pins for the other unchanged runtime packages. The private
 lifecycle reference pins contracts 0.1.15 and remains private. Existing registry
-CLI 0.2.178 cannot receive this source through an unchanged immutable version.
+CLI 0.2.179 cannot receive the timeout correction through an unchanged immutable version.
 
 Qualification requires the reviewed membership-guarded server migration and
 route, exact deployed readback and these immutable package contents before client

@@ -44,7 +44,7 @@ function signedQuestion(binding: LocalProviderSessionBinding, now: Date, questio
   return { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
 }
 
-function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTurn?: boolean; closeFails?: boolean; answer?: string;
+function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTurn?: boolean; closeFails?: boolean; silentTurn?: boolean; answer?: string;
   filesystemRules?: Record<string, string> } = {}) {
   const calls: string[] = [];
   const listeners = new Set<(event: unknown) => void>();
@@ -73,6 +73,7 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
       if (method === 'thread/resume') return { thread: { id: binding.sessionId,
         cwd: binding.workspaceRoot, status: { type: 'idle' } } };
       if (method === 'turn/start') {
+        if (options.silentTurn) return { turn: { id: 'turn-1' } };
         queueMicrotask(() => {
           for (const listener of listeners) listener({ method: 'turn/completed', params: {
             threadId: binding.sessionId, turn: { id: 'turn-1',
@@ -83,6 +84,7 @@ function fakeTransport(binding: LocalProviderSessionBinding, options: { failedTu
         });
         return { turn: { id: 'turn-1' } };
       }
+      if (method === 'turn/interrupt') return {};
       throw new Error(`unexpected:${method}`);
     },
   };
@@ -383,6 +385,78 @@ test('signed inbox dispatch retains the selected thread and publishes answers wi
   } finally { await inbox.close(); f.vault.close(); }
   assert.equal(remote.isClosed(), true);
   assert.equal(detaches, 0);
+});
+
+test('timed-out accepted peer turn reports failure without extending authority or replaying the provider', async t => {
+ for (const scenario of ['reported', 'lost_ack', 'revoked', 'close_unconfirmed'] as const) await t.test(scenario, async t => {
+  t.mock.timers.enable({apis: ['Date', 'setTimeout', 'setInterval']});
+  const f = await fixture(), remote = fakeTransport(f.binding, {silentTurn: true, closeFails: scenario === 'close_unconfirmed'});
+  if (scenario === 'revoked') {
+    const put = f.vault.putBlob.bind(f.vault);
+    f.vault.putBlob = async (bytes, purpose) => {
+      const hash = await put(bytes, purpose);
+      if (purpose === 'provider-session-failed-turn') f.vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+      return hash;
+    };
+  }
+  const question = signedQuestion(f.binding, f.now), replies: Record<string, unknown>[] = [];
+  let accepted = false;
+  const channelTransport = {async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    if (route.endsWith('provider-sessions')) return {ok: true, organizationId: f.binding.organizationId,
+      correlationId: ids.threadId, registration: {bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId,
+        endpointId: f.binding.endpointId, repositoryBindingId: f.binding.repositoryBindingId,
+        membershipId: f.binding.membershipId, deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+        revision: Number(body.expectedRevision) + 1, state: 'attached', leaseUntil: new Date(Date.now() + 120_000).toISOString(), replay: false}};
+    if (body.action === 'inbox') return {ok: true, organizationId: f.binding.organizationId,
+      correlationId: ids.threadId, result: {offers: accepted ? [] : [question]}};
+    if (body.action === 'accept') accepted = true;
+    if (body.action === 'reply') {
+      replies.push(body); assert.equal(body.answer, ''); assert.equal(body.failureCode, 'execution_failed');
+      assert.equal(remote.isClosed(), false, 'bounded failure delivery must retain the original owner');
+      if (scenario === 'lost_ack') throw new Error('synthetic lost failure acknowledgement');
+    }
+    return {ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId,
+      result: {questionId: question.questionId, taskId: question.taskId, targetBindingId: f.binding.bindingId,
+        state: body.action === 'accept' ? 'accepted' : body.outcome, replay: false}};
+  }};
+  const inbox = await openCodexInboxSession({...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+    channelTransport, authorizeContent: async () => true, openTransport: async () => remote.transport});
+  try {
+    const pending = inbox.runNext();
+    // Observe the actual turn admission before advancing the unchanged deadline.
+    for (let i = 0; i < 100 && !remote.calls.includes('turn/start'); i++) await new Promise(resolve => setImmediate(resolve));
+    assert.ok(remote.calls.includes('turn/start')); await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(60_001);
+    const result = await pending;
+    assert.equal(result.state, ['lost_ack', 'revoked'].includes(scenario) ? 'failure_reply_pending' : 'failed');
+    assert.ok('providerShutdownConfirmed' in result);
+    assert.equal(result.providerShutdownConfirmed, scenario !== 'close_unconfirmed');
+    assert.ok('failureEvidenceHash' in result && typeof result.failureEvidenceHash === 'string');
+    const evidence = JSON.parse((await f.vault.getBlob(result.failureEvidenceHash)).toString());
+    assert.equal(evidence.code, 'codex_session_turn_timeout'); assert.equal(evidence.questionId, question.questionId);
+    assert.equal('answer' in evidence, false); assert.equal('signature' in evidence, false);
+    assert.equal(replies.length, scenario === 'revoked' ? 0 : 1);
+    assert.equal(remote.isClosed(), scenario !== 'close_unconfirmed');
+    assert.equal(remote.calls.filter(x => x === 'turn/start').length, 1);
+    assert.equal(remote.calls.filter(x => x === 'turn/interrupt').length, 1);
+    await assert.rejects(inbox.runNext(), /codex_inbox_session_unavailable/);
+  } finally {
+    if (scenario === 'close_unconfirmed') await assert.rejects(inbox.close(), /process_still_running/);
+    else await inbox.close();
+    f.vault.close();
+  }
+ });
+});
+
+test('standalone timed-out owner still closes without inbox failure-delivery authority', async () => {
+  const f = await fixture(), remote = fakeTransport(f.binding, {silentTurn: true});
+  const owner = await openCodexBoundSession({...f, bindingId: f.binding.bindingId, openTransport: async () => remote.transport});
+  try {
+    await assert.rejects(owner.runQuestion({question: signedQuestion(f.binding, f.now), timeoutMs: 1}), /codex_session_turn_timeout/);
+    assert.equal(remote.isClosed(), true);
+    await assert.rejects(owner.runQuestion({question: signedQuestion(f.binding, f.now)}), /codex_session_closed/);
+  } finally {await owner.close(); f.vault.close();}
 });
 
 test('oversized completed peer answer publishes only a validation failure and retains encrypted evidence', async t => {

@@ -54,11 +54,11 @@ function fixture() {
   return { io, effects };
 }
 
-test('publishes precisely the approved four releases in dependency order', async () => {
+test('publishes precisely the approved CLI correction without republishing dependencies', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, approvedPackages.map((item) => item.name));
-  assert.deepEqual(approvedPackages.map((item) => item.version), ['0.1.15', '0.1.9', '0.2.32', '0.2.179']);
+  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.180']]);
 });
 
 for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
@@ -67,9 +67,9 @@ for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
     if (defect === 'source') io.verifySource = async () => { throw new Error('source mismatch'); };
     if (defect === 'name' || defect === 'version') {
       const original = io.manifest;
-      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.179' ? { [defect]: 'wrong' } : {}) });
+      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.180' ? { [defect]: 'wrong' } : {}) });
     }
-    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.179'
+    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.180'
       ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : `sha512-${item.version}` } } : null;
     await assert.rejects(publishBoundedRelease(head, io));
     assert.deepEqual(effects, []);
@@ -84,7 +84,7 @@ test('matching existing integrity and provenance are verified, never republished
   } });
   io.verifyPublished = async () => { checked++; };
   await publishBoundedRelease(head, io);
-  assert.equal(checked, 4);
+  assert.equal(checked, 1);
   assert.deepEqual(effects, []);
 });
 
@@ -97,7 +97,7 @@ test('publication failure is not replayed and later packages remain unpublished'
 
 for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher']) {
   test(`source admission rejects changed ${defect}`, () => {
-    const snapshot = { head, ref: 'refs/heads/main', tree: 'd80a643d2eedcacab3ffd0612fd9c8ee9af82389',
+    const snapshot = { head, ref: 'refs/heads/main', tree: '06e98ae37ac6b83ce4d6f32f3b40fcd720134e95',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
       changed: [], untracked: [], baselineManifest: { scripts: {} }, manifest: { scripts: {
         'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',

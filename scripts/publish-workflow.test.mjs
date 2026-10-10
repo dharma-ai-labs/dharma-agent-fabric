@@ -14,7 +14,7 @@ test('bounded onboarding publication is explicit and opt-in', () => {
   assert.equal(publish.if, "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'");
 });
 
-test('bounded mode selects only the four onboarding packages in dependency order', () => {
+test('bounded mode invokes the reviewed exact-package allowlist rather than the broad publisher', () => {
   assert.equal(step.env.ONBOARDING_ONLY, "${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}");
   assert.equal(step.env.EXPECTED_HEAD, '${{ inputs.expected_head }}');
   assert.match(step.run, /if \[ "\$ONBOARDING_ONLY" = "true" \]; then\s+npm run publish:onboarding -- --expected-head "\$EXPECTED_HEAD"\s+exit 0\s+fi/);
