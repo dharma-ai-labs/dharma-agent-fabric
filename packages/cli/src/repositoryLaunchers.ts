@@ -45,7 +45,7 @@ export function stableRepositoryLauncherContents(version: string,
     if (runtime.platform !== 'linux') throw new Error('relay_startup_codex_path_invalid');
     const directory = codexDirectoryPath(runtime.codexDirectory);
     // Preserve only the qualified provider bin directory, not the login environment.
-    shellEnvironment = `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n` + shellEnvironment;
+    shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
   }
   return { shell: `#!/bin/sh\n${shellEnvironment}exec ${shellInvocation} "$@"\n`,
     windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n` };
@@ -57,9 +57,9 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
       || launchers.shell.length > 16384 || launchers.windows.length > 16384) return undefined;
     let shell = launchers.shell;
     const providerPrefix = platform === 'linux'
-      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\n(?=export PATH=)/) : undefined;
-    const codexDirectory = providerPrefix ? codexDirectoryPath(providerPrefix[1]!.replace(/'\\''/g, "'")) : undefined;
-    if (providerPrefix) shell = '#!/bin/sh\n' + shell.slice(providerPrefix[0].length);
+      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\nexport PATH='([^\n]*)':"\$PATH"\n/) : undefined;
+    const codexDirectory = providerPrefix ? codexDirectoryPath(providerPrefix[2]!.replace(/'\\''/g, "'")) : undefined;
+    if (providerPrefix) shell = `#!/bin/sh\nexport PATH='${providerPrefix[1]}':"$PATH"\n` + shell.slice(providerPrefix[0].length);
     const captured = platform === 'win32'
       ? launchers.windows.match(/^@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "PATH=([^\r\n]*);%PATH%"\r\n/)?.[1]
       : shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\n/)?.[1];

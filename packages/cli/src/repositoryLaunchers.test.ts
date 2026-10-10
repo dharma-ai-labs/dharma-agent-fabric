@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ test('Linux launcher retains the selected Codex directory without copying the am
     npmCliPath: '/approved/npm/bin/npm-cli.js', codexDirectory: "/approved/codex ' tools/bin"};
   const launchers = stableRepositoryLauncherContents('0.2.180', runtime);
   assert.ok(launchers.shell.includes("export PATH='/approved/codex '\\'' tools/bin':\"$PATH\"\n"));
-  assert.ok(launchers.shell.indexOf("export PATH='/approved/node/bin'") > launchers.shell.indexOf('codex'));
+  assert.ok(launchers.shell.indexOf("export PATH='/approved/node/bin'") < launchers.shell.indexOf('codex'));
   assert.equal(recordedRepositoryNodeDirectory('0.2.180', launchers, 'linux'), runtime.nodeDirectory);
   assert.equal(recordedRepositoryNodeDirectory('0.2.180', {...launchers,
     shell: launchers.shell.replace('codex', 'codex\nunsafe')}, 'linux'), undefined);
@@ -74,7 +74,9 @@ test('actual Linux service-style startup retains Codex with a minimal inherited 
   const run = promisify(execFile), env = {PATH: join(root, 'absent'), HOME: root, UNRELATED_SECRET: 'not-in-launcher'};
   const before = JSON.parse((await run('/bin/sh', [old], {env})).stdout);
   assert.equal(before.status, null);
+  await writeFile(join(nodeDirectory, 'codex'), '#!/bin/sh\nprintf "wrong-node-directory-codex\\n"\n', {mode: 0o700});
   assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: 'fixture-codex\n'});
+  await rm(join(nodeDirectory, 'codex'));
   assert.ok(!launchers.shell.includes('UNRELATED_SECRET') && !launchers.shell.includes('not-in-launcher'));
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
   assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), true);
