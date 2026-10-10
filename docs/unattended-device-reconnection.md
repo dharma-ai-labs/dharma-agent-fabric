@@ -28,6 +28,9 @@ CLI 0.2.180 cannot receive the startup-path correction through an unchanged immu
 On Linux, managed launchers retain only the selected protected Codex executable
 directory alongside the pinned Node/npm runtime, using the same provider search
 path as the foreground agent. They do not copy the login environment or secrets.
+The selected Codex directory has priority over any Codex beside Node. If it also
+contains `node`, that executable must have the same protected bytes as the running
+pinned Node; otherwise setup and recorded-launcher verification fail closed.
 Unsafe executable paths fail with `relay_startup_codex_path_invalid` before launcher
 publication. Normal upgrade records the selected path; rollback restores the exact
 previous launcher bytes and rechecks their protection. A foreground capability

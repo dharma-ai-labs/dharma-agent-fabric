@@ -130,7 +130,7 @@ export async function resolveRepositoryNpmCli(options: {npmExecPath?: string; se
   throw new Error('relay_startup_npm_unavailable');
 }
 
-async function protectedCodexDirectory(directory: string) {
+async function protectedCodexDirectory(directory: string, nodePath = process.execPath) {
   codexDirectoryPath(directory);
   if (await realpath(directory) !== directory) throw Error();
   const protectParents = async (path: string) => {
@@ -148,6 +148,18 @@ async function protectedCodexDirectory(directory: string) {
   await protectParents(dirname(executable));
   await protectedBinaryHash(executable, 'linux');
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
+  let hasNode = true;
+  try {await lstat(join(directory, 'node'));} catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    hasNode = false;
+  }
+  // npm's CLI child uses env-node; provider priority must not replace its runtime.
+  if (hasNode) {
+    const selectedNode = await realpath(join(directory, 'node'));
+    await protectParents(dirname(selectedNode));
+    if (!((await lstat(selectedNode)).mode & 0o111)
+      || await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
+  }
   return directory;
 }
 
@@ -203,7 +215,7 @@ async function verifyRecordedRuntime(version: string, launchers: Launchers,
   // A changed npm cache path is not a new trust root: require the already running Node bytes.
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
-    if (recorded.codexDirectory !== undefined) await protectedCodexDirectory(recorded.codexDirectory);
+    if (recorded.codexDirectory !== undefined) await protectedCodexDirectory(recorded.codexDirectory, runtime.nodePath);
     if (recorded.npmCliPath !== undefined) {
       const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)
         : await resolveRepositoryNpmCli({npmExecPath: runtime.npmCliPath, platform: runtime.platform});

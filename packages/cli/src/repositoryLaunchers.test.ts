@@ -58,7 +58,8 @@ test('Codex startup resolution is protected and does not skip an unsafe first ex
 });
 
 test('actual Linux service-style startup retains Codex with a minimal inherited PATH', {skip: process.platform !== 'linux'}, async () => {
-  const {stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers} = await import('./repositoryLaunchers.js');
+  const {stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers,
+    resolveRepositoryCodexDirectory} = await import('./repositoryLaunchers.js');
   const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-codex ' startup-")));
   const nodeDirectory = join(root, 'node'), npmDirectory = join(root, 'npm'), codexDirectory = join(root, 'provider');
   for (const directory of [nodeDirectory, npmDirectory, codexDirectory]) await mkdir(directory, {mode: 0o700});
@@ -80,6 +81,22 @@ test('actual Linux service-style startup retains Codex with a minimal inherited 
   assert.ok(!launchers.shell.includes('UNRELATED_SECRET') && !launchers.shell.includes('not-in-launcher'));
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
   assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), true);
+  const shadow = join(codexDirectory, 'node');
+  await writeFile(shadow, '#!/bin/sh\nprintf "unapproved-node\\n"\n', {mode: 0o700});
+  const envNode = '/usr/bin/env node\n';
+  const shebang = join(root, 'child');
+  await writeFile(shebang, '#!' + envNode + 'console.log(process.version);\n', {mode: 0o700});
+  await writeFile(npmCliPath, `const r=require('node:child_process').spawnSync(${JSON.stringify(shebang)},[],{encoding:'utf8'});process.stdout.write(JSON.stringify({status:r.status,stdout:r.stdout}));`, {mode: 0o600});
+  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: 'unapproved-node\n'});
+  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: codexDirectory}), /relay_startup_codex_path_invalid/);
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), false);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), false);
+  await copyFile(process.execPath, shadow); await chmod(shadow, 0o700);
+  assert.equal(await resolveRepositoryCodexDirectory({searchPath: codexDirectory}), codexDirectory);
+  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: process.version + '\n'});
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), true);
+  await rm(shadow);
   await chmod(join(codexDirectory, 'codex'), 0o722);
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), false);
   assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), false);
