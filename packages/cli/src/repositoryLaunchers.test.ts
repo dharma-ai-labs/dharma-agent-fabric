@@ -6,6 +6,21 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 
+test('Linux launcher retains the selected Codex directory without copying the ambient environment', async () => {
+  const {stableRepositoryLauncherContents, recordedRepositoryNodeDirectory} = await import('./repositoryLaunchers.js');
+  const runtime = {platform: 'linux' as const, nodeDirectory: '/approved/node/bin',
+    npmCliPath: '/approved/npm/bin/npm-cli.js', codexDirectory: "/approved/codex ' tools/bin"};
+  const launchers = stableRepositoryLauncherContents('0.2.180', runtime);
+  assert.ok(launchers.shell.includes("export PATH='/approved/codex '\\'' tools/bin':\"$PATH\"\n"));
+  assert.ok(launchers.shell.indexOf("export PATH='/approved/node/bin'") > launchers.shell.indexOf('codex'));
+  assert.equal(recordedRepositoryNodeDirectory('0.2.180', launchers, 'linux'), runtime.nodeDirectory);
+  assert.equal(recordedRepositoryNodeDirectory('0.2.180', {...launchers,
+    shell: launchers.shell.replace('codex', 'codex\nunsafe')}, 'linux'), undefined);
+  for (const codexDirectory of ['relative/bin', '/approved/bin:foreign', '/approved/bin\nunsafe', '/']) {
+    assert.throws(() => stableRepositoryLauncherContents('0.2.180', {...runtime, codexDirectory}));
+  }
+});
+
 test('Linux startup records npm explicitly instead of relying on the service PATH', async () => {
   const { stableRepositoryLauncherContents, recordedRepositoryNodeDirectory } = await import('./repositoryLaunchers.js');
   const runtime = { platform: 'linux' as const, nodeDirectory: '/approved/node/bin',
@@ -18,6 +33,52 @@ test('Linux startup records npm explicitly instead of relying on the service PAT
   for (const npmCliPath of ['relative/npm-cli.js', '/approved/npm\n-cli.js', '/approved/npm\0-cli.js']) {
     assert.throws(() => stableRepositoryLauncherContents('0.2.177', { ...runtime, npmCliPath }));
   }
+});
+
+test('Codex startup resolution is protected and does not skip an unsafe first executable', {skip: process.platform !== 'linux'}, async () => {
+  const {resolveRepositoryCodexDirectory} = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-codex-startup-')));
+  const good = join(root, 'good'), unsafe = join(root, 'unsafe');
+  await mkdir(good, {mode: 0o700}); await mkdir(unsafe, {mode: 0o700});
+  const binary = join(good, 'codex');
+  await writeFile(binary, '#!/bin/sh\nprintf "fixture-codex\\n"\n', {mode: 0o700});
+  await symlink(binary, join(unsafe, 'codex'));
+  assert.equal(await resolveRepositoryCodexDirectory({searchPath: join(root, 'absent') + ':' + good}), good);
+  assert.equal(await resolveRepositoryCodexDirectory({searchPath: ''}), undefined);
+  await chmod(unsafe, 0o777);
+  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: unsafe + ':' + good}), /relay_startup_codex_path_invalid/);
+  await chmod(binary, 0o722);
+  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: good}), /relay_startup_codex_path_invalid/);
+  await chmod(binary, 0o700);
+  await chmod(root, 0o777);
+  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: good}), /relay_startup_codex_path_invalid/);
+  await chmod(root, 0o700);
+});
+
+test('actual Linux service-style startup retains Codex with a minimal inherited PATH', {skip: process.platform !== 'linux'}, async () => {
+  const {stableRepositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers} = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-codex ' startup-")));
+  const nodeDirectory = join(root, 'node'), npmDirectory = join(root, 'npm'), codexDirectory = join(root, 'provider');
+  for (const directory of [nodeDirectory, npmDirectory, codexDirectory]) await mkdir(directory, {mode: 0o700});
+  await copyFile(process.execPath, join(nodeDirectory, 'node')); await chmod(join(nodeDirectory, 'node'), 0o700);
+  const npmCliPath = join(npmDirectory, 'bin', 'npm-cli.js'); await mkdir(dirname(npmCliPath), {mode: 0o700});
+  await writeFile(join(npmDirectory, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+  await writeFile(npmCliPath, "const r=require('node:child_process').spawnSync('codex',['--version'],{encoding:'utf8'});process.stdout.write(JSON.stringify({status:r.status,stdout:r.stdout}));", {mode: 0o600});
+  await writeFile(join(codexDirectory, 'codex'), '#!/bin/sh\nprintf "fixture-codex\\n"\n', {mode: 0o700});
+  const runtime = {platform: 'linux' as const, nodeDirectory, npmCliPath, codexDirectory};
+  const old = join(root, 'old.sh'), fixed = join(root, 'fixed.sh');
+  await writeFile(old, stableRepositoryLauncherContents('0.2.180', {...runtime, codexDirectory: undefined}).shell);
+  const launchers = stableRepositoryLauncherContents('0.2.180', runtime); await writeFile(fixed, launchers.shell);
+  const run = promisify(execFile), env = {PATH: join(root, 'absent'), HOME: root, UNRELATED_SECRET: 'not-in-launcher'};
+  const before = JSON.parse((await run('/bin/sh', [old], {env})).stdout);
+  assert.equal(before.status, null);
+  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: 'fixture-codex\n'});
+  assert.ok(!launchers.shell.includes('UNRELATED_SECRET') && !launchers.shell.includes('not-in-launcher'));
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), true);
+  await chmod(join(codexDirectory, 'codex'), 0o722);
+  assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), false);
+  assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), false);
 });
 
 test('npm resolution validates the selected protected package without falling back from invalid state', async () => {

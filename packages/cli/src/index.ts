@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryCodexDirectory } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -136,7 +136,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.180';
+const VERSION = '0.2.181';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1888,7 +1888,7 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 }
 
 export function stableRepositoryLauncherContents(version = VERSION,
-  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string }) {
+  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; codexDirectory?: string }) {
   return repositoryLauncherContents(version, runtime);
 }
 
@@ -1900,8 +1900,12 @@ async function installStableRepositoryLauncher(workspace: string) {
   await scope?.assert();
   const npmCliPath = process.platform === 'linux' ? await (scope
     ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
+  const codexDirectory = await (scope
+    ? scope.step(() => resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}))
+    : resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}));
   const contents = stableRepositoryLauncherContents(VERSION,
-    { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}) });
+    { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+      ...(codexDirectory === undefined ? {} : {codexDirectory}) });
   if (scope) {
     await scope.assert();
     if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
@@ -1963,6 +1967,8 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
   };
   return withRelayStartupMutation(async () => {
     const npmCliPath = process.platform === 'linux' && !flags.has('rollback') ? await resolveRepositoryNpmCli() : undefined;
+    const codexDirectory = !flags.has('rollback')
+      ? await resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
     const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
       dryRun: !flags.has('apply'), rollback: flags.has('rollback') }, {
@@ -1975,7 +1981,8 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         return current;
       },
       launcherContents: version => stableRepositoryLauncherContents(version,
-        { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}) }),
+        { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+          ...(codexDirectory === undefined ? {} : {codexDirectory}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
       verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
       recordNextLaunchers: process.platform === 'linux',

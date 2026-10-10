@@ -25,6 +25,8 @@ async function fixture() {
     readdir: async () => [], pidProcessState: async () => 'stopped',
     VERSION: '0.2.118', stableRepositoryLauncherContents: (version: string) => ({ version }),
     resolveRepositoryNpmCli: async () => '/fixtures/npm/bin/npm-cli.js',
+    providerProcessEnvironment: (source: NodeJS.ProcessEnv) => source,
+    resolveRepositoryCodexDirectory: async () => '/fixtures/codex/bin',
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => { calls.push('lock'); return operation(); },
     upgradeRelayRuntime: async (_input: unknown, hooks: { assertStopped(): Promise<void>; inspectStartup(): Promise<unknown> }) => {
       await hooks.assertStopped(); await hooks.inspectStartup(); return { state: 'planned' };
@@ -85,18 +87,24 @@ test('actual upgrade caller binds the reviewed recorded-runtime verifier without
 test('actual Linux upgrade records npm while rollback does not require a replacement npm installation', async () => {
   const f = await fixture();
   let resolutions = 0;
+  let codexResolutions = 0;
   f.deps.resolveRepositoryNpmCli = async () => {resolutions++; return '/fixtures/npm/bin/npm-cli.js';};
-  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {npmCliPath?: string}) => ({runtime});
-  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {npmCliPath?: string}}}) => {
+  f.deps.resolveRepositoryCodexDirectory = async () => {codexResolutions++; return '/fixtures/codex/bin';};
+  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {npmCliPath?: string; codexDirectory?: string}) => ({runtime});
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {npmCliPath?: string; codexDirectory?: string}}}) => {
     assert.equal(hooks.launcherContents('0.2.118').runtime?.npmCliPath,
       f.flags.has('rollback') ? undefined : '/fixtures/npm/bin/npm-cli.js');
+    assert.equal(hooks.launcherContents('0.2.118').runtime?.codexDirectory,
+      f.flags.has('rollback') ? undefined : '/fixtures/codex/bin');
     return {state: 'planned'};
   };
   await f.run()(f.flags);
   assert.equal(resolutions, 1);
+  assert.equal(codexResolutions, 1);
   f.flags.set('rollback', true);
   await f.run()(f.flags);
   assert.equal(resolutions, 1);
+  assert.equal(codexResolutions, 1);
 });
 
 test('actual Linux caller and real runtime journal restore exact bytes on a fresh rollback without npm resolution',
@@ -131,6 +139,7 @@ test('actual Linux caller and real runtime journal restore exact bytes on a fres
       readDeviceConfig: async () => ({organizationId: selected.organizationId, deviceId: selected.deviceId}),
       stableRepositoryLauncherContents, upgradeRelayRuntime,
       resolveRepositoryNpmCli: async () => {resolutions++; return npmCliPath;},
+      resolveRepositoryCodexDirectory: async () => undefined,
       enableRelayAutostart: async (input: {version: string}) => {f.startup.version = input.version;},
       startRelayAutostart: async () => {running = true;}, stopRelayAutostart: async () => {running = false;},
       relayStop: async () => ({ok: true}),

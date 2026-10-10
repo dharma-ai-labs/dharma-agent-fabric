@@ -10,6 +10,7 @@ import {currentBootstrapHostScope, runCodexBootstrapHost} from './bootstrapHostS
 import {writeBootstrapHostText} from './bootstrapHostFiles.js';
 import {stableRepositoryLauncherContents} from './repositoryLaunchers.js';
 const npmCliPath = process.platform === 'linux' ? '/synthetic/npm/bin/npm-cli.js' : undefined;
+const codexDirectory = process.platform === 'linux' ? '/synthetic/codex/bin' : undefined;
 
 async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const root = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'dharma-launcher-caller-')));
@@ -25,7 +26,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
 }
 
 // Execute the actual CLI installer declaration with real filesystem effects.
-async function caller() {
+async function caller(overrides: Record<string, unknown> = {}) {
   const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'installStableRepositoryLauncher');
@@ -35,7 +36,11 @@ async function caller() {
   assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${output.outputText}\ninstallStableRepositoryLauncher`, {...fs, process, resolve, dirname,
     currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents,
-    resolveRepositoryNpmCli: async () => npmCliPath, VERSION: '0.2.153'},
+    resolveRepositoryNpmCli: async () => npmCliPath,
+    providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/fallback/bin'}),
+    resolveRepositoryCodexDirectory: async (input: {searchPath?: string}) => {
+      assert.equal(input.searchPath, '/synthetic/codex/bin:/synthetic/fallback/bin'); return codexDirectory;
+    }, VERSION: '0.2.153', ...overrides},
     {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as (workspace: string) => Promise<{shell: string; windows: string}>;
 }
 
@@ -52,7 +57,8 @@ test('actual launcher installer publishes exact pinned bytes under the original 
   const result = await runCodexBootstrapHost(f.input, () => install(f.root));
   assert.equal(result.shell, '.dharma/bin/dharma'); assert.equal(result.windows, '.dharma/bin/dharma.cmd');
   const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
-    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath})});
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+    ...(codexDirectory === undefined ? {} : {codexDirectory})});
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma.cmd'), 'utf8'), expected.windows);
   assert.deepEqual((await fs.readdir(f.bin)).sort(), ['dharma', 'dharma.cmd']);
@@ -97,4 +103,21 @@ test('legacy launcher installation retains its existing supported contents witho
   const f = await fixture(t), install = await caller();
   await install(f.root);
   assert.match(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), /agent-fabric@0\.2\.153/);
+});
+
+test('actual launcher installer stops before publishing an unsafe provider path', async t => {
+  const f = await fixture(t), install = await caller({resolveRepositoryCodexDirectory: async () => {
+    throw new Error('relay_startup_codex_path_invalid');
+  }});
+  await assert.rejects(runCodexBootstrapHost(f.input, () => install(f.root)), {message: 'relay_startup_codex_path_invalid'});
+  assert.equal(existsSync(f.bin), false);
+});
+
+test('actual launcher installer cannot publish after provider resolution loses its owning scope', async t => {
+  const f = await fixture(t);
+  let close = () => {};
+  const install = await caller({resolveRepositoryCodexDirectory: async () => {close(); return codexDirectory;}});
+  await assert.rejects(runCodexBootstrapHost(f.input, async ({scope}) => {close = () => scope.close(); return install(f.root);}),
+    {message: 'codex_setup_host_scope_unavailable'});
+  assert.equal(existsSync(f.bin), false);
 });
