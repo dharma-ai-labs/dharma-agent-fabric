@@ -5,9 +5,18 @@ import { dirname, join, posix, win32 } from 'node:path';
 
 type Launchers = { shell: string; windows: string };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
+type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; codexDirectory?: string};
+
+function codexDirectoryPath(value: string) {
+  if (!value || value.length > 4096 || !posix.isAbsolute(value) || value === '/'
+    || posix.resolve(value) !== value || /[\x00-\x1f\x7f:]/.test(value)) {
+    throw new Error('relay_startup_codex_path_invalid');
+  }
+  return value;
+}
 
 export function stableRepositoryLauncherContents(version: string,
-  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string }): Launchers {
+  runtime?: LauncherRuntime): Launchers {
   if (!VERSION.test(version)) throw new Error('Managed launcher version is invalid.');
   let shellEnvironment = '', windowsEnvironment = '';
   if (runtime) {
@@ -32,6 +41,12 @@ export function stableRepositoryLauncherContents(version: string,
     const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
     shellInvocation = `${quote(posix.join(runtime.nodeDirectory, 'node'))} ${quote(entry)} exec --yes -- @dharma-ai-labs/agent-fabric@${version}`;
   }
+  if (runtime?.codexDirectory !== undefined) {
+    if (runtime.platform !== 'linux') throw new Error('relay_startup_codex_path_invalid');
+    const directory = codexDirectoryPath(runtime.codexDirectory);
+    // Preserve only the qualified provider bin directory, not the login environment.
+    shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
+  }
   return { shell: `#!/bin/sh\n${shellEnvironment}exec ${shellInvocation} "$@"\n`,
     windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n` };
 }
@@ -40,9 +55,14 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
   try {
     if (typeof launchers.shell !== 'string' || typeof launchers.windows !== 'string'
       || launchers.shell.length > 16384 || launchers.windows.length > 16384) return undefined;
+    let shell = launchers.shell;
+    const providerPrefix = platform === 'linux'
+      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\nexport PATH='([^\n]*)':"\$PATH"\n/) : undefined;
+    const codexDirectory = providerPrefix ? codexDirectoryPath(providerPrefix[2]!.replace(/'\\''/g, "'")) : undefined;
+    if (providerPrefix) shell = `#!/bin/sh\nexport PATH='${providerPrefix[1]}':"$PATH"\n` + shell.slice(providerPrefix[0].length);
     const captured = platform === 'win32'
       ? launchers.windows.match(/^@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "PATH=([^\r\n]*);%PATH%"\r\n/)?.[1]
-      : launchers.shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\n/)?.[1];
+      : shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\n/)?.[1];
     if (!captured) return undefined;
     const directory = platform === 'win32' ? captured.replace(/%%/g, '%') : captured.replace(/'\\''/g, "'");
     let npmCliPath: string | undefined;
@@ -50,13 +70,14 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
       const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
       const prefix = `#!/bin/sh\nexport PATH=${quote(directory)}:"$PATH"\nexec ${quote(posix.join(directory, 'node'))} `;
       const suffix = ` exec --yes -- @dharma-ai-labs/agent-fabric@${version} "$@"\n`;
-      if (launchers.shell.startsWith(prefix) && launchers.shell.endsWith(suffix)) {
-        const token = launchers.shell.slice(prefix.length, -suffix.length);
+      if (shell.startsWith(prefix) && shell.endsWith(suffix)) {
+        const token = shell.slice(prefix.length, -suffix.length);
         if (!token.startsWith("'") || !token.endsWith("'")) return undefined;
         npmCliPath = token.slice(1, -1).replace(/'\\''/g, "'");
       }
     }
-    const runtime = {platform, nodeDirectory: directory, ...(npmCliPath === undefined ? {} : {npmCliPath})};
+    const runtime = {platform, nodeDirectory: directory, ...(npmCliPath === undefined ? {} : {npmCliPath}),
+      ...(codexDirectory === undefined ? {} : {codexDirectory})};
     const expected = stableRepositoryLauncherContents(version, runtime);
     return expected.shell === launchers.shell && expected.windows === launchers.windows ? runtime : undefined;
   } catch { return undefined; }
@@ -109,6 +130,53 @@ export async function resolveRepositoryNpmCli(options: {npmExecPath?: string; se
   throw new Error('relay_startup_npm_unavailable');
 }
 
+async function protectedCodexDirectory(directory: string, nodePath = process.execPath) {
+  codexDirectoryPath(directory);
+  if (await realpath(directory) !== directory) throw Error();
+  const protectParents = async (path: string) => {
+    for (let current = path; ; current = dirname(current)) {
+      const parent = await lstat(current);
+      // Root-owned sticky temporary roots cannot replace this user's child directories.
+      const stickyRoot = current !== path && parent.uid === 0 && (parent.mode & 0o1000);
+      if (!parent.isDirectory() || parent.isSymbolicLink() || ![0, process.getuid!()].includes(parent.uid)
+        || ((parent.mode & 0o022) && !stickyRoot)) throw Error();
+      if (dirname(current) === current) break;
+    }
+  };
+  await protectParents(directory);
+  const executable = await realpath(join(directory, 'codex'));
+  await protectParents(dirname(executable));
+  await protectedBinaryHash(executable, 'linux');
+  if (!((await lstat(executable)).mode & 0o111)) throw Error();
+  let hasNode = true;
+  try {await lstat(join(directory, 'node'));} catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    hasNode = false;
+  }
+  // npm's CLI child uses env-node; provider priority must not replace its runtime.
+  if (hasNode) {
+    const selectedNode = await realpath(join(directory, 'node'));
+    await protectParents(dirname(selectedNode));
+    if (!((await lstat(selectedNode)).mode & 0o111)
+      || await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
+  }
+  return directory;
+}
+
+export async function resolveRepositoryCodexDirectory(options: {searchPath?: string; platform?: NodeJS.Platform} = {}) {
+  if ((options.platform ?? process.platform) !== 'linux') return undefined;
+  for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
+    if (!directory) continue;
+    try {await lstat(join(directory, 'codex'));} catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new Error('relay_startup_codex_path_invalid');
+    }
+    // Do not skip an unsafe first match and silently select a different provider.
+    try {return await protectedCodexDirectory(directory);} catch {throw new Error('relay_startup_codex_path_invalid');}
+  }
+  return undefined;
+}
+
 async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
   if (await realpath(path) !== path) throw new Error('noncanonical_node_binary');
   const file = await open(path, constants.O_RDONLY | (platform === 'win32' ? 0 : constants.O_NOFOLLOW));
@@ -147,6 +215,7 @@ async function verifyRecordedRuntime(version: string, launchers: Launchers,
   // A changed npm cache path is not a new trust root: require the already running Node bytes.
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
+    if (recorded.codexDirectory !== undefined) await protectedCodexDirectory(recorded.codexDirectory, runtime.nodePath);
     if (recorded.npmCliPath !== undefined) {
       const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)
         : await resolveRepositoryNpmCli({npmExecPath: runtime.npmCliPath, platform: runtime.platform});

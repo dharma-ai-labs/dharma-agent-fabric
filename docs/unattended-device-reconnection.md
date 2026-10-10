@@ -1,7 +1,8 @@
 # Returning device connection (candidate)
 
-This guide describes the resume-first change released in CLI 0.2.179. Its bounded
-peer-timeout failure-reporting correction is prepared as CLI 0.2.180, not yet a
+This guide describes the resume-first change released in CLI 0.2.179 and the
+peer-timeout correction released in CLI 0.2.180. The protected Codex startup-path
+correction is prepared as CLI 0.2.181, not yet a
 published or activated release. Use that correction only after its independent
 review and release gates pass. The server must
 also implement the membership-guarded `dharma.device-admission/v1` session response;
@@ -11,18 +12,30 @@ repository readiness, service restart, or task execution.
 
 ## Candidate release alignment
 
-The dependencies below are published; CLI 0.2.180 is the pending correction:
+The dependencies below are published; CLI 0.2.181 is the pending correction:
 
 | Package | Candidate version | Required direct pins |
 | --- | --- | --- |
 | contracts | 0.1.15 | Existing third-party dependencies |
 | secure-store | 0.1.9 | No first-party dependencies |
 | relay-client | 0.2.32 | contracts 0.1.15; secure-store 0.1.9 |
-| CLI | 0.2.180 (pending) | contracts 0.1.15; secure-store 0.1.9; relay-client 0.2.32 |
+| CLI | 0.2.181 (pending) | contracts 0.1.15; secure-store 0.1.9; relay-client 0.2.32 |
 
 The CLI retains exact pins for the other unchanged runtime packages. The private
 lifecycle reference pins contracts 0.1.15 and remains private. Existing registry
-CLI 0.2.179 cannot receive the timeout correction through an unchanged immutable version.
+CLI 0.2.180 cannot receive the startup-path correction through an unchanged immutable version.
+
+On Linux, managed launchers retain only the selected protected Codex executable
+directory alongside the pinned Node/npm runtime, using the same provider search
+path as the foreground agent. They do not copy the login environment or secrets.
+The selected Codex directory has priority over any Codex beside Node. If it also
+contains `node`, that executable must have the same protected bytes as the running
+pinned Node; otherwise setup and recorded-launcher verification fail closed.
+Unsafe executable paths fail with `relay_startup_codex_path_invalid` before launcher
+publication. Normal upgrade records the selected path; rollback restores the exact
+previous launcher bytes and rechecks their protection. A foreground capability
+receipt does not prove that a restarted relay has discovered the same provider;
+verify a fresh endpoint capability receipt after the owned service restart.
 
 Qualification requires the reviewed membership-guarded server migration and
 route, exact deployed readback and these immutable package contents before client

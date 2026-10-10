@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '7adee4e339e65a5b2340a02159002ac7294dac37';
-const tree = '06e98ae37ac6b83ce4d6f32f3b40fcd720134e95';
+const source = '1df82fed998159b129f948064efa5755b953390e';
+const tree = 'd7fbbd8f1dda4c5434dffc0e7fcab2da15829c20';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.180' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.181' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -58,8 +58,9 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
-    'packages/cli/src/codexBoundSession.ts', 'packages/cli/src/codexInboxSession.ts',
-    'packages/cli/src/codexBoundSession.test.ts', 'docs/unattended-device-reconnection.md',
+    'packages/cli/src/repositoryLaunchers.ts', 'packages/cli/src/repositoryLaunchers.test.ts',
+    'packages/cli/src/bootstrapLauncherCaller.test.ts', 'packages/cli/src/relayRuntimeUpgradeCaller.test.ts',
+    'docs/unattended-device-reconnection.md',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
     'scripts/publish-workflow.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
