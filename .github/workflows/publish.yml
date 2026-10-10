@@ -5,6 +5,15 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      onboarding_only:
+        description: Publish only contracts, secure-store, relay-client and CLI from reviewed main
+        type: boolean
+        default: false
+      expected_head:
+        description: Exact reviewed main SHA (required for onboarding-only publication)
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -13,10 +22,13 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: npm
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22.22.0"
@@ -40,7 +52,14 @@ jobs:
       - name: Publish public workspaces
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
+          if [ "$ONBOARDING_ONLY" = "true" ]; then
+            npm run publish:onboarding -- --expected-head "$EXPECTED_HEAD"
+            exit 0
+          fi
+
           package_exists() {
             local package="$1"
             local attempt
@@ -53,19 +72,21 @@ jobs:
             return 1
           }
 
-          for workspace in \
-            packages/contracts \
-            packages/secure-store \
-            packages/policy \
-            packages/provider-adapters \
-            packages/better-harness-bridge \
-            packages/evidence-reduction \
-            packages/relay-client \
-            packages/local-vault \
-            packages/task-runner \
-            packages/skill-manager \
-            packages/sdk \
+          workspaces=(
+            packages/contracts
+            packages/secure-store
+            packages/policy
+            packages/provider-adapters
+            packages/better-harness-bridge
+            packages/evidence-reduction
+            packages/relay-client
+            packages/local-vault
+            packages/task-runner
+            packages/skill-manager
+            packages/sdk
             packages/cli
+          )
+          for workspace in "${workspaces[@]}"
           do
             name=$(node -p "require('./${workspace}/package.json').name")
             version=$(node -p "require('./${workspace}/package.json').version")
@@ -92,11 +113,12 @@ jobs:
             fi
           done
       - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --generate-notes
   publish-python:
-    if: vars.PYPI_PUBLISH_ENABLED == 'true'
+    if: vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.onboarding_only)
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
