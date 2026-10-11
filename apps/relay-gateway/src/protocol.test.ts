@@ -62,6 +62,7 @@ test('relay permits only bounded repository collaboration and package routes', (
   for (const pathname of [
     `/api/v1/orgs/org_customer/agent-fabric/repository-source-policy?workspaceId=${id}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates/${other}?workspaceId=${id}&operationId=${operationId}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}&operationId=${operationId}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}&category=release-safety`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-questions/${other}?workspaceId=${id}`,
@@ -72,6 +73,9 @@ test('relay permits only bounded repository collaboration and package routes', (
   }
   for (const pathname of [
     `/api/v1/orgs/org_customer/agent-fabric/repository-source-policy?workspaceId=all`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}&operationId=${operationId}&admin=true`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}&operationId=${operationId}&workspaceId=${other}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}&admin=true`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-questions/all?workspaceId=${id}`,
     `/api/v1/orgs/org_customer/agent-fabric/skills/${id}/repository-package/chunks?rolloutId=${other}&workspaceId=${id}&provider=codex&fileIndex=-1&chunkIndex=0`,

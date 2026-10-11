@@ -81,6 +81,39 @@ async function snapshot(root: string) {
   return inventoryRepositoryPackage(input);
 }
 
+test('lost terminal POST response recovers by operation lookup without a second upload', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-lost-response-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, calls: string[] = [];
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    let candidate: Record<string, unknown> | null = null;
+    const transport = {
+      signedPost: async (_route: string, value: unknown) => {
+        calls.push('POST');const body = value as Record<string, unknown>;
+        candidate = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+          snapshotHash: body.sourceSnapshotHash, state: 'published', releaseId: restoration.priorReleaseId };
+        throw new Error('simulated_lost_POST_response');
+      },
+      signedGet: async (route: string) => {
+        calls.push('GET');assert.ok(route.includes(`/package-candidates?workspaceId=${ids.workspaceId}&operationId=`));
+        return { ok: true, organizationId: scope.organizationId, candidate };
+      },
+    };
+    const input = { transport, outboxRoot: join(root, 'outbox'), scope, snapshot: await snapshot(root),
+      initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+    await assert.rejects(synchronizeRepositoryCandidate(input), /simulated_lost_POST_response/);
+    const journal = JSON.parse(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'));
+    assert.equal(journal.state, 'pending_upload');assert.equal(journal.candidateId, null);
+    for (let replay = 0; replay < 2; replay++) {
+      assert.deepEqual((await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }))?.candidate, candidate);
+    }
+    assert.deepEqual(calls, ['POST', 'GET', 'GET']);
+    candidate = null;
+    assert.equal(await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('repository candidate upload persists an exact outbox and polls the same operation after a lost caller response', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-'));
   const calls: Array<{ method: string; route: string; body?: unknown }> = [];

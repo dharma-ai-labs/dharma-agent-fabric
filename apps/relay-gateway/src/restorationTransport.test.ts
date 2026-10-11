@@ -74,10 +74,11 @@ test('actual gateway forwards signed restoration metadata and blobs but rejects 
   const prefix = `/api/v1/orgs/org_fixture/agent-fabric/repository-agents/${randomUUID()}/source-inventory`;
   const metadata = `${prefix}?workspaceId=${randomUUID()}&restoration=true`;
   const blob = `${prefix}/${randomUUID()}/blobs/sha256%3A${'a'.repeat(64)}?workspaceId=${randomUUID()}&path=docs%2Fstable.md&restoration=true`;
-  for (const pathname of [metadata, `${metadata}&restorationOperationId=sha256%3A${'b'.repeat(64)}`, blob]) {
+  const operation = `${prefix.replace(/\/source-inventory$/, '/package-candidates')}?workspaceId=${randomUUID()}&operationId=sha256%3A${'c'.repeat(64)}`;
+  for (const pathname of [metadata, `${metadata}&restorationOperationId=sha256%3A${'b'.repeat(64)}`, blob, operation]) {
     const response = await send(pathname);assert.equal(response.status, 200);assert.equal(JSON.parse(response.body).ok, true);
   }
   const denied = await send(`${metadata}&admin=true`);
   assert.equal(denied.status, 400);assert.equal(JSON.parse(denied.body).error.code, 'route_not_allowed');
-  assert.equal(upstreamPaths.length, 3);
+  assert.equal(upstreamPaths.length, 4);
 });

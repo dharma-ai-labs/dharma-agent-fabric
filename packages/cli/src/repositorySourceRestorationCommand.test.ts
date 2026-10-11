@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import { loadDeviceEnrollmentAnchor, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 
 const text = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
 const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -27,7 +29,9 @@ function fixture() {
     resolve: (...args: string[]) => args.join('/'),
     loadVerifiedWorkspacePolicy: async () => { calls.push('policy');return { serverAuthorization: {} }; },
     assertWorkspaceAuthorizationCurrent: async () => { calls.push('authorization'); },
-    loadDeviceEnrollmentAnchor: async () => { calls.push('protected-anchor');return { serverPublicKeyEd25519: 'public' }; },
+    loadDeviceEnrollmentAnchor: async (input: { readOnly: boolean }) => {
+      calls.push(input.readOnly ? 'protected-anchor-readonly' : 'protected-anchor');return { serverPublicKeyEd25519: 'public' };
+    },
     currentBootstrapHostScope: () => undefined, configPath: () => '/synthetic/device', protocolStatePath: () => '/synthetic/protocol',
     AgentFabricClient: { open: async () => { calls.push('client');return { openSession: async () => { calls.push('session'); } }; } },
     VERSION: 'fixture', createPublicKey: () => ({}), repositorySourceComparisonBaseline: () => null,
@@ -73,7 +77,26 @@ test('restoration planning has no source, registry or activation writes', async 
   const f = fixture(), result = await f.run(f.flags(['dry-run', true]));
   assert.equal(result.planHash, 'reviewed-plan');assert.equal(result.activated, false);assert.equal(result.published, false);
   assert.equal(result.localMutation, false);assert.equal(result.serverSourceMutation, false);
+  assert.ok(f.calls.includes('protected-anchor-readonly'));assert.ok(!f.calls.includes('protected-anchor'));
   assert.ok(!f.calls.some(call => /write|submit|relay-state/.test(call)));
+});
+
+test('dry-run reads the official legacy enrollment anchor in place without secure-store migration', async () => {
+  const f = fixture(), writes: string[] = [];
+  const config = { schema: 'dharma.device-config/v1' as const, hqUrl: 'https://fixture.example', organizationId: 'org_fixture',
+    deviceId: '44444444-4444-4444-8444-444444444444', deviceName: 'Synthetic', platform: 'linux' as const,
+    publicKeyEd25519: 'A'.repeat(43), serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example',
+    enrolledAt: '2026-10-01T00:00:00.000Z' };
+  const legacy = 'device-enrollment-' + createHash('sha256').update([config.hqUrl, config.organizationId].join(':')).digest('hex').slice(0, 32);
+  const anchor = JSON.stringify({ schema: 'dharma.device-enrollment-anchor/v1', hqUrl: config.hqUrl,
+    organizationId: config.organizationId, deviceId: config.deviceId, devicePublicKeyEd25519: config.publicKeyEd25519,
+    serverPublicKeyEd25519: config.serverPublicKeyEd25519, enrolledAt: config.enrolledAt });
+  const values = new Map([[legacy, anchor]]), before = new Map(values);
+  const store: SecureSecretStore = { backend: 'linux-secret-service', get: async key => values.get(key) ?? null,
+    getFresh: async key => values.get(key) ?? null,
+    put: async (key, value) => { writes.push(key);values.set(key, value); }, delete: async key => { writes.push(key);values.delete(key); } };
+  f.overrides.loadDeviceEnrollmentAnchor = async (input: { readOnly: boolean }) => loadDeviceEnrollmentAnchor({ config, store, readOnly: input.readOnly });
+  await f.run(f.flags(['dry-run', true]));assert.deepEqual(values, before);assert.deepEqual(writes, []);
 });
 
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {

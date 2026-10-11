@@ -5735,7 +5735,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   const policy = await loadVerifiedWorkspacePolicy(resolve(workspace.path, '.dharma', 'approved-policy.json'), workspaceId);
   if (!policy.serverAuthorization) throw new Error('repository_source_restoration_workspace_not_authorized');
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
-  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope(), readOnly: !apply });
   const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
     hostScope: currentBootstrapHostScope(), readOnly: !apply });
   await fabric.openSession(VERSION);

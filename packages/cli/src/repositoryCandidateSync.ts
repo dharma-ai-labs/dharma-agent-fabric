@@ -274,16 +274,18 @@ export async function recoverRepositoryRestorationCandidate(input: {
   const scope = checkedScope(input.scope);
   requireFact(HASH.test(input.planHash), 'Repository restoration plan hash is invalid.');
   const path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
-  if (!pending?.restoration || pending.restoration.planHash !== input.planHash || !pending.candidateId) return null;
+  if (!pending?.restoration || pending.restoration.planHash !== input.planHash) return null;
   requireFact(pending.consolidation.mode === 'repository_update' && Boolean(pending.consolidation.expectedLatestSourceFingerprint)
     && repositoryCandidateOperationId({ scope, snapshotHash: pending.snapshotHash,
       sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation }) === pending.operationId,
   'Repository restoration checkpoint operation is invalid.');
   const query = new URLSearchParams({ workspaceId: scope.workspaceId, operationId: pending.operationId });
-  const candidate = receipt(await input.transport.signedGet(
-    `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates/${encodeURIComponent(pending.candidateId)}?${query}`,
-  ), scope, pending.operationId, pending.snapshotHash);
-  requireFact(candidate.candidateId === pending.candidateId, 'Repository restoration checkpoint candidate changed.');
+  const suffix = pending.candidateId ? `/${encodeURIComponent(pending.candidateId)}` : '';
+  const response = await input.transport.signedGet(
+    `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates${suffix}?${query}`);
+  if (!pending.candidateId && response.ok === true && response.organizationId === scope.organizationId && response.candidate === null) return null;
+  const candidate = receipt(response, scope, pending.operationId, pending.snapshotHash);
+  requireFact(!pending.candidateId || candidate.candidateId === pending.candidateId, 'Repository restoration checkpoint candidate changed.');
   return { candidate, sourceManifestHash: pending.sourceManifestHash, ...pending.restoration };
 }
 
