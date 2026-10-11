@@ -21,7 +21,8 @@ test('current scoped restoration is admitted by the bounded publisher delta', ()
     manifest: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))};
   assert.doesNotThrow(() => assertSourceSnapshot(current, snapshot));
   assert.doesNotThrow(() => assertSourceSnapshot(current, { ...snapshot, changed: [...snapshot.changed,
-    'apps/relay-gateway/src/protocol.ts', 'apps/relay-gateway/src/protocol.test.ts'] }));
+    'apps/relay-gateway/src/protocol.ts', 'apps/relay-gateway/src/protocol.test.ts',
+    'packages/cli/src/repositoryCandidateSync.test.ts'] }));
   for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml']) {
     assert.throws(() => assertSourceSnapshot(current, {...snapshot, changed: [...snapshot.changed, forbidden]}),
       /unreviewed product source delta/);

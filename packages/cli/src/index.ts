@@ -78,7 +78,7 @@ import { prepareProvidersIndependently, startSkillPreparationPump } from './skil
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { publishSkillPreparationCache, takeSkillPreparationCache } from './skillPreparationCache.js';
-import { adoptRepositoryCandidate, pollRepositoryCandidate, synchronizeRepositoryCandidate,
+import { adoptRepositoryCandidate, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateReceipt } from './repositoryCandidateSync.js';
 import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type RepositoryRoleScope } from './repositoryRoleMetadata.js';
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
@@ -5741,6 +5741,41 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   await fabric.openSession(VERSION);
   const scope = { organizationId: workspace.organizationId, workspaceId,
     repositoryBindingId: workspace.repositoryBindingId, repositoryAgentId: workspace.repositoryAgentId };
+  if (apply) {
+    const authorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+    if (!authorization.policy.automaticValidatedPublication) throw new Error('repository_source_restoration_publication_denied');
+    const recovered = await recoverRepositoryRestorationCandidate({ transport: fabric, scope,
+      outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), planHash: required(flags, 'plan-hash') });
+    if (recovered) {
+      const currentOperationId = workspace.repositoryPackage.operationId ?? null;
+      if (currentOperationId !== recovered.previousOperationId && currentOperationId !== recovered.candidate.operationId) {
+        throw new Error('repository_source_restoration_checkpoint_registry_changed');
+      }
+      for (const hash of [recovered.localSnapshotHash, recovered.candidate.snapshotHash]) {
+        const snapshot = await readRepositoryPackageSnapshot(workspace.path, hash);
+        if (!snapshot || snapshot.manifest.organizationId !== scope.organizationId || snapshot.manifest.workspaceId !== workspaceId
+          || snapshot.manifest.knowledge?.repositoryAgentId !== scope.repositoryAgentId
+          || hash === recovered.candidate.snapshotHash && sha256(canonicalize(snapshot.manifest)) !== recovered.sourceManifestHash) {
+          throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
+        }
+      }
+      await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+      if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+        throw new Error('repository_source_restoration_requires_stopped_relay');
+      }
+      const candidate = recovered.candidate, pending = candidate.state === 'accepted' || candidate.state === 'processing';
+      await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
+        ...candidate, sourceManifestHash: recovered.sourceManifestHash, consolidationMode: 'repository_update',
+        localBaselineSnapshotHash: candidate.state === 'blocked' ? recovered.baselineSnapshotHash : recovered.localSnapshotHash,
+        publishedLocalSnapshotHash: candidate.state === 'published' ? recovered.localSnapshotHash : recovered.baselineSnapshotHash,
+        pendingLocalSnapshotHash: pending ? recovered.localSnapshotHash : null,
+        pendingLocalOperationId: pending ? candidate.operationId : null } });
+      return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_recovered',
+        planHash: recovered.planHash, candidate, priorReleaseId: recovered.priorReleaseId,
+        localMutation: true, serverSourceMutation: false, activated: false,
+        nextAction: 'Resume the owned relay; recovery only reconciled the existing candidate receipt.' };
+    }
+  }
   const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
     workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
   const collected = await collectRepositorySourceRestoration({ ...scope, workspace: workspace.path, transport: fabric,
@@ -5774,7 +5809,10 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   const candidate = await synchronizeRepositoryCandidate({ transport: fabric,
     outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), scope,
     snapshot: collected.snapshot, initialRepository: false,
-    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint });
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
+    restoration: { planHash, localSnapshotHash: collected.local.manifest.snapshotHash,
+      baselineSnapshotHash: baseline, previousOperationId: workspace.repositoryPackage.operationId ?? null,
+      priorReleaseId: collected.priorReleaseId } });
   const pending = candidate.state === 'accepted' || candidate.state === 'processing';
   await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
     ...candidate, sourceManifestHash: sha256(canonicalize(collected.snapshot.manifest)), consolidationMode: 'repository_update',

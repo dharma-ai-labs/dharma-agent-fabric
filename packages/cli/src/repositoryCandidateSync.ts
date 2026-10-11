@@ -44,6 +44,15 @@ type CandidateOutbox = {
   candidateId: string | null;
   state: 'pending_upload' | RepositoryCandidateState;
   releaseId: string | null;
+  restoration?: RestorationCheckpoint;
+};
+
+type RestorationCheckpoint = {
+  planHash: string;
+  localSnapshotHash: string;
+  baselineSnapshotHash: string | null;
+  previousOperationId: string | null;
+  priorReleaseId: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
@@ -65,6 +74,18 @@ export function repositoryCandidateOperationId(input: {
 
 function requireFact(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
+}
+
+function restorationCheckpoint(value: unknown): RestorationCheckpoint {
+  requireFact(value !== null && typeof value === 'object' && !Array.isArray(value), 'Repository restoration checkpoint is invalid.');
+  const row = value as Record<string, unknown>;
+  requireFact(Object.keys(row).sort().join(',') === 'baselineSnapshotHash,localSnapshotHash,planHash,previousOperationId,priorReleaseId'
+    && typeof row.planHash === 'string' && HASH.test(row.planHash)
+    && typeof row.localSnapshotHash === 'string' && HASH.test(row.localSnapshotHash)
+    && (row.baselineSnapshotHash === null || typeof row.baselineSnapshotHash === 'string' && HASH.test(row.baselineSnapshotHash))
+    && (row.previousOperationId === null || typeof row.previousOperationId === 'string' && HASH.test(row.previousOperationId))
+    && typeof row.priorReleaseId === 'string' && UUID.test(row.priorReleaseId), 'Repository restoration checkpoint is invalid.');
+  return row as RestorationCheckpoint;
 }
 
 function checkedScope(value: RepositoryCandidateScope): RepositoryCandidateScope {
@@ -115,7 +136,7 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     'candidateId', 'state', 'releaseId'];
   requireFact(row.schema === 'dharma.repository-candidate-outbox/v1'
     && Reflect.ownKeys(row).every(key => typeof key === 'string')
-    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key)),
+    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key) || key === 'restoration'),
   'Repository candidate outbox is invalid.');
   const scope = checkedScope(row.scope as RepositoryCandidateScope);
   if (expectedScope) requireFact(canonicalize(scope) === canonicalize(expectedScope), 'Repository candidate outbox scope is invalid.');
@@ -143,7 +164,8 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     operationId: row.operationId as string, sourceManifestHash: row.sourceManifestHash as string,
     snapshotHash: row.snapshotHash as string, consolidation: consolidation as CandidateOutbox['consolidation'],
     candidateId: row.candidateId as string | null, state: row.state as CandidateOutbox['state'],
-    releaseId: row.releaseId as string | null };
+    releaseId: row.releaseId as string | null,
+    ...(Object.hasOwn(row, 'restoration') ? { restoration: restorationCheckpoint(row.restoration) } : {}) };
 }
 
 async function readOutbox(path: string, expectedScope?: RepositoryCandidateScope): Promise<CandidateOutbox | null> {
@@ -165,6 +187,7 @@ export async function synchronizeRepositoryCandidate(input: {
   initialRepository: boolean;
   expectedLatestSourceFingerprint?: string;
   blockedCandidate?: RepositoryCandidateReceipt;
+  restoration?: RestorationCheckpoint;
 }): Promise<RepositoryCandidateReceipt> {
   const scope = checkedScope(input.scope);
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
@@ -201,6 +224,9 @@ export async function synchronizeRepositoryCandidate(input: {
       expectedLatestSourceFingerprint: input.expectedLatestSourceFingerprint,
     } : {}),
   };
+  const restoration = input.restoration === undefined ? undefined : restorationCheckpoint(input.restoration);
+  requireFact(!restoration || !input.initialRepository && Boolean(input.expectedLatestSourceFingerprint)
+    && !input.blockedCandidate, 'Repository restoration checkpoint requires an update.');
   const operationId = repositoryCandidateOperationId({ scope, snapshotHash: snapshot.manifest.snapshotHash,
     sourceManifestHash, consolidation, recoveryAttempt: Boolean(input.blockedCandidate) });
   const path = outboxPath(input.outboxRoot, scope);
@@ -214,9 +240,11 @@ export async function synchronizeRepositoryCandidate(input: {
     schema: 'dharma.repository-candidate-outbox/v1', scope, operationId,
     sourceManifestHash, snapshotHash: snapshot.manifest.snapshotHash, consolidation,
     candidateId: null, state: 'pending_upload', releaseId: null,
+    ...(restoration ? { restoration } : {}),
   };
   requireFact(pending.sourceManifestHash === sourceManifestHash && pending.snapshotHash === snapshot.manifest.snapshotHash
-    && canonicalize(pending.consolidation) === canonicalize(consolidation),
+    && canonicalize(pending.consolidation) === canonicalize(consolidation)
+    && canonicalize(pending.restoration ?? null) === canonicalize(restoration ?? null),
   'Repository candidate outbox does not match the current upload.');
   await writeOutbox(path, pending);
   const route = `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates`;
@@ -235,6 +263,28 @@ export async function synchronizeRepositoryCandidate(input: {
   }
   await writeOutbox(path, { ...pending, candidateId: accepted.candidateId, state: accepted.state, releaseId: accepted.releaseId });
   return accepted;
+}
+
+// Only reconcile an already admitted operation. This never uploads or obtains
+// new restoration authority, even if the original registry write was lost.
+export async function recoverRepositoryRestorationCandidate(input: {
+  transport: Pick<RepositoryCandidateTransport, 'signedGet'>;
+  outboxRoot: string; scope: RepositoryCandidateScope; planHash: string;
+}) {
+  const scope = checkedScope(input.scope);
+  requireFact(HASH.test(input.planHash), 'Repository restoration plan hash is invalid.');
+  const path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
+  if (!pending?.restoration || pending.restoration.planHash !== input.planHash || !pending.candidateId) return null;
+  requireFact(pending.consolidation.mode === 'repository_update' && Boolean(pending.consolidation.expectedLatestSourceFingerprint)
+    && repositoryCandidateOperationId({ scope, snapshotHash: pending.snapshotHash,
+      sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation }) === pending.operationId,
+  'Repository restoration checkpoint operation is invalid.');
+  const query = new URLSearchParams({ workspaceId: scope.workspaceId, operationId: pending.operationId });
+  const candidate = receipt(await input.transport.signedGet(
+    `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates/${encodeURIComponent(pending.candidateId)}?${query}`,
+  ), scope, pending.operationId, pending.snapshotHash);
+  requireFact(candidate.candidateId === pending.candidateId, 'Repository restoration checkpoint candidate changed.');
+  return { candidate, sourceManifestHash: pending.sourceManifestHash, ...pending.restoration };
 }
 
 export async function pollRepositoryCandidate(input: {

@@ -31,6 +31,9 @@ function fixture() {
     currentBootstrapHostScope: () => undefined, configPath: () => '/synthetic/device', protocolStatePath: () => '/synthetic/protocol',
     AgentFabricClient: { open: async () => { calls.push('client');return { openSession: async () => { calls.push('session'); } }; } },
     VERSION: 'fixture', createPublicKey: () => ({}), repositorySourceComparisonBaseline: () => null,
+    fetchRepositorySourceAuthorization: async () => ({ policy: { automaticValidatedPublication: true } }),
+    validateRepositorySourceAuthorization: (value: unknown) => value,
+    recoverRepositoryRestorationCandidate: async () => null,
     collectRepositorySourceRestoration: async () => { calls.push('collect');return {
       local: { manifest: { snapshotHash: 'local' } },
       snapshot: { manifest: { snapshotHash: 'snapshot' } }, expectedLatestSourceFingerprint: 'head',
@@ -91,6 +94,53 @@ test('published restoration keeps the actual local baseline rather than remote-o
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.publishedLocalSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, null);
+});
+
+test('terminal submission survives a lost registry write and retries without restoration readmission or POST', async () => {
+  for (const state of ['published', 'blocked'] as const) {
+    const f = fixture();let checkpoint: Record<string, unknown> | null = null, writes = 0, submissions = 0;
+    const candidate = { state, operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot',
+      releaseId: state === 'published' ? 'release' : null };
+    f.overrides.synchronizeRepositoryCandidate = async (input: { restoration: Record<string, unknown> }) => {
+      submissions++;checkpoint = { ...input.restoration, candidate, sourceManifestHash: 'reviewed-plan' };return candidate;
+    };
+    f.overrides.recoverRepositoryRestorationCandidate = async () => checkpoint;
+    f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => ({ manifest: {
+      snapshotHash: hash, organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' } } });
+    f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace) => {
+      if (++writes === 1) throw new Error('simulated_registry_write_failure');
+      Object.assign(f.workspace, record);
+    };
+    const flags = f.flags(['apply', true], ['plan-hash', 'reviewed-plan']);
+    await assert.rejects(f.run(flags), /simulated_registry_write_failure/);
+    f.overrides.collectRepositorySourceRestoration = async () => { throw new Error('operation_already_used'); };
+    for (let replay = 0; replay < 2; replay++) {
+      const result = await f.run(flags);
+      assert.equal(result.stage, 'repository_restoration_candidate_recovered');
+      assert.equal(result.serverSourceMutation, false);assert.equal(result.activated, false);
+      assert.equal(f.workspace.repositoryPackage.pendingLocalOperationId, null);
+      assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).publishedLocalSnapshotHash,
+        state === 'published' ? 'local' : null);
+    }
+    assert.equal(submissions, 1);
+  }
+});
+
+test('recovery rejects unavailable CAS, revoked publication, or a restarted supervisor without registry mutation', async () => {
+  for (const mode of ['cas', 'revoked', 'supervisor', 'registry']) {
+    const f = fixture();
+    f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
+      localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: mode === 'registry' ? 'different' : null,
+      priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
+      candidate: { state: 'published', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'release' } });
+    f.overrides.readRepositoryPackageSnapshot = async () => mode === 'cas' ? null : ({ manifest: {
+      organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' } } });
+    if (mode === 'revoked') f.overrides.fetchRepositorySourceAuthorization = async () => ({ policy: { automaticValidatedPublication: false } });
+    let checks = 0;
+    if (mode === 'supervisor') f.overrides.relaySupervisorProcessState = async () => ++checks === 1 ? 'stopped' : 'running';
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])));
+    assert.ok(!f.calls.some(call => /write|submit|collect/.test(call)));
+  }
 });
 
 test('running or unknown supervisor, including a final-check restart, cannot write or submit', async () => {

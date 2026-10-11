@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
-import { pollRepositoryCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
+import { pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 
@@ -14,6 +14,48 @@ const ids = {
   repositoryBindingId: '73a95988-fd64-41ba-a0b9-6c8867d03788',
   repositoryAgentId: '57f61652-a5eb-46e4-930c-9478cd4a9c31',
 };
+
+test('durable restoration checkpoint recovers a terminal receipt by exact scoped GET without reposting', async () => {
+  for (const state of ['published', 'blocked'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-replay-'));
+    try {
+      const scope = { organizationId: 'org_fixture', ...ids }, calls: string[] = [];
+      const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+        baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+      let accepted: Record<string, unknown> = {};
+      const transport = {
+        signedPost: async (_route: string, body: unknown) => {
+          calls.push('POST');const request = body as Record<string, unknown>;
+          assert.equal(Object.hasOwn(request, 'restoration'), false);
+          const journal = JSON.parse(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'));
+          assert.deepEqual(journal.restoration, restoration);assert.equal(journal.state, 'pending_upload');
+          accepted = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: request.operationId,
+            snapshotHash: request.sourceSnapshotHash, state, releaseId: state === 'published' ? restoration.priorReleaseId : null };
+          return { ok: true, organizationId: scope.organizationId, candidate: accepted };
+        },
+        signedGet: async (route: string) => {
+          calls.push('GET');assert.ok(route.includes(`/package-candidates/${accepted.candidateId}?workspaceId=${ids.workspaceId}&operationId=`));
+          return { ok: true, organizationId: scope.organizationId, candidate: accepted };
+        },
+      };
+      const input = { transport, outboxRoot: join(root, 'outbox'), scope,
+        snapshot: await snapshot(root), initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+      await synchronizeRepositoryCandidate(input);
+      for (let replay = 0; replay < 2; replay++) {
+        const recovered = await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash });
+        assert.deepEqual(recovered?.candidate, accepted);assert.equal(recovered?.localSnapshotHash, restoration.localSnapshotHash);
+      }
+      assert.equal(await recoverRepositoryRestorationCandidate({ ...input, planHash: `sha256:${'d'.repeat(64)}` }), null);
+      assert.deepEqual(calls, ['POST', 'GET', 'GET']);
+      const path = join(root, 'outbox', `${ids.workspaceId}.json`), journal = JSON.parse(await readFile(path, 'utf8'));
+      journal.operationId = `sha256:${'e'.repeat(64)}`;await writeFile(path, JSON.stringify(journal));
+      await assert.rejects(recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), /checkpoint operation/);
+      assert.deepEqual(calls, ['POST', 'GET', 'GET']);
+      journal.scope.repositoryAgentId = '97f61652-a5eb-46e4-930c-9478cd4a9c31';await writeFile(path, JSON.stringify(journal));
+      await assert.rejects(recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), /outbox scope/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
 async function snapshot(root: string) {
   const workspace = join(root, 'repository');
   await mkdir(join(workspace, '.agents/skills/dharma-agent-fabric'), { recursive: true });
