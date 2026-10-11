@@ -289,6 +289,34 @@ export async function recoverRepositoryRestorationCandidate(input: {
   return { candidate, sourceManifestHash: pending.sourceManifestHash, ...pending.restoration };
 }
 
+// Called only after the command's final authority, CAS and stopped-runtime
+// checks. Keep restoration provenance if the following registry write fails.
+export async function checkpointRepositoryRestorationCandidate(input: {
+  outboxRoot: string; scope: RepositoryCandidateScope;
+  recovered: NonNullable<Awaited<ReturnType<typeof recoverRepositoryRestorationCandidate>>>;
+}): Promise<RepositoryCandidateReceipt> {
+  const scope = checkedScope(input.scope), recovered = input.recovered;
+  const path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
+  const expected = restorationCheckpoint({ planHash: recovered.planHash, localSnapshotHash: recovered.localSnapshotHash,
+    baselineSnapshotHash: recovered.baselineSnapshotHash, previousOperationId: recovered.previousOperationId,
+    priorReleaseId: recovered.priorReleaseId });
+  requireFact(pending?.restoration && canonicalize(pending.restoration) === canonicalize(expected)
+    && pending.sourceManifestHash === recovered.sourceManifestHash
+    && pending.consolidation.mode === 'repository_update' && Boolean(pending.consolidation.expectedLatestSourceFingerprint)
+    && repositoryCandidateOperationId({ scope, snapshotHash: pending.snapshotHash,
+      sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation }) === pending.operationId,
+  'Repository restoration checkpoint changed.');
+  const candidate = receipt({ ok: true, organizationId: scope.organizationId, candidate: recovered.candidate },
+    scope, pending.operationId, pending.snapshotHash);
+  requireFact(!pending.candidateId || pending.candidateId === candidate.candidateId,
+    'Repository restoration checkpoint candidate changed.');
+  requireFact(!['published', 'blocked'].includes(pending.state)
+    || pending.state === candidate.state && pending.releaseId === candidate.releaseId,
+  'Repository restoration checkpoint terminal state changed.');
+  await writeOutbox(path, { ...pending, ...candidate });
+  return candidate;
+}
+
 export async function pollRepositoryCandidate(input: {
   transport: Pick<RepositoryCandidateTransport, 'signedGet'>;
   outboxRoot: string;

@@ -78,7 +78,7 @@ import { prepareProvidersIndependently, startSkillPreparationPump } from './skil
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { publishSkillPreparationCache, takeSkillPreparationCache } from './skillPreparationCache.js';
-import { adoptRepositoryCandidate, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate,
+import { adoptRepositoryCandidate, checkpointRepositoryRestorationCandidate, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateReceipt } from './repositoryCandidateSync.js';
 import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type RepositoryRoleScope } from './repositoryRoleMetadata.js';
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
@@ -5763,7 +5763,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
       if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
         throw new Error('repository_source_restoration_requires_stopped_relay');
       }
-      const candidate = recovered.candidate, pending = candidate.state === 'accepted' || candidate.state === 'processing';
+      const candidate = await checkpointRepositoryRestorationCandidate({ scope, recovered,
+        outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
+      const pending = candidate.state === 'accepted' || candidate.state === 'processing';
       await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
         ...candidate, sourceManifestHash: recovered.sourceManifestHash, consolidationMode: 'repository_update',
         localBaselineSnapshotHash: candidate.state === 'blocked' ? recovered.baselineSnapshotHash : recovered.localSnapshotHash,

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
-import { pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
+import { checkpointRepositoryRestorationCandidate, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 
@@ -112,6 +112,68 @@ test('lost terminal POST response recovers by operation lookup without a second 
     candidate = null;
     assert.equal(await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), null);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('lost pending response checkpoints recovery durably and normal polling reaches publication', async () => {
+  for (const initialState of ['accepted', 'processing'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-pending-recovery-'));
+    try {
+      const scope = { organizationId: 'org_fixture', ...ids }, calls: string[] = [];
+      const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+        baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+      let candidate: Record<string, unknown> = {};
+      const transport = {
+        signedPost: async (_route: string, value: unknown) => {
+          calls.push('POST');const body = value as Record<string, unknown>;
+          candidate = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+            snapshotHash: body.sourceSnapshotHash, state: initialState, releaseId: null };
+          throw new Error('simulated_lost_POST_response');
+        },
+        signedGet: async (route: string) => {
+          calls.push(route);return { ok: true, organizationId: scope.organizationId, candidate };
+        },
+      };
+      const input = { transport, outboxRoot: join(root, 'outbox'), scope, snapshot: await snapshot(root),
+        initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+      await assert.rejects(synchronizeRepositoryCandidate(input), /simulated_lost_POST_response/);
+      assert.equal(await pollRepositoryCandidate(input), null);
+      const recovered = await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash });
+      assert.ok(recovered);
+      await checkpointRepositoryRestorationCandidate({ ...input, recovered });
+      // Simulate a registry-write crash after the durable checkpoint: retry
+      // must recover by candidate ID with all restoration provenance intact.
+      const retried = await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash });
+      assert.deepEqual(retried, recovered);
+      await checkpointRepositoryRestorationCandidate({ ...input, recovered: retried! });
+      candidate = { ...candidate, state: 'processing' };
+      assert.equal((await pollRepositoryCandidate(input))?.state, 'processing');
+      candidate = { ...candidate, state: 'published', releaseId: restoration.priorReleaseId };
+      assert.equal((await pollRepositoryCandidate(input))?.state, 'published');
+      const path = join(input.outboxRoot, `${scope.workspaceId}.json`), bytes = await readFile(path, 'utf8');
+      const stored = JSON.parse(bytes);
+      assert.equal(stored.candidateId, candidate.candidateId);assert.equal(stored.state, 'published');
+      assert.deepEqual(stored.restoration, restoration);
+      assert.equal(calls.filter(call => call === 'POST').length, 1);
+      assert.ok(calls[1]!.includes('/package-candidates?workspaceId='));
+      assert.ok(calls.slice(2).every(call => call.includes(`/package-candidates/${candidate.candidateId}?`)));
+      await assert.rejects(checkpointRepositoryRestorationCandidate({ ...input, recovered }), /terminal state changed/);
+      assert.equal(await readFile(path, 'utf8'), bytes);
+      for (const changed of [
+        { ...retried!, planHash: `sha256:${'e'.repeat(64)}` },
+        { ...retried!, localSnapshotHash: `sha256:${'e'.repeat(64)}` },
+        { ...retried!, sourceManifestHash: `sha256:${'e'.repeat(64)}` },
+        { ...retried!, candidate: { ...retried!.candidate, operationId: `sha256:${'e'.repeat(64)}` } },
+        { ...retried!, candidate: { ...retried!.candidate, snapshotHash: `sha256:${'e'.repeat(64)}` } },
+        { ...retried!, candidate: { ...retried!.candidate, candidateId: '97f61652-a5eb-46e4-930c-9478cd4a9c31' } },
+      ]) {
+        await assert.rejects(checkpointRepositoryRestorationCandidate({ ...input, recovered: changed }));
+        assert.equal(await readFile(path, 'utf8'), bytes);
+      }
+      await assert.rejects(checkpointRepositoryRestorationCandidate({ ...input, recovered: retried!,
+        scope: { ...scope, repositoryAgentId: '97f61652-a5eb-46e4-930c-9478cd4a9c31' } }), /outbox scope/);
+      assert.equal(await readFile(path, 'utf8'), bytes);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test('repository candidate upload persists an exact outbox and polls the same operation after a lost caller response', async () => {

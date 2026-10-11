@@ -38,6 +38,9 @@ function fixture() {
     fetchRepositorySourceAuthorization: async () => ({ policy: { automaticValidatedPublication: true } }),
     validateRepositorySourceAuthorization: (value: unknown) => value,
     recoverRepositoryRestorationCandidate: async () => null,
+    checkpointRepositoryRestorationCandidate: async (input: { recovered: { candidate: unknown } }) => {
+      calls.push('outbox-write');return input.recovered.candidate;
+    },
     collectRepositorySourceRestoration: async () => { calls.push('collect');return {
       local: { manifest: { snapshotHash: 'local' } },
       snapshot: { manifest: { snapshotHash: 'snapshot' } }, expectedLatestSourceFingerprint: 'head',
@@ -119,8 +122,8 @@ test('published restoration keeps the actual local baseline rather than remote-o
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, null);
 });
 
-test('terminal submission survives a lost registry write and retries without restoration readmission or POST', async () => {
-  for (const state of ['published', 'blocked'] as const) {
+test('submission survives a lost registry write and recovery checkpoints before retrying the registry', async () => {
+  for (const state of ['accepted', 'processing', 'published', 'blocked'] as const) {
     const f = fixture();let checkpoint: Record<string, unknown> | null = null, writes = 0, submissions = 0;
     const candidate = { state, operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot',
       releaseId: state === 'published' ? 'release' : null };
@@ -131,6 +134,7 @@ test('terminal submission survives a lost registry write and retries without res
     f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => ({ manifest: {
       snapshotHash: hash, organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' } } });
     f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace) => {
+      f.calls.push('registry-write');
       if (++writes === 1) throw new Error('simulated_registry_write_failure');
       Object.assign(f.workspace, record);
     };
@@ -141,16 +145,19 @@ test('terminal submission survives a lost registry write and retries without res
       const result = await f.run(flags);
       assert.equal(result.stage, 'repository_restoration_candidate_recovered');
       assert.equal(result.serverSourceMutation, false);assert.equal(result.activated, false);
-      assert.equal(f.workspace.repositoryPackage.pendingLocalOperationId, null);
+      assert.deepEqual(f.calls.slice(-5), ['authorization', 'supervisor-state', 'relay-state', 'outbox-write', 'registry-write']);
+      assert.equal(f.workspace.repositoryPackage.pendingLocalOperationId,
+        state === 'accepted' || state === 'processing' ? 'operation' : null);
       assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).publishedLocalSnapshotHash,
         state === 'published' ? 'local' : null);
+      if (state === 'accepted' || state === 'processing') break;
     }
     assert.equal(submissions, 1);
   }
 });
 
 test('recovery rejects unavailable CAS, revoked publication, or a restarted supervisor without registry mutation', async () => {
-  for (const mode of ['cas', 'revoked', 'supervisor', 'registry']) {
+  for (const mode of ['cas', 'revoked', 'final-revoked', 'supervisor', 'registry']) {
     const f = fixture();
     f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
       localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: mode === 'registry' ? 'different' : null,
@@ -159,6 +166,10 @@ test('recovery rejects unavailable CAS, revoked publication, or a restarted supe
     f.overrides.readRepositoryPackageSnapshot = async () => mode === 'cas' ? null : ({ manifest: {
       organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' } } });
     if (mode === 'revoked') f.overrides.fetchRepositorySourceAuthorization = async () => ({ policy: { automaticValidatedPublication: false } });
+    let authorityChecks = 0;
+    if (mode === 'final-revoked') f.overrides.assertWorkspaceAuthorizationCurrent = async () => {
+      if (++authorityChecks > 1) throw new Error('revoked');
+    };
     let checks = 0;
     if (mode === 'supervisor') f.overrides.relaySupervisorProcessState = async () => ++checks === 1 ? 'stopped' : 'running';
     await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])));
