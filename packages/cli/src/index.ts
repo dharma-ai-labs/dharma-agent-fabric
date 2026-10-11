@@ -4947,7 +4947,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const workId = required(flags, 'work-id');
     if (!/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(workId)) throw new Error('named_session_work_invalid');
     const result = await namedSessionRequest(dharmaHome(), name, {action: 'audit', workId});
-    if (!(await validateContract(resolve(import.meta.dirname, 'schemas'),
+    if (!(await validateContract(resolve(dirname(fileURLToPath(import.meta.url)), 'schemas'),
       'https://schemas.dharma-ai.io/named-session-native-audit/v1', result)).ok
       || result.bindingId !== existing.bindingId || result.workId !== workId
       || Object.entries(existing.identity).some(([key, value]) => result[key] !== value)) {
