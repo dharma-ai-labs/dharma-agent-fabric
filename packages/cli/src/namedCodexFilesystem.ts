@@ -11,13 +11,15 @@ function contains(parent: string, child: string): boolean {
 export async function namedCodexFilesystem(input: {
   environment: NodeJS.ProcessEnv; workspace: string; privateRoots: string[]; writeRoots: string[];
   nodeExecutable?: string;
-}): Promise<{ peer: string; work: string; runtimeRoots: string[];
+}): Promise<{ peer: string; work: string; runtimeRoots: string[]; environment: NodeJS.ProcessEnv; providerExecutable: string;
   additionalFilesystemRules: Readonly<Record<string, 'read' | 'deny'>> }> {
   // A child denial is already covered by its parent. Materializing both can
   // require creating a socket placeholder under a read-only denied directory.
   const privateRoots = [...new Set(input.privateRoots.map(root => resolve(root)))];
   const denied = privateRoots.filter(root => !privateRoots.some(parent => parent !== root && contains(parent, root)));
   const runtimeRoots: string[] = [];
+  const environment = { ...input.environment };
+  let providerExecutable = 'codex';
   if (process.platform === 'linux') {
     let executable: string | undefined;
     for (const root of (input.environment.PATH || '').split(delimiter)) {
@@ -27,6 +29,7 @@ export async function namedCodexFilesystem(input: {
       catch { /* Continue through the existing provider PATH only. */ }
     }
     if (!executable) throw new Error('named_session_provider_runtime_missing');
+    providerExecutable = executable;
     let directory = dirname(executable);
     for (let depth = 0; depth < 5; depth++) {
       let manifest: { name?: string; optionalDependencies?: Record<string, string> } | undefined;
@@ -67,6 +70,10 @@ export async function namedCodexFilesystem(input: {
       await access(node, constants.X_OK);
     } catch { throw new Error('named_session_node_runtime_invalid'); }
     if (!runtimeRoots.some(root => contains(root, node))) runtimeRoots.push(node);
+    // PATH and the file-level mount must select the same verified runtime.
+    // Adding its directory to PATH does not grant directory read access.
+    environment.PATH = [dirname(node), ...(environment.PATH || '').split(delimiter)
+      .filter(root => root !== dirname(node))].join(delimiter);
   }
   for (const root of runtimeRoots) {
     if (contains(input.workspace, root) || denied.some(privateRoot => contains(root, privateRoot) || contains(privateRoot, root))) {
@@ -82,6 +89,6 @@ export async function namedCodexFilesystem(input: {
     .map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(',')}}`;
   const profile = (workspaceRoots: Record<string, string>) => `{${Object.entries(shared)
     .map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(',')},":workspace_roots"=${table(workspaceRoots)}}`;
-  return { peer: profile({ '.': 'read' }), work: profile(roots), runtimeRoots,
+  return { peer: profile({ '.': 'read' }), work: profile(roots), runtimeRoots, environment, providerExecutable,
     additionalFilesystemRules: Object.freeze(additionalFilesystemRules) };
 }

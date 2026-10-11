@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import test from 'node:test';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 
@@ -23,6 +25,46 @@ async function fixture(packageDirectory = 'node_modules') {
   await chmod(node, 0o755);
   return { root, bin, code, native, node };
 }
+
+test('worker PATH selects the exact exposed Node rather than an unexposed prepared sibling', { skip: process.platform !== 'linux' }, async () => {
+  const f = await fixture();
+  try {
+    await writeFile(f.node, '#!/bin/sh\nprintf trusted-node\n');
+    await writeFile(join(f.root, 'public-node', 'codex'), '#!/bin/sh\nprintf wrong-provider\n');
+    await chmod(join(f.root, 'public-node', 'codex'), 0o755);
+    await writeFile(join(f.bin, 'node'), '#!/bin/sh\nprintf wrong-prepared-node\n');
+    await chmod(join(f.bin, 'node'), 0o755);
+    const environment = { PATH: f.bin, HOME: f.root };
+    const result = await namedCodexFilesystem({ environment, workspace: join(f.root, 'checkout'),
+      privateRoots: [join(f.root, 'private')], writeRoots: [], nodeExecutable: f.node });
+    const mapped = result as typeof result & { environment: NodeJS.ProcessEnv };
+    assert.ok(mapped.environment, 'verified runtime environment missing');
+    const execution = await promisify(execFile)('node', [], { env: mapped.environment });
+    assert.equal(execution.stdout, 'trusted-node');
+    assert.equal(result.providerExecutable, join(f.code, 'bin/codex.js'));
+    assert.equal(result.additionalFilesystemRules[join(f.root, 'public-node', 'codex')], undefined);
+    assert.equal(environment.PATH, f.bin, 'caller environment mutated');
+    assert.equal(result.additionalFilesystemRules[f.node], 'read');
+    assert.equal(result.additionalFilesystemRules[join(f.root, 'public-node')], undefined);
+    assert.equal(result.additionalFilesystemRules[join(f.bin, 'node')], undefined);
+    assert.equal(result.additionalFilesystemRules[join(f.root, 'private')], 'deny');
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('runtime PATH uses the verified canonical Node location rather than its outer alias', { skip: process.platform !== 'linux' }, async () => {
+  const f = await fixture();
+  try {
+    const alias = join(f.bin, 'node');
+    await symlink(f.node, alias);
+    const result = await namedCodexFilesystem({ environment: { PATH: f.bin }, workspace: join(f.root, 'checkout'),
+      privateRoots: [], writeRoots: [], nodeExecutable: alias });
+    const mapped = result as typeof result & { environment: NodeJS.ProcessEnv };
+    assert.ok(mapped.environment, 'verified runtime environment missing');
+    assert.equal(mapped.environment.PATH?.split(':')[0], join(f.root, 'public-node'));
+    assert.equal(result.additionalFilesystemRules[alias], undefined);
+    assert.equal(result.additionalFilesystemRules[f.node], 'read');
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
 
 test('the trusted Node executable is readable without exposing its directory or private siblings', { skip: process.platform !== 'linux' }, async () => {
   const f = await fixture();

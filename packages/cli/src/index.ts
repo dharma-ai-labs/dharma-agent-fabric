@@ -138,7 +138,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.184';
+const VERSION = '0.2.185';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5072,8 +5072,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     if (!ownerConfirmed) {
       throw new Error('named_session_registration_invalid');
     }
-    transport = await openCodexAppServerTransport({ command: 'codex', cwd: item.path,
-      environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
+    transport = await openCodexAppServerTransport({ command: filesystem.providerExecutable, cwd: item.path,
+      environment: filesystem.environment, experimentalApi: true, toolCallTimeoutMs: 60_000,
       argv: [...namedCodexNodeOutputArguments(), '-c', 'allow_login_shell=false', '-c', 'default_permissions="dharma_bridge"',
         '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
         '-c', 'permissions.dharma_bridge.network={enabled=false}',

@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = 'd2727f51c54d24da2a65437ae16e6172c484a7f5';
-const tree = '2e4f6de845e4e71f7ef74793b9bfca9437feef39';
+const source = '32afaebaa51a9199267dd11a74f5e8b0cd061fe4';
+const tree = '8c8a6f63e4ef2e11f80a5c4a9e29976b91de0855';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.184' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.185' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -58,10 +58,9 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
-    'packages/cli/src/namedSessionStartupDiagnostic.ts', 'packages/cli/src/namedSessionStartupDiagnostic.test.ts',
-    'packages/cli/src/namedSessionStartupChild.ts', 'packages/cli/src/namedSessionStartupChild.test.ts',
-    'packages/cli/src/codexSetupChildProvider.test.ts', 'packages/cli/src/codexSetupDiagnostic.ts',
-    'packages/cli/src/codexSetupDiagnostic.test.ts', 'schemas/codex-setup-failure-diagnostic.schema.json',
+    'packages/cli/src/namedCodexFilesystem.ts', 'packages/cli/src/namedCodexFilesystem.test.ts',
+    'packages/cli/src/codexSetupOwnedConnection.ts', 'packages/cli/src/codexSetupOwnedConnection.test.ts',
+    'packages/cli/src/codexSetupChildProvider.test.ts',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');

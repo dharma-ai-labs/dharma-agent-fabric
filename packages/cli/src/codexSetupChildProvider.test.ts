@@ -51,8 +51,11 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     refreshVerifiedWorkspacePolicyForTransmission: async () => ({tasks: {writePaths: ['src/**']}}),
     namedCodexEnvironment: () => ({}), namedCodexNodeOutputArguments, namedSessionStartupPhaseError,
     dharmaHome: () => resolve(root, 'dharma'), homedir: () => resolve(root, 'home'),
-    namedCodexFilesystem: async () => ({peer: 'synthetic-peer', work: 'synthetic-work'}),
-    openCodexAppServerTransport: async (options: {argv: string[]}) => {
+    namedCodexFilesystem: async () => ({peer: 'synthetic-peer', work: 'synthetic-work',
+      providerExecutable: '/synthetic/verified-provider/codex', environment: {PATH: '/synthetic/verified-node/bin:/synthetic/provider/bin'}}),
+    openCodexAppServerTransport: async (options: {argv: string[]; environment: NodeJS.ProcessEnv; command: string}) => {
+      assert.equal(options.command, '/synthetic/verified-provider/codex');
+      assert.equal(options.environment.PATH, '/synthetic/verified-node/bin:/synthetic/provider/bin');
       assert.deepEqual(options.argv.slice(0, namedCodexNodeOutputArguments().length), namedCodexNodeOutputArguments());
       assert.ok(options.argv.includes('permissions.dharma_bridge.network={enabled=false}'));
       assert.ok(options.argv.includes('permissions.dharma_work.network={enabled=false}'));
