@@ -8,10 +8,10 @@ import { approvedPackages, assertSourceSnapshot, assertProvenance, publishBounde
 
 const head = 'a'.repeat(40);
 
-test('current reviewed runtime selection correction is admitted by the bounded publisher delta', () => {
+test('current scoped native audit is admitted by the bounded publisher delta', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '32afaebaa51a9199267dd11a74f5e8b0cd061fe4';
+  const baseline = '8f0878a9b03d537ff0a1cda8a228cd4c4b661a1c';
   const current = git('rev-parse', 'HEAD');
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: current, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
@@ -76,7 +76,7 @@ test('publishes precisely the approved CLI correction without republishing depen
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, approvedPackages.map((item) => item.name));
-  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.185']]);
+  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.186']]);
 });
 
 for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
@@ -85,9 +85,9 @@ for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
     if (defect === 'source') io.verifySource = async () => { throw new Error('source mismatch'); };
     if (defect === 'name' || defect === 'version') {
       const original = io.manifest;
-      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.185' ? { [defect]: 'wrong' } : {}) });
+      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.186' ? { [defect]: 'wrong' } : {}) });
     }
-    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.185'
+    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.186'
       ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : `sha512-${item.version}` } } : null;
     await assert.rejects(publishBoundedRelease(head, io));
     assert.deepEqual(effects, []);
@@ -115,7 +115,7 @@ test('publication failure is not replayed and later packages remain unpublished'
 
 for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher']) {
   test(`source admission rejects changed ${defect}`, () => {
-    const snapshot = { head, ref: 'refs/heads/main', tree: '8c8a6f63e4ef2e11f80a5c4a9e29976b91de0855',
+    const snapshot = { head, ref: 'refs/heads/main', tree: '01f75ddb73da0fb3e2598b2c637713ae95d752ca',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
       changed: [], untracked: [], baselineManifest: { scripts: {} }, manifest: { scripts: {
         'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',

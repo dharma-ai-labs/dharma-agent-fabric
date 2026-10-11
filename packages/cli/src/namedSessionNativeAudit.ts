@@ -16,7 +16,9 @@ const captureLimitations = ['conflicting_turn_identity', 'unscoped_notification'
 
 export interface NamedSessionNativeAuditEvent {
   kind: typeof kinds[number]; sequence: number; receivedAt: string; itemHash: string; itemIdHash: string | null;
-  commandHash: string | null; outputHash: string | null; argumentsHash: string | null; resultHash: string | null;
+  commandHash: string | null; cwdHash: string | null; outputHash: string | null; argumentsHash: string | null; resultHash: string | null;
+  dynamicContentHash: string | null; dynamicResponseHash: string | null; errorHash: string | null;
+  toolStatus: 'inProgress' | 'completed' | 'failed' | null; toolSuccess: boolean | null;
   exitCode: number | null; durationMs: number | null; pathHashes: string[]; pathsTruncated: boolean;
   commandShape: 'node_version' | 'node_test' | 'npm_test' | 'other';
   reportedNodeVersion: string | null;
@@ -98,11 +100,23 @@ export async function readNamedSessionNativeAudit(input: {
     if (events.length >= 32) return;
     const changes = Array.isArray(item.changes) ? item.changes : [];
     const output = item.aggregatedOutput ?? item.output;
+    const dynamic = kind === 'dynamicToolCall', tool = dynamic || kind === 'mcpToolCall';
+    const toolStatus = tool && ['inProgress', 'completed', 'failed'].includes(String(item.status))
+      ? item.status as NamedSessionNativeAuditEvent['toolStatus'] : null;
+    const dynamicResponse = dynamic && toolStatus !== null
+      && (item.success === null || typeof item.success === 'boolean')
+      && (item.contentItems === null || Array.isArray(item.contentItems))
+      ? {contentItems: item.contentItems, success: item.success, status: toolStatus} : undefined;
     events.push({kind, sequence, receivedAt, itemHash, itemIdHash: id,
       ...reportedCommandFacts(kind === 'commandExecution' ? item.command : undefined, output),
       commandHash: typeof item.command === 'string' ? digest(item.command) : null,
-      outputHash: contentHash(output), argumentsHash: hash(item.arguments),
-      resultHash: hash(item.result), exitCode: Number.isSafeInteger(item.exitCode) ? Number(item.exitCode) : null,
+      cwdHash: kind === 'commandExecution' && typeof item.cwd === 'string' ? digest(item.cwd) : null,
+      outputHash: dynamic ? null : contentHash(output), argumentsHash: hash(item.arguments),
+      resultHash: dynamic ? null : hash(item.result),
+      dynamicContentHash: dynamicResponse && Array.isArray(dynamicResponse.contentItems) ? hash(dynamicResponse.contentItems) : null,
+      dynamicResponseHash: hash(dynamicResponse), errorHash: kind === 'mcpToolCall' && item.error != null ? hash(item.error) : null,
+      toolStatus, toolSuccess: dynamic && typeof item.success === 'boolean' ? item.success : null,
+      exitCode: Number.isSafeInteger(item.exitCode) ? Number(item.exitCode) : null,
       durationMs: Number.isSafeInteger(item.durationMs) && Number(item.durationMs) >= 0 ? Number(item.durationMs) : null,
       pathsTruncated: changes.length > 4,
       pathHashes: changes.slice(0, 4).map(object).filter(change => typeof change.path === 'string')

@@ -31,12 +31,16 @@
     "limitations": {"type": "array", "uniqueItems": true, "maxItems": 5, "items": {"enum": ["hashed_native_items_not_raw_transcripts", "provider_reports_not_independent_grading", "hashed_command_and_path_match_required", "retained_context_unavailable", "executed_model_unreported"]}},
     "events": {"type": "array", "maxItems": 32, "items": {
       "type": "object", "additionalProperties": false,
-      "required": ["kind", "sequence", "receivedAt", "itemHash", "itemIdHash", "commandHash", "outputHash", "argumentsHash", "resultHash", "exitCode", "durationMs", "pathHashes", "pathsTruncated", "commandShape", "reportedNodeVersion", "reportedTapSummary"],
+      "required": ["kind", "sequence", "receivedAt", "itemHash", "itemIdHash", "commandHash", "cwdHash", "outputHash", "argumentsHash", "resultHash", "dynamicContentHash", "dynamicResponseHash", "errorHash", "toolStatus", "toolSuccess", "exitCode", "durationMs", "pathHashes", "pathsTruncated", "commandShape", "reportedNodeVersion", "reportedTapSummary"],
       "properties": {
         "kind": {"enum": ["commandExecution", "mcpToolCall", "dynamicToolCall", "fileChange"]},
         "sequence": {"type": "integer", "minimum": 0}, "receivedAt": {"$ref": "#/$defs/time"},
         "itemHash": {"$ref": "#/$defs/hash"}, "itemIdHash": {"$ref": "#/$defs/nullableHash"},
         "commandHash": {"$ref": "#/$defs/nullableHash"}, "outputHash": {"$ref": "#/$defs/nullableHash"},
+        "cwdHash": {"$ref": "#/$defs/nullableHash"},
+        "dynamicContentHash": {"$ref": "#/$defs/nullableHash"}, "dynamicResponseHash": {"$ref": "#/$defs/nullableHash"},
+        "errorHash": {"$ref": "#/$defs/nullableHash"},
+        "toolStatus": {"enum": ["inProgress", "completed", "failed", null]}, "toolSuccess": {"type": ["boolean", "null"]},
         "argumentsHash": {"$ref": "#/$defs/nullableHash"}, "resultHash": {"$ref": "#/$defs/nullableHash"},
         "exitCode": {"type": ["integer", "null"]}, "durationMs": {"type": ["integer", "null"], "minimum": 0},
         "pathsTruncated": {"type": "boolean"},

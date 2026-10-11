@@ -160,3 +160,45 @@ test('audit rejects contradictory repeated completion items instead of choosing 
   final.items[0] = clone;
   await assert.rejects(readNamedSessionNativeAudit(f.prepare()), /audit_integrity_failed/);
 });
+
+test('official dynamic-tool responses hash content and outcome without substituting MCP result fields', async () => {
+  for (const [status, success, contentItems] of [
+    ['completed', true, [{type: 'inputText', text: 'PEER_RESPONSE_PRIVATE_CANARY'}]],
+    ['failed', false, [{type: 'inputText', text: 'PEER_FAILURE_PRIVATE_CANARY'}]],
+    ['completed', null, null],
+  ] as const) {
+    const f = fixture(), item = (f.capture.events[1]!.notification.params as {item: Record<string, unknown>}).item;
+    Object.keys(item).forEach(key => delete item[key]);
+    Object.assign(item, {id: 'dynamic-native', type: 'dynamicToolCall', namespace: 'dharma', tool: 'peer_answer',
+      arguments: {questionId: 'SYNTHETIC_QUESTION'}, status, success, contentItems, durationMs: 12});
+    const result = await readNamedSessionNativeAudit(f.prepare()), event = result.events[0]! as unknown as Record<string, unknown>;
+    assert.equal(event.dynamicContentHash, contentItems === null ? null : digest(JSON.stringify(contentItems)));
+    assert.equal(event.dynamicResponseHash, digest(JSON.stringify({contentItems, success, status})));
+    assert.equal(event.toolSuccess, success);assert.equal(event.toolStatus, status);
+    assert.equal(event.outputHash, null);assert.equal(event.resultHash, null);assert.equal(event.cwdHash, null);
+    assert.equal(JSON.stringify(result).includes('PRIVATE_CANARY'), false);
+    assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+      'https://schemas.dharma-ai.io/named-session-native-audit/v1', result)).ok, true);
+    delete item.contentItems;
+    const missing = (await readNamedSessionNativeAudit(f.prepare())).events[0]! as unknown as Record<string, unknown>;
+    assert.equal(missing.dynamicContentHash, null);assert.equal(missing.dynamicResponseHash, null);
+  }
+});
+
+test('command cwd is independently matchable while MCP results and errors retain separate hashes', async () => {
+  const f = fixture(), item = (f.capture.events[1]!.notification.params as {item: Record<string, unknown>}).item;
+  item.cwd = '/synthetic/checkout';
+  const first = (await readNamedSessionNativeAudit(f.prepare())).events[0]! as unknown as Record<string, unknown>;
+  item.cwd = '/foreign/PRIVATE_CWD_CANARY';
+  const other = (await readNamedSessionNativeAudit(f.prepare())).events[0]! as unknown as Record<string, unknown>;
+  assert.equal(first.cwdHash, digest('/synthetic/checkout'));assert.equal(other.cwdHash, digest(String(item.cwd)));
+  assert.notEqual(first.cwdHash, other.cwdHash);assert.equal(first.commandHash, other.commandHash);
+  assert.equal(first.outputHash, other.outputHash);assert.equal(JSON.stringify(other).includes('PRIVATE_CWD_CANARY'), false);
+  Object.keys(item).forEach(key => delete item[key]);
+  Object.assign(item, {id: 'mcp-native', type: 'mcpToolCall', server: 'dharma', tool: 'peer_answer', status: 'failed',
+    arguments: {questionId: 'SYNTHETIC_QUESTION'}, result: null, error: {message: 'PRIVATE_MCP_ERROR_CANARY'}});
+  const mcp = (await readNamedSessionNativeAudit(f.prepare())).events[0]! as unknown as Record<string, unknown>;
+  assert.equal(mcp.errorHash, digest(JSON.stringify(item.error)));assert.equal(mcp.toolStatus, 'failed');
+  assert.equal(mcp.toolSuccess, null);assert.equal(mcp.dynamicResponseHash, null);assert.equal(mcp.cwdHash, null);
+  assert.equal(JSON.stringify(mcp).includes('PRIVATE_MCP_ERROR_CANARY'), false);
+});
