@@ -5755,19 +5755,23 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
         const snapshot = await readRepositoryPackageSnapshot(workspace.path, hash);
         if (!snapshot || snapshot.manifest.organizationId !== scope.organizationId || snapshot.manifest.workspaceId !== workspaceId
           || snapshot.manifest.knowledge?.repositoryAgentId !== scope.repositoryAgentId
+          || canonicalize(snapshot.manifest.sourceAuthorization) !== canonicalize(authorization)
           || hash === recovered.candidate.snapshotHash && sha256(canonicalize(snapshot.manifest)) !== recovered.sourceManifestHash) {
           throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
         }
       }
-      await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+      const currentAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+      if (canonicalize(currentAuthorization) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
       if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
         throw new Error('repository_source_restoration_requires_stopped_relay');
       }
+      await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
       const candidate = await checkpointRepositoryRestorationCandidate({ scope, recovered,
         outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
       const pending = candidate.state === 'accepted' || candidate.state === 'processing';
       await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
         ...candidate, sourceManifestHash: recovered.sourceManifestHash, consolidationMode: 'repository_update',
+        sourcePolicyGenerationId: currentAuthorization.generationId,
         localBaselineSnapshotHash: candidate.state === 'blocked' ? recovered.baselineSnapshotHash : recovered.localSnapshotHash,
         publishedLocalSnapshotHash: candidate.state === 'published' ? recovered.localSnapshotHash : recovered.baselineSnapshotHash,
         pendingLocalSnapshotHash: pending ? recovered.localSnapshotHash : null,
@@ -5804,6 +5808,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
     throw new Error('repository_source_restoration_requires_stopped_relay');
   }
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+  const sourcePolicyGenerationId = collected.snapshot.manifest.sourceAuthorization?.generationId;
+  if (!sourcePolicyGenerationId) throw new Error('repository_source_restoration_policy_changed');
   await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.local, candidateOnly: true });
   if (collected.snapshot.manifest.snapshotHash !== collected.local.manifest.snapshotHash) {
     await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });
@@ -5818,6 +5825,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   const pending = candidate.state === 'accepted' || candidate.state === 'processing';
   await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
     ...candidate, sourceManifestHash: sha256(canonicalize(collected.snapshot.manifest)), consolidationMode: 'repository_update',
+    sourcePolicyGenerationId,
     localBaselineSnapshotHash: candidate.state === 'blocked' ? baseline : collected.local.manifest.snapshotHash,
     publishedLocalSnapshotHash: candidate.state === 'published' ? collected.local.manifest.snapshotHash : baseline,
     pendingLocalSnapshotHash: pending ? collected.local.manifest.snapshotHash : null,

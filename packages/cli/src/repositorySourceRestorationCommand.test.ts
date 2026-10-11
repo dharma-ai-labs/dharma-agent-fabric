@@ -35,7 +35,7 @@ function fixture() {
     currentBootstrapHostScope: () => undefined, configPath: () => '/synthetic/device', protocolStatePath: () => '/synthetic/protocol',
     AgentFabricClient: { open: async () => { calls.push('client');return { openSession: async () => { calls.push('session'); } }; } },
     VERSION: 'fixture', createPublicKey: () => ({}), repositorySourceComparisonBaseline: () => null,
-    fetchRepositorySourceAuthorization: async () => ({ policy: { automaticValidatedPublication: true } }),
+    fetchRepositorySourceAuthorization: async () => ({ generationId: 'current-generation', policy: { automaticValidatedPublication: true } }),
     validateRepositorySourceAuthorization: (value: unknown) => value,
     recoverRepositoryRestorationCandidate: async () => null,
     checkpointRepositoryRestorationCandidate: async (input: { recovered: { candidate: unknown } }) => {
@@ -43,7 +43,7 @@ function fixture() {
     },
     collectRepositorySourceRestoration: async () => { calls.push('collect');return {
       local: { manifest: { snapshotHash: 'local' } },
-      snapshot: { manifest: { snapshotHash: 'snapshot' } }, expectedLatestSourceFingerprint: 'head',
+      snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: { generationId: 'current-generation' } } }, expectedLatestSourceFingerprint: 'head',
       headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot', operationId: 'operation',
       priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => { calls.push('recheck'); } }; },
     canonicalize: JSON.stringify, sha256: () => 'reviewed-plan', dharmaHome: () => '/synthetic/device',
@@ -105,11 +105,12 @@ test('dry-run reads the official legacy enrollment anchor in place without secur
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-10), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state',
+  assert.deepEqual(f.calls.slice(-11), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization',
     'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write']);
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.snapshotHash, 'snapshot');
+  assert.equal(f.saved()?.repositoryPackage.sourcePolicyGenerationId, 'current-generation');
 });
 
 test('published restoration keeps the actual local baseline rather than remote-only candidate content', async () => {
@@ -132,7 +133,8 @@ test('submission survives a lost registry write and recovery checkpoints before 
     };
     f.overrides.recoverRepositoryRestorationCandidate = async () => checkpoint;
     f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => ({ manifest: {
-      snapshotHash: hash, organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' } } });
+      snapshotHash: hash, organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
+      sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
     f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace) => {
       f.calls.push('registry-write');
       if (++writes === 1) throw new Error('simulated_registry_write_failure');
@@ -145,7 +147,8 @@ test('submission survives a lost registry write and recovery checkpoints before 
       const result = await f.run(flags);
       assert.equal(result.stage, 'repository_restoration_candidate_recovered');
       assert.equal(result.serverSourceMutation, false);assert.equal(result.activated, false);
-      assert.deepEqual(f.calls.slice(-5), ['authorization', 'supervisor-state', 'relay-state', 'outbox-write', 'registry-write']);
+      assert.deepEqual(f.calls.slice(-5), ['supervisor-state', 'relay-state', 'authorization', 'outbox-write', 'registry-write']);
+      assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).sourcePolicyGenerationId, 'current-generation');
       assert.equal(f.workspace.repositoryPackage.pendingLocalOperationId,
         state === 'accepted' || state === 'processing' ? 'operation' : null);
       assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).publishedLocalSnapshotHash,
@@ -157,19 +160,24 @@ test('submission survives a lost registry write and recovery checkpoints before 
 });
 
 test('recovery rejects unavailable CAS, revoked publication, or a restarted supervisor without registry mutation', async () => {
-  for (const mode of ['cas', 'revoked', 'final-revoked', 'supervisor', 'registry']) {
+  for (const mode of ['cas', 'revoked', 'final-revoked', 'changed-generation', 'snapshot-generation', 'supervisor', 'registry']) {
     const f = fixture();
     f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
       localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: mode === 'registry' ? 'different' : null,
       priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
       candidate: { state: 'published', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'release' } });
     f.overrides.readRepositoryPackageSnapshot = async () => mode === 'cas' ? null : ({ manifest: {
-      organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' } } });
+      organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
+      sourceAuthorization: { generationId: mode === 'snapshot-generation' ? 'foreign-generation' : 'current-generation',
+        policy: { automaticValidatedPublication: true } } } });
     if (mode === 'revoked') f.overrides.fetchRepositorySourceAuthorization = async () => ({ policy: { automaticValidatedPublication: false } });
     let authorityChecks = 0;
     if (mode === 'final-revoked') f.overrides.assertWorkspaceAuthorizationCurrent = async () => {
       if (++authorityChecks > 1) throw new Error('revoked');
     };
+    let sourceChecks = 0;
+    if (mode === 'changed-generation') f.overrides.fetchRepositorySourceAuthorization = async () => ({
+      generationId: ++sourceChecks === 1 ? 'current-generation' : 'replacement-generation', policy: { automaticValidatedPublication: true } });
     let checks = 0;
     if (mode === 'supervisor') f.overrides.relaySupervisorProcessState = async () => ++checks === 1 ? 'stopped' : 'running';
     await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])));
@@ -184,6 +192,22 @@ test('running or unknown supervisor, including a final-check restart, cannot wri
     await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
     assert.ok(!f.calls.some(call => /write|submit/.test(call)));
   }
+});
+
+test('workspace authority superseded during final awaited reads cannot persist or submit restoration', async () => {
+  const f = fixture();let superseded = false;
+  f.overrides.assertWorkspaceAuthorizationCurrent = async () => {
+    if (superseded) throw new Error('workspace_authorization_superseded');
+  };
+  f.overrides.collectRepositorySourceRestoration = async () => ({
+    local: { manifest: { snapshotHash: 'local' } },
+    snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: { generationId: 'current-generation' } } },
+    expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
+    operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
+    assertCurrent: async () => { await Promise.resolve();superseded = true; },
+  });
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /workspace_authorization_superseded/);
+  assert.ok(!f.calls.some(call => /write|submit/.test(call)));
 });
 
 test('terminal history collision and expired final conflict approval stop before any candidate writes', async () => {
