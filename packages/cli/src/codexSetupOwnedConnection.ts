@@ -26,8 +26,8 @@ export async function openCodexSetupOwnedConnection(input: {
   if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
   const filesystem = await namedCodexFilesystem({environment, workspace: input.workspace, privateRoots, writeRoots: []});
   await assert();
-  const transport = await openCodexAppServerTransport({command: 'codex', cwd: input.workspace,
-    environment, experimentalApi: true, toolCallTimeoutMs: 60_000, setupApprovalTimeoutMs: 900_000,
+  const transport = await openCodexAppServerTransport({command: filesystem.providerExecutable, cwd: input.workspace,
+    environment: filesystem.environment, experimentalApi: true, toolCallTimeoutMs: 60_000, setupApprovalTimeoutMs: 900_000,
     argv: ['-c', 'allow_login_shell=false', '-c', 'apps._default.enabled=false', '-c', 'default_permissions="dharma_bridge"',
       '-c', `permissions.dharma_bridge.filesystem=${filesystem.peer}`,
       '-c', 'permissions.dharma_bridge.network={enabled=false}', 'app-server']});

@@ -34,7 +34,8 @@ async function connectionFixture() {
     namedCodexEnvironment: () => ({PATH: '/synthetic/public/bin', CODEX_HOME: resolve('synthetic-provider-private')}),
     namedCodexFilesystem: async (input: unknown) => {
       filesystem = input; if (filesystemFails) throw new Error('synthetic filesystem failure');
-      return {peer: 'synthetic-readonly-profile', additionalFilesystemRules: {synthetic: 'deny'}};
+      return {peer: 'synthetic-readonly-profile', additionalFilesystemRules: {synthetic: 'deny'}, providerExecutable: '/synthetic/verified-provider/codex',
+        environment: {PATH: '/synthetic/verified-node/bin:/synthetic/public/bin', CODEX_HOME: resolve('synthetic-provider-private')}};
     },
     openCodexAppServerTransport: async (input: unknown) => {launch = input; launches++; return transport;},
     verifyCodexSetupReadOnlyProfile: async (_transport: unknown, _workspace: string, scope: any) => {
@@ -50,8 +51,9 @@ async function connectionFixture() {
 
 test('owning connection uses fixed official readonly launch and denies private roots', async () => {
   const f = await connectionFixture(), connection = await f.open({...f.input, command: 'foreign', transport: 'foreign'});
-  assert.equal(connection.transport, f.transport); assert.equal(f.launch.command, 'codex');
+  assert.equal(connection.transport, f.transport); assert.equal(f.launch.command, '/synthetic/verified-provider/codex');
   assert.equal(f.launch.environment.SYNTHETIC_SECRET, undefined);
+  assert.equal(f.launch.environment.PATH, '/synthetic/verified-node/bin:/synthetic/public/bin');
   assert.deepEqual(f.filesystem.writeRoots, []); assert.ok(f.filesystem.privateRoots.includes(f.input.deviceHome));
   assert.ok(f.launch.argv.includes('apps._default.enabled=false'));
   assert.ok(f.launch.argv.includes('allow_login_shell=false'));
