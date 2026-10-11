@@ -55,5 +55,11 @@ export class NamedSessionBudget {
     const result = this.#db.prepare('select request_id, state, payload_hash, updated_at from work_receipts order by rowid desc limit 1').get();
     return result ? { workId: result.request_id, state: result.state, receiptHash: result.payload_hash, updatedAt: result.updated_at } : null;
   }
+  getWork(workId: string) {
+    if (!/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(workId)) throw new Error('named_session_work_invalid');
+    const row = this.#db.prepare('select request_id, state, payload_hash, updated_at from work_receipts where request_id=?').get(workId);
+    return row ? { workId: String(row.request_id), state: String(row.state), receiptHash: String(row.payload_hash),
+      updatedAt: String(row.updated_at) } : null;
+  }
   close() { this.#db.close(); }
 }

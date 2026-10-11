@@ -67,6 +67,28 @@ correlation, not execution authority; signed target/session, expiry, ownership
 and budget checks still apply. Actual read containment and customer journeys
 must be qualified separately from these policy tests.
 
+## Exact-work native audit
+
+```bash
+dharma sessions audit --name NAME --workspace-id WORKSPACE_UUID --work-id WORK_UUID
+```
+
+Use the existing running, enrolled named session in its normal protected-store
+context. The command verifies one recorded work receipt, capture integrity and
+all organization/member/device/repository/workspace/endpoint/session identities.
+It does not export raw commands, outputs, arguments, paths, prompts or reasoning;
+it returns bounded hashes and explicitly provider-reported facts. It does not
+start a provider turn, revive an owner, read an arbitrary vault object or establish
+independent grading or accepted learning. Unavailable, unfinished, foreign or
+corrupt work fails closed. Preserve coverage, exclusions and truncation.
+
+Compare command, output, per-command cwd and tool-response hashes only against
+independently known authorized values. Dynamic replies preserve nullable status
+and success with hashes of their actual content. TAP totals are returned only
+when all supported categories reconcile exactly; nonzero, duplicate or malformed
+TODO summaries return null. Missing evidence is not success. Never extract keys
+or use another storage route if the normal owner is unavailable.
+
 ## Owned Linux container lifecycle
 
 An unprivileged Linux container may use `relay container-entrypoint` as its

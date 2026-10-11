@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '32afaebaa51a9199267dd11a74f5e8b0cd061fe4';
-const tree = '8c8a6f63e4ef2e11f80a5c4a9e29976b91de0855';
+const source = '8f0878a9b03d537ff0a1cda8a228cd4c4b661a1c';
+const tree = '01f75ddb73da0fb3e2598b2c637713ae95d752ca';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.185' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.186' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -58,9 +58,11 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
-    'packages/cli/src/namedCodexFilesystem.ts', 'packages/cli/src/namedCodexFilesystem.test.ts',
-    'packages/cli/src/codexSetupOwnedConnection.ts', 'packages/cli/src/codexSetupOwnedConnection.test.ts',
-    'packages/cli/src/codexSetupChildProvider.test.ts',
+    'packages/cli/src/namedSessionNativeAudit.ts', 'packages/cli/src/namedSessionNativeAudit.test.ts',
+    'packages/cli/src/namedSessionBudget.ts', 'packages/cli/src/namedSessionBudget.test.ts',
+    'packages/cli/src/namedSessionService.ts', 'packages/cli/src/namedSessionService.test.ts',
+    'schemas/named-session-native-audit.schema.json', 'docs/named-session-native-audit.md',
+    'packages/cli/src/usage.ts', 'packages/cli/src/usage.test.ts', 'packages/cli/README.md',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');

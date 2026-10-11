@@ -8,6 +8,7 @@ import { openCodexInboxSession } from './codexInboxSession.js';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type { NamedSessionEvidenceReceipt } from './namedSessionEvidence.js';
+import {readNamedSessionNativeAudit} from './namedSessionNativeAudit.js';
 import { composeNamedSessionRepositoryPrompt } from './namedSessionPackageGate.js';
 import {parseNamedCodexSkillObservation, type NamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 
@@ -196,6 +197,15 @@ export async function runNamedSessionService(input: {
           if (request.action === 'status') return status();
           if (request.action === 'stop') { closing = true; return { ok: true, state: 'stop_requested' }; }
           return enqueue(async () => {
+            if (request.action === 'audit') {
+              try {
+                if (Object.keys(request).sort().join(',') !== 'action,workId' || typeof request.workId !== 'string'
+                  || !await owner!.assertActive() || !await input.authorizeLocalWork()) throw new Error('named_session_audit_unavailable');
+                const result = await readNamedSessionNativeAudit({vault: input.vault, binding, work: budget.getWork(request.workId)});
+                if (!await owner!.assertActive() || !await input.authorizeLocalWork()) throw new Error('named_session_audit_unavailable');
+                return result;
+              } catch {throw new Error('named_session_audit_unavailable');}
+            }
             if (request.action === 'readiness') {
               if (Object.keys(request).length !== 1 || !input.observeNativeSkill || !await owner!.assertActive()) {
                 throw new Error('named_session_readiness_unavailable');

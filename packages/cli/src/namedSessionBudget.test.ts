@@ -39,3 +39,22 @@ test('restart records interrupted work without replay or releasing its reserved 
   assert.equal(budget.lastWork()?.state, 'completed');
   budget.close();
 });
+
+test('exact-work audit lookup preserves reservations and never falls back to the latest work', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-audit-budget-'));
+  const budget = new NamedSessionBudget(join(root, 'budget.sqlite'), 'audit-scope', 50);
+  try {
+    budget.beginWork('older-work', 'sha256:' + 'a'.repeat(64));
+    budget.reserve('older-work', 25);
+    budget.finishWork('older-work', 'completed', 'sha256:' + 'b'.repeat(64));
+    budget.beginWork('newer-work', 'sha256:' + 'c'.repeat(64));
+    const reader = budget as unknown as {getWork(id: string): {workId: string; state: string; receiptHash: string} | null};
+    const before = budget.status();
+    assert.equal(reader.getWork('older-work')?.receiptHash, 'sha256:' + 'b'.repeat(64));
+    assert.equal(reader.getWork('older-work')?.state, 'completed');
+    assert.equal(reader.getWork('newer-work')?.state, 'executing');
+    assert.equal(reader.getWork('absent-work'), null);
+    assert.throws(() => reader.getWork('../foreign'), /named_session_work_invalid/);
+    assert.deepEqual(budget.status(), before);
+  } finally {budget.close();}
+});
