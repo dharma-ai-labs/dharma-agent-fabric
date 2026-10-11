@@ -59,6 +59,8 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
     'packages/cli/src/namedPeerContentAuthorization.ts', 'packages/cli/src/namedPeerContentAuthorization.test.ts',
+    'packages/cli/src/cliProcessIdentity.ts', 'packages/cli/src/cliProcessIdentity.test.ts',
+    'packages/cli/src/codexSetupSessionCaller.test.ts', 'packages/cli/src/codexBootstrapCompletion.test.ts',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
