@@ -15,6 +15,11 @@ export class NamedPeerContentAuthorizationError extends Error {
   }
 }
 
+function compactJsonWhitespace(content: string): string {
+  // Preserve every string token, including escapes; parsing alone could lose duplicate keys.
+  return content.replace(/("(?:\\[\s\S]|[^"\\])*")|[ \t\r\n]+/g, (_match, literal: string | undefined) => literal ?? '');
+}
+
 // This authorizes bounded task-channel text, not native history or learning intake.
 // Session ownership, signed offers, task/target scope and budgets remain the channel's responsibility.
 export function createNamedPeerContentAuthorization(input: {
@@ -36,8 +41,13 @@ export function createNamedPeerContentAuthorization(input: {
       if (policy.organizationId !== input.scope.organizationId) return deny('foreign_policy');
       if (containsDisallowedLocalPath(content)) return deny('private_local_path');
       if (referencesExcludedPath(content, policy.evidence.excludePaths, 'content')) return deny('excluded_path');
-      if (canonicalize(redactValue(content, { classes: new Set<string>(), redactedValues: 0,
-        excludedPaths: 0, inputBytes: 0, outputBytes: 0 })) !== canonicalize(content)) return deny('redaction_required');
+      const stats = { classes: new Set<string>(), redactedValues: 0,
+        excludedPaths: 0, inputBytes: 0, outputBytes: 0 };
+      const redacted = redactValue(content, stats);
+      if (canonicalize(redacted) !== canonicalize(content)
+        && !(typeof redacted === 'string' && stats.classes.size === 0 && stats.redactedValues === 0
+          && stats.excludedPaths === 0 && /^[\[{]/.test(content.trim())
+          && compactJsonWhitespace(content) === redacted)) return deny('redaction_required');
       const mode = policy.evidence.automaticDisclosure?.mode;
       if (mode === 'customer_authorized_content') return true;
       // Explicit metadata-only/legacy policies are not silently upgraded.

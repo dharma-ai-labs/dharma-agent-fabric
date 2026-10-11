@@ -44,6 +44,36 @@ test('repository-authorized task text works without upgrading local-analysis or 
   assert.equal(f.loads(), 2); assert.deepEqual(f.policy, original);
   assert.equal(f.policy.evidence.automaticDisclosure?.consentReceiptId, undefined);
 });
+
+test('safe JSON formatting is not a redaction and retains current source authorization', async () => {
+  const f = fixture(true);
+  for (const content of [
+    JSON.stringify({ procedure: 'logical-job-failure-retry', expected_effects: { total: 3 }, evidence: 'reasoning_not_executed' }, null, 2),
+    ' \n[ { "value": "quoted spaces and \\"escapes\\"" }, true, null ]\t',
+    '{\n\t"value" : "whitespace inside strings stays intact"\r\n}',
+  ]) {
+    assert.equal(await f.authorize(content, 'answer'), true);
+  }
+  assert.equal(await f.authorize('{ "value": "same source scope" }', 'question'), true);
+  assert.equal(f.loads(), 4);
+  await assert.rejects(f.authorize('{\n"value": "multiline question remains invalid"\n}', 'question'), /provider_session_channel_input/);
+  f.setUnavailable();
+  await assert.rejects(f.authorize('{ "total": 3 }', 'answer'), /provider_session_channel_input/);
+});
+
+test('JSON formatting cannot conceal sensitive fields, nested paths or lossy normalization', async () => {
+  const f = fixture();
+  for (const content of [
+    '{ "password": "synthetic-private-value" }',
+    '{ "nested": { "api_key": "synthetic-private-value" } }',
+    '{ "nested": "{\\"password\\":\\"synthetic-private-value\\"}" }',
+    '{ "message": "Read /internal/notes.txt" }',
+    '{ "result": "first", "result": "last" }',
+    '{ "value": 1.0 }',
+    '{ "value": "\\u0061" }',
+  ]) assert.equal(await f.authorize(content, 'answer'), false);
+  assert.equal(f.loads(), 0);
+});
 test('source authority is refreshed and a later denial cannot reuse approval', async () => {
   const f = fixture(); assert.equal(await f.authorize('Which catalog applies?', 'question'), true);
   f.setUnavailable(); assert.equal(await f.authorize('Which catalog applies?', 'question'), false);

@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '1df82fed998159b129f948064efa5755b953390e';
-const tree = 'd7fbbd8f1dda4c5434dffc0e7fcab2da15829c20';
+const source = '87ea95692a908b799c0390823c73e5578281b5ab';
+const tree = '8ec4389b12eb6e0bf787951788910d33268285ec';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.181' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.182' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -58,11 +58,8 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
-    'packages/cli/src/repositoryLaunchers.ts', 'packages/cli/src/repositoryLaunchers.test.ts',
-    'packages/cli/src/bootstrapLauncherCaller.test.ts', 'packages/cli/src/relayRuntimeUpgradeCaller.test.ts',
-    'docs/unattended-device-reconnection.md',
-    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'scripts/publish-workflow.test.mjs']);
+    'packages/cli/src/namedPeerContentAuthorization.ts', 'packages/cli/src/namedPeerContentAuthorization.test.ts',
+    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   const baseline = structuredClone(snapshot.baselineManifest);
