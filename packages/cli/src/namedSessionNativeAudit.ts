@@ -38,11 +38,14 @@ function reportedCommandFacts(command: unknown, output: unknown): Pick<NamedSess
     facts.commandShape = command.startsWith('npm ') ? 'npm_test' : 'node_test';
     const counts: Record<string, number> = {};
     for (const key of ['tests', 'pass', 'fail', 'cancelled', 'skipped']) {
-      const matches = [...output.matchAll(new RegExp(`^# ${key} ([0-9]{1,7})\\r?$`, 'gm'))];
-      if (matches.length !== 1 || Number(matches[0]![1]) > 1_000_000) return facts;
-      counts[key] = Number(matches[0]![1]);
+      const lines = [...output.matchAll(new RegExp(`^# ${key}\\b[^\\n]*$`, 'gm'))];
+      const count = lines.length === 1 ? lines[0]![0].match(new RegExp(`^# ${key} ([0-9]{1,7})\\r?$`)) : null;
+      if (!count || Number(count[1]) > 1_000_000) return facts;
+      counts[key] = Number(count[1]);
     }
-    if (counts.pass! + counts.fail! + counts.cancelled! + counts.skipped! <= counts.tests!) {
+    const todoLines = [...output.matchAll(/^# todo\b[^\n]*$/gm)];
+    if (todoLines.length > 1 || (todoLines.length === 1 && !/^# todo 0\r?$/.test(todoLines[0]![0]))) return facts;
+    if (counts.pass! + counts.fail! + counts.cancelled! + counts.skipped! === counts.tests!) {
       facts.reportedTapSummary = counts as NonNullable<NamedSessionNativeAuditEvent['reportedTapSummary']>;
     }
   }

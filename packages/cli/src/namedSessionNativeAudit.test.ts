@@ -127,6 +127,26 @@ test('typed native output facts are limited to exact version/test commands and c
   }
 });
 
+test('typed TAP totals reject unexplained gaps and nonzero or malformed TODO categories', async () => {
+  for (const suffix of ['', '\n# todo 1', '\n# todo nope', '\n# todo 0\n# todo 0']) {
+    const f = fixture(), item = (f.capture.events[1]!.notification.params as {item: Record<string, unknown>}).item;
+    item.command = 'node --test test/public.test.js';
+    item.aggregatedOutput = '# tests 11\n# pass 10\n# fail 0\n# cancelled 0\n# skipped 0' + suffix;
+    assert.equal((await readNamedSessionNativeAudit(f.prepare())).events[0]!.reportedTapSummary, null);
+  }
+  for (const suffix of ['\n# todo 1', '\n# todo nope', '\n# todo 0\n# todo 0']) {
+    const f = fixture(), item = (f.capture.events[1]!.notification.params as {item: Record<string, unknown>}).item;
+    item.command = 'npm test';
+    item.aggregatedOutput = '# tests 11\n# pass 11\n# fail 0\n# cancelled 0\n# skipped 0' + suffix;
+    assert.equal((await readNamedSessionNativeAudit(f.prepare())).events[0]!.reportedTapSummary, null);
+  }
+  const f = fixture(), item = (f.capture.events[1]!.notification.params as {item: Record<string, unknown>}).item;
+  item.command = 'npm test';
+  item.aggregatedOutput = '# tests 11\n# pass 11\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0';
+  assert.deepEqual((await readNamedSessionNativeAudit(f.prepare())).events[0]!.reportedTapSummary,
+    {tests: 11, pass: 11, fail: 0, cancelled: 0, skipped: 0});
+});
+
 test('v2 audit checks request integrity and original workspace without upgrading partial coverage', async () => {
   const f = fixture();
   const request = {method: 'turn/start' as const, params: {threadId: f.binding.sessionId,

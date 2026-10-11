@@ -62,6 +62,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     'packages/cli/src/namedSessionBudget.ts', 'packages/cli/src/namedSessionBudget.test.ts',
     'packages/cli/src/namedSessionService.ts', 'packages/cli/src/namedSessionService.test.ts',
     'schemas/named-session-native-audit.schema.json', 'docs/named-session-native-audit.md',
+    'packages/cli/src/usage.ts', 'packages/cli/src/usage.test.ts', 'packages/cli/README.md',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
