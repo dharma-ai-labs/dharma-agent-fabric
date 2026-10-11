@@ -1,5 +1,6 @@
 import {types} from 'node:util';
 import type {OnboardingStage} from './onboardingStage.js';
+import {isNamedSessionStartupPhaseFailure} from './namedSessionStartupDiagnostic.js';
 
 const stages: readonly OnboardingStage[] = ['local_skill_inventory', 'first_learning_preview',
   'first_learning_sync', 'package_snapshot', 'package_publication', 'role_registration',
@@ -49,7 +50,8 @@ export function classifyCodexSetupFailure(error: unknown,
         const found = stages.find(value => message.value.startsWith(`agent_fabric_onboarding_${value}:`));
         if (found) stage = found;
       }
-      if (category === 'setup_runtime_unclassified' && categories.has(message.value)) category = message.value;
+      if (category === 'setup_runtime_unclassified'
+        && (categories.has(message.value) || isNamedSessionStartupPhaseFailure(message.value))) category = message.value;
     }
     const cause = Object.getOwnPropertyDescriptor(error, 'cause');
     error = cause && Object.hasOwn(cause, 'value') ? cause.value : undefined;

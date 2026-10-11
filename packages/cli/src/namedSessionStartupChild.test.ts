@@ -37,6 +37,17 @@ test('a live child is never declared stopped from stderr alone', () => {
   assert.equal(f.observed.readFailure(), undefined);f.observed.dispose();
 });
 
+test('a real child reports its fixed startup phase without private exception text', async () => {
+  const moduleUrl = new URL('./namedSessionStartupDiagnostic.js', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e',
+    `import {namedSessionStartupPhaseError} from ${JSON.stringify(moduleUrl)};
+     process.stderr.write(namedSessionStartupPhaseError('thread', new Error('secret-placeholder')).message+'\\n');
+     process.exitCode=2;`], {stdio: ['ignore', 'ignore', 'pipe']});
+  const observed = observeNamedSessionStartupChild(child);
+  try {await once(child, 'close'); assert.equal(observed.readFailure(), 'named_session_startup_phase_thread_unclassified');}
+  finally {observed.dispose();}
+});
+
 test('clean exit before readiness and spawn error have distinct fixed categories', () => {
   const a = fixture();a.child.emit('close', 0);assert.equal(a.observed.readFailure(), 'named_session_startup_child_exited');a.observed.dispose();
   const b = fixture();b.child.emit('error', new Error('secret-placeholder'));b.child.emit('close', -1);

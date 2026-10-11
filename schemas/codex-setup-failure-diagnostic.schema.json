@@ -31,7 +31,9 @@
       ]
     },
     "category": {
-      "enum": [
+      "anyOf": [
+        {"type": "string", "pattern": "^named_session_startup_phase_(vault|lock|client|trust|session|policy|registration|environment|filesystem|transport|account|thread|binding|lifetime|service)_(unclassified|missing|permission|conflict|timeout|connection|aborted)$(?![\\s\\S])"},
+        {"enum": [
         "setup_runtime_unclassified",
         "codex_setup_host_scope_unavailable",
         "codex_setup_host_source_mismatch",
@@ -91,6 +93,7 @@
         "setup_readiness_context_unconfirmed",
         "setup_readiness_lease_invalid",
         "setup_readiness_persistence_unconfirmed"
+        ]}
       ]
     }
   }
