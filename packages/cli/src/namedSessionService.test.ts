@@ -125,13 +125,16 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
     };
     let boundaryWorkId: string | null = null;
     const retainedWorkIds: string[] = [];
-    let exportSyncs = 0, nativeReads = 0, nativeUnavailable = false;
+    let exportSyncs = 0, nativeReads = 0, nativeUnavailable = false, auditAuthorizationFailure = false;
     const nativeSkill = {schema: 'dharma.named-codex-skill-observation/v1' as const, nativeDiscovered: true as const,
       bundleId: randomUUID(), bundleHash: `sha256:${'a'.repeat(64)}`, catalogHash: `sha256:${'b'.repeat(64)}`,
       manifestHash: `sha256:${'c'.repeat(64)}`, skillsHash: `sha256:${'d'.repeat(64)}`, observedAt: new Date().toISOString()};
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
-      authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => true,
+      authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => {
+        if (auditAuthorizationFailure) throw new Error('PRIVATE_AUDIT_AUTHORIZATION_DIAGNOSTIC');
+        return true;
+      },
       observeNativeSkill: async () => {
         assert.equal(active, 0); assert.equal(boundaryWorkId, null); nativeReads++;
         if (nativeUnavailable) throw new Error('PRIVATE_NATIVE_DIAGNOSTIC');
@@ -223,6 +226,10 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         const failedId = randomUUID();
         await assert.rejects(namedSessionRequest(home, 'implementer', { action: 'work', workId: failedId,
           prompt: 'A failing native task.' }), /turn_failed/);
+        // A failed provider turn closes this mock owner; audit must not revive it or bypass its lease.
+        await assert.rejects(namedSessionRequest(home, 'implementer', {action: 'audit', workId: failedId}),
+          /named_session_(busy|unavailable|audit_unavailable)/);
+        assert.deepEqual(turns, ['dharma_work', 'dharma_work']);
         controller.abort();
         await service;
         const health = JSON.parse(await readFile(namedSessionPaths(home, 'implementer').health, 'utf8'));
@@ -251,6 +258,16 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       const second = namedSessionRequest(home, 'implementer', { action: 'work', workId: randomUUID(), prompt: 'Check the correction.' });
       const workReceipts = await Promise.all([first, second]);
       for (const receipt of workReceipts) {
+        const beforeAudit = await namedSessionRequest(home, 'implementer', {action: 'status'});
+        const audit = await namedSessionRequest(home, 'implementer', {action: 'audit', workId: receipt.workId});
+        assert.equal(audit.schema, 'dharma.named-session-native-audit/v1');assert.equal(audit.workId, receipt.workId);
+        assert.equal(audit.bindingId, binding.bindingId);assert.equal(audit.sessionId, binding.sessionId);
+        assert.equal(audit.receiptHash, receipt.completionHash);
+        assert.equal(audit.rawContentExported, false);assert.equal(audit.acceptedLearningObservation, false);
+        assert.equal(JSON.stringify(audit).includes('RAW_CAPTURE_ONLY_TEST_CANARY'), false);
+        assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+          'https://schemas.dharma-ai.io/named-session-native-audit/v1', audit)).ok, true);
+        assert.deepEqual((await namedSessionRequest(home, 'implementer', {action: 'status'})).budget, beforeAudit.budget);
         const intent = JSON.parse((await vault.getBlob(String(receipt.intentHash))).toString('utf8'));
         assert.equal(intent.workId, receipt.workId);
         assert.equal(intent.bindingId, binding.bindingId);
@@ -277,6 +294,15 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         const stored = await readFile(join(home, 'vault', 'blobs', digest.slice(0, 2), `${digest}.blob`));
         assert.equal(stored.includes(Buffer.from('RAW_CAPTURE_ONLY_TEST_CANARY')), false);
       }
+      for (const request of [{action: 'audit', workId: randomUUID()}, {action: 'audit', workId: '../foreign'},
+        {action: 'audit', workId, captureHash: 'sha256:' + 'a'.repeat(64)}, {action: 'audit', workId, prompt: 'Run a task'}]) {
+        await assert.rejects(namedSessionRequest(home, 'implementer', request), /named_session_audit_unavailable/);
+      }
+      assert.equal(turns.length, 2);
+      auditAuthorizationFailure = true;
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action: 'audit', workId}),
+        {message: 'named_session_audit_unavailable'});
+      auditAuthorizationFailure = false;
       for (const entry of await readdir(join(home, 'vault'), { withFileTypes: true })) {
         if (entry.isFile()) assert.equal((await readFile(join(home, 'vault', entry.name))).includes(Buffer.from('RAW_CAPTURE_ONLY_TEST_CANARY')), false);
       }

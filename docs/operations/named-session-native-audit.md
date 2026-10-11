@@ -1,0 +1,19 @@
+# Exact-Work Native Audit
+
+This additive local owner interface returns bounded metadata and SHA256 digests of native tool items for one recorded work ID. It does not return prompts, arguments, command text, outputs, diffs, paths, assistant messages, protected reasoning, credential material or arbitrary vault blobs.
+
+```bash
+dharma sessions audit --name implementer --workspace-id WORKSPACE_UUID --work-id WORK_UUID
+```
+
+Run in the existing enrolled Linux client's normal protected-store context. An enabled registered named session must already be running and authorized. The owner verifies the exact work receipt, capture hash, event hash, organization/member/device/repository/workspace/endpoint/binding/thread identities and request context. It does not fall back to the newest work or accept a caller-supplied vault locator. Foreign, unfinished, interrupted, absent or corrupt captures fail closed.
+
+The service serializes audit access with its existing work queue and uses its existing protected vault handle. No new authentication, enrollment, provider turn, network authority or reservation is introduced. The normal session CLI never returns a vault key or opens an alternate credential route.
+
+Match `commandHash`, `outputHash` and `pathHashes` against independently known authorized public values. Command/output/path hashes use SHA256 over their exact UTF-8 strings; structured arguments/results and full native items use SHA256 over their JSON serialization. A match establishes only that the captured provider event reported that value. It is not independent grading or proof of every requested action. Repeated completion items are deduplicated within the capture.
+
+For a narrow, shell-free Node version/test or npm test command shape, the projection can additionally expose an exact semantic version and complete numeric TAP totals. These are explicitly `reportedNodeVersion` and `reportedTapSummary`, not independently verified outcomes. Extra version text, duplicate/missing totals, contradictory counts and unrecognized commands produce null facts. No surrounding output is returned. Skill/report reads and peer-answer consumption still require known-public hashes and native ordering; metadata alone must not claim those behaviors.
+
+At most 32 completed tool/file-change items and four paths per item are included. `truncated`, `pathsTruncated`, `droppedEvents`, `coverage` and explicit limitations must be retained in any acceptance report. Known capture limitations (including `credential_excluded`) are preserved verbatim from a closed allowlist. The current capture schemas reject unknown limitation strings; no such string is exposed. Missing items, hashes, output or exit codes cannot be interpreted as success. Work from v1 captures lacks the v2 retained request binding; neither format proves full provider context, executed model, implicit file reads or accepted learning.
+
+This command is not a credential-recovery mechanism, a raw-transcript export, a cross-user audit service or permission to bypass an unavailable owner socket. A stopped/unavailable session must use the separately qualified normal recovery route. Do not use direct key extraction as an audit fallback.

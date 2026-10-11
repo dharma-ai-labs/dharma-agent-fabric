@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-native-audit/v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["ok", "schema", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "bindingId", "provider", "sessionId", "workId", "workState", "captureWorkOutcome", "receiptHash", "captureId", "captureHash", "eventsHash", "startedAt", "closedAt", "observedAt", "providerTurnId", "providerTurnState", "coverage", "droppedEvents", "qualifyingItems", "captureLimitations", "unrecognizedCaptureLimitationCount", "truncated", "rawContentExported", "acceptedLearningObservation", "limitations", "events"],
+  "$defs": {
+    "uuid": {"type": "string", "format": "uuid"},
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "nullableHash": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+    "time": {"type": "string", "format": "date-time"}
+  },
+  "properties": {
+    "ok": {"const": true}, "schema": {"const": "dharma.named-session-native-audit/v1"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"},
+    "repositoryBindingId": {"$ref": "#/$defs/uuid"}, "workspaceId": {"$ref": "#/$defs/uuid"},
+    "endpointId": {"$ref": "#/$defs/uuid"}, "membershipId": {"$ref": "#/$defs/uuid"},
+    "deviceId": {"$ref": "#/$defs/uuid"}, "bindingId": {"$ref": "#/$defs/uuid"},
+    "provider": {"const": "codex"}, "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "workId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "workState": {"enum": ["completed", "failed"]}, "captureWorkOutcome": {"enum": ["completed", "failed"]},
+    "receiptHash": {"$ref": "#/$defs/hash"}, "captureId": {"$ref": "#/$defs/uuid"},
+    "captureHash": {"$ref": "#/$defs/hash"}, "eventsHash": {"$ref": "#/$defs/hash"},
+    "startedAt": {"$ref": "#/$defs/time"}, "closedAt": {"$ref": "#/$defs/time"}, "observedAt": {"$ref": "#/$defs/time"},
+    "providerTurnId": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "providerTurnState": {"enum": ["completed", "failed", "interrupted", "unconfirmed"]},
+    "coverage": {"enum": ["observed", "partial", "unavailable"]},
+    "droppedEvents": {"type": "integer", "minimum": 0}, "qualifyingItems": {"type": "integer", "minimum": 0},
+    "captureLimitations": {"type": "array", "maxItems": 7, "uniqueItems": true, "items": {"enum": ["conflicting_turn_identity", "unscoped_notification", "invalid_notification", "capture_limit", "credential_excluded", "turn_unconfirmed", "terminal_unconfirmed"]}},
+    "unrecognizedCaptureLimitationCount": {"type": "integer", "minimum": 0},
+    "truncated": {"type": "boolean"}, "rawContentExported": {"const": false}, "acceptedLearningObservation": {"const": false},
+    "limitations": {"type": "array", "uniqueItems": true, "maxItems": 5, "items": {"enum": ["hashed_native_items_not_raw_transcripts", "provider_reports_not_independent_grading", "hashed_command_and_path_match_required", "retained_context_unavailable", "executed_model_unreported"]}},
+    "events": {"type": "array", "maxItems": 32, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "sequence", "receivedAt", "itemHash", "itemIdHash", "commandHash", "outputHash", "argumentsHash", "resultHash", "exitCode", "durationMs", "pathHashes", "pathsTruncated", "commandShape", "reportedNodeVersion", "reportedTapSummary"],
+      "properties": {
+        "kind": {"enum": ["commandExecution", "mcpToolCall", "dynamicToolCall", "fileChange"]},
+        "sequence": {"type": "integer", "minimum": 0}, "receivedAt": {"$ref": "#/$defs/time"},
+        "itemHash": {"$ref": "#/$defs/hash"}, "itemIdHash": {"$ref": "#/$defs/nullableHash"},
+        "commandHash": {"$ref": "#/$defs/nullableHash"}, "outputHash": {"$ref": "#/$defs/nullableHash"},
+        "argumentsHash": {"$ref": "#/$defs/nullableHash"}, "resultHash": {"$ref": "#/$defs/nullableHash"},
+        "exitCode": {"type": ["integer", "null"]}, "durationMs": {"type": ["integer", "null"], "minimum": 0},
+        "pathsTruncated": {"type": "boolean"},
+        "commandShape": {"enum": ["node_version", "node_test", "npm_test", "other"]},
+        "reportedNodeVersion": {"type": ["string", "null"], "pattern": "^v[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$"},
+        "reportedTapSummary": {
+          "type": ["object", "null"], "additionalProperties": false,
+          "required": ["tests", "pass", "fail", "cancelled", "skipped"],
+          "properties": {
+            "tests": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "pass": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "fail": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "cancelled": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "skipped": {"type": "integer", "minimum": 0, "maximum": 1000000}
+          }
+        },
+        "pathHashes": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/hash"}}
+      }
+    }}
+  }
+}

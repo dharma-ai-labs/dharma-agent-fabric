@@ -4940,6 +4940,21 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   }
   if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
+  if (action === 'audit') {
+    if (!existing?.enabled || [...flags.keys()].some(key => !['name', 'workspace-id', 'work-id'].includes(key))) {
+      throw new Error('named_session_audit_unavailable');
+    }
+    const workId = required(flags, 'work-id');
+    if (!/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(workId)) throw new Error('named_session_work_invalid');
+    const result = await namedSessionRequest(dharmaHome(), name, {action: 'audit', workId});
+    if (!(await validateContract(resolve(import.meta.dirname, 'schemas'),
+      'https://schemas.dharma-ai.io/named-session-native-audit/v1', result)).ok
+      || result.bindingId !== existing.bindingId || result.workId !== workId
+      || Object.entries(existing.identity).some(([key, value]) => result[key] !== value)) {
+      throw new Error('named_session_audit_scope_mismatch');
+    }
+    return result;
+  }
   if (action === 'stop') {
     if (!flags.has('apply')) return { ok: true, planned: true, name, action: 'stop' };
     if (existing) await saveNamedSession(dharmaHome(), { ...existing, enabled: false });
