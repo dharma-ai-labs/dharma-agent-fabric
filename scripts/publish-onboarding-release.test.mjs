@@ -1,12 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { approvedPackages, assertSourceSnapshot, assertProvenance, publishBoundedRelease } from './publish-onboarding-release.mjs';
 
 const head = 'a'.repeat(40);
+
+test('current reviewed npm startup correction is admitted by the bounded publisher delta', () => {
+  const root = join(import.meta.dirname, '..');
+  const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
+  const baseline = '87ea95692a908b799c0390823c73e5578281b5ab';
+  const current = git('rev-parse', 'HEAD');
+  // Exercise committed candidate metadata, not a claim of clean release eligibility.
+  const snapshot = {head: current, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
+    dirty: '', lifecycleLauncher: git('ls-tree', 'HEAD', 'packages/lifecycle-adapter/bin/run.mjs'),
+    changed: git('diff', '--name-only', baseline, 'HEAD').split('\n').filter(Boolean), untracked: [],
+    baselineManifest: JSON.parse(git('show', `${baseline}:package.json`)),
+    manifest: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))};
+  assert.doesNotThrow(() => assertSourceSnapshot(current, snapshot));
+  for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml']) {
+    assert.throws(() => assertSourceSnapshot(current, {...snapshot, changed: [...snapshot.changed, forbidden]}),
+      /unreviewed product source delta/);
+  }
+});
 
 test('npm bin linking leaves a tracked executable launcher clean on Linux', { skip: process.platform !== 'linux' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'dharma-bin-mode-'));
@@ -58,7 +76,7 @@ test('publishes precisely the approved CLI correction without republishing depen
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, approvedPackages.map((item) => item.name));
-  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.182']]);
+  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.183']]);
 });
 
 for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
@@ -67,9 +85,9 @@ for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
     if (defect === 'source') io.verifySource = async () => { throw new Error('source mismatch'); };
     if (defect === 'name' || defect === 'version') {
       const original = io.manifest;
-      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.182' ? { [defect]: 'wrong' } : {}) });
+      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.183' ? { [defect]: 'wrong' } : {}) });
     }
-    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.182'
+    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.183'
       ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : `sha512-${item.version}` } } : null;
     await assert.rejects(publishBoundedRelease(head, io));
     assert.deepEqual(effects, []);

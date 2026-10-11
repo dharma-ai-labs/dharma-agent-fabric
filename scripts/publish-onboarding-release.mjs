@@ -10,7 +10,7 @@ const source = '87ea95692a908b799c0390823c73e5578281b5ab';
 const tree = '8ec4389b12eb6e0bf787951788910d33268285ec';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.182' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.183' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -59,6 +59,8 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
     'packages/cli/src/namedPeerContentAuthorization.ts', 'packages/cli/src/namedPeerContentAuthorization.test.ts',
+    'packages/cli/src/cliProcessIdentity.ts', 'packages/cli/src/cliProcessIdentity.test.ts',
+    'packages/cli/src/codexSetupSessionCaller.test.ts', 'packages/cli/src/codexBootstrapCompletion.test.ts',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
