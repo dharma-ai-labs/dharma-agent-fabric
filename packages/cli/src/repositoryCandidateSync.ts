@@ -52,6 +52,17 @@ const ORG = /^org_[A-Za-z0-9_]{1,156}$(?![\s\S])/;
 const STATES = new Set<RepositoryCandidateState>(['accepted', 'processing', 'published', 'blocked']);
 const OUTBOX_STATES = new Set<CandidateOutbox['state']>(['pending_upload', ...STATES]);
 
+export function repositoryCandidateOperationId(input: {
+  scope: RepositoryCandidateScope; snapshotHash: string; sourceManifestHash: string;
+  consolidation: CandidateOutbox['consolidation']; recoveryAttempt?: boolean;
+}) {
+  return sha256(canonicalize({ schema: 'dharma.repository-candidate-operation/v1',
+    organizationId: input.scope.organizationId, workspaceId: input.scope.workspaceId,
+    repositoryBindingId: input.scope.repositoryBindingId, repositoryAgentId: input.scope.repositoryAgentId,
+    snapshotHash: input.snapshotHash, sourceManifestHash: input.sourceManifestHash, consolidation: input.consolidation,
+    ...(input.recoveryAttempt ? { recoveryAttempt: 1 } : {}) }));
+}
+
 function requireFact(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
@@ -190,9 +201,8 @@ export async function synchronizeRepositoryCandidate(input: {
       expectedLatestSourceFingerprint: input.expectedLatestSourceFingerprint,
     } : {}),
   };
-  const operationId = sha256(canonicalize({ schema: 'dharma.repository-candidate-operation/v1', ...scope,
-    snapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash, consolidation,
-    ...(input.blockedCandidate ? { recoveryAttempt: 1 } : {}) }));
+  const operationId = repositoryCandidateOperationId({ scope, snapshotHash: snapshot.manifest.snapshotHash,
+    sourceManifestHash, consolidation, recoveryAttempt: Boolean(input.blockedCandidate) });
   const path = outboxPath(input.outboxRoot, scope);
   const prior = await readOutbox(path, scope);
   if (prior && (prior.operationId !== operationId || canonicalize(prior.scope) !== canonicalize(scope))) {

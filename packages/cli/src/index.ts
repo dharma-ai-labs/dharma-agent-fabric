@@ -69,6 +69,7 @@ import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionS
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
+import { collectRepositorySourceRestoration } from './repositorySourceRestoration.js';
 import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
 import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
 import { activateRepositorySourceResolution, readActiveRepositorySourceResolution,
@@ -138,7 +139,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.186';
+const VERSION = '0.2.187';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5710,6 +5711,71 @@ async function repositoryInstallerRecoveryCommand(flags: Map<string, string | bo
     nextAction: 'Resume pinned onboarding; recovery is not signed skill installation or activation.' };
 }
 
+export async function repositoryRestoreCommand(flags: Map<string, string | boolean>) {
+  flags = new Map(flags);
+  const allowed = new Set(['workspace-id', 'dry-run', 'apply', 'plan-hash', 'json']);
+  if ([...flags].some(([key, value]) => !allowed.has(key)
+    || (['workspace-id', 'plan-hash'].includes(key) ? typeof value !== 'string' || !value : value !== true))
+    || flags.has('apply') === flags.has('dry-run') || flags.has('apply') !== flags.has('plan-hash')) {
+    throw new Error('repository_source_restoration_option_invalid');
+  }
+  const workspaceId = required(flags, 'workspace-id'), apply = flags.has('apply');
+  const config = await readDeviceConfig();
+  const workspace = (await registry()).find(row => row.workspaceId === workspaceId && row.organizationId === config?.organizationId);
+  if (!config || !workspace?.repositoryBindingId || !workspace.repositoryAgentId
+    || workspace.accessMode === 'knowledge_only' || !workspace.repositoryPackage
+    || workspace.repositoryPackage.generation < 1 || workspace.repositoryPackage.pendingLocalOperationId) {
+    throw new Error('repository_source_restoration_workspace_not_authorized');
+  }
+  // An explicit recovery must not race the relay's candidate outbox or silently
+  // undo containment. The operator uses the normal owned relay stop/start flow.
+  if (apply && await relayProcessState() !== 'stopped') throw new Error('repository_source_restoration_requires_stopped_relay');
+  const policy = await loadVerifiedWorkspacePolicy(resolve(workspace.path, '.dharma', 'approved-policy.json'), workspaceId);
+  if (!policy.serverAuthorization) throw new Error('repository_source_restoration_workspace_not_authorized');
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
+  const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(), readOnly: !apply });
+  await fabric.openSession(VERSION);
+  const scope = { organizationId: workspace.organizationId, workspaceId,
+    repositoryBindingId: workspace.repositoryBindingId, repositoryAgentId: workspace.repositoryAgentId };
+  const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
+    workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
+  const collected = await collectRepositorySourceRestoration({ ...scope, workspace: workspace.path, transport: fabric,
+    serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 }, format: 'jwk' }),
+    loadPublishedLocalBaseline: () => baseline ? readRepositoryPackageSnapshot(workspace.path, baseline) : Promise.resolve(null),
+    loadResolution: () => readActiveRepositorySourceResolution(workspace.path) });
+  const planHash = sha256(canonicalize({ schema: 'dharma.repository-restoration-plan/v1', ...scope,
+    priorReleaseId: collected.priorReleaseId, priorGeneration: collected.priorGeneration,
+    headCandidateId: collected.headCandidateId, headSnapshotHash: collected.headSnapshotHash, operationId: collected.operationId,
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint, snapshotHash: collected.snapshot.manifest.snapshotHash }));
+  if (!apply) return { ok: true, stage: 'repository_restoration_planned', dryRun: true, planHash,
+    priorReleaseId: collected.priorReleaseId, priorGeneration: collected.priorGeneration,
+    headCandidateId: collected.headCandidateId, operationId: collected.operationId,
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
+    snapshotHash: collected.snapshot.manifest.snapshotHash, localMutation: false, serverSourceMutation: false,
+    protocolSessionCreated: true, activated: false, published: false };
+  if (required(flags, 'plan-hash') !== planHash) throw new Error('repository_source_restoration_plan_changed');
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+  if (await relayProcessState() !== 'stopped') throw new Error('repository_source_restoration_requires_stopped_relay');
+  await collected.assertCurrent();
+  await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });
+  const candidate = await synchronizeRepositoryCandidate({ transport: fabric,
+    outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), scope,
+    snapshot: collected.snapshot, initialRepository: false,
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint });
+  const pending = candidate.state === 'accepted' || candidate.state === 'processing';
+  await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
+    ...candidate, sourceManifestHash: sha256(canonicalize(collected.snapshot.manifest)), consolidationMode: 'repository_update',
+    localBaselineSnapshotHash: candidate.state === 'blocked' ? baseline : collected.snapshot.manifest.snapshotHash,
+    publishedLocalSnapshotHash: candidate.state === 'published' ? collected.snapshot.manifest.snapshotHash : baseline,
+    pendingLocalSnapshotHash: pending ? collected.snapshot.manifest.snapshotHash : null,
+    pendingLocalOperationId: pending ? candidate.operationId : null } });
+  return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_submitted', planHash, candidate,
+    priorReleaseId: collected.priorReleaseId, localMutation: true, serverSourceMutation: true, activated: false,
+    nextAction: 'Resume the owned relay; evaluation, signing, delivery and activation must pass independently.' };
+}
+
 export async function repositorySourceResolutionCommand(flags: Map<string, string | boolean>) {
   flags = new Map(flags);
   const allowed = new Set(['workspace-id', 'dry-run', 'prepare', 'apply', 'plan-hash', 'choose-reviewed-local', 'json']);
@@ -8718,6 +8784,12 @@ export async function run(argv: string[]): Promise<Output> {
       throw new Error('repository_source_resolution_option_invalid');
     }
     return repositorySourceResolutionCommand(flags);
+  }
+  if (command === 'repositories' && subcommand === 'restore') {
+    if (positional.length !== 2 || [...repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('repository_source_restoration_option_invalid');
+    }
+    return repositoryRestoreCommand(flags);
   }
   if (command === 'repositories' && ['role-register', 'role-discover', 'ask', 'reply'].includes(String(subcommand))) {
     const action = subcommand === 'role-register' ? 'register' : subcommand === 'role-discover' ? 'discover' : subcommand;

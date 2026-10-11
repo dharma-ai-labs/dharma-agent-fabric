@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
+import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -8,10 +9,15 @@ import { fileURLToPath } from 'node:url';
 import { canonicalize, signCanonicalObject, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { calculateBundleHash, contentHash, installSkillBundle, readVerifiedRepositoryKnowledge } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { AgentFabricClient, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor,
+  type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import * as knowledge from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
+import { collectRepositorySourceRestoration, fetchRepositorySourceRestoration } from './repositorySourceRestoration.js';
+import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { planRepositorySourceResolution } from './repositorySourceReconciliation.js';
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const CATALOG = `${ROOT}/knowledge/CATALOG.json`, MANIFEST = `${ROOT}/MANIFEST.json`;
@@ -366,4 +372,244 @@ test('source collection validates retained scope and bounded bytes before use', 
   await assert.rejects(selectInstalledRepositoryKnowledge({ ...scope, loadProvider: async () => ({ catalogBytes: Buffer.alloc(262145), manifestBytes: f.manifestBytes }) }), /limit/);
   await assert.rejects(inventoryRepositoryPackage({ ...f.input, sourceAuthorization: undefined,
     retainedKnowledge: { catalogBytes: f.catalogBytes, manifestBytes: f.manifestBytes } }), /governed scope/);
+});
+
+async function restorationFixture(t: TestContext) {
+  const f = await fixture(t), auth = validateRepositorySourceAuthorization(authorization(), scope, new Date()), keys = generateKeyPairSync('ed25519');
+  const catalog = { ...f.catalog, policyHash: auth.policyHash };
+  const catalogBytes = Buffer.from(`${canonicalize(catalog)}\n`);
+  const manifest = structuredClone(f.manifest); manifest.policyHash = auth.policyHash;
+  const catalogFile = manifest.files.find(file => file.path === CATALOG)!;
+  catalogFile.sha256 = digest(catalogBytes); catalogFile.sizeBytes = catalogBytes.length;
+  const manifestBytes = Buffer.from(`${canonicalize(manifest)}\n`);
+  // The active managed catalog has been cleared/reinitialized. Restoration
+  // carries verified metadata in memory without writing it back as activation.
+  await f.put(CATALOG, f.initialCatalogBytes);
+  const retainedKnowledge = { catalogBytes, manifestBytes };
+  const baseline = await inventoryRepositoryPackage({ ...f.input, retainedKnowledge });
+  const createdAt = new Date(Date.now() - 60000).toISOString(), expiresAt = new Date(Date.now() + 86400000).toISOString();
+  const descriptor = { schema: 'dharma.repository-package-delivery/v1', delivery: 'authenticated_chunks',
+    transferSchema: 'dharma.repository-package-transfer/v2', organizationId: scope.organizationId,
+    repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+    releaseId: 'c24b5a90-3b7a-4a81-9503-c9f49be790c3', generation: catalog.generation,
+    gitCommit: 'a'.repeat(40), policyHash: auth.policyHash, sourceSnapshotHash: catalog.sourceSnapshotHash,
+    sourceManifestHash: manifest.sourceManifestHash, sourceLocalCatalogHash: catalog.sourceLocalCatalogHash,
+    catalogHash: digest(catalogBytes), manifestHash: digest(manifestBytes), transferIndexHash: H,
+    fileCount: 2, totalBytes: catalogBytes.length + manifestBytes.length, maximumFileBytes: 262144,
+    createdAt, expiresAt };
+  const unsigned = { schema: 'dharma.repository-package-envelope/v1',
+    bundleId: 'd24b5a90-3b7a-4a81-9503-c9f49be790c3', bundleHash: H, descriptor };
+  const envelope = { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey) };
+  const body = { ok: true, organizationId: scope.organizationId, repositoryBindingId: scope.repositoryBindingId,
+    repositoryAgentId: scope.repositoryAgentId, policyGenerationId: auth.generationId, workspaceBaseline: null,
+    source: { candidateId: 'e24b5a90-3b7a-4a81-9503-c9f49be790c3', workspaceId: scope.workspaceId,
+      sourceSnapshotHash: baseline.manifest.snapshotHash, sourceManifestHash: digest(canonicalize(baseline.manifest)),
+      sourceFingerprint: baseline.manifest.sourceFingerprint, files: baseline.manifest.files.filter(file => file.role !== 'knowledge'),
+      skills: baseline.manifest.skills },
+    restoration: { schema: 'dharma.repository-knowledge-restoration/v1', authority: 'candidate_reference_only', envelope,
+      catalogBase64: catalogBytes.toString('base64'), manifestBase64: manifestBytes.toString('base64') } };
+  const calls: string[] = [];
+  const transport = { signedGet: async (route: string): Promise<Record<string, unknown>> => {
+    calls.push(route);
+    if (route.startsWith('/agent-fabric/repository-source-policy')) return { ok: true, organizationId: scope.organizationId,
+      policy: { ...scope, current: { active: true, reason: 'authorized', revision: auth.revision,
+        generationId: auth.generationId, receiptId: auth.receiptId, policyRevision: auth.policyRevision,
+        confirmedAt: auth.confirmedAt, policyHash: auth.policyHash, policy: auth.policy } } };
+    const query = new URL(route, 'https://fixture.invalid').searchParams;
+    if (query.get('restoration') !== 'true') throw new Error('Unexpected non-restoration read');
+    return { ...structuredClone(body), ...(query.has('restorationOperationId')
+      ? { restorationOperationId: query.get('restorationOperationId') } : {}) };
+  } };
+  return { ...f, auth, keys, body, baseline, catalogBytes, manifestBytes, transport, calls,
+    input: { ...scope, workspace: f.workspace, transport, serverPublicKey: keys.publicKey,
+      loadPublishedLocalBaseline: async () => baseline,
+      loadResolution: async () => { throw new Error('No conflict approval should be loaded'); } } };
+}
+
+test('explicit restoration verifies publisher metadata without reinstalling or overwriting a cleared catalog', async t => {
+  const f = await restorationFixture(t);
+  const result = await fetchRepositorySourceRestoration({ ...f.input, scope, authorization: f.auth });
+  assert.deepEqual(result.catalogBytes, f.catalogBytes);
+  assert.equal(result.generation, 2);
+  assert.equal(result.sourceFingerprint, f.baseline.manifest.sourceFingerprint);
+  assert.deepEqual(await readFile(resolve(f.workspace, CATALOG)), f.initialCatalogBytes);
+  assert.equal(f.calls.length, 1);
+});
+
+test('restoration rejects foreign response authority, tampered content/signature and expiry', async t => {
+  const f = await restorationFixture(t);
+  for (const body of [{ ...f.body, organizationId: 'org_foreign' }, { ...f.body, policyGenerationId: 'foreign' },
+    { ...f.body, restoration: { ...f.body.restoration, authority: 'activate' } },
+    { ...f.body, restoration: { ...f.body.restoration, catalogBase64: Buffer.from('tampered').toString('base64') } },
+    { ...f.body, restoration: { ...f.body.restoration, envelope: { ...f.body.restoration.envelope,
+      signature: Buffer.alloc(64).toString('base64url') } } }]) {
+    await assert.rejects(fetchRepositorySourceRestoration({ ...f.input, scope, authorization: f.auth,
+      transport: { signedGet: async () => body } }), /restoration_reference_invalid/);
+  }
+  await assert.rejects(fetchRepositorySourceRestoration({ ...f.input, scope, authorization: f.auth,
+    now: () => new Date(f.body.restoration.envelope.descriptor.expiresAt) }), /restoration_reference_invalid/);
+  await assert.rejects(fetchRepositorySourceRestoration({ ...f.input, scope, authorization: f.auth,
+    transport: { signedGet: async () => ({ ...f.body, restoration: null }) } }), /restoration_not_required/);
+});
+
+test('restoration collects a fresh update with the stable signed prior and latest source compare-and-swap', async t => {
+  const f = await restorationFixture(t);
+  await f.put('output/approved/restoration-report.md', '# Reviewed correction\n');
+  const result = await collectRepositorySourceRestoration(f.input);
+  assert.equal(result.expectedLatestSourceFingerprint, f.baseline.manifest.sourceFingerprint);
+  assert.equal(result.snapshot.manifest.knowledge?.authority, 'unverified_prior_release_reference');
+  assert.equal(result.snapshot.manifest.knowledge?.priorRelease?.generation, 2);
+  assert.ok(result.snapshot.manifest.files.some(file => file.path === 'output/approved/restoration-report.md'));
+  await result.assertCurrent();
+  assert.deepEqual(await readFile(resolve(f.workspace, CATALOG)), f.initialCatalogBytes);
+});
+
+test('restoration fails closed if the head or workspace changes between plan and submission', async t => {
+  const f = await restorationFixture(t);
+  const result = await collectRepositorySourceRestoration(f.input);
+  await f.put('README.md', '# Changed after plan\n');
+  await assert.rejects(result.assertCurrent(), /restoration_workspace_changed/);
+  await f.put('README.md', '# Shared repository');
+  f.body.source.sourceFingerprint = H;
+  await assert.rejects(result.assertCurrent(), /restoration_head_changed/);
+});
+
+test('restoration rechecks unchanged conflict approval expiry after awaited final reads', async t => {
+  const f = await restorationFixture(t), now = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now });
+  await f.put('README.md', '# Remote change\n');
+  const retainedKnowledge = { catalogBytes: f.catalogBytes, manifestBytes: f.manifestBytes };
+  const remote = await inventoryRepositoryPackage({ ...f.input, retainedKnowledge, sourceAuthorization: f.auth });
+  Object.assign(f.body.source, { sourceSnapshotHash: remote.manifest.snapshotHash,
+    sourceManifestHash: digest(canonicalize(remote.manifest)), sourceFingerprint: remote.manifest.sourceFingerprint,
+    files: remote.manifest.files.filter(file => file.role !== 'knowledge'), skills: remote.manifest.skills });
+  await f.put('README.md', '# Local correction\n');
+  const local = await inventoryRepositoryPackage({ ...f.input, retainedKnowledge, sourceAuthorization: f.auth });
+  const resolution = planRepositorySourceResolution({ local, previousLocal: f.baseline,
+    published: { files: f.body.source.files, skills: remote.manifest.skills, blobs: remote.blobs,
+      sourceFingerprint: remote.manifest.sourceFingerprint! } });
+  assert.equal(resolution.plan.conflicts.length, 1);
+  const transport = { signedGet: async (route: string) => {
+    if (route.includes('/blobs/')) {
+      const file = remote.manifest.files.find(file => file.path === 'README.md')!;
+      const blob = remote.blobs.find(blob => blob.sha256 === file.sha256)!;
+      return { ok: true, ...scope, ...f.body.source, ...file, contentBase64: blob.contentBase64 };
+    }
+    return f.transport.signedGet(route);
+  } };
+  const result = await collectRepositorySourceRestoration({ ...f.input, transport, loadResolution: async () => resolution });
+  const finalTransport = transport.signedGet;
+  transport.signedGet = async route => {
+    const body = await finalTransport(route);
+    if (route.includes('restorationOperationId')) t.mock.timers.setTime(now + 15 * 60_000);
+    return body;
+  };
+  await assert.rejects(result.assertCurrent(), /resolution_expired_or_invalid/);
+  assert.deepEqual(await readFile(resolve(f.workspace, CATALOG)), f.initialCatalogBytes);
+});
+
+test('identical source fingerprints do not conceal a changed rolled-back candidate identity', async t => {
+  const f = await restorationFixture(t), result = await collectRepositorySourceRestoration(f.input);
+  f.body.source.candidateId = randomUUID();
+  await assert.rejects(result.assertCurrent(), /restoration_head_changed/);
+});
+
+test('real signed HTTP restoration carries scoped queries through blob reads and never submits a candidate', async t => {
+  const f = await restorationFixture(t), bytes = Buffer.from('# Stable remote report\n');
+  await f.put('docs/stable.md', bytes);
+  const remote = await inventoryRepositoryPackage({ ...f.input,
+    retainedKnowledge: { catalogBytes: f.catalogBytes, manifestBytes: f.manifestBytes }, sourceAuthorization: f.auth });
+  await unlink(resolve(f.workspace, 'docs/stable.md'));
+  Object.assign(f.body.source, { sourceSnapshotHash: remote.manifest.snapshotHash,
+    sourceManifestHash: digest(canonicalize(remote.manifest)), sourceFingerprint: remote.manifest.sourceFingerprint,
+    files: remote.manifest.files.filter(file => file.role !== 'knowledge'), skills: remote.manifest.skills });
+  const observed: Array<{ method: string; path: string; verified: boolean }> = [];
+  let deviceKey: ReturnType<typeof createPublicKey>, denied = false, terminalOperation = false;
+  const server = createServer(async (request, response) => {
+    try {
+      const parts: Buffer[] = []; for await (const part of request) parts.push(Buffer.from(part));
+      const payload = { bodyHash: digest(Buffer.concat(parts)), deviceId: request.headers['x-dharma-device-id'],
+        messageId: request.headers['x-dharma-message-id'], method: request.method,
+        nonce: request.headers['x-dharma-nonce'], organizationId: scope.organizationId, pathname: request.url,
+        sequence: Number(request.headers['x-dharma-sequence']), sessionId: request.headers['x-dharma-session-id'],
+        timestamp: request.headers['x-dharma-timestamp'] };
+      const verified = verify(null, Buffer.from(canonicalize(payload)), deviceKey,
+        Buffer.from(String(request.headers['x-dharma-signature']), 'base64url'));
+      observed.push({ method: request.method!, path: request.url!, verified });
+      assert.equal(verified, true);
+      const route = request.url!.replace(`/api/v1/orgs/${scope.organizationId}`, '');
+      let body: Record<string, unknown>;
+      if (request.method === 'POST' && route === '/agent-fabric/sessions') body = { ok: true };
+      else {
+        assert.equal(request.method, 'GET');
+        if (denied) {
+          response.writeHead(403, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ ok: false, error: { code: 'repository_source_inventory_access_denied',
+            message: 'Current repository source authorization is required.' } })); return;
+        }
+        if (terminalOperation && route.includes('restorationOperationId=')) {
+          response.writeHead(409, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ ok: false, error: { code: 'repository_source_restoration_operation_already_used',
+            message: 'These inputs already have a terminal candidate.' } })); return;
+        }
+        if (route.includes('/blobs/')) {
+          const url = new URL(route, 'http://fixture.invalid');
+          assert.equal(url.searchParams.get('workspaceId'), scope.workspaceId);
+          assert.equal(url.searchParams.get('restoration'), 'true');
+          assert.equal(url.searchParams.get('path'), 'docs/stable.md');
+          assert.ok(url.pathname.endsWith(`/blobs/${encodeURIComponent(digest(bytes))}`));
+          body = { ok: true, ...scope, ...f.body.source, path: 'docs/stable.md', sha256: digest(bytes),
+            role: 'repository_content', sizeBytes: bytes.length, contentBase64: bytes.toString('base64') };
+        } else body = await f.transport.signedGet(route);
+      }
+      response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body));
+    } catch {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ok: false, error: { code: 'synthetic_http_fixture_failed', message: 'Fixture failed.' } }));
+    }
+  });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(() => new Promise<void>((done, reject) => {
+    server.close(error => error ? reject(error) : done()); server.closeAllConnections();
+  }));
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const hqUrl = `http://127.0.0.1:${address.port}`, values = new Map<string, string>();
+  let writes = 0;
+  const store: SecureSecretStore = { backend: 'linux-secret-service',
+    async get(account) { return values.get(account) ?? null; },
+    async put(account, value) { writes++; values.set(account, value); },
+    async delete(account) { writes++; values.delete(account); } };
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId: scope.organizationId, store });
+  deviceKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: identity.publicKeyEd25519 }, format: 'jwk' });
+  const config: DeviceConfig = { schema: 'dharma.device-config/v1', hqUrl, organizationId: scope.organizationId,
+    deviceId: randomUUID(), deviceName: 'Synthetic restoration HTTP fixture', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: String(f.keys.publicKey.export({ format: 'jwk' }).x),
+    relayUrl: 'wss://fixture.invalid', enrolledAt: new Date().toISOString() };
+  const configPath = resolve(f.workspace, 'http-device.json'), statePath = resolve(f.workspace, 'http-state.json');
+  await saveDeviceConfig(configPath, config); await saveDeviceEnrollmentAnchor({ config, store });
+  const initialWrites = writes;
+  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher: fetch, readOnly: true });
+  await client.openSession();
+  const result = await collectRepositorySourceRestoration({ ...f.input, transport: client });
+  assert.equal(result.expectedLatestSourceFingerprint, remote.manifest.sourceFingerprint);
+  assert.ok(result.snapshot.manifest.files.some(file => file.path === 'docs/stable.md'));
+  assert.equal(observed.filter(item => item.path.includes('/blobs/')).length, 1);
+  await assert.rejects(client.signedPost('/agent-fabric/repository-agents/candidates', {}), /read_only/);
+  const outboxPath = resolve(f.workspace, 'retained-published-outbox.json');
+  const oldOutbox = JSON.stringify({ operationId: result.operationId, state: 'published',
+    candidateId: f.body.source.candidateId, snapshotHash: result.snapshot.manifest.snapshotHash });
+  await writeFile(outboxPath, oldOutbox);
+  terminalOperation = true;
+  await assert.rejects(result.assertCurrent(), /restoration_operation_already_used/);
+  assert.equal(await readFile(outboxPath, 'utf8'), oldOutbox);
+  denied = true;
+  await assert.rejects(fetchRepositorySourceRestoration({ ...f.input, scope, authorization: f.auth, transport: client }),
+    /repository_source_inventory_access_denied/);
+  assert.equal(observed.every(item => item.verified), true);
+  assert.deepEqual(observed.filter(item => item.method !== 'GET').map(item => item.path),
+    [`/api/v1/orgs/${scope.organizationId}/agent-fabric/sessions`]);
+  assert.equal(writes, initialWrites);
+  await assert.rejects(readFile(statePath), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(resolve(f.workspace, CATALOG)), f.initialCatalogBytes);
+  await assert.rejects(readFile(resolve(f.workspace, 'docs/stable.md')), { code: 'ENOENT' });
 });

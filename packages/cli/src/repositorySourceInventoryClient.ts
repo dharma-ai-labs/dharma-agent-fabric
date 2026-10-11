@@ -71,10 +71,12 @@ export async function fetchPublishedRepositorySource(input: {
   authorization: RepositorySourceAuthorization;
   publishedAuthorization?: RepositorySourceAuthorization;
   local: RepositoryPackageSnapshot;
+  restoration?: true;
 }): Promise<PublishedRepositorySource | null> {
   const { transport, scope, authorization, local } = input;
   const route = `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/source-inventory`;
-  const response = record(await transport.signedGet(`${route}?workspaceId=${encodeURIComponent(scope.workspaceId)}`), 'response');
+  const restorationQuery = input.restoration ? '&restoration=true' : '';
+  const response = record(await transport.signedGet(`${route}?workspaceId=${encodeURIComponent(scope.workspaceId)}${restorationQuery}`), 'response');
   if (response.ok !== true || response.organizationId !== scope.organizationId
     || response.repositoryBindingId !== scope.repositoryBindingId
     || response.repositoryAgentId !== scope.repositoryAgentId
@@ -103,6 +105,7 @@ export async function fetchPublishedRepositorySource(input: {
   for (let offset = 0; offset < pending.length; offset += 8) {
     const batch = await Promise.all(pending.slice(offset, offset + 8).map(async file => {
       const query = new URLSearchParams({ workspaceId: scope.workspaceId, path: file.path });
+      if (input.restoration) query.set('restoration', 'true');
       const raw = await transport.signedGet(`${route}/${source.candidateId}/blobs/${encodeURIComponent(file.sha256)}?${query}`);
       const body = record(raw, 'blob response');
       if (body.ok !== true || body.organizationId !== scope.organizationId
