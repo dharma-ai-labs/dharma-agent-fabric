@@ -11,6 +11,7 @@ import {LocalVault, type LocalCodexSetupSessionRequest} from '@dharma-ai-labs/ag
 import {runCodexSetupChildStartup, type CodexSetupChildScope} from './codexSetupChildStartup.js';
 import {isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt} from './namedSessionTrust.js';
 import {namedCodexNodeOutputArguments} from './namedCodexNodeOutput.js';
+import {namedSessionStartupPhaseError} from './namedSessionStartupDiagnostic.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -48,7 +49,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     configPath: () => 'synthetic-config-path', currentBootstrapHostScope: () => undefined,
     createNamedSessionTrust: () => ({refresh: async () => {effects.push('trust');}}),
     refreshVerifiedWorkspacePolicyForTransmission: async () => ({tasks: {writePaths: ['src/**']}}),
-    namedCodexEnvironment: () => ({}), namedCodexNodeOutputArguments,
+    namedCodexEnvironment: () => ({}), namedCodexNodeOutputArguments, namedSessionStartupPhaseError,
     dharmaHome: () => resolve(root, 'dharma'), homedir: () => resolve(root, 'home'),
     namedCodexFilesystem: async () => ({peer: 'synthetic-peer', work: 'synthetic-work'}),
     openCodexAppServerTransport: async (options: {argv: string[]}) => {
@@ -93,6 +94,35 @@ test('actual provider initializer validates exact recipient receipt before provi
   assert.ok(f.effects.indexOf('attach') < f.effects.indexOf('transport'));
   assert.equal(f.effects.filter(value => value === 'thread-start').length, 1);
   assert.equal((await f.vault.getProviderSessionBinding(uuid(40), result.registration.identity))?.sessionId, 'synthetic-thread');
+});
+
+test('actual initializer reports a sanitized transport failure without creating a thread or binding', async t => {
+  const f = await fixture(t);
+  f.dependencies.openCodexAppServerTransport = async () => {throw new Error('password=secret-placeholder');};
+  await assert.rejects(f.run(), error => {
+    assert.equal((error as Error).message, 'named_session_startup_phase_transport_unclassified');
+    assert.equal(Object.hasOwn(error as Error, 'cause'), false); return true;
+  });
+  assert.equal(f.effects.filter(value => value === 'attach').length, 1);
+  assert.equal(f.effects.includes('thread-start'), false);
+  assert.equal(f.effects.includes('save-registration'), false);
+});
+
+test('actual initializer identifies thread creation failure before binding persistence', async t => {
+  const f = await fixture(t);
+  f.dependencies.startNamedCodexThread = async () => {throw Object.assign(new Error('private-placeholder'), {code: 'ETIMEDOUT'});};
+  await assert.rejects(f.run(), /named_session_startup_phase_thread_timeout/);
+  assert.equal(f.effects.includes('save-registration'), false);
+});
+
+test('actual initializer distinguishes binding persistence failure after a thread result', async t => {
+  const f = await fixture(t);
+  f.dependencies.vault = {saveProviderSessionBinding: async () => {
+    throw Object.assign(new Error('private-placeholder'), {code: 'EACCES'});
+  }};
+  await assert.rejects(f.run(), /named_session_startup_phase_binding_permission/);
+  assert.equal(f.effects.filter(value => value === 'thread-start').length, 1);
+  assert.equal(f.effects.includes('save-registration'), false);
 });
 
 for (const change of ['member', 'device', 'workspace', 'repository', 'endpoint', 'binding', 'organization', 'revision', 'state'] as const) {

@@ -118,7 +118,7 @@ test('actual bootstrap continuation reports fixed owner diagnostics while preser
 test('runtime classifications agree with the closed schema and reject private fields', async () => {
   const schema = JSON.parse(await readFile(new URL('../../../schemas/codex-setup-failure-diagnostic.schema.json', import.meta.url), 'utf8'));
   const validate = new Ajv2020({strict: true}).compile(schema);
-  for (const category of schema.properties.category.enum) {
+  for (const category of schema.properties.category.anyOf[1].enum) {
     const event = classifyCodexSetupFailure(new Error(category), 'completion');
     assert.equal(event.category, category); assert.equal(validate(event), true);
   }
@@ -130,5 +130,20 @@ test('runtime classifications agree with the closed schema and reject private fi
   const event = classifyCodexSetupFailure(new Error('private-placeholder'), 'bootstrap');
   for (const delta of [{message: 'private'}, {cause: 'private'}, {token: 'private'}, {category: 'private'}, {stage: 'private'}]) {
     assert.equal(validate({...event, ...delta}), false);
+  }
+});
+
+test('fixed startup phase diagnostics satisfy the closed schema without private suffixes', async () => {
+  const schema = JSON.parse(await readFile(new URL('../../../schemas/codex-setup-failure-diagnostic.schema.json', import.meta.url), 'utf8'));
+  const validate = new Ajv2020({strict: true}).compile(schema);
+  for (const phase of ['vault', 'lock', 'client', 'trust', 'session', 'policy', 'registration',
+    'environment', 'filesystem', 'transport', 'account', 'thread', 'binding', 'lifetime', 'service']) {
+    for (const reason of ['unclassified', 'missing', 'permission', 'conflict', 'timeout', 'connection', 'aborted']) {
+      const category = `named_session_startup_phase_${phase}_${reason}`;
+      const diagnostic = classifyCodexSetupFailure(new Error(category), 'bootstrap');
+      assert.equal(diagnostic.category, category); assert.equal(validate(diagnostic), true);
+      assert.equal(validate({...diagnostic, category: category+'\n'}), false);
+      assert.equal(validate({...diagnostic, category: category+' private-placeholder'}), false);
+    }
   }
 });

@@ -1,21 +1,16 @@
 import type {ChildProcess} from 'node:child_process';
 import type {Readable} from 'node:stream';
+import {isNamedSessionStartupPhaseFailure, namedSessionStartupErrors as classifications,
+  type NamedSessionStartupPhaseFailure} from './namedSessionStartupDiagnostic.js';
 
-const classifications = {
-  setup_child_unavailable: 'named_session_startup_setup_child_unavailable',
-  named_session_registration_invalid: 'named_session_startup_registration_invalid',
-  named_session_provider_authentication_required: 'named_session_startup_provider_authentication_required',
-  named_session_workspace_write_not_authorized: 'named_session_startup_workspace_write_not_authorized',
-  named_session_trust_scope_mismatch: 'named_session_startup_trust_scope_mismatch',
-  codex_session_sandbox_unqualified: 'named_session_startup_sandbox_unqualified',
-} as const;
 export type NamedSessionStartupFailure = typeof classifications[keyof typeof classifications]
+  | NamedSessionStartupPhaseFailure
   | 'named_session_startup_child_spawn_failed' | 'named_session_startup_child_exited'
   | 'named_session_startup_child_failed';
 const codes = new Set<string>([...Object.values(classifications), 'named_session_startup_child_spawn_failed',
   'named_session_startup_child_exited', 'named_session_startup_child_failed']);
 export function isNamedSessionStartupFailure(value: unknown): value is NamedSessionStartupFailure {
-  return typeof value === 'string' && codes.has(value);
+  return typeof value === 'string' && (codes.has(value) || isNamedSessionStartupPhaseFailure(value));
 }
 
 /** Observe only the freshly spawned handle. Raw stderr stays bounded in memory,
@@ -36,6 +31,7 @@ export function observeNamedSessionStartupChild(child: ChildProcess) {
     if (!overflow && exit !== 0 && exit !== null) {
       const last = buffer.subarray(0, length).toString('utf8').trim().split(/\r?\n/).at(-1);
       if (last && Object.hasOwn(classifications, last)) failure = classifications[last as keyof typeof classifications];
+      else if (isNamedSessionStartupPhaseFailure(last)) failure = last;
     }
     buffer.fill(0); length = 0;
   };

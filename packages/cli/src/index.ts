@@ -103,6 +103,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
+import {namedSessionStartupPhaseError, type NamedSessionStartupPhase} from './namedSessionStartupDiagnostic.js';
 import {verifiedCliProcessArguments} from './cliProcessIdentity.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
@@ -4987,15 +4988,19 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     } finally {startupChild?.dispose();}
   }
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
-  const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')});
+  const vault = await openBootstrapVault({root: resolve(dharmaHome(), 'vault')})
+    .catch(error => {throw namedSessionStartupPhaseError('vault', error);});
   let releaseLock: (() => Promise<void>) | undefined;
   const controller = new AbortController(), stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   if (childMessage) process.once('disconnect', stop);
   let transport: Awaited<ReturnType<typeof openCodexAppServerTransport>> | undefined;
   try {
-    releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running');
+    releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running')
+      .catch(error => {throw namedSessionStartupPhaseError('lock', error);});
     const startProvider = async (childScope?: CodexSetupChildScope) => {
+    let startupPhase: NamedSessionStartupPhase = 'client';
+    try {
     const startupStep = <T>(operation: () => Promise<T>) => childScope ? childScope.step(operation) : operation();
     if (childScope && existing && existing.identity.membershipId !== childScope.request.membershipId) {
       throw new Error('setup_child_unavailable');
@@ -5004,14 +5009,18 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       hostScope: currentBootstrapHostScope() }));
     if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
       || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
+    startupPhase = 'trust';
     const trust = createNamedSessionTrust({ configPath: configPath(), identity: fabric.config });
     await startupStep(() => trust.refresh());
+    startupPhase = 'session';
     await startupStep(() => fabric.openSession(VERSION));
+    startupPhase = 'policy';
     const policyPath = resolve(item.path, '.dharma', 'approved-policy.json');
     const policy = await startupStep(() => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric));
     const writeRoots = policy.tasks.writePaths.filter(path => /^[a-zA-Z0-9_-]+\/\*\*$/.test(path))
       .map(path => path.slice(0, -3));
     if (!writeRoots.length) throw new Error('named_session_workspace_write_not_authorized');
+    startupPhase = 'registration';
     let registration = existing, pending: NamedSessionRegistration | undefined;
     let ownerReceipt: Record<string, unknown>;
     // Resolve authenticated ownership before opening any provider transport.
@@ -5047,11 +5056,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       pending = {schema: 'dharma.named-session/v1', name, bindingId, identity,
         maximumCostCents, maximumTurnCostCents, enabled: true};
     }
+    startupPhase = 'environment';
     const environment = namedCodexEnvironment(process.env);
     const privateRoots = [dharmaHome(), resolve(environment.CODEX_HOME || resolve(homedir(), '.codex'))];
     if (environment.XDG_RUNTIME_DIR) privateRoots.push(environment.XDG_RUNTIME_DIR);
     if (environment.DBUS_SESSION_BUS_ADDRESS) privateRoots.push(environment.DBUS_SESSION_BUS_ADDRESS.slice('unix:path='.length));
+    startupPhase = 'filesystem';
     const filesystem = await startupStep(() => namedCodexFilesystem({ environment, workspace: item.path, privateRoots, writeRoots }));
+    startupPhase = 'transport';
     await startupStep(async () => {
     const expectedOwner = registration ?? pending!;
     const ownerConfirmed = registration
@@ -5069,10 +5081,13 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         '-c', 'permissions.dharma_work.network={enabled=false}', 'app-server'] });
     return transport;
     });
+    startupPhase = 'account';
     const account = await startupStep(() => transport!.request('account/read', { refreshToken: false })) as { account?: unknown };
     if (!account.account) throw new Error('named_session_provider_authentication_required');
     if (pending) {
+      startupPhase = 'thread';
       const threadId = await startupStep(() => startNamedCodexThread(transport!, item.path, name));
+      startupPhase = 'binding';
       await startupStep(async () => vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...pending!.identity,
         bindingId: pending!.bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
@@ -5081,6 +5096,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       await startupStep(async () => saveNamedSession(dharmaHome(), registration!));
     }
     return {registration: registration!, filesystem, fabric, trust, policyPath, writeRoots};
+    } catch (error) {throw namedSessionStartupPhaseError(startupPhase, error);}
     };
     const {registration, filesystem, fabric, trust, policyPath, writeRoots} = childMessage
       ? await runCodexSetupChildStartup({vault: vault as LocalVault, message: childMessage, name, workspaceId,
@@ -5098,7 +5114,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     };
     const refreshLifetime = () => renewNamedSessionLifetime({ vault, bindingId: registration!.bindingId,
       identity: registration!.identity, trust, authorize: authorizeLifetime });
-    await refreshLifetime();
+    await refreshLifetime().catch(error => {throw namedSessionStartupPhaseError('lifetime', error);});
     const channelTransport = { async signedPost(route: string, body: unknown) {
       await trust.refresh();
       const response = await fabric.signedPost(route, body);
@@ -5218,7 +5234,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       verifier: { resolvePublicKey: trust.resolvePublicKey, consume: async id => { if (consumed.has(id)) return false; consumed.add(id); return true; } },
       authorizeContent: createNamedPeerContentAuthorization({ scope: repositoryRoleScope(item), diagnostics: true,
         loadCurrentPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
-        loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) });
+        loadCurrentSourceAuthorization: () => fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) })
+      .catch(error => {throw namedSessionStartupPhaseError('service', error);});
   } finally {
     try { if (transport) await transport.close(); }
     finally {
