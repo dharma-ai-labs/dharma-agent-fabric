@@ -58,7 +58,7 @@ test('publishes precisely the approved CLI correction without republishing depen
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, approvedPackages.map((item) => item.name));
-  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.182']]);
+  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.183']]);
 });
 
 for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
@@ -67,9 +67,9 @@ for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
     if (defect === 'source') io.verifySource = async () => { throw new Error('source mismatch'); };
     if (defect === 'name' || defect === 'version') {
       const original = io.manifest;
-      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.182' ? { [defect]: 'wrong' } : {}) });
+      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.183' ? { [defect]: 'wrong' } : {}) });
     }
-    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.182'
+    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.183'
       ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : `sha512-${item.version}` } } : null;
     await assert.rejects(publishBoundedRelease(head, io));
     assert.deepEqual(effects, []);

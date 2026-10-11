@@ -103,6 +103,7 @@ import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSess
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
+import {verifiedCliProcessArguments} from './cliProcessIdentity.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
@@ -136,7 +137,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.182';
+const VERSION = '0.2.183';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2365,11 +2366,12 @@ async function qualifyCodexSetupChildRequest(request: Readonly<LocalCodexSetupSe
     const parent = await readContainerProcessIdentity(process.ppid);
     // The official container/systemd launcher enters through bin.js; direct
     // supervision enters through index.js in this same qualified package.
-    const entrypoint = parent.argv[1];
+    const argv = await verifiedCliProcessArguments(parent, import.meta.url);
+    const entrypoint = argv?.[1];
     if (typeof entrypoint !== 'string'
       || ![fileURLToPath(import.meta.url), fileURLToPath(new URL('./bin.js', import.meta.url))].includes(entrypoint)) return false;
     return ['systemd-user', 'container-entrypoint'].includes(startup.backend) && startup.version === VERSION
-      && parent.uid === process.getuid!() && canonicalize(parent.argv) === canonicalize([
+      && parent.uid === process.getuid!() && canonicalize(argv) === canonicalize([
         process.execPath, entrypoint, 'relay', 'supervise', '--policy', startup.policy]);
   } catch {return false;}
 }
@@ -2676,7 +2678,9 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
   const relayPid = await pidFrom(resolve(home, 'relay', 'relay.pid'));
   const sessionPid = await pidFrom(resolve(namedSessionPaths(home, name).root, 'service.lock'));
   const processes = await step(() => Promise.all([supervisorPid, relayPid, sessionPid].map(pid => readContainerProcessIdentity(pid))));
-  const supervisorEntry = processes[0]!.argv[1];
+  const verifiedArgv = await step(() => Promise.all(processes.map(value => verifiedCliProcessArguments(value, import.meta.url))));
+  if (verifiedArgv.some(value => value === null)) throw new Error('setup_runtime_process_unconfirmed');
+  const supervisorEntry = verifiedArgv[0]?.[1];
   if (typeof supervisorEntry !== 'string'
     || ![entry, fileURLToPath(new URL('./bin.js', import.meta.url))].includes(supervisorEntry)) {
     throw new Error('setup_runtime_process_unconfirmed');
@@ -2685,8 +2689,8 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     [process.execPath, entry, 'relay', 'start', '--policy', startup.policy],
     [process.execPath, entry, 'sessions', 'serve', '--name', name, '--workspace-id', item.workspaceId, '--apply']];
   if (processes.some((value, i) => value.uid !== process.getuid!() || !/^\d+$/.test(value.startTicks)
-    || canonicalize(value.argv) !== canonicalize(argv[i])
-      && (i !== 2 || canonicalize(value.argv) !== canonicalize([...argv[i]!, '--setup-handoff']))) || processes[1]!.parentPid !== supervisorPid
+    || canonicalize(verifiedArgv[i]) !== canonicalize(argv[i])
+      && (i !== 2 || canonicalize(verifiedArgv[i]) !== canonicalize([...argv[i]!, '--setup-handoff']))) || processes[1]!.parentPid !== supervisorPid
     || processes[2]!.parentPid !== supervisorPid) {
     throw new Error('setup_runtime_process_unconfirmed');
   }

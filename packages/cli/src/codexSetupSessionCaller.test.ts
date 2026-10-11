@@ -102,7 +102,7 @@ test('actual standing receiver admits only a freshly verified renewal with uncha
   });
 });
 
-for (const change of ['none', 'official-bin', 'systemd-bin', 'foreign-bin', 'foreign-index', 'parent-runtime',
+for (const change of ['none', 'official-bin', 'systemd-bin', 'npm-alias', 'foreign-npm-alias', 'foreign-bin', 'foreign-index', 'parent-runtime',
   'parent-policy', 'parent-uid', 'parent-argv', 'backend', 'version', 'source', 'parent-unavailable'] as const) {
   test(`actual child startup verifies source and its own IPC parent (${change})`, async t => {
     const f = await fixture(t), parentPid = process.pid + 1;
@@ -110,6 +110,9 @@ for (const change of ['none', 'official-bin', 'systemd-bin', 'foreign-bin', 'for
     const parent = {uid: 1000, argv: [process.execPath, '/synthetic/index.js', 'relay', 'supervise', '--policy', startup.policy]};
     if (change === 'official-bin' || change === 'systemd-bin') parent.argv[1] = '/synthetic/bin.js';
     if (change === 'systemd-bin') startup.backend = 'systemd-user';
+    if (change === 'npm-alias' || change === 'foreign-npm-alias') {
+      parent.argv[0] = 'node';parent.argv[1] = '/cache/node_modules/.bin/dharma';startup.backend = 'systemd-user';
+    }
     if (change === 'foreign-bin') parent.argv[1] = '/foreign/bin.js';
     if (change === 'foreign-index') parent.argv[1] = '/foreign/index.js';
     if (change === 'parent-runtime') parent.argv[0] = '/foreign/node';
@@ -123,10 +126,12 @@ for (const change of ['none', 'official-bin', 'systemd-bin', 'foreign-bin', 'for
       qualifyCodexSetupSessionSource: await declaration('qualifyCodexSetupSessionSource', f.dependencies),
       process: {platform: 'linux', ppid: parentPid, execPath: process.execPath, getuid: () => 1000}, VERSION: '0.2.153',
       fileURLToPath: (value: string | URL) => new URL(value).pathname, inspectOwnedRelayAutostart: async () => startup,
+      verifiedCliProcessArguments: async (identity: typeof parent) => change === 'foreign-npm-alias' ? null
+        : change === 'npm-alias' ? [process.execPath, '/synthetic/bin.js', ...identity.argv.slice(2)] : identity.argv,
       readContainerProcessIdentity: async (pid: number) => {
         assert.equal(pid, parentPid); if (change === 'parent-unavailable') throw new Error('synthetic-parent-missing'); return parent;
       }});
-    assert.equal(await qualify(f.request), ['none', 'official-bin', 'systemd-bin'].includes(change));
+    assert.equal(await qualify(f.request), ['none', 'official-bin', 'systemd-bin', 'npm-alias'].includes(change));
   });
 }
 

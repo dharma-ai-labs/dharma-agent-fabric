@@ -104,6 +104,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     [resolve(home, 'relay', 'repositories', workspaceId, 'last-successful-poll.json'), poll],
   ]);
   const calls: string[] = [], mutations: Record<string, () => void> = {};
+  const canonicalProcesses = new Map<number, string[] | null>();
   const dependencies: Record<string, unknown> = {
     resolve, Date, canonicalize, sha256, codexSetupSessionPolicyHash, selectDeviceWorkspace, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
     isNamedSessionOwnerReceipt, repositoryRelayObservationReady, discoverRepositoryRoleMetadata,
@@ -136,6 +137,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     readContainerProcessIdentity: async (pid: number) => {
       calls.push(`process-${pid}`); mutations.process?.(); return structuredClone(processes.find(p => p.pid === pid));
     },
+    verifiedCliProcessArguments: async (identity: {pid: number; argv: string[]}) =>
+      canonicalProcesses.has(identity.pid) ? canonicalProcesses.get(identity.pid) : identity.argv,
     readBootstrapRuntimeJson: async (path: string, scope: typeof prepared.scope) => scope.step(async () => {
       calls.push('owned-state'); if (!paths.has(path)) throw new Error('fixture_path_unknown'); return structuredClone(paths.get(path));
     }),
@@ -154,7 +157,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
       return handoffEnabled ? handoff : null;
     }};
   return {prepared, vault, observe, providerVault, calls, paths, mutations, row, profile, binding, native, remote,
-    content, startup, startupState, policy, supervisor, poll, processes, dependencies, handoff,
+    content, startup, startupState, policy, supervisor, poll, processes, canonicalProcesses, dependencies, handoff,
     enableHandoff: () => {handoffEnabled = true; processes[2]!.argv.push('--setup-handoff');}};
 }
 
@@ -242,7 +245,25 @@ for (const ipc of [false, true]) {
     const result = await f.observe(f.prepared, f.providerVault, 'no_eligible_history', ipc ? hash : undefined);
     assert.equal(result.sessionId, f.binding.sessionId);
   });
+  test(`actual completion accepts verified npm aliases with IPC=${ipc}`, async t => {
+    const f = await fixture(t);
+    f.processes[0]!.argv[0] = 'node';
+    f.processes[0]!.argv[1] = resolve(f.row.path, 'npm-cache', 'node_modules', '.bin', 'dharma');
+    f.canonicalProcesses.set(101, ['synthetic-node', resolve(f.row.path, 'bin.js'), ...f.processes[0]!.argv.slice(2)]);
+    if (ipc) f.enableHandoff();
+    const result = await f.observe(f.prepared, f.providerVault, 'no_eligible_history', ipc ? hash : undefined);
+    assert.equal(result.sessionId, f.binding.sessionId);
+  });
 }
+
+test('actual completion rejects an npm alias without verified executable and package identity', async t => {
+  const f = await fixture(t); f.enableHandoff();
+  f.processes[0]!.argv[0] = 'node';
+  f.processes[0]!.argv[1] = resolve(f.row.path, 'npm-cache', 'node_modules', '.bin', 'dharma');
+  f.canonicalProcesses.set(101, null);
+  await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash),
+    {message: 'setup_runtime_process_unconfirmed'});
+});
 
 for (const change of ['foreign-supervisor', 'relay-bin', 'session-bin', 'runtime', 'uid', 'policy', 'extra-args'] as const) {
   test(`official bin completion still rejects ${change}`, async t => {
