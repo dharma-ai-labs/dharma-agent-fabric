@@ -18,10 +18,12 @@ function fixture() {
     repositoryAgentId: 'agent', accessMode: 'source_connected', path: '/synthetic',
     repositoryPackage: { generation: 18, pendingLocalOperationId: null as string | null } };
   const overrides: Record<string, unknown> = {};
+  let savedRecord: { repositoryPackage: Record<string, unknown> } | undefined;
   const defaults = {
     required: (flags: Map<string, unknown>, key: string) => { if (!flags.get(key)) throw new Error('missing_flag');return flags.get(key); },
     readDeviceConfig: async () => ({ organizationId: 'org_fixture' }), registry: async () => [workspace],
     relayProcessState: async () => { calls.push('relay-state');return 'stopped'; },
+    relaySupervisorProcessState: async () => { calls.push('supervisor-state');return 'stopped'; },
     resolve: (...args: string[]) => args.join('/'),
     loadVerifiedWorkspacePolicy: async () => { calls.push('policy');return { serverAuthorization: {} }; },
     assertWorkspaceAuthorizationCurrent: async () => { calls.push('authorization'); },
@@ -30,17 +32,20 @@ function fixture() {
     AgentFabricClient: { open: async () => { calls.push('client');return { openSession: async () => { calls.push('session'); } }; } },
     VERSION: 'fixture', createPublicKey: () => ({}), repositorySourceComparisonBaseline: () => null,
     collectRepositorySourceRestoration: async () => { calls.push('collect');return {
+      local: { manifest: { snapshotHash: 'local' } },
       snapshot: { manifest: { snapshotHash: 'snapshot' } }, expectedLatestSourceFingerprint: 'head',
       headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot', operationId: 'operation',
       priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => { calls.push('recheck'); } }; },
     canonicalize: JSON.stringify, sha256: () => 'reviewed-plan', dharmaHome: () => '/synthetic/device',
-    writeRepositoryPackageSnapshot: async () => { calls.push('snapshot-write'); },
+    writeRepositoryPackageSnapshot: async (input: { snapshot: { manifest: { snapshotHash: string } }; candidateOnly: boolean }) => {
+      assert.equal(input.candidateOnly, true);calls.push(`snapshot-write:${input.snapshot.manifest.snapshotHash}`);
+    },
     synchronizeRepositoryCandidate: async (input: Record<string, unknown>) => {
       calls.push('submit');assert.equal(input.initialRepository, false);assert.equal(input.expectedLatestSourceFingerprint, 'head');
       return { state: 'accepted', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null };
     },
     saveWorkspaceRecord: async (record: { repositoryPackage: Record<string, unknown> }) => {
-      calls.push('registry-write');assert.equal(record.repositoryPackage.pendingLocalOperationId, 'operation');
+      calls.push('registry-write');savedRecord = record;
     },
   };
   const run = (flags: Map<string, string | boolean>) => {
@@ -49,7 +54,7 @@ function fixture() {
     return fn(flags);
   };
   const flags = (...entries: Array<[string, string | boolean]>) => new Map<string, string | boolean>([['workspace-id', 'workspace'], ...entries]);
-  return { workspace, overrides, calls, run, flags };
+  return { workspace, overrides, calls, run, flags, saved: () => savedRecord };
 }
 
 test('restoration requires one explicit mode and rejects arbitrary/conflicting flags before access', async () => {
@@ -71,13 +76,37 @@ test('restoration planning has no source, registry or activation writes', async 
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-6), ['authorization', 'relay-state', 'recheck', 'snapshot-write', 'submit', 'registry-write']);
+  assert.deepEqual(f.calls.slice(-10), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state',
+    'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write']);
+  assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
+  assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
+  assert.equal(f.saved()?.repositoryPackage.snapshotHash, 'snapshot');
+});
+
+test('published restoration keeps the actual local baseline rather than remote-only candidate content', async () => {
+  const f = fixture();
+  f.overrides.synchronizeRepositoryCandidate = async () => ({ state: 'published', operationId: 'operation',
+    candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'release' });
+  await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
+  assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
+  assert.equal(f.saved()?.repositoryPackage.publishedLocalSnapshotHash, 'local');
+  assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, null);
+});
+
+test('running or unknown supervisor, including a final-check restart, cannot write or submit', async () => {
+  for (const state of ['running', 'unknown']) for (const stoppedChecks of [0, 1, 2]) {
+    const f = fixture();let checks = 0;
+    f.overrides.relaySupervisorProcessState = async () => ++checks <= stoppedChecks ? 'stopped' : state;
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
+    assert.ok(!f.calls.some(call => /write|submit/.test(call)));
+  }
 });
 
 test('terminal history collision and expired final conflict approval stop before any candidate writes', async () => {
   for (const reason of ['repository_source_restoration_operation_already_used', 'repository_source_resolution_expired_or_invalid']) {
     const f = fixture();
     f.overrides.collectRepositorySourceRestoration = async () => ({ snapshot: { manifest: { snapshotHash: 'snapshot' } },
+      local: { manifest: { snapshotHash: 'local' } },
       expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
       operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
       assertCurrent: async () => { throw new Error(reason); } });

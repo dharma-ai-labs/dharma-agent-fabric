@@ -94,7 +94,10 @@ test('relay permits only signed, bounded repository source reads', () => {
   const blob = `${prefix}/${candidateId}/blobs/sha256%3A${'a'.repeat(64)}`;
   for (const pathname of [
     `${prefix}?workspaceId=${id}`,
+    `${prefix}?workspaceId=${id}&restoration=true`,
+    `${prefix}?workspaceId=${id}&restoration=true&restorationOperationId=sha256%3A${'b'.repeat(64)}`,
     `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&restoration=true`,
     `${blob}?workspaceId=${id}&path=approved+reports%2Fnotes%23one.md`,
   ]) {
     assert.doesNotThrow(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }));
@@ -104,7 +107,14 @@ test('relay permits only signed, bounded repository source reads', () => {
     prefix,
     `${prefix}?workspaceId=all`,
     `${prefix}?workspaceId=${id}&admin=true`,
+    `${prefix}?workspaceId=${id}&restoration=false`,
+    `${prefix}?workspaceId=${id}&restoration=true&restoration=true`,
+    `${prefix}?workspaceId=${id}&restorationOperationId=sha256%3A${'b'.repeat(64)}`,
+    `${prefix}?workspaceId=${id}&restoration=true&restorationOperationId=all`,
+    `${prefix}?workspaceId=${id}&restoration=true&restorationOperationId=sha256%3A${'b'.repeat(64)}&admin=true`,
     `${blob}?workspaceId=${id}`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&restoration=false`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&restoration=true&restorationOperationId=sha256%3A${'b'.repeat(64)}`,
     `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&admin=true`,
     `${blob}?path=skills%2Fcodex%2FSKILL.md&workspaceId=${id}`,
     `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md/raw`,

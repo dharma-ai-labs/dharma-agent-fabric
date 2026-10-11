@@ -5729,7 +5729,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   }
   // An explicit recovery must not race the relay's candidate outbox or silently
   // undo containment. The operator uses the normal owned relay stop/start flow.
-  if (apply && await relayProcessState() !== 'stopped') throw new Error('repository_source_restoration_requires_stopped_relay');
+  if (apply && (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped')) {
+    throw new Error('repository_source_restoration_requires_stopped_relay');
+  }
   const policy = await loadVerifiedWorkspacePolicy(resolve(workspace.path, '.dharma', 'approved-policy.json'), workspaceId);
   if (!policy.serverAuthorization) throw new Error('repository_source_restoration_workspace_not_authorized');
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
@@ -5748,7 +5750,8 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   const planHash = sha256(canonicalize({ schema: 'dharma.repository-restoration-plan/v1', ...scope,
     priorReleaseId: collected.priorReleaseId, priorGeneration: collected.priorGeneration,
     headCandidateId: collected.headCandidateId, headSnapshotHash: collected.headSnapshotHash, operationId: collected.operationId,
-    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint, snapshotHash: collected.snapshot.manifest.snapshotHash }));
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
+    localSnapshotHash: collected.local.manifest.snapshotHash, snapshotHash: collected.snapshot.manifest.snapshotHash }));
   if (!apply) return { ok: true, stage: 'repository_restoration_planned', dryRun: true, planHash,
     priorReleaseId: collected.priorReleaseId, priorGeneration: collected.priorGeneration,
     headCandidateId: collected.headCandidateId, operationId: collected.operationId,
@@ -5757,9 +5760,17 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     protocolSessionCreated: true, activated: false, published: false };
   if (required(flags, 'plan-hash') !== planHash) throw new Error('repository_source_restoration_plan_changed');
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
-  if (await relayProcessState() !== 'stopped') throw new Error('repository_source_restoration_requires_stopped_relay');
+  if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+    throw new Error('repository_source_restoration_requires_stopped_relay');
+  }
   await collected.assertCurrent();
-  await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });
+  if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+    throw new Error('repository_source_restoration_requires_stopped_relay');
+  }
+  await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.local, candidateOnly: true });
+  if (collected.snapshot.manifest.snapshotHash !== collected.local.manifest.snapshotHash) {
+    await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });
+  }
   const candidate = await synchronizeRepositoryCandidate({ transport: fabric,
     outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), scope,
     snapshot: collected.snapshot, initialRepository: false,
@@ -5767,9 +5778,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   const pending = candidate.state === 'accepted' || candidate.state === 'processing';
   await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
     ...candidate, sourceManifestHash: sha256(canonicalize(collected.snapshot.manifest)), consolidationMode: 'repository_update',
-    localBaselineSnapshotHash: candidate.state === 'blocked' ? baseline : collected.snapshot.manifest.snapshotHash,
-    publishedLocalSnapshotHash: candidate.state === 'published' ? collected.snapshot.manifest.snapshotHash : baseline,
-    pendingLocalSnapshotHash: pending ? collected.snapshot.manifest.snapshotHash : null,
+    localBaselineSnapshotHash: candidate.state === 'blocked' ? baseline : collected.local.manifest.snapshotHash,
+    publishedLocalSnapshotHash: candidate.state === 'published' ? collected.local.manifest.snapshotHash : baseline,
+    pendingLocalSnapshotHash: pending ? collected.local.manifest.snapshotHash : null,
     pendingLocalOperationId: pending ? candidate.operationId : null } });
   return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_submitted', planHash, candidate,
     priorReleaseId: collected.priorReleaseId, localMutation: true, serverSourceMutation: true, activated: false,

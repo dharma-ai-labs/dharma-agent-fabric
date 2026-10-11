@@ -117,7 +117,7 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
     retained.assertCurrent();
   };
   await assertCurrent();
-  return { snapshot, expectedLatestSourceFingerprint: retained.sourceFingerprint,
+  return { local, snapshot, expectedLatestSourceFingerprint: retained.sourceFingerprint,
     headCandidateId: retained.headCandidateId, headSnapshotHash: retained.headSnapshotHash, operationId,
     priorReleaseId: retained.releaseId, priorGeneration: retained.generation, assertCurrent };
 }

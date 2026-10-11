@@ -58,7 +58,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
+    'apps/relay-gateway/src/protocol.ts', 'apps/relay-gateway/src/protocol.test.ts',
+    'apps/relay-gateway/src/restorationTransport.test.ts',
     'packages/cli/src/repositoryCandidateSync.ts', 'packages/cli/src/repositoryKnowledgeRetention.test.ts',
+    'packages/cli/src/repositorySourceSync.ts', 'packages/cli/src/repositorySourceSync.test.ts',
     'packages/cli/src/repositorySourceInventoryClient.ts', 'packages/cli/src/repositorySourceRestoration.ts',
     'packages/cli/src/repositorySourceRestorationCommand.test.ts', 'packages/cli/src/usage.ts',
     'schemas/repository-knowledge-restoration-v1.schema.json',

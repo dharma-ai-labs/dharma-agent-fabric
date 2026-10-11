@@ -12,12 +12,13 @@ import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { AgentFabricClient, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
 import * as knowledge from './repositoryKnowledge.js';
-import { inventoryRepositoryPackage, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
+import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
+import { advanceRepositorySourceBaseline, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline,
+  RepositorySourceWatcher, scanRepositorySourceChanges } from './repositorySourceSync.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { collectRepositorySourceRestoration, fetchRepositorySourceRestoration } from './repositorySourceRestoration.js';
 import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
-import { planRepositorySourceResolution } from './repositorySourceReconciliation.js';
+import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const CATALOG = `${ROOT}/knowledge/CATALOG.json`, MANIFEST = `${ROOT}/MANIFEST.json`;
@@ -593,6 +594,35 @@ test('real signed HTTP restoration carries scoped queries through blob reads and
   const result = await collectRepositorySourceRestoration({ ...f.input, transport: client });
   assert.equal(result.expectedLatestSourceFingerprint, remote.manifest.sourceFingerprint);
   assert.ok(result.snapshot.manifest.files.some(file => file.path === 'docs/stable.md'));
+  assert.ok(!result.local.manifest.files.some(file => file.path === 'docs/stable.md'));
+  assert.notEqual(result.local.manifest.snapshotHash, result.snapshot.manifest.snapshotHash);
+  const nextScan = reconcileRepositorySourceSnapshot({ local: result.local, previousLocal: result.local,
+    published: { files: result.snapshot.manifest.files.filter(file => file.role !== 'knowledge'),
+      skills: result.snapshot.manifest.skills, blobs: result.snapshot.blobs,
+      sourceFingerprint: result.snapshot.manifest.sourceFingerprint! } });
+  assert.ok(nextScan.manifest.files.some(file => file.path === 'docs/stable.md'));
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: result.local, candidateOnly: true });
+  await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: result.snapshot, candidateOnly: true });
+  const pendingRecord = { state: 'accepted', snapshotHash: result.snapshot.manifest.snapshotHash,
+    localBaselineSnapshotHash: result.local.manifest.snapshotHash, publishedLocalSnapshotHash: null,
+    pendingLocalSnapshotHash: result.local.manifest.snapshotHash, pendingLocalOperationId: result.operationId };
+  const publishedRecord = { ...pendingRecord, state: 'published',
+    ...advanceRepositorySourceBaseline(pendingRecord, { state: 'published', operationId: result.operationId }) };
+  const persistedRecord = JSON.parse(JSON.stringify(publishedRecord));
+  const recovered = await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.workspace, record: persistedRecord });
+  assert.equal(recovered, result.local.manifest.snapshotHash, 'startup must not replace the local baseline with merged remote content');
+  const comparison = repositorySourceComparisonBaseline(persistedRecord, recovered);
+  const restartedBaseline = await readRepositoryPackageSnapshot(f.workspace, comparison!);
+  const restartPublished = { files: result.snapshot.manifest.files.filter(file => file.role !== 'knowledge'),
+    skills: result.snapshot.manifest.skills, blobs: result.snapshot.blobs, sourceFingerprint: result.snapshot.manifest.sourceFingerprint! };
+  const afterRestart = reconcileRepositorySourceSnapshot({ local: result.local, previousLocal: restartedBaseline, published: restartPublished });
+  assert.ok(afterRestart.manifest.files.some(file => file.path === 'docs/stable.md'));
+  await unlink(resolve(f.workspace, 'README.md'));
+  const deletedLocal = await inventoryRepositoryPackage({ ...f.input,
+    retainedKnowledge: { catalogBytes: f.catalogBytes, manifestBytes: f.manifestBytes }, sourceAuthorization: f.auth });
+  const afterDeletion = reconcileRepositorySourceSnapshot({ local: deletedLocal, previousLocal: restartedBaseline, published: restartPublished });
+  assert.ok(!afterDeletion.manifest.files.some(file => file.path === 'README.md'));
+  assert.ok(afterDeletion.manifest.files.some(file => file.path === 'docs/stable.md'));
   assert.equal(observed.filter(item => item.path.includes('/blobs/')).length, 1);
   await assert.rejects(client.signedPost('/agent-fabric/repository-agents/candidates', {}), /read_only/);
   const outboxPath = resolve(f.workspace, 'retained-published-outbox.json');
