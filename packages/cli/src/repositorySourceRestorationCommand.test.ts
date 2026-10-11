@@ -13,6 +13,47 @@ assert.equal(declaration.length, 1);
 const code = ts.transpileModule(declaration[0]!.getText(source), {
   compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS },
 }).outputText;
+const saveDeclaration = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'saveWorkspaceRecord');
+assert.ok(saveDeclaration);
+const saveCode = ts.transpileModule(saveDeclaration.getText(source), {
+  compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS },
+}).outputText;
+
+test('official guarded registry save compares the current locked record before any outbox checkpoint', async () => {
+  for (const mode of ['same', 'operation-changed', 'scope-changed', 'missing', 'checkpoint-failed']) {
+    const expected = { workspaceId: 'workspace', organizationId: 'org_fixture', repositoryPackage: { operationId: 'previous' } };
+    let records: Array<Record<string, unknown>> = [structuredClone(expected), { workspaceId: 'sibling', marker: 'preserve' }];
+    const calls: string[] = [];let locked = false;
+    const fn = runInNewContext(saveCode + '\nsaveWorkspaceRecord', { exports: {}, structuredClone,
+      canonicalize: JSON.stringify, currentBootstrapHostScope: () => undefined, workspaceRegistryPath: () => '/synthetic/registry.json',
+      acquirePidLock: async () => {
+        calls.push('lock');locked = true;
+        if (mode === 'operation-changed') records[0] = { ...expected, repositoryPackage: { operationId: 'newer' } };
+        if (mode === 'scope-changed') records[0] = { ...expected, organizationId: 'org_other' };
+        if (mode === 'missing') records = records.slice(1);
+        return async () => { calls.push('release');locked = false; };
+      },
+      readFile: async () => { assert.equal(locked, true);calls.push('read-current');return JSON.stringify(records); },
+      saveRegistry: async (next: typeof records) => { assert.equal(locked, true);calls.push('save');records = next; },
+    }, { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } }) as
+      (record: unknown, guard: { expected: unknown; beforeSave: () => Promise<void> }) => Promise<void>;
+    const guard = { expected, beforeSave: async () => {
+      assert.equal(locked, true);calls.push('checkpoint');
+      if (mode === 'checkpoint-failed') throw new Error('checkpoint_failure');
+    } };
+    const updated = { ...expected, repositoryPackage: { operationId: 'recovered' } };
+    if (mode === 'same') {
+      await fn(updated, guard);
+      assert.deepEqual(calls, ['lock', 'read-current', 'checkpoint', 'save', 'release']);
+      assert.equal((records.find(row => row.workspaceId === 'workspace')!.repositoryPackage as Record<string, unknown>).operationId, 'recovered');
+    } else {
+      await assert.rejects(fn(updated, guard), mode === 'checkpoint-failed' ? /checkpoint_failure/ : /compare_and_swap_failed/);
+      assert.ok(!calls.includes('save'));
+      if (mode !== 'checkpoint-failed') assert.ok(!calls.includes('checkpoint'));
+    }
+    assert.equal(locked, false);assert.equal(records.find(row => row.workspaceId === 'sibling')!.marker, 'preserve');
+  }
+});
 
 function fixture() {
   const calls: string[] = [];
@@ -43,7 +84,8 @@ function fixture() {
     },
     collectRepositorySourceRestoration: async () => { calls.push('collect');return {
       local: { manifest: { snapshotHash: 'local' } },
-      snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: { generationId: 'current-generation' } } }, expectedLatestSourceFingerprint: 'head',
+      snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: {
+        generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } }, expectedLatestSourceFingerprint: 'head',
       headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot', operationId: 'operation',
       priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => { calls.push('recheck'); } }; },
     canonicalize: JSON.stringify, sha256: () => 'reviewed-plan', dharmaHome: () => '/synthetic/device',
@@ -54,7 +96,8 @@ function fixture() {
       calls.push('submit');assert.equal(input.initialRepository, false);assert.equal(input.expectedLatestSourceFingerprint, 'head');
       return { state: 'accepted', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null };
     },
-    saveWorkspaceRecord: async (record: { repositoryPackage: Record<string, unknown> }) => {
+    saveWorkspaceRecord: async (record: { repositoryPackage: Record<string, unknown> }, guard?: { beforeSave?: () => Promise<void> }) => {
+      await guard?.beforeSave?.();
       calls.push('registry-write');savedRecord = record;
     },
   };
@@ -135,7 +178,8 @@ test('submission survives a lost registry write and recovery checkpoints before 
     f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => ({ manifest: {
       snapshotHash: hash, organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
       sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
-    f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace) => {
+    f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace, guard?: { beforeSave?: () => Promise<void> }) => {
+      await guard?.beforeSave?.();
       f.calls.push('registry-write');
       if (++writes === 1) throw new Error('simulated_registry_write_failure');
       Object.assign(f.workspace, record);
@@ -153,7 +197,6 @@ test('submission survives a lost registry write and recovery checkpoints before 
         state === 'accepted' || state === 'processing' ? 'operation' : null);
       assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).publishedLocalSnapshotHash,
         state === 'published' ? 'local' : null);
-      if (state === 'accepted' || state === 'processing') break;
     }
     assert.equal(submissions, 1);
   }
@@ -201,13 +244,57 @@ test('workspace authority superseded during final awaited reads cannot persist o
   };
   f.overrides.collectRepositorySourceRestoration = async () => ({
     local: { manifest: { snapshotHash: 'local' } },
-    snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: { generationId: 'current-generation' } } },
+    snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: {
+      generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
     expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
     operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
     assertCurrent: async () => { await Promise.resolve();superseded = true; },
   });
   await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /workspace_authorization_superseded/);
   assert.ok(!f.calls.some(call => /write|submit/.test(call)));
+});
+
+test('source policy rollover during final awaited reads cannot write a stale pending outbox', async () => {
+  const f = fixture();let changed = false;
+  f.overrides.fetchRepositorySourceAuthorization = async () => ({
+    generationId: changed ? 'replacement-generation' : 'current-generation', policy: { automaticValidatedPublication: true } });
+  f.overrides.collectRepositorySourceRestoration = async () => ({
+    local: { manifest: { snapshotHash: 'local' } },
+    snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: {
+      generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
+    expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
+    operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
+    assertCurrent: async () => { await Promise.resolve();changed = true; },
+  });
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /policy_changed/);
+  assert.ok(!f.calls.some(call => /write|submit/.test(call)));
+});
+
+test('matching pending restoration retries reconcile a later terminal receipt without fresh admission', async () => {
+  for (const state of ['accepted', 'processing'] as const) {
+    const f = fixture();f.workspace.repositoryPackage.pendingLocalOperationId = 'operation';
+    Object.assign(f.workspace.repositoryPackage, { operationId: 'operation' });
+    f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
+      localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: null,
+      priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
+      candidate: { state, operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null } });
+    f.overrides.readRepositoryPackageSnapshot = async () => ({ manifest: { organizationId: 'org_fixture', workspaceId: 'workspace',
+      knowledge: { repositoryAgentId: 'agent' }, sourceAuthorization: {
+        generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
+    const flags = f.flags(['apply', true], ['plan-hash', 'reviewed-plan']);
+    assert.equal((await f.run(flags)).stage, 'repository_restoration_candidate_recovered');
+    f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
+      localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: null,
+      priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
+      candidate: { state: 'published', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'release' } });
+    assert.equal((await f.run(flags)).stage, 'repository_restoration_candidate_recovered');
+    assert.equal(f.saved()?.repositoryPackage.pendingLocalOperationId, null);
+    assert.ok(!f.calls.includes('collect'));assert.ok(!f.calls.includes('submit'));
+    f.workspace.repositoryPackage.pendingLocalOperationId = 'foreign-operation';
+    const priorWrites = f.calls.filter(call => call.includes('write')).length;
+    await assert.rejects(f.run(flags), /checkpoint_registry_changed/);
+    assert.equal(f.calls.filter(call => call.includes('write')).length, priorWrites);
+  }
 });
 
 test('terminal history collision and expired final conflict approval stop before any candidate writes', async () => {

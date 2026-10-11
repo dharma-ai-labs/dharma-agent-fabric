@@ -1628,13 +1628,16 @@ async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
   }
 }
 
-async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
+async function saveWorkspaceRecord(entry: WorkspaceRecord, guard?: {
+  expected: WorkspaceRecord; beforeSave?: () => Promise<void>;
+}): Promise<void> {
   const scope = currentBootstrapHostScope();
   const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
   let release: (() => Promise<void>) | undefined;
   try {
     await scope?.assert();
     const snapshot = scope ? structuredClone(entry) : entry;
+    const expected = guard ? structuredClone(guard.expected) : undefined;
     await step(async () => {release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
       'Workspace registry is busy; preserve it for recovery.');});
     const value = await step(() => readFile(workspaceRegistryPath(), 'utf8')).catch(error => {
@@ -1642,6 +1645,10 @@ async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
     });
     const items = JSON.parse(value) as WorkspaceRecord[];
     if (!Array.isArray(items)) throw new Error('Workspace registry is invalid; preserve it for recovery.');
+    if (expected && canonicalize(items.find(item => item.workspaceId === snapshot.workspaceId) ?? null) !== canonicalize(expected)) {
+      throw new Error('workspace_registry_compare_and_swap_failed');
+    }
+    if (guard?.beforeSave) await step(guard.beforeSave);
     await saveRegistry([...items.filter(item => item.workspaceId !== snapshot.workspaceId), snapshot]);
   } catch (error) {
     if (!scope) throw error;
@@ -5724,7 +5731,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   const workspace = (await registry()).find(row => row.workspaceId === workspaceId && row.organizationId === config?.organizationId);
   if (!config || !workspace?.repositoryBindingId || !workspace.repositoryAgentId
     || workspace.accessMode === 'knowledge_only' || !workspace.repositoryPackage
-    || workspace.repositoryPackage.generation < 1 || workspace.repositoryPackage.pendingLocalOperationId) {
+    || workspace.repositoryPackage.generation < 1 || !apply && workspace.repositoryPackage.pendingLocalOperationId) {
     throw new Error('repository_source_restoration_workspace_not_authorized');
   }
   // An explicit recovery must not race the relay's candidate outbox or silently
@@ -5751,6 +5758,10 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
       if (currentOperationId !== recovered.previousOperationId && currentOperationId !== recovered.candidate.operationId) {
         throw new Error('repository_source_restoration_checkpoint_registry_changed');
       }
+      if (workspace.repositoryPackage.pendingLocalOperationId
+        && workspace.repositoryPackage.pendingLocalOperationId !== recovered.candidate.operationId) {
+        throw new Error('repository_source_restoration_checkpoint_registry_changed');
+      }
       for (const hash of [recovered.localSnapshotHash, recovered.candidate.snapshotHash]) {
         const snapshot = await readRepositoryPackageSnapshot(workspace.path, hash);
         if (!snapshot || snapshot.manifest.organizationId !== scope.organizationId || snapshot.manifest.workspaceId !== workspaceId
@@ -5766,8 +5777,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
         throw new Error('repository_source_restoration_requires_stopped_relay');
       }
       await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
-      const candidate = await checkpointRepositoryRestorationCandidate({ scope, recovered,
-        outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
+      const candidate = recovered.candidate;
       const pending = candidate.state === 'accepted' || candidate.state === 'processing';
       await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
         ...candidate, sourceManifestHash: recovered.sourceManifestHash, consolidationMode: 'repository_update',
@@ -5775,13 +5785,16 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
         localBaselineSnapshotHash: candidate.state === 'blocked' ? recovered.baselineSnapshotHash : recovered.localSnapshotHash,
         publishedLocalSnapshotHash: candidate.state === 'published' ? recovered.localSnapshotHash : recovered.baselineSnapshotHash,
         pendingLocalSnapshotHash: pending ? recovered.localSnapshotHash : null,
-        pendingLocalOperationId: pending ? candidate.operationId : null } });
+        pendingLocalOperationId: pending ? candidate.operationId : null } }, { expected: workspace,
+        beforeSave: async () => { await checkpointRepositoryRestorationCandidate({ scope, recovered,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') }); } });
       return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_recovered',
         planHash: recovered.planHash, candidate, priorReleaseId: recovered.priorReleaseId,
         localMutation: true, serverSourceMutation: false, activated: false,
         nextAction: 'Resume the owned relay; recovery only reconciled the existing candidate receipt.' };
     }
   }
+  if (workspace.repositoryPackage.pendingLocalOperationId) throw new Error('repository_source_restoration_workspace_not_authorized');
   const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
     workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
   const collected = await collectRepositorySourceRestoration({ ...scope, workspace: workspace.path, transport: fabric,
@@ -5808,6 +5821,10 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
     throw new Error('repository_source_restoration_requires_stopped_relay');
   }
+  const finalAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+  if (canonicalize(finalAuthorization) !== canonicalize(collected.snapshot.manifest.sourceAuthorization)) {
+    throw new Error('repository_source_restoration_policy_changed');
+  }
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
   const sourcePolicyGenerationId = collected.snapshot.manifest.sourceAuthorization?.generationId;
   if (!sourcePolicyGenerationId) throw new Error('repository_source_restoration_policy_changed');
@@ -5829,7 +5846,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     localBaselineSnapshotHash: candidate.state === 'blocked' ? baseline : collected.local.manifest.snapshotHash,
     publishedLocalSnapshotHash: candidate.state === 'published' ? collected.local.manifest.snapshotHash : baseline,
     pendingLocalSnapshotHash: pending ? collected.local.manifest.snapshotHash : null,
-    pendingLocalOperationId: pending ? candidate.operationId : null } });
+    pendingLocalOperationId: pending ? candidate.operationId : null } }, { expected: workspace });
   return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_submitted', planHash, candidate,
     priorReleaseId: collected.priorReleaseId, localMutation: true, serverSourceMutation: true, activated: false,
     nextAction: 'Resume the owned relay; evaluation, signing, delivery and activation must pass independently.' };
