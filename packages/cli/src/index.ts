@@ -78,7 +78,8 @@ import { prepareProvidersIndependently, startSkillPreparationPump } from './skil
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { publishSkillPreparationCache, takeSkillPreparationCache } from './skillPreparationCache.js';
-import { adoptRepositoryCandidate, checkpointRepositoryRestorationCandidate, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate,
+import { adoptRepositoryCandidate, checkpointRepositoryRestorationCandidate, checkpointRepositoryRestorationFence,
+  fenceRepositoryRestorationUpload, readRepositoryRestorationAttempt, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateReceipt } from './repositoryCandidateSync.js';
 import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type RepositoryRoleScope } from './repositoryRoleMetadata.js';
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
@@ -5720,10 +5721,11 @@ async function repositoryInstallerRecoveryCommand(flags: Map<string, string | bo
 
 export async function repositoryRestoreCommand(flags: Map<string, string | boolean>) {
   flags = new Map(flags);
-  const allowed = new Set(['workspace-id', 'dry-run', 'apply', 'plan-hash', 'json']);
+  const allowed = new Set(['workspace-id', 'dry-run', 'apply', 'plan-hash', 'fence-upload', 'json']);
   if ([...flags].some(([key, value]) => !allowed.has(key)
     || (['workspace-id', 'plan-hash'].includes(key) ? typeof value !== 'string' || !value : value !== true))
-    || flags.has('apply') === flags.has('dry-run') || flags.has('apply') !== flags.has('plan-hash')) {
+    || flags.has('apply') === flags.has('dry-run') || flags.has('apply') !== flags.has('plan-hash')
+    || flags.has('fence-upload') && !flags.has('apply')) {
     throw new Error('repository_source_restoration_option_invalid');
   }
   const workspaceId = required(flags, 'workspace-id'), apply = flags.has('apply');
@@ -5751,6 +5753,34 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   if (apply) {
     const authorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
     if (!authorization.policy.automaticValidatedPublication) throw new Error('repository_source_restoration_publication_denied');
+    if (flags.has('fence-upload')) {
+      if (workspace.repositoryPackage.pendingLocalOperationId) throw new Error('repository_source_restoration_workspace_not_authorized');
+      let fenced: Awaited<ReturnType<typeof fenceRepositoryRestorationUpload>> | undefined;
+      const assertFenceAuthority = async () => {
+        const current = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+        if (canonicalize(current) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
+        await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+        if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+          throw new Error('repository_source_restoration_requires_stopped_relay');
+        }
+      };
+      await saveWorkspaceRecord(workspace, { expected: workspace, beforeSave: async () => {
+        await assertFenceAuthority();
+        fenced = await fenceRepositoryRestorationUpload({ transport: fabric, scope,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), planHash: required(flags, 'plan-hash'),
+          policyGenerationId: authorization.generationId,
+          expectedPreviousOperationId: workspace.repositoryPackage!.operationId ?? null });
+        await assertFenceAuthority();
+        if (fenced.fence) await checkpointRepositoryRestorationFence({ scope, fenced,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
+      } });
+      if (!fenced) throw new Error('repository_source_restoration_fence_unavailable');
+      return { ok: true, stage: fenced.fence ? 'repository_restoration_upload_fenced' : 'repository_restoration_admission_found',
+        fence: fenced.fence, candidate: fenced.candidate, localMutation: true, serverSourceMutation: false,
+        serverOperationFenced: Boolean(fenced.fence), activated: false,
+        nextAction: fenced.fence ? 'Obtain a fresh restoration dry-run plan before applying; retain the terminal fence archive.'
+          : 'Retry the original plan without --fence-upload to reconcile the admitted candidate; no operation was cancelled.' };
+    }
     const recovered = await recoverRepositoryRestorationCandidate({ transport: fabric, scope,
       outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), planHash: required(flags, 'plan-hash') });
     if (recovered) {
@@ -5806,7 +5836,10 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   if (workspace.repositoryPackage.pendingLocalOperationId) throw new Error('repository_source_restoration_workspace_not_authorized');
   const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
     workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
+  const restorationAttempt = await readRepositoryRestorationAttempt({ scope,
+    outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
   const collected = await collectRepositorySourceRestoration({ ...scope, workspace: workspace.path, transport: fabric,
+    restorationAttempt,
     serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 }, format: 'jwk' }),
     loadPublishedLocalBaseline: () => baseline ? readRepositoryPackageSnapshot(workspace.path, baseline) : Promise.resolve(null),
     loadResolution: () => readActiveRepositorySourceResolution(workspace.path) });
@@ -5850,7 +5883,8 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
     restoration: { planHash, localSnapshotHash: collected.local.manifest.snapshotHash,
       baselineSnapshotHash: baseline, previousOperationId: workspace.repositoryPackage.operationId ?? null,
-      priorReleaseId: collected.priorReleaseId } });
+      priorReleaseId: collected.priorReleaseId, headCandidateId: collected.headCandidateId,
+      ...(restorationAttempt ? { attemptId: restorationAttempt } : {}) } });
   if (candidate.state === 'published' && candidate.releaseId === collected.priorReleaseId) {
     throw new Error('repository_source_restoration_archived_release_reused');
   }

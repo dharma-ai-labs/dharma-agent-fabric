@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-candidate-fence/v1",
+  "title": "Repository Operation Fence Metadata",
+  "description": "Device-signed, current-policy metadata request. The signed transport binds organization, device, session, timestamp and message identity. A terminal fence denies late admission; it never cancels an admitted candidate or authorizes activation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "operationId", "workspaceId", "repositoryBindingId", "repositoryAgentId", "sourceSnapshotHash", "sourceManifestHash", "consolidation"],
+  "properties": {
+    "schema": { "const": "dharma.repository-candidate-fence/v1" },
+    "operationId": { "$ref": "#/$defs/hash" },
+    "workspaceId": { "$ref": "#/$defs/uuid" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+    "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+    "sourceManifestHash": { "$ref": "#/$defs/hash" },
+    "restorationAttempt": { "$ref": "#/$defs/uuid" },
+    "restorationContext": {
+      "type": "object", "additionalProperties": false, "required": ["headCandidateId", "priorReleaseId"],
+      "properties": { "headCandidateId": { "$ref": "#/$defs/uuid" }, "priorReleaseId": { "$ref": "#/$defs/uuid" } }
+    },
+    "consolidation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "includeApprovedOutputs", "requireAtlasAssociation", "expectedLatestSourceFingerprint"],
+      "properties": {
+        "mode": { "const": "repository_update" },
+        "includeApprovedOutputs": { "const": true },
+        "requireAtlasAssociation": { "const": true },
+        "expectedLatestSourceFingerprint": { "$ref": "#/$defs/hash" }
+      }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "uuid": { "type": "string", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\\s\\S])" },
+    "fence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fenceId", "operationId", "workspaceId", "repositoryBindingId", "repositoryAgentId", "sourceSnapshotHash", "sourceManifestHash", "policyGenerationId", "state", "createdAt"],
+      "properties": {
+        "fenceId": { "$ref": "#/$defs/uuid" },
+        "operationId": { "$ref": "#/$defs/hash" },
+        "workspaceId": { "$ref": "#/$defs/uuid" },
+        "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+        "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+        "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+        "sourceManifestHash": { "$ref": "#/$defs/hash" },
+        "policyGenerationId": { "$ref": "#/$defs/uuid" },
+        "state": { "const": "fenced" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

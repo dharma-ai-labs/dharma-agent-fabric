@@ -79,6 +79,7 @@ function fixture() {
     fetchRepositorySourceAuthorization: async () => ({ generationId: 'current-generation', policy: { automaticValidatedPublication: true } }),
     validateRepositorySourceAuthorization: (value: unknown) => value,
     recoverRepositoryRestorationCandidate: async () => null,
+    readRepositoryRestorationAttempt: async () => undefined,
     checkpointRepositoryRestorationCandidate: async (input: { recovered: { candidate: unknown } }) => {
       calls.push('outbox-write');return input.recovered.candidate;
     },
@@ -94,6 +95,7 @@ function fixture() {
     },
     synchronizeRepositoryCandidate: async (input: Record<string, unknown>) => {
       calls.push('submit');assert.equal(input.initialRepository, false);assert.equal(input.expectedLatestSourceFingerprint, 'head');
+      assert.equal((input.restoration as Record<string, unknown>).headCandidateId, 'rolled-back-head');
       return { state: 'accepted', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null };
     },
     saveWorkspaceRecord: async (record: { repositoryPackage: Record<string, unknown> }, guard?: { beforeSave?: () => Promise<void> }) => {
@@ -116,6 +118,43 @@ test('restoration requires one explicit mode and rejects arbitrary/conflicting f
     const f = fixture();
     await assert.rejects(f.run(f.flags(...entries)), /option_invalid/);
     assert.deepEqual(f.calls, []);
+  }
+});
+
+test('explicit fencing is guarded metadata recovery, never a source upload or activation', async () => {
+  const f = fixture();
+  f.overrides.fenceRepositoryRestorationUpload = async (input: { expectedPreviousOperationId: string | null }) => {
+    assert.equal(input.expectedPreviousOperationId, null);f.calls.push('fence');
+    return { candidate: null, fence: { fenceId: 'terminal-fence' } };
+  };
+  f.overrides.checkpointRepositoryRestorationFence = async () => { f.calls.push('fence-checkpoint'); };
+  const result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'], ['fence-upload', true]));
+  assert.equal(result.stage, 'repository_restoration_upload_fenced');assert.equal(result.activated, false);
+  assert.equal(result.serverSourceMutation, false);
+  assert.ok(f.calls.indexOf('fence-checkpoint') > f.calls.indexOf('fence'));
+  assert.ok(!f.calls.some(call => /collect|submit|snapshot-write|outbox-write/.test(call)));
+});
+
+test('fencing refuses changed authority and running clients before checkpoint retirement', async () => {
+  for (const mode of ['pending', 'revoked', 'restarted', 'candidate-won']) {
+    const f = fixture();
+    if (mode === 'pending') f.workspace.repositoryPackage.pendingLocalOperationId = 'existing';
+    f.overrides.fenceRepositoryRestorationUpload = async () => {
+      f.calls.push('fence');
+      if (mode === 'revoked') f.overrides.fetchRepositorySourceAuthorization = async () => ({ generationId: 'changed', policy: {} });
+      return { candidate: mode === 'candidate-won' ? { candidateId: 'existing' } : null,
+        fence: mode === 'candidate-won' ? null : { fenceId: 'terminal' } };
+    };
+    let checks = 0;
+    f.overrides.fetchRepositorySourceAuthorization = async () => ({ generationId: mode === 'revoked' && ++checks > 2 ? 'changed' : 'current-generation',
+      policy: { automaticValidatedPublication: true } });
+    let relayChecks = 0;
+    if (mode === 'restarted') f.overrides.relayProcessState = async () => ++relayChecks > 2 ? 'running' : 'stopped';
+    f.overrides.checkpointRepositoryRestorationFence = async () => { f.calls.push('fence-checkpoint'); };
+    const run = f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'], ['fence-upload', true]));
+    if (mode === 'candidate-won') assert.equal((await run).stage, 'repository_restoration_admission_found');
+    else await assert.rejects(run, /workspace_not_authorized|policy_changed|requires_stopped_relay/);
+    assert.ok(!f.calls.includes('fence-checkpoint'));assert.ok(!f.calls.includes('submit'));
   }
 });
 

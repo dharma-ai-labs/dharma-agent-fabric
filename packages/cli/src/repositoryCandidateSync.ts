@@ -1,7 +1,9 @@
 import { constants } from 'node:fs';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { link, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
+import { fileURLToPath } from 'node:url';
+import { canonicalize, sha256, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import {
   serializeRepositoryPackageSnapshot,
   type RepositoryPackageSnapshot,
@@ -42,9 +44,10 @@ type CandidateOutbox = {
     expectedLatestSourceFingerprint?: string;
   };
   candidateId: string | null;
-  state: 'pending_upload' | RepositoryCandidateState;
+  state: 'pending_upload' | 'fenced' | RepositoryCandidateState;
   releaseId: string | null;
   restoration?: RestorationCheckpoint;
+  fence?: RepositoryCandidateFence;
 };
 
 type RestorationCheckpoint = {
@@ -53,23 +56,39 @@ type RestorationCheckpoint = {
   baselineSnapshotHash: string | null;
   previousOperationId: string | null;
   priorReleaseId: string;
+  attemptId?: string;
+  headCandidateId?: string;
+};
+
+type RestorationContext = { headCandidateId: string; priorReleaseId: string };
+
+type RepositoryCandidateFence = {
+  fenceId: string; operationId: string; workspaceId: string; repositoryBindingId: string; repositoryAgentId: string;
+  sourceSnapshotHash: string; sourceManifestHash: string; policyGenerationId: string;
+  state: 'fenced'; createdAt: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
 const HASH = /^sha256:[0-9a-f]{64}$(?![\s\S])/;
 const ORG = /^org_[A-Za-z0-9_]{1,156}$(?![\s\S])/;
 const STATES = new Set<RepositoryCandidateState>(['accepted', 'processing', 'published', 'blocked']);
-const OUTBOX_STATES = new Set<CandidateOutbox['state']>(['pending_upload', ...STATES]);
+const OUTBOX_STATES = new Set<CandidateOutbox['state']>(['pending_upload', 'fenced', ...STATES]);
 
 export function repositoryCandidateOperationId(input: {
   scope: RepositoryCandidateScope; snapshotHash: string; sourceManifestHash: string;
-  consolidation: CandidateOutbox['consolidation']; recoveryAttempt?: boolean;
+  consolidation: CandidateOutbox['consolidation']; recoveryAttempt?: boolean; restorationAttempt?: string;
+  restorationContext?: RestorationContext;
 }) {
+  requireFact(input.restorationAttempt === undefined || UUID.test(input.restorationAttempt), 'Repository restoration attempt is invalid.');
+  requireFact(input.restorationContext === undefined || UUID.test(input.restorationContext.headCandidateId)
+    && UUID.test(input.restorationContext.priorReleaseId), 'Repository restoration context is invalid.');
   return sha256(canonicalize({ schema: 'dharma.repository-candidate-operation/v1',
     organizationId: input.scope.organizationId, workspaceId: input.scope.workspaceId,
     repositoryBindingId: input.scope.repositoryBindingId, repositoryAgentId: input.scope.repositoryAgentId,
     snapshotHash: input.snapshotHash, sourceManifestHash: input.sourceManifestHash, consolidation: input.consolidation,
-    ...(input.recoveryAttempt ? { recoveryAttempt: 1 } : {}) }));
+    ...(input.recoveryAttempt ? { recoveryAttempt: 1 } : {}),
+    ...(input.restorationAttempt ? { restorationAttempt: input.restorationAttempt } : {}),
+    ...(input.restorationContext ? { restorationContext: input.restorationContext } : {}) }));
 }
 
 function requireFact(value: unknown, message: string): asserts value {
@@ -79,13 +98,22 @@ function requireFact(value: unknown, message: string): asserts value {
 function restorationCheckpoint(value: unknown): RestorationCheckpoint {
   requireFact(value !== null && typeof value === 'object' && !Array.isArray(value), 'Repository restoration checkpoint is invalid.');
   const row = value as Record<string, unknown>;
-  requireFact(Object.keys(row).sort().join(',') === 'baselineSnapshotHash,localSnapshotHash,planHash,previousOperationId,priorReleaseId'
+  requireFact(Object.keys(row).sort().join(',') === ['baselineSnapshotHash', 'localSnapshotHash', 'planHash',
+    'previousOperationId', 'priorReleaseId', ...(Object.hasOwn(row, 'attemptId') ? ['attemptId'] : []),
+    ...(Object.hasOwn(row, 'headCandidateId') ? ['headCandidateId'] : [])].sort().join(',')
     && typeof row.planHash === 'string' && HASH.test(row.planHash)
     && typeof row.localSnapshotHash === 'string' && HASH.test(row.localSnapshotHash)
     && (row.baselineSnapshotHash === null || typeof row.baselineSnapshotHash === 'string' && HASH.test(row.baselineSnapshotHash))
     && (row.previousOperationId === null || typeof row.previousOperationId === 'string' && HASH.test(row.previousOperationId))
-    && typeof row.priorReleaseId === 'string' && UUID.test(row.priorReleaseId), 'Repository restoration checkpoint is invalid.');
+    && typeof row.priorReleaseId === 'string' && UUID.test(row.priorReleaseId)
+    && (row.attemptId === undefined || typeof row.attemptId === 'string' && UUID.test(row.attemptId))
+    && (!Object.hasOwn(row, 'headCandidateId') || typeof row.headCandidateId === 'string' && UUID.test(row.headCandidateId)),
+  'Repository restoration checkpoint is invalid.');
   return row as RestorationCheckpoint;
+}
+
+function restorationContext(checkpoint: RestorationCheckpoint | undefined): RestorationContext | undefined {
+  return checkpoint?.headCandidateId ? { headCandidateId: checkpoint.headCandidateId, priorReleaseId: checkpoint.priorReleaseId } : undefined;
 }
 
 function checkedScope(value: RepositoryCandidateScope): RepositoryCandidateScope {
@@ -139,7 +167,7 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     'candidateId', 'state', 'releaseId'];
   requireFact(row.schema === 'dharma.repository-candidate-outbox/v1'
     && Reflect.ownKeys(row).every(key => typeof key === 'string')
-    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key) || key === 'restoration'),
+    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key) || key === 'restoration' || key === 'fence'),
   'Repository candidate outbox is invalid.');
   const scope = checkedScope(row.scope as RepositoryCandidateScope);
   if (expectedScope) requireFact(canonicalize(scope) === canonicalize(expectedScope), 'Repository candidate outbox scope is invalid.');
@@ -149,7 +177,7 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     && typeof row.state === 'string' && OUTBOX_STATES.has(row.state as CandidateOutbox['state'])
     && (row.candidateId === null || typeof row.candidateId === 'string' && UUID.test(row.candidateId))
     && (row.releaseId === null || typeof row.releaseId === 'string' && UUID.test(row.releaseId))
-    && (row.state === 'pending_upload') === (row.candidateId === null)
+    && ['pending_upload', 'fenced'].includes(String(row.state)) === (row.candidateId === null)
     && (row.state === 'published') === (row.releaseId !== null), 'Repository candidate outbox is inconsistent.');
   requireFact(row.consolidation !== null && typeof row.consolidation === 'object' && !Array.isArray(row.consolidation),
     'Repository candidate consolidation is invalid.');
@@ -163,12 +191,32 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
       || consolidation.mode === 'repository_update' && typeof consolidation.expectedLatestSourceFingerprint === 'string'
         && HASH.test(consolidation.expectedLatestSourceFingerprint)),
   'Repository candidate consolidation is invalid.');
+  const restoration = Object.hasOwn(row, 'restoration') ? restorationCheckpoint(row.restoration) : undefined;
+  requireFact((row.state === 'fenced') === Object.hasOwn(row, 'fence') && (row.state !== 'fenced' || Boolean(restoration)),
+    'Repository candidate fence checkpoint is inconsistent.');
+  const fence = row.state === 'fenced' ? checkedFence(row.fence, scope, String(row.operationId),
+    String(row.snapshotHash), String(row.sourceManifestHash)) : undefined;
   return { schema: 'dharma.repository-candidate-outbox/v1', scope,
     operationId: row.operationId as string, sourceManifestHash: row.sourceManifestHash as string,
     snapshotHash: row.snapshotHash as string, consolidation: consolidation as CandidateOutbox['consolidation'],
     candidateId: row.candidateId as string | null, state: row.state as CandidateOutbox['state'],
     releaseId: row.releaseId as string | null,
-    ...(Object.hasOwn(row, 'restoration') ? { restoration: restorationCheckpoint(row.restoration) } : {}) };
+    ...(restoration ? { restoration } : {}), ...(fence ? { fence } : {}) };
+}
+
+function checkedFence(value: unknown, scope: RepositoryCandidateScope, operationId: string, snapshotHash: string,
+  sourceManifestHash: string, policyGenerationId?: string): RepositoryCandidateFence {
+  requireFact(value !== null && typeof value === 'object' && !Array.isArray(value), 'Repository candidate fence receipt is invalid.');
+  const row = value as Record<string, unknown>;
+  requireFact(Object.keys(row).sort().join(',') === 'createdAt,fenceId,operationId,policyGenerationId,repositoryAgentId,repositoryBindingId,sourceManifestHash,sourceSnapshotHash,state,workspaceId'
+    && typeof row.fenceId === 'string' && UUID.test(row.fenceId) && row.operationId === operationId
+    && row.workspaceId === scope.workspaceId && row.repositoryBindingId === scope.repositoryBindingId && row.repositoryAgentId === scope.repositoryAgentId
+    && row.sourceSnapshotHash === snapshotHash && row.sourceManifestHash === sourceManifestHash && row.state === 'fenced'
+    && typeof row.policyGenerationId === 'string' && UUID.test(row.policyGenerationId)
+    && (policyGenerationId === undefined || row.policyGenerationId === policyGenerationId)
+    && typeof row.createdAt === 'string' && Number.isFinite(Date.parse(row.createdAt))
+    && new Date(row.createdAt).toISOString() === row.createdAt, 'Repository candidate fence receipt is inconsistent.');
+  return row as RepositoryCandidateFence;
 }
 
 async function readOutbox(path: string, expectedScope?: RepositoryCandidateScope): Promise<CandidateOutbox | null> {
@@ -231,11 +279,17 @@ export async function synchronizeRepositoryCandidate(input: {
   requireFact(!restoration || !input.initialRepository && Boolean(input.expectedLatestSourceFingerprint)
     && !input.blockedCandidate, 'Repository restoration checkpoint requires an update.');
   const operationId = repositoryCandidateOperationId({ scope, snapshotHash: snapshot.manifest.snapshotHash,
-    sourceManifestHash, consolidation, recoveryAttempt: Boolean(input.blockedCandidate) });
+    sourceManifestHash, consolidation, recoveryAttempt: Boolean(input.blockedCandidate), restorationAttempt: restoration?.attemptId,
+    restorationContext: restorationContext(restoration) });
   const path = outboxPath(input.outboxRoot, scope);
   const prior = await readOutbox(path, scope);
+  if (prior?.state === 'fenced') {
+    requireFact(prior.fence && restoration?.attemptId === prior.fence.fenceId && prior.operationId !== operationId,
+      'A fenced operation requires its verified new restoration attempt.');
+    await archiveFencedCheckpoint(input.outboxRoot, prior);
+  }
   if (prior && (prior.operationId !== operationId || canonicalize(prior.scope) !== canonicalize(scope))) {
-    requireFact(['published', 'blocked'].includes(prior.state)
+    requireFact(['published', 'blocked', 'fenced'].includes(prior.state)
       || input.blockedCandidate?.candidateId === prior.candidateId,
     'A different repository candidate is still pending.');
   }
@@ -262,6 +316,8 @@ export async function synchronizeRepositoryCandidate(input: {
       repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
       sourceSnapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash: pending.sourceManifestHash,
       consolidation: pending.consolidation, snapshot,
+      ...(restoration?.attemptId ? { restorationAttempt: restoration.attemptId } : {}),
+      ...(restorationContext(restoration) ? { restorationContext: restorationContext(restoration) } : {}),
     }), scope, operationId, snapshot.manifest.snapshotHash, restoration?.priorReleaseId);
   }
   await writeOutbox(path, { ...pending, candidateId: accepted.candidateId, state: accepted.state, releaseId: accepted.releaseId });
@@ -277,10 +333,11 @@ export async function recoverRepositoryRestorationCandidate(input: {
   const scope = checkedScope(input.scope);
   requireFact(HASH.test(input.planHash), 'Repository restoration plan hash is invalid.');
   const path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
-  if (!pending?.restoration || pending.restoration.planHash !== input.planHash) return null;
+  if (!pending?.restoration || pending.state === 'fenced' || pending.restoration.planHash !== input.planHash) return null;
   requireFact(pending.consolidation.mode === 'repository_update' && Boolean(pending.consolidation.expectedLatestSourceFingerprint)
     && repositoryCandidateOperationId({ scope, snapshotHash: pending.snapshotHash,
-      sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation }) === pending.operationId,
+      sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation,
+      restorationAttempt: pending.restoration.attemptId, restorationContext: restorationContext(pending.restoration) }) === pending.operationId,
   'Repository restoration checkpoint operation is invalid.');
   const query = new URLSearchParams({ workspaceId: scope.workspaceId, operationId: pending.operationId });
   const suffix = pending.candidateId ? `/${encodeURIComponent(pending.candidateId)}` : '';
@@ -304,12 +361,14 @@ export async function checkpointRepositoryRestorationCandidate(input: {
   const path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
   const expected = restorationCheckpoint({ planHash: recovered.planHash, localSnapshotHash: recovered.localSnapshotHash,
     baselineSnapshotHash: recovered.baselineSnapshotHash, previousOperationId: recovered.previousOperationId,
-    priorReleaseId: recovered.priorReleaseId });
-  requireFact(pending?.restoration && canonicalize(pending.restoration) === canonicalize(expected)
+    priorReleaseId: recovered.priorReleaseId, ...(recovered.attemptId ? { attemptId: recovered.attemptId } : {}),
+    ...(recovered.headCandidateId ? { headCandidateId: recovered.headCandidateId } : {}) });
+  requireFact(pending?.restoration && pending.state !== 'fenced' && canonicalize(pending.restoration) === canonicalize(expected)
     && pending.sourceManifestHash === recovered.sourceManifestHash
     && pending.consolidation.mode === 'repository_update' && Boolean(pending.consolidation.expectedLatestSourceFingerprint)
     && repositoryCandidateOperationId({ scope, snapshotHash: pending.snapshotHash,
-      sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation }) === pending.operationId,
+      sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation,
+      restorationAttempt: pending.restoration.attemptId, restorationContext: restorationContext(pending.restoration) }) === pending.operationId,
   'Repository restoration checkpoint changed.');
   const candidate = receipt({ ok: true, organizationId: scope.organizationId, candidate: recovered.candidate },
     scope, pending.operationId, pending.snapshotHash, pending.restoration.priorReleaseId);
@@ -322,6 +381,104 @@ export async function checkpointRepositoryRestorationCandidate(input: {
   return candidate;
 }
 
+export async function readRepositoryRestorationAttempt(input: { outboxRoot: string; scope: RepositoryCandidateScope }) {
+  const scope = checkedScope(input.scope), pending = await readOutbox(outboxPath(input.outboxRoot, scope), scope);
+  return pending?.state === 'fenced' ? pending.fence!.fenceId
+    : pending?.state === 'pending_upload' ? pending.restoration?.attemptId : undefined;
+}
+
+// Explicit recovery only: this can fence an unadmitted operation but never
+// cancels admitted work, uploads source, or retires a local checkpoint.
+export async function fenceRepositoryRestorationUpload(input: {
+  transport: RepositoryCandidateTransport; outboxRoot: string; scope: RepositoryCandidateScope;
+  planHash: string; policyGenerationId: string; expectedPreviousOperationId: string | null;
+}) {
+  const scope = checkedScope(input.scope);
+  requireFact(HASH.test(input.planHash) && UUID.test(input.policyGenerationId), 'Repository restoration fence authority is invalid.');
+  const pending = await readOutbox(outboxPath(input.outboxRoot, scope), scope);
+  requireFact(pending?.restoration && pending.restoration.planHash === input.planHash
+    && pending.restoration.previousOperationId === input.expectedPreviousOperationId
+    && ['pending_upload', 'fenced'].includes(pending.state) && pending.candidateId === null
+    && pending.consolidation.mode === 'repository_update' && Boolean(pending.consolidation.expectedLatestSourceFingerprint)
+    && repositoryCandidateOperationId({ scope, snapshotHash: pending.snapshotHash, sourceManifestHash: pending.sourceManifestHash,
+      consolidation: pending.consolidation, restorationAttempt: pending.restoration.attemptId,
+      restorationContext: restorationContext(pending.restoration) }) === pending.operationId,
+  'Repository restoration fence checkpoint is invalid.');
+  const body = {
+      schema: 'dharma.repository-candidate-fence/v1', operationId: pending.operationId,
+      workspaceId: scope.workspaceId, repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+      sourceSnapshotHash: pending.snapshotHash, sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation,
+      ...(pending.restoration.attemptId ? { restorationAttempt: pending.restoration.attemptId } : {}),
+      ...(restorationContext(pending.restoration) ? { restorationContext: restorationContext(pending.restoration) } : {}),
+    };
+  const schemaDirectory = fileURLToPath(new URL('./schemas/', import.meta.url));
+  requireFact((await validateContract(schemaDirectory, 'https://schemas.dharma-ai.io/repository-candidate-fence/v1', body)).ok
+    && Buffer.byteLength(canonicalize(body)) <= 4096, 'Repository restoration fence metadata is invalid.');
+  const response = await input.transport.signedPost(
+    `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates/fence`, body);
+  requireFact(response.ok === true && response.organizationId === scope.organizationId
+    && Object.hasOwn(response, 'candidate') && Object.hasOwn(response, 'fence')
+    && (response.candidate === null) !== (response.fence === null), 'Repository restoration fence response is invalid.');
+  const fence = response.fence === null ? null : checkedFence(response.fence, scope, pending.operationId,
+    pending.snapshotHash, pending.sourceManifestHash, input.policyGenerationId);
+  requireFact(!fence || (await validateContract(schemaDirectory,
+    'https://schemas.dharma-ai.io/repository-candidate-fence/v1#/$defs/fence', fence)).ok,
+  'Repository restoration fence receipt schema is invalid.');
+  const candidate = fence ? null : receipt(response, scope, pending.operationId, pending.snapshotHash, pending.restoration.priorReleaseId);
+  requireFact(pending.state !== 'fenced' || fence && canonicalize(fence) === canonicalize(pending.fence),
+    'Repository restoration terminal fence changed.');
+  return { checkpointHash: sha256(canonicalize(pending)), pending, fence, candidate };
+}
+
+async function archiveFencedCheckpoint(root: string, pending: CandidateOutbox) {
+  requireFact(pending.state === 'fenced' && pending.fence && pending.restoration, 'Repository restoration terminal fence is required.');
+  const { fence, ...checkpoint } = pending;
+  const value = { checkpoint: { ...checkpoint, state: 'pending_upload' }, fence };
+  const bytes = `${canonicalize(value)}\n`, directory = resolve(root, 'fenced');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = await lstat(directory);
+  requireFact(directoryStat.isDirectory() && !directoryStat.isSymbolicLink(), 'Repository restoration archive directory is invalid.');
+  const path = resolve(directory, `${pending.scope.workspaceId}.${fence.fenceId}.json`);
+  const temporary = resolve(directory, `.${pending.scope.workspaceId}.${fence.fenceId}.${randomUUID()}.tmp`);
+  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
+  try {
+    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+    // Publishing a fully flushed inode with a link cannot replace an existing archive.
+    try { await link(temporary, path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const before = await lstat(path);
+      requireFact(before.isFile() && !before.isSymbolicLink() && before.size <= 65_536, 'Repository restoration archive is invalid.');
+      const existing = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+      try {
+        const after = await existing.stat();
+        requireFact(after.isFile() && before.ino === after.ino && before.dev === after.dev && after.size <= 65_536
+          && await existing.readFile('utf8') === bytes, 'Repository restoration archive changed.');
+      } finally { await existing.close(); }
+    }
+    if (process.platform !== 'win32') {
+      const parent = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW || 0));
+      try { await parent.sync(); } finally { await parent.close(); }
+    }
+  } finally { await rm(temporary, { force: true }); }
+}
+
+// The command invokes this only after the registry CAS, current authority and
+// stopped-runtime guards. Persist the terminal archive before replacement.
+export async function checkpointRepositoryRestorationFence(input: {
+  outboxRoot: string; scope: RepositoryCandidateScope;
+  fenced: Awaited<ReturnType<typeof fenceRepositoryRestorationUpload>>;
+}) {
+  const scope = checkedScope(input.scope), path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
+  requireFact(pending && sha256(canonicalize(pending)) === input.fenced.checkpointHash
+    && input.fenced.fence && input.fenced.candidate === null, 'Repository restoration fence checkpoint changed.');
+  const fence = checkedFence(input.fenced.fence, scope, pending.operationId, pending.snapshotHash, pending.sourceManifestHash);
+  const next: CandidateOutbox = { ...pending, state: 'fenced', fence };
+  await archiveFencedCheckpoint(input.outboxRoot, next);
+  if (canonicalize(next) !== canonicalize(pending)) await writeOutbox(path, next);
+  return fence;
+}
+
 export async function pollRepositoryCandidate(input: {
   transport: Pick<RepositoryCandidateTransport, 'signedGet'>;
   outboxRoot: string;
@@ -330,7 +487,7 @@ export async function pollRepositoryCandidate(input: {
   const scope = checkedScope(input.scope);
   const path = outboxPath(input.outboxRoot, scope);
   const pending = await readOutbox(path, scope);
-  if (!pending || pending.state === 'pending_upload') return null;
+  if (!pending || pending.state === 'pending_upload' || pending.state === 'fenced') return null;
   if (pending.state === 'published' || pending.state === 'blocked') {
     requireFact(pending.state !== 'published' || pending.releaseId !== pending.restoration?.priorReleaseId,
       'Repository restoration cannot reuse the archived release identity.');
@@ -357,6 +514,12 @@ export async function adoptRepositoryCandidate(input: {
   requireFact(HASH.test(input.sourceManifestHash), 'Canonical repository candidate manifest hash is invalid.');
   const candidate = receipt({ ok: true, organizationId: scope.organizationId, candidate: input.candidate },
     scope, input.candidate.operationId, input.candidate.snapshotHash);
+  const prior = await readOutbox(outboxPath(input.outboxRoot, scope), scope);
+  if (prior?.state === 'fenced') {
+    requireFact(prior.operationId !== candidate.operationId, 'A fenced operation cannot be adopted.');
+    await archiveFencedCheckpoint(input.outboxRoot, prior);
+  } else requireFact(!prior?.restoration || ['published', 'blocked'].includes(prior.state),
+    'An unresolved restoration checkpoint cannot be replaced by adoption.');
   requireFact(candidate.state !== 'accepted' || candidate.candidateId !== null,
     'Canonical repository candidate is incomplete.');
   await writeOutbox(outboxPath(input.outboxRoot, scope), {

@@ -130,6 +130,17 @@ test('relay permits only signed, bounded repository source reads', () => {
     pathname: `${prefix}?workspaceId=${id}`, body: '{}' }), /get_body_forbidden/);
 });
 
+test('repository operation fencing permits only a signed metadata POST capped at four KiB', () => {
+  const path = '/api/v1/orgs/org_customer/agent-fabric/repository-agents/d327bcce-2314-4c92-a6b7-13ec5570c1ee/package-candidates/fence';
+  assert.doesNotThrow(() => parseRelayRequest({ ...request, pathname: path, body: 'x'.repeat(4096) }));
+  assert.throws(() => parseRelayRequest({ ...request, pathname: path, body: 'x'.repeat(4097) }), /body_too_large/);
+  for (const pathname of [path + '?admin=true', path + '/all', path + '/', path.replace('/fence', '/cancel')]) {
+    assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);
+  }
+  assert.throws(() => parseRelayRequest({ ...request, pathname: path, method: 'GET', body: '' }), /route_not_allowed/);
+  assert.throws(() => parseRelayRequest({ ...request, pathname: path, headers: {} }), /signed_headers_required/);
+});
+
 test('relay permits only the bounded trajectory-head reconciliation route', () => {
   assert.doesNotThrow(() => parseRelayRequest({
     ...request,

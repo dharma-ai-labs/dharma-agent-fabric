@@ -515,6 +515,27 @@ test('identical source fingerprints do not conceal a changed rolled-back candida
   await assert.rejects(result.assertCurrent(), /restoration_head_changed/);
 });
 
+test('later rollback of identical content has a distinct restoration operation', async t => {
+  const f = await restorationFixture(t), first = await collectRepositorySourceRestoration(f.input);
+  f.body.source.candidateId = randomUUID();
+  const second = await collectRepositorySourceRestoration(f.input);
+  assert.equal(first.snapshot.manifest.snapshotHash, second.snapshot.manifest.snapshotHash);
+  assert.notEqual(first.operationId, second.operationId);
+  assert.equal(second.operationId, (await collectRepositorySourceRestoration(f.input)).operationId);
+});
+
+test('a different signed prior release changes restoration identity without changing local content', async t => {
+  const f = await restorationFixture(t), first = await collectRepositorySourceRestoration(f.input);
+  const envelope = f.body.restoration.envelope;
+  envelope.descriptor.releaseId = randomUUID();
+  const { signature: _signature, ...unsigned } = envelope;
+  envelope.signature = signCanonicalObject(unsigned, f.keys.privateKey);
+  const second = await collectRepositorySourceRestoration(f.input);
+  assert.equal(first.local.manifest.sourceFingerprint, second.local.manifest.sourceFingerprint);
+  assert.notEqual(first.priorReleaseId, second.priorReleaseId);
+  assert.notEqual(first.operationId, second.operationId);
+});
+
 test('real signed HTTP restoration carries scoped queries through blob reads and never submits a candidate', async t => {
   const f = await restorationFixture(t), bytes = Buffer.from('# Stable remote report\n');
   await f.put('docs/stable.md', bytes);

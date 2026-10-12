@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
-import { checkpointRepositoryRestorationCandidate, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
+import { checkpointRepositoryRestorationCandidate, checkpointRepositoryRestorationFence, fenceRepositoryRestorationUpload,
+  readRepositoryRestorationAttempt, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
 
@@ -14,6 +17,148 @@ const ids = {
   repositoryBindingId: '73a95988-fd64-41ba-a0b9-6c8867d03788',
   repositoryAgentId: '57f61652-a5eb-46e4-930c-9478cd4a9c31',
 };
+
+test('unadmitted restoration is fenced before checkpoint retirement and a distinct retry preserves its archive', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-fence-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, calls: string[] = [];
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    const outboxRoot = join(root, 'outbox'), path = join(outboxRoot, `${ids.workspaceId}.json`);
+    const generation = '67f61652-a5eb-46e4-930c-9478cd4a9c31', fenceId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const inventory = await snapshot(root);let admitted = false;
+    const transport = {
+      signedGet: async () => ({ ok: true, organizationId: scope.organizationId, candidate: null }),
+      signedPost: async (route: string, raw: unknown) => {
+        const body = raw as Record<string, unknown>;calls.push(route.endsWith('/fence') ? 'FENCE' : 'UPLOAD');
+        if (route.endsWith('/fence')) return { ok: true, organizationId: scope.organizationId, candidate: null,
+          fence: { fenceId, operationId: body.operationId, workspaceId: scope.workspaceId,
+            repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+            sourceSnapshotHash: body.sourceSnapshotHash, sourceManifestHash: body.sourceManifestHash,
+            policyGenerationId: generation, state: 'fenced', createdAt: '2030-01-02T00:00:00.000Z' } };
+        if (!admitted) throw new Error('lost_upload');
+        assert.equal(body.restorationAttempt, fenceId);
+        return { ok: true, organizationId: scope.organizationId, candidate: {
+          candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+          snapshotHash: body.sourceSnapshotHash, state: 'accepted', releaseId: null } };
+      },
+    };
+    const input = { transport, outboxRoot, scope, snapshot: inventory, initialRepository: false,
+      expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+    await assert.rejects(synchronizeRepositoryCandidate(input), /lost_upload/);
+    const before = await readFile(path, 'utf8'), old = JSON.parse(before);
+    await assert.rejects(fenceRepositoryRestorationUpload({ ...input, planHash: restoration.planHash,
+      policyGenerationId: generation, expectedPreviousOperationId: `sha256:${'d'.repeat(64)}` }), /checkpoint is invalid/);
+    assert.deepEqual(calls, ['UPLOAD']);assert.equal(await readFile(path, 'utf8'), before);
+    const fenced = await fenceRepositoryRestorationUpload({ ...input, planHash: restoration.planHash,
+      policyGenerationId: generation, expectedPreviousOperationId: null });
+    assert.equal(await readFile(path, 'utf8'), before);assert.equal(fenced.fence?.fenceId, fenceId);
+    await checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced });
+    assert.equal(await readRepositoryRestorationAttempt({ outboxRoot, scope }), fenceId);
+    assert.equal(await pollRepositoryCandidate(input), null);
+    // A crash after durable archival but before the outbox rename must recover the same fence.
+    await writeFile(path, before);
+    const recoveredFence = await fenceRepositoryRestorationUpload({ ...input, planHash: restoration.planHash,
+      policyGenerationId: generation, expectedPreviousOperationId: null });
+    await checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced: recoveredFence });
+    admitted = true;
+    await assert.rejects(synchronizeRepositoryCandidate(input), /fenced operation requires/);
+    const retry = await synchronizeRepositoryCandidate({ ...input, restoration: { ...restoration, attemptId: fenceId } });
+    assert.notEqual(retry.operationId, old.operationId);assert.deepEqual(calls, ['UPLOAD', 'FENCE', 'FENCE', 'UPLOAD']);
+    const archive = JSON.parse(await readFile(join(outboxRoot, 'fenced', `${ids.workspaceId}.${fenceId}.json`), 'utf8'));
+    assert.deepEqual(archive.checkpoint, old);assert.equal(archive.fence.fenceId, fenceId);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('partial archive writes never publish a poisoned terminal receipt and retry recovers', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-archive-interruption-')), originalOpen = fs.open;
+  let injected = false;
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+    const path = join(outboxRoot, `${ids.workspaceId}.json`), generation = '67f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const fenceId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    const transport = { signedGet: async () => ({}), signedPost: async (route: string, raw: unknown) => {
+      if (!route.endsWith('/fence')) throw new Error('lost_upload');
+      const body = raw as Record<string, unknown>;
+      return { ok: true, organizationId: scope.organizationId, candidate: null, fence: { fenceId,
+        operationId: body.operationId, ...ids, sourceSnapshotHash: body.sourceSnapshotHash,
+        sourceManifestHash: body.sourceManifestHash, policyGenerationId: generation, state: 'fenced', createdAt: '2030-01-02T00:00:00.000Z' } };
+    } };
+    await assert.rejects(synchronizeRepositoryCandidate({ scope, outboxRoot, transport, snapshot: await snapshot(root),
+      initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration }), /lost_upload/);
+    const before = await readFile(path, 'utf8');
+    const fenced = await fenceRepositoryRestorationUpload({ scope, outboxRoot, transport, planHash: restoration.planHash,
+      policyGenerationId: generation, expectedPreviousOperationId: null });
+    fs.open = async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (String(args[0]).replaceAll('\\', '/').includes('/fenced/') && !injected) {
+        const write = handle.writeFile.bind(handle);
+        handle.writeFile = async () => { injected = true; await write('partial'); throw new Error('partial_archive_write'); };
+      }
+      return handle;
+    };syncBuiltinESMExports();
+    await assert.rejects(checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced }), /partial_archive_write/);
+    fs.open = originalOpen;syncBuiltinESMExports();
+    assert.equal(injected, true);assert.equal(await readFile(path, 'utf8'), before);
+    assert.deepEqual(await fs.readdir(join(outboxRoot, 'fenced')), []);
+    await checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced });
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).state, 'fenced');
+    assert.deepEqual(await fs.readdir(join(outboxRoot, 'fenced')), [`${ids.workspaceId}.${fenceId}.json`]);
+  } finally { fs.open = originalOpen;syncBuiltinESMExports();await rm(root, { recursive: true, force: true }); }
+});
+
+test('uncertain, malformed or foreign fence responses preserve the pending checkpoint byte for byte', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-fence-rejection-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+    const path = join(outboxRoot, `${ids.workspaceId}.json`), generation = '67f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    const transport = { signedGet: async () => ({}), signedPost: async () => { throw new Error('lost_upload'); } };
+    const input = { transport, outboxRoot, scope, snapshot: await snapshot(root), initialRepository: false,
+      expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+    await assert.rejects(synchronizeRepositoryCandidate(input), /lost_upload/);
+    const before = await readFile(path, 'utf8'), pending = JSON.parse(before);
+    const fence = { fenceId: 'a7f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: pending.operationId,
+      workspaceId: scope.workspaceId, repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+      sourceSnapshotHash: pending.snapshotHash, sourceManifestHash: pending.sourceManifestHash, policyGenerationId: generation,
+      state: 'fenced', createdAt: '2030-01-02T00:00:00.000Z' };
+    for (const value of [null, { candidate: null, fence: null }, { candidate: {}, fence },
+      { candidate: null, fence: { ...fence, policyGenerationId: scope.workspaceId } },
+      { candidate: null, fence: { ...fence, sourceManifestHash: `sha256:${'f'.repeat(64)}` } },
+      { candidate: null, fence: { ...fence, privateKey: 'synthetic-must-not-be-retained' } }]) {
+      const transport = { signedGet: async () => ({}), signedPost: async () => {
+        if (!value) throw new Error('lost_fence_reply');
+        return { ok: true, organizationId: scope.organizationId, ...value };
+      } };
+      await assert.rejects(fenceRepositoryRestorationUpload({ transport, outboxRoot, scope, planHash: restoration.planHash,
+        policyGenerationId: generation, expectedPreviousOperationId: null }));
+      assert.equal(await readFile(path, 'utf8'), before);
+    }
+    const transportWon = { signedGet: async () => ({}), signedPost: async () => ({ ok: true,
+      organizationId: scope.organizationId, fence: null, candidate: { candidateId: scope.repositoryAgentId,
+        operationId: pending.operationId, snapshotHash: pending.snapshotHash, state: 'accepted', releaseId: null } }) };
+    const won = await fenceRepositoryRestorationUpload({ transport: transportWon, outboxRoot, scope,
+      planHash: restoration.planHash, policyGenerationId: generation, expectedPreviousOperationId: null });
+    assert.equal(won.fence, null);assert.equal(won.candidate?.state, 'accepted');
+    await assert.rejects(checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced: won }), /checkpoint changed/);
+    assert.equal(await readFile(path, 'utf8'), before);
+    const transportFenced = { signedGet: async () => ({}), signedPost: async () => ({ ok: true,
+      organizationId: scope.organizationId, candidate: null, fence }) };
+    const terminal = await fenceRepositoryRestorationUpload({ transport: transportFenced, outboxRoot, scope,
+      planHash: restoration.planHash, policyGenerationId: generation, expectedPreviousOperationId: null });
+    const changed = JSON.stringify({ ...pending, restoration: { ...restoration, planHash: `sha256:${'e'.repeat(64)}` } });
+    await writeFile(path, changed);
+    await assert.rejects(checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced: terminal }), /checkpoint changed/);
+    assert.equal(await readFile(path, 'utf8'), changed);
+    await writeFile(path, before);await mkdir(join(outboxRoot, 'fenced'));
+    await writeFile(join(outboxRoot, 'fenced', `${ids.workspaceId}.${fence.fenceId}.json`), 'conflicting archive');
+    await assert.rejects(checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced: terminal }), /archive changed/);
+    assert.equal(await readFile(path, 'utf8'), before);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('durable restoration checkpoint recovers a terminal receipt by exact scoped GET without reposting', async () => {
   for (const state of ['published', 'blocked'] as const) {

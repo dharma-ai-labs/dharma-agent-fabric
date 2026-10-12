@@ -16,9 +16,16 @@ test('actual gateway forwards signed restoration metadata and blobs but rejects 
   const upstreamPaths: string[] = [];
   const upstream = createServer(async (request, response) => {
     try {
-      assert.equal(request.method, 'GET');
+      assert.ok(request.method === 'GET' || request.method === 'POST');
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks).toString('utf8');
+      if (request.method === 'POST') {
+        assert.ok(request.url?.endsWith('/package-candidates/fence'));
+        assert.equal(JSON.parse(body).schema, 'dharma.repository-candidate-fence/v1');
+      }
       assert.equal(request.headers.authorization, undefined);assert.equal(request.headers.cookie, undefined);
-      const payload = { bodyHash: `sha256:${createHash('sha256').update('').digest('hex')}`, deviceId,
+      const payload = { bodyHash: `sha256:${createHash('sha256').update(body).digest('hex')}`, deviceId,
         messageId: request.headers['x-dharma-message-id'], method: request.method,
         nonce: request.headers['x-dharma-nonce'], organizationId: 'org_fixture', pathname: request.url,
         sequence: Number(request.headers['x-dharma-sequence']), sessionId,
@@ -56,14 +63,15 @@ test('actual gateway forwards signed restoration metadata and blobs but rejects 
   await new Promise<void>((done, reject) => { socket.addEventListener('open', () => done(), { once: true });
     socket.addEventListener('error', () => reject(new Error('synthetic_gateway_connect_failed')), { once: true }); });
   let sequence = 0;
-  const send = async (pathname: string) => {
+  const send = async (pathname: string, method = 'GET', body = '') => {
     const messageId = randomUUID(), timestamp = new Date().toISOString(), nonce = randomBytes(24).toString('base64url');
-    const payload = { bodyHash: `sha256:${createHash('sha256').update('').digest('hex')}`, deviceId,
-      messageId, method: 'GET', nonce, organizationId: 'org_fixture', pathname, sequence: ++sequence, sessionId, timestamp };
+    const payload = { bodyHash: `sha256:${createHash('sha256').update(body).digest('hex')}`, deviceId,
+      messageId, method, nonce, organizationId: 'org_fixture', pathname, sequence: ++sequence, sessionId, timestamp };
     const result = new Promise<{ status: number; body: string }>(done => {
       socket.addEventListener('message', event => done(JSON.parse(String(event.data))), { once: true });
     });
-    socket.send(JSON.stringify({ requestId: messageId, method: 'GET', pathname, body: '', headers: {
+    socket.send(JSON.stringify({ requestId: messageId, method, pathname, body, headers: {
+      ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
       'x-dharma-device-id': deviceId, 'x-dharma-session-id': sessionId, 'x-dharma-message-id': messageId,
       'x-dharma-timestamp': timestamp, 'x-dharma-nonce': nonce, 'x-dharma-sequence': String(sequence),
       'x-dharma-signature': sign(null, Buffer.from(JSON.stringify(payload)), keys.privateKey).toString('base64url'),
@@ -80,5 +88,8 @@ test('actual gateway forwards signed restoration metadata and blobs but rejects 
   }
   const denied = await send(`${metadata}&admin=true`);
   assert.equal(denied.status, 400);assert.equal(JSON.parse(denied.body).error.code, 'route_not_allowed');
-  assert.equal(upstreamPaths.length, 4);
+  const fence = prefix.replace(/\/source-inventory$/, '/package-candidates/fence');
+  assert.equal((await send(fence, 'POST', JSON.stringify({ schema: 'dharma.repository-candidate-fence/v1' }))).status, 200);
+  assert.equal((await send(fence, 'POST', 'x'.repeat(4097))).status, 400);
+  assert.equal(upstreamPaths.length, 5);
 });

@@ -8,6 +8,7 @@ const AGENT_FABRIC_SOURCE_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent
 const CONTROL_AGENT_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions|sessions\/[0-9a-f-]{36}\/messages)$/i;
 const CONTROL_AGENT_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions(?:\?sessionId=[0-9a-f-]{36})?|sessions\/[0-9a-f-]{36}\/events(?:\?afterSequence=\d+)?)$/i;
 const AGENT_FABRIC_CANDIDATE_RECOVERY_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/repository-agents\/[0-9a-f-]{36}\/package-candidates\?workspaceId=[0-9a-f-]{36}&operationId=sha256%3A[a-f0-9]{64}$/i;
+const AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/repository-agents\/[0-9a-f-]{36}\/package-candidates\/fence$/i;
 const FORWARDED_HEADERS = new Set([
   'content-type', 'idempotency-key', 'x-dharma-correlation-id', 'x-dharma-device-id', 'x-dharma-session-id',
   'x-dharma-message-id', 'x-dharma-timestamp', 'x-dharma-nonce', 'x-dharma-sequence', 'x-dharma-signature',
@@ -30,10 +31,12 @@ export function parseRelayRequest(value: unknown): RelayRequest {
   if (method !== 'GET' && method !== 'POST') throw new Error('route_not_allowed');
   const methodAllowed = method === 'POST'
     ? AGENT_FABRIC_POST_ROUTE.test(input.pathname) || CONTROL_AGENT_POST_ROUTE.test(input.pathname)
+      || AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE.test(input.pathname)
     : AGENT_FABRIC_GET_ROUTE.test(input.pathname) || AGENT_FABRIC_SOURCE_GET_ROUTE.test(input.pathname)
       || AGENT_FABRIC_CANDIDATE_RECOVERY_GET_ROUTE.test(input.pathname) || CONTROL_AGENT_GET_ROUTE.test(input.pathname);
   if (!methodAllowed) throw new Error('route_not_allowed');
-  const maximumBodyBytes = method === 'POST' && /\/repository-agents\/[0-9a-f-]{36}\/package-candidates$/i.test(input.pathname)
+  const maximumBodyBytes = method === 'POST' && AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE.test(input.pathname) ? 4096
+    : method === 'POST' && /\/repository-agents\/[0-9a-f-]{36}\/package-candidates$/i.test(input.pathname)
     ? MAX_REPOSITORY_PACKAGE_CANDIDATE_BODY_BYTES
     : MAX_RELAY_BODY_BYTES;
   if (typeof input.body !== 'string' || Buffer.byteLength(input.body) > maximumBodyBytes) throw new Error('body_too_large');

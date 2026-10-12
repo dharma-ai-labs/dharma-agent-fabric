@@ -77,6 +77,7 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
   workspace: string; transport: Transport; serverPublicKey: KeyObject;
   loadPublishedLocalBaseline: () => Promise<RepositoryPackageSnapshot | null>;
   loadResolution: () => Promise<RepositorySourceResolution | null>;
+  restorationAttempt?: string;
 }) {
   const authorization = await fetchRepositorySourceAuthorization(input.transport, input);
   if (!authorization.policy.automaticValidatedPublication) throw new Error('repository_source_restoration_publication_denied');
@@ -96,7 +97,9 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
   }
   const operationId = repositoryCandidateOperationId({ scope: input, snapshotHash: snapshot.manifest.snapshotHash,
     sourceManifestHash: digest(canonicalize(snapshot.manifest)), consolidation: { mode: 'repository_update',
-      includeApprovedOutputs: true, requireAtlasAssociation: true, expectedLatestSourceFingerprint: retained.sourceFingerprint } });
+      includeApprovedOutputs: true, requireAtlasAssociation: true, expectedLatestSourceFingerprint: retained.sourceFingerprint },
+    restorationAttempt: input.restorationAttempt,
+    restorationContext: { headCandidateId: retained.headCandidateId, priorReleaseId: retained.releaseId } });
   const assertCurrent = async () => {
     retained.assertCurrent();
     const current = await fetchRepositorySourceAuthorization(input.transport, input);
