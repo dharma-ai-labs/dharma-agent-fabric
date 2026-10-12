@@ -79,6 +79,14 @@ test('unadmitted restoration is fenced before checkpoint retirement and a distin
       assert.equal(await readFile(archivePath, 'utf8'), archivedBytes);
       assert.equal(await readRepositoryRestorationAttempt({ outboxRoot, scope }), fenceId);
     }
+    for (const state of ['accepted', 'processing'] as const) {
+      await assert.rejects(adoptRepositoryCandidate({ scope, outboxRoot, sourceManifestHash: `sha256:${'d'.repeat(64)}`,
+        consolidationMode: 'repository_update', candidate: { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31',
+          operationId: `sha256:${'e'.repeat(64)}`, snapshotHash: `sha256:${'f'.repeat(64)}`, state, releaseId: null } }),
+      /fenced restoration requires a terminal canonical candidate before adoption/);
+      assert.equal(await readFile(path, 'utf8'), terminalBytes);
+      assert.equal(await readRepositoryRestorationAttempt({ outboxRoot, scope }), fenceId);
+    }
     admitted = true;
     await assert.rejects(synchronizeRepositoryCandidate(input), /fenced operation requires/);
     const retry = await synchronizeRepositoryCandidate({ ...input, restoration: { ...restoration, attemptId: fenceId } });
@@ -819,6 +827,25 @@ test('reconciled updates pin the latest source in the signed upload and durable 
     const stored = JSON.parse(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'));
     assert.equal(stored.consolidation.expectedLatestSourceFingerprint, parent);
     await assert.rejects(synchronizeRepositoryCandidate({ ...input, initialRepository: true }), /expected source parent/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('ordinary in-flight candidate adoption without a fence retains a pollable target', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-adoption-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+    const candidate = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31',
+      operationId: `sha256:${'e'.repeat(64)}`, snapshotHash: `sha256:${'f'.repeat(64)}`, state: 'accepted' as const, releaseId: null };
+    await adoptRepositoryCandidate({ scope, outboxRoot, candidate, sourceManifestHash: `sha256:${'d'.repeat(64)}`,
+      consolidationMode: 'repository_update' });
+    let polls = 0;
+    const current = await pollRepositoryCandidate({ scope, outboxRoot, transport: { signedGet: async route => {
+      polls++;assert.ok(route.includes(candidate.candidateId));assert.ok(route.includes(encodeURIComponent(candidate.operationId)));
+      return { ok: true, organizationId: scope.organizationId, candidate: { ...candidate, state: 'published',
+        releaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' } };
+    } } });
+    assert.equal(polls, 1);assert.equal(current?.state, 'published');
+    assert.equal(JSON.parse(await readFile(join(outboxRoot, `${ids.workspaceId}.json`), 'utf8')).state, 'published');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

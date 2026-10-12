@@ -600,6 +600,8 @@ export async function adoptRepositoryCandidate(input: {
   const prior = await readOutbox(outboxPath(input.outboxRoot, scope), scope);
   if (prior?.state === 'fenced') {
     requireFact(prior.operationId !== candidate.operationId, 'A fenced operation cannot be adopted.');
+    requireFact(['published', 'blocked'].includes(candidate.state),
+      'A fenced restoration requires a terminal canonical candidate before adoption. Retry after canonical publication completes.');
     await archiveFencedCheckpoint(input.outboxRoot, prior);
     // Registry adoption is not a new restoration. Keep its terminal retry
     // identity active until a restoration explicitly carries this fence ID.
