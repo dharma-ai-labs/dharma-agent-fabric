@@ -6230,7 +6230,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       ? sha256(canonicalize(initialSnapshot.manifest)) : canonicalPackage.sourceManifestHash,
     releaseId: candidate.releaseId,
     generation: candidate.state === 'published' ? Math.max(1, canonicalPackage.generation) : canonicalPackage.generation,
-    consolidationMode: canonicalPackage.generation === 0 ? 'initial_repository'
+    consolidationMode: restorationRegistryBaseline ? 'repository_update' : canonicalPackage.generation === 0 ? 'initial_repository'
       : refreshPolicy ? 'repository_update' : canonicalPackage.consolidationMode,
     sourcePolicyGenerationId: submitPackage ? sourceAuthorization.generationId : canonicalPackage.sourcePolicyGenerationId,
     localBaselineSnapshotHash: initialSnapshot.manifest.snapshotHash,

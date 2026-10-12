@@ -496,7 +496,7 @@ test('same-operation onboarding adopts retained restoration baselines and marks 
     && node.name && helperNames.includes(node.name.text)).map(node => node.getText(source)).join('\n')
     + `\nasync function saveAdoption() { ${tail}\nreturn registered; }`,
   { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS } }).outputText;
-  for (const state of ['published', 'blocked'] as const) {
+  for (const generation of [0, 18]) for (const state of ['published', 'blocked'] as const) {
     const root = await mkdtemp(join(tmpdir(), 'dharma-onboarding-restoration-reconcile-'));
     try {
       const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
@@ -516,7 +516,7 @@ test('same-operation onboarding adopts retained restoration baselines and marks 
             releaseId: state === 'published' ? '97f61652-a5eb-46e4-930c-9478cd4a9c31' : null } };
         } } };
       const receipt = await synchronizeRepositoryCandidate({ ...input, restoration });
-      const original = { ...scope, repositoryPackage: { ...receipt, generation: 18,
+      const original = { ...scope, repositoryPackage: { ...receipt, generation,
         sourceManifestHash: sha256(canonicalize(inventory.manifest)), consolidationMode: 'repository_update',
         sourcePolicyGenerationId: inventory.manifest.sourceAuthorization!.generationId } };
       const sibling = { workspaceId: 'sibling', marker: 'preserve' };
