@@ -233,6 +233,9 @@ function requiredArtifactReferences(task: TaskEnvelope, worktree?: string): stri
     const portable = artifact.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().normalize('NFC');
     const previous = portableNames.get(portable);
     if (previous !== undefined && previous !== artifact) throw new Error('required_artifact_invalid');
+    if ([...portableNames.keys()].some(existing => portable.startsWith(existing + '/') || existing.startsWith(portable + '/'))) {
+      throw new Error('required_artifact_invalid');
+    }
     portableNames.set(portable, artifact);
     if (!pathWithinPolicy(artifact, task.authority.readPaths)) {
       throw new Error('required_artifact_unauthorized');

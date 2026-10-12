@@ -112,7 +112,7 @@ test('required artifacts reject ambiguous or unauthorized references before prov
       const fixture = await requiredArtifactFixture(child, [artifact]);
       let calls = 0;
       await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
-        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_(invalid|unauthorized)/);
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_(invalid|unauthorized)|Task failed schema validation/);
       assert.equal(calls, 0);
     });
   }
@@ -407,6 +407,27 @@ test('required artifact review v6: acceptance count reserves capacity for a dura
   await assert.rejects(executeTask({ ...fixture.input, task: oversized,
     providerExecutor: async () => { calls++; return fixture.providerResult; } }), /schema validation|receipt capacity/);
   assert.equal(calls, 0);
+});
+
+test('required artifact review v8: signed schemas reject empty artifact references', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['']);
+  const task = fixture.signed({ target: { ...fixture.unsigned.target, endpointId: randomUUID() } });
+  assert.equal(validateTaskEnvelopeContract(task).ok, false);
+  assert.equal(validateTaskActionContract(canonicalTaskActionForTask(task, randomUUID())).ok, false);
+});
+
+test('required artifact review v8: impossible ancestor file requirements fail before effects', async (t) => {
+  for (const artifacts of [['reports/result', 'reports/result/details.json'],
+    ['reports/result/details.json', 'reports/result'], ['reports/RESULT', 'reports/result/details.json'],
+    ['reports/\u00e9', 'reports/e\u0301/details.json']]) {
+    await t.test(JSON.stringify(artifacts), async (child) => {
+      const fixture = await requiredArtifactFixture(child, artifacts);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
 });
 
 test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
