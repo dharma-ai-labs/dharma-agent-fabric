@@ -5910,6 +5910,14 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     }
     // Network head/authority waits can outlive the preceding local scan.
     await collected.assertLocalCurrent();
+    // These are bounded observations, not a filesystem/server transaction.
+    // Later edits require a new plan; never replace the immutable plan bytes.
+    await collected.assertHeadCurrent();
+    const admissionAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+    if (canonicalize(admissionAuthorization) !== canonicalize(collected.snapshot.manifest.sourceAuthorization)) {
+      throw new Error('repository_source_restoration_policy_changed');
+    }
+    await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
     if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
       throw new Error('repository_source_restoration_requires_stopped_relay');
     }

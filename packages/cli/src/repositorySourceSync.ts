@@ -63,7 +63,8 @@ export async function recoverPublishedLocalSourceBaseline(input: BoundRepository
   if (record.state !== 'published' || record.pendingLocalOperationId) return null;
   // New receipts explicitly retain the pre-merge local snapshot. A merged
   // candidate in the same CAS does not prove its remote files existed locally.
-  const hash = record.publishedLocalSnapshotHash ?? record.snapshotHash;
+  const hash = Object.hasOwn(record, 'publishedLocalSnapshotHash')
+    ? record.publishedLocalSnapshotHash : record.snapshotHash;
   if (!hash) return null;
   if (!HASH.test(hash)) throw new Error('Published repository source baseline hash is invalid.');
   let snapshot: RepositoryPackageSnapshot;

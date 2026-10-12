@@ -10,7 +10,7 @@ import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, rebuildRepos
   writeRepositoryPackageSnapshot } from './repositoryPackage.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
-import { planRepositorySourceResolution, type RepositorySourceResolution } from './repositorySourceReconciliation.js';
+import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot, type RepositorySourceResolution } from './repositorySourceReconciliation.js';
 import { activateRepositorySourceResolution, readActiveRepositorySourceResolution,
   saveRepositorySourceResolutionPlan } from './repositorySourceResolutionStore.js';
 
@@ -341,6 +341,29 @@ test('explicit published local baseline is checked without fallback to a merged 
   await assert.rejects(recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace,
     workspaceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     record: { ...record, publishedLocalSnapshotHash: snapshot.manifest.snapshotHash } }), /scope/);
+});
+
+test('explicitly absent published local baseline never adopts remote-only candidate files as local', async t => {
+  const f = await fixture(t), authorization = await fetchRepositorySourceAuthorization(f.input.transport, scope);
+  const local = await inventoryRepositoryPackage({ ...scope, workspace: f.input.workspace, sourceAuthorization: authorization });
+  const bytes = Buffer.from('# Remote-only approved report\n');
+  const file = { path: 'output/approved/remote-only.md', role: 'approved_output' as const,
+    sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, sizeBytes: bytes.length };
+  const merged = rebuildRepositoryPackageSnapshot(local, { files: [...local.manifest.files, file],
+    skills: local.manifest.skills, blobs: [...local.blobs, { sha256: file.sha256, contentBase64: bytes.toString('base64') }] });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot: local, candidateOnly: true });
+  await writeRepositoryPackageSnapshot({ workspace: f.input.workspace, snapshot: merged, candidateOnly: true });
+  const record = { state: 'published', snapshotHash: merged.manifest.snapshotHash,
+    publishedLocalSnapshotHash: null, localBaselineSnapshotHash: local.manifest.snapshotHash };
+  const recovered = await recoverPublishedLocalSourceBaseline({ ...scope, workspace: f.input.workspace, record });
+  assert.equal(recovered, null);
+  const baseline = repositorySourceComparisonBaseline(record, recovered);
+  assert.equal(baseline, local.manifest.snapshotHash);
+  const next = reconcileRepositorySourceSnapshot({ local,
+    previousLocal: await readRepositoryPackageSnapshot(f.input.workspace, baseline!), published: {
+      files: merged.manifest.files.filter(value => value.role !== 'knowledge'), skills: merged.manifest.skills,
+      blobs: merged.blobs, sourceFingerprint: merged.manifest.sourceFingerprint! } });
+  assert.ok(next.manifest.files.some(value => value.path === file.path));
 });
 test('watcher resumes from an integrity-checked persisted source fingerprint', () => {
   const watcher = new RepositorySourceWatcher(1000);
