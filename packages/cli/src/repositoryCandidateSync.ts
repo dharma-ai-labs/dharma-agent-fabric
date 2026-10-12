@@ -284,7 +284,7 @@ export async function synchronizeRepositoryCandidate(input: {
 }): Promise<RepositoryCandidateReceipt> {
   const scope = checkedScope(input.scope);
   const serialized = serializeRepositoryPackageSnapshot(input.snapshot);
-  requireFact(Buffer.byteLength(serialized) <= 8_388_608, 'Repository candidate exceeds its upload byte limit.');
+  requireFact(Buffer.byteLength(serialized) <= 4_194_304, 'Repository candidate exceeds its upload byte limit.');
   requireFact(input.snapshot.schema === 'dharma.repository-package-snapshot/v1'
     && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input.snapshot.capturedAt)
     && Number.isFinite(Date.parse(input.snapshot.capturedAt))
@@ -354,9 +354,11 @@ export async function synchronizeRepositoryCandidate(input: {
     ...(restoration?.attemptId ? { restorationAttempt: restoration.attemptId } : {}),
     ...(restorationContext(restoration) ? { restorationContext: restorationContext(restoration) } : {}),
   };
+  // The relay caps the complete encoded request, not only raw repository bytes.
+  requireFact(Buffer.byteLength(canonicalize(body)) <= 4_194_304, 'Repository candidate exceeds its upload byte limit.');
   requireFact((await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
-    'https://schemas.dharma-ai.io/repository-candidate-upload/v1', body)).ok
-    && Buffer.byteLength(canonicalize(body)) <= 8_388_608, 'Repository candidate upload contract is invalid.');
+    'https://schemas.dharma-ai.io/repository-candidate-upload/v1', body)).ok,
+  'Repository candidate upload contract is invalid.');
   await writeOutbox(path, pending);
   const route = `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates`;
   let accepted: RepositoryCandidateReceipt;
@@ -467,7 +469,8 @@ export async function fenceRepositoryRestorationUpload(input: {
     && Object.hasOwn(response, 'candidate') && Object.hasOwn(response, 'fence')
     && (response.candidate === null) !== (response.fence === null), 'Repository restoration fence response is invalid.');
   const fence = response.fence === null ? null : checkedFence(response.fence, scope, pending.operationId,
-    pending.snapshotHash, pending.sourceManifestHash, input.policyGenerationId);
+    pending.snapshotHash, pending.sourceManifestHash,
+    pending.state === 'fenced' ? pending.fence!.policyGenerationId : input.policyGenerationId);
   requireFact(!fence || (await validateContract(schemaDirectory,
     'https://schemas.dharma-ai.io/repository-candidate-fence/v1#/$defs/fence', fence)).ok,
   'Repository restoration fence receipt schema is invalid.');

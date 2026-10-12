@@ -204,16 +204,79 @@ test('durable restoration checkpoint recovers a terminal receipt by exact scoped
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
-async function snapshot(root: string) {
+test('review regression: encoded candidate respects the relay body limit before checkpoint or transport', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-body-limit-'));
+  try {
+    const outboxRoot = join(root, 'outbox');let posts = 0;
+    const inventory = await snapshot(root, 13);
+    const serializedBytes = Buffer.byteLength(canonicalize(inventory));
+    assert.ok(serializedBytes > 4_194_304 && serializedBytes < 8_388_608);
+    const transport = { signedGet: async () => ({}), signedPost: async () => {
+      posts++;throw new Error('oversized upload reached transport');
+    } };
+    await assert.rejects(synchronizeRepositoryCandidate({ transport, outboxRoot,
+      scope: { organizationId: 'org_fixture', ...ids }, snapshot: inventory, initialRepository: true }), /upload byte limit/);
+    const bytesPerFile = 262_000 - Math.ceil((serializedBytes - 4_194_304 + 100) * 3 / 4 / 13);
+    const nearLimit = await snapshot(root, 13, bytesPerFile);
+    const remaining = 4_194_304 - Buffer.byteLength(canonicalize(nearLimit));
+    assert.ok(remaining > 0 && remaining < 200, `Snapshot boundary margin: ${remaining}`);
+    await assert.rejects(synchronizeRepositoryCandidate({ transport, outboxRoot,
+      scope: { organizationId: 'org_fixture', ...ids }, snapshot: nearLimit, initialRepository: true }), /upload byte limit/);
+    assert.equal(posts, 0);
+    await assert.rejects(readFile(join(outboxRoot, `${ids.workspaceId}.json`)), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('review regression: checkpointed fence replay retains its admitted generation after policy rollover', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-fence-policy-rollover-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+    const generation = '67f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const currentGeneration = '97f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const fenceId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';let tamper = false;
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    const transport = { signedGet: async () => ({}), signedPost: async (route: string, raw: unknown) => {
+      if (!route.endsWith('/fence')) throw new Error('lost_upload');
+      const body = raw as Record<string, unknown>;
+      return { ok: true, organizationId: scope.organizationId, candidate: null, fence: { fenceId,
+        operationId: body.operationId, ...ids, sourceSnapshotHash: body.sourceSnapshotHash,
+        sourceManifestHash: body.sourceManifestHash, policyGenerationId: tamper ? currentGeneration : generation,
+        state: 'fenced', createdAt: '2030-01-02T00:00:00.000Z' } };
+    } };
+    await assert.rejects(synchronizeRepositoryCandidate({ scope, outboxRoot, transport, snapshot: await snapshot(root),
+      initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration }), /lost_upload/);
+    const input = { scope, outboxRoot, transport, planHash: restoration.planHash,
+      policyGenerationId: generation, expectedPreviousOperationId: null };
+    const fenced = await fenceRepositoryRestorationUpload(input);
+    await checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced });
+    const path = join(outboxRoot, `${ids.workspaceId}.json`);
+    const archivePath = join(outboxRoot, 'fenced', `${ids.workspaceId}.${fenceId}.json`);
+    const before = await readFile(path, 'utf8'), archiveBefore = await readFile(archivePath, 'utf8');
+    const replay = await fenceRepositoryRestorationUpload({ ...input, policyGenerationId: currentGeneration });
+    assert.deepEqual(replay.fence, fenced.fence);
+    await checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced: replay });
+    tamper = true;
+    await assert.rejects(fenceRepositoryRestorationUpload({ ...input, policyGenerationId: currentGeneration }), /fence/);
+    assert.equal(await readFile(path, 'utf8'), before);
+    assert.equal(await readFile(archivePath, 'utf8'), archiveBefore);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+async function snapshot(root: string, largeFiles = 0, largeFileBytes = 262_000) {
   const workspace = join(root, 'repository');
   await mkdir(join(workspace, '.agents/skills/dharma-agent-fabric'), { recursive: true });
   await writeFile(join(workspace, '.agents/skills/dharma-agent-fabric/.dharma-agent-fabric.json'),
     JSON.stringify({ managedBy: 'dharma-agent-fabric', workspaceId: ids.workspaceId }));
   await writeFile(join(workspace, 'README.md'), '# Governed repository\n');
+  const largePaths = Array.from({ length: largeFiles }, (_, index) => `source-${index}.txt`);
+  for (const [index, path] of largePaths.entries()) {
+    await writeFile(join(workspace, path), `${index}:` + 'x'.repeat(largeFileBytes));
+  }
   const operation = { action: 'authorize', confirmed: true,
     requestId: '5ff2ee1b-6cb3-459e-a977-ea99c757bf30', repositoryBindingId: ids.repositoryBindingId,
     expectedRevision: 0, allowedContentClasses: ['approved_outputs', 'repository_content', 'repository_skills'],
-    approvedRepositoryPaths: ['README.md'], approvedOutputFolders: [], automaticValidatedPublication: true,
+    approvedRepositoryPaths: ['README.md', ...largePaths].sort(), approvedOutputFolders: [], automaticValidatedPublication: true,
     retentionDays: 30, maximumFileBytes: 262144, maximumSnapshotBytes: 4194304,
     maximumDailyUploadBytes: 1073741824, expiresAt: '2031-01-01T00:00:00.000Z' };
   const generationId = '67f61652-a5eb-46e4-930c-9478cd4a9c31';
