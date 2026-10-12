@@ -8,23 +8,25 @@ import { approvedPackages, assertSourceSnapshot, assertProvenance, publishBounde
 
 const head = 'a'.repeat(40);
 
-test('current scoped restoration is admitted by the bounded publisher delta', () => {
+test('reviewed restoration snapshot is admitted without extending current publication authority', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
   const baseline = '2d64a4957460b49f3aadfda86999d283b0234f90';
-  const current = git('rev-parse', 'HEAD');
+  const reviewed = '3ce9cb72351bde88a5ad9e0e68dada5d843bb656';
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'a8ea567ca7e06ce7ac43e633c1bfb60e21e1c79a');
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
-  const snapshot = {head: current, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
-    dirty: '', lifecycleLauncher: git('ls-tree', 'HEAD', 'packages/lifecycle-adapter/bin/run.mjs'),
-    changed: git('diff', '--name-only', baseline, 'HEAD').split('\n').filter(Boolean), untracked: [],
+  const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
+    dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
+    changed: git('diff', '--name-only', baseline, reviewed).split('\n').filter(Boolean), untracked: [],
     baselineManifest: JSON.parse(git('show', `${baseline}:package.json`)),
-    manifest: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))};
-  assert.doesNotThrow(() => assertSourceSnapshot(current, snapshot));
-  assert.doesNotThrow(() => assertSourceSnapshot(current, { ...snapshot, changed: [...snapshot.changed,
+    manifest: JSON.parse(git('show', `${reviewed}:package.json`))};
+  assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
+  assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [...snapshot.changed,
     'apps/relay-gateway/src/protocol.ts', 'apps/relay-gateway/src/protocol.test.ts',
     'packages/cli/src/repositoryCandidateSync.test.ts'] }));
-  for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml']) {
-    assert.throws(() => assertSourceSnapshot(current, {...snapshot, changed: [...snapshot.changed, forbidden]}),
+  for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml',
+    'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md']) {
+    assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, changed: [...snapshot.changed, forbidden]}),
       /unreviewed product source delta/);
   }
 });

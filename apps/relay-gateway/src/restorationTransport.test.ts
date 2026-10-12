@@ -50,11 +50,14 @@ test('actual gateway forwards signed restoration metadata and blobs but rejects 
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');await terminal; });
   await new Promise<void>((done, reject) => {
     let output = '';
-    const timer = setTimeout(() => reject(new Error(`synthetic_gateway_start_timeout: ${JSON.stringify(output.slice(0, 512))}`)), 10000);
+    let diagnostic = '';
+    child.stderr.on('data', bytes => { diagnostic = (diagnostic + String(bytes)).slice(0, 2048); });
+    const details = () => JSON.stringify({ stdout: output.slice(0, 512), stderr: diagnostic.slice(0, 512) });
+    const timer = setTimeout(() => reject(new Error(`synthetic_gateway_start_timeout: ${details()}`)), 10000);
     child.once('error', error => { clearTimeout(timer);reject(error); });
-    child.once('exit', () => { clearTimeout(timer);reject(new Error('synthetic_gateway_start_failed')); });
+    child.once('exit', (code, signal) => { clearTimeout(timer);reject(new Error(`synthetic_gateway_start_failed: ${JSON.stringify({ code, signal })} ${details()}`)); });
     child.stdout.on('data', bytes => {
-      output += String(bytes);
+      output = (output + String(bytes)).slice(0, 2048);
       if (output.includes(`"port":${relayPort}`)) { clearTimeout(timer);done(); }
     });
   });

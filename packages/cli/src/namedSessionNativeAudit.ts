@@ -25,6 +25,19 @@ export interface NamedSessionNativeAuditEvent {
   reportedTapSummary: {tests: number; pass: number; fail: number; cancelled: number; skipped: number} | null;
 }
 
+export type NamedSessionNativeAuditResult = Pick<LocalProviderSessionBinding,
+  'organizationId' | 'repositoryBindingId' | 'workspaceId' | 'endpointId' | 'membershipId' | 'deviceId' | 'bindingId' | 'provider'> & {
+  ok: true; schema: 'dharma.named-session-native-audit/v1'; sessionId: string;
+  workId: string; receiptHash: string; workState: string;
+  captureWorkOutcome: CodexLocalWorkCapture['workOutcome'];
+  captureId: string; captureHash: string; eventsHash: string; startedAt: string; closedAt: string; observedAt: string;
+  providerTurnId: CodexLocalWorkCapture['providerTurnId']; providerTurnState: CodexLocalWorkCapture['providerTurnState'];
+  coverage: CodexLocalWorkCapture['coverage']; droppedEvents: number; qualifyingItems: number;
+  captureLimitations: Array<typeof captureLimitations[number]>; unrecognizedCaptureLimitationCount: number;
+  truncated: boolean; rawContentExported: false; acceptedLearningObservation: false;
+  limitations: string[]; events: NamedSessionNativeAuditEvent[];
+};
+
 function reportedCommandFacts(command: unknown, output: unknown): Pick<NamedSessionNativeAuditEvent,
   'commandShape' | 'reportedNodeVersion' | 'reportedTapSummary'> {
   const facts: Pick<NamedSessionNativeAuditEvent, 'commandShape' | 'reportedNodeVersion' | 'reportedTapSummary'> = {
@@ -57,7 +70,7 @@ export async function readNamedSessionNativeAudit(input: {
   vault: Pick<LocalVault | ScopedLocalVault, 'getBlob'>;
   binding: LocalProviderSessionBinding;
   work: {workId: string; state: string; receiptHash: string} | null;
-}) {
+}): Promise<NamedSessionNativeAuditResult> {
   const {vault, binding, work} = input;
   if (!work || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(work.workId)
     || !['completed', 'failed'].includes(work.state) || !validHash(work.receiptHash)) {

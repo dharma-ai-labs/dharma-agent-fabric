@@ -316,6 +316,7 @@
       "properties": {
         "commands": {
           "type": "array",
+          "maxItems": 98,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -331,8 +332,11 @@
         },
         "requiredArtifacts": {
           "type": "array",
+          "maxItems": 100,
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
           }
         },
         "externalEffectReceiptCommandId": {

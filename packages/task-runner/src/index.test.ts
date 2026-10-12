@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import {
   actionDecisionDigest,
   signCanonicalObject,
+  validateTaskEnvelopeContract,
+  validateTaskActionContract,
   type ActionDecisionEnvelope,
   type ActionDecisionReceipt,
 } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -23,6 +26,498 @@ import {
   verifyTaskEnvelope,
   type TaskEnvelope,
 } from './index.js';
+
+async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string[]) {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-required-artifact-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = resolve(root, 'workspace');
+  await mkdir(workspace);
+  for (const argv of [['init', '-q'], ['config', 'user.email', 'test@dharma.ai'],
+    ['config', 'user.name', 'Artifact Fixture'], ['commit', '--allow-empty', '-qm', 'initial']]) {
+    assert.equal(spawnSync('git', argv, { cwd: workspace }).status, 0);
+  }
+  const policy: OrganizationPolicy = {
+    schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
+    evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1,
+      maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
+    tasks: { defaultNetwork: 'deny', defaultGit: 'task_branch', allowedCommands: {}, writePaths: ['reports/**'],
+      requireLocalConfirmationFor: [] },
+    skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
+  };
+  const unsigned = {
+    schema: 'dharma.task/v1' as const, taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace',
+    taskType: 'external_request' as const, target: { deviceId: 'device', provider: 'codex' as const },
+    skillBundle: null, instructions: 'Produce the signed required artifacts.', requiredSkills: [],
+    authority: { readPaths: ['reports/**'], writePaths: ['reports/**'], commands: [] as { commandId: string }[],
+      network: 'deny', git: 'task_branch' as const },
+    execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+    acceptance: { commands: [] as { commandId: string }[], requiredArtifacts },
+    budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+    createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: randomUUID(),
+  };
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const signed = (overrides: Partial<Omit<TaskEnvelope, 'signature'>> = {}) => {
+    const task = { ...unsigned, ...overrides };
+    return { ...task, signature: signCanonicalObject(task, privateKey) } as TaskEnvelope;
+  };
+  const providerResult = {
+    provider: 'codex' as const, exitCode: 0, signal: null, timedOut: false, stdout: 'synthetic completion', stderr: '',
+    stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+  };
+  return { root, workspace, policy, unsigned, signed, providerResult, publicKey,
+    input: { policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey,
+      receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')) } };
+}
+
+test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
+  for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {
+    await t.test(stream, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const originalSpawn = childProcess.spawn;
+      const body = stream === 'unterminated' ? 'reports/partial'
+        : 'reports/a\0'.repeat(99_999) + 'reports/zzextra\0';
+      const outputPath = resolve(fixture.root, 'synthetic-git-output');
+      await writeFile(outputPath, body);
+      let intercepted = 0;
+      const patch = child.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
+        if (command === 'git' && (stream === 'untracked-overflow' ? argv[0] === 'ls-files' : argv[0] === 'diff')) {
+          intercepted++;
+          return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], options);
+        }
+        return originalSpawn(command, argv, options);
+      });
+      syncBuiltinESMExports();
+      try {
+        const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+          providerExecutor: async ({ workspace }) => {
+            if (stream !== 'untracked-overflow') await writeFile(resolve(workspace, 'outside.txt'), 'fixture');
+            return fixture.providerResult;
+          } });
+        assert.equal(intercepted, 1);
+        assert.equal(receipt.status, 'failed');
+        assert.match(receipt.commandResults.at(-1)?.stderr || '', /output.*limit|Git path output was incomplete/);
+      } finally { patch.mock.restore(); syncBuiltinESMExports(); }
+    });
+  }
+});
+
+test('required artifact review v10: ignored outputs require signed write authority', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  await writeFile(resolve(fixture.workspace, '.gitignore'), 'reports/result.json\n');
+  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace }).status, 0);
+  fixture.unsigned.authority.writePaths = ['reports/allowed/**'];
+  let calls = 0;
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      calls++;
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/result.json'), 'forbidden ignored output');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'failed');
+  assert.equal(calls, 0);
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_missing/);
+});
+
+test('required artifact review v10: existing read-only artifacts remain unchanged through acceptance', async (t) => {
+  for (const mutate of [false, true]) {
+    await t.test(mutate ? 'changed by acceptance' : 'unchanged', async (child) => {
+      const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
+      await mkdir(resolve(fixture.workspace, 'reports'));
+      await writeFile(resolve(fixture.workspace, 'reports/result.json'), 'private-read-only-sentinel');
+      assert.equal(spawnSync('git', ['add', 'reports/result.json'], { cwd: fixture.workspace }).status, 0);
+      assert.equal(spawnSync('git', ['commit', '-qm', 'existing output'], { cwd: fixture.workspace }).status, 0);
+      fixture.unsigned.authority.writePaths = ['reports/allowed/**'];
+      if (mutate) {
+        fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e',
+          'require("node:fs").writeFileSync("reports/result.json","unauthorized-replacement");'], timeoutSeconds: 5 };
+        fixture.unsigned.authority.commands.push({ commandId: 'verify' });
+        fixture.unsigned.acceptance.commands.push({ commandId: 'verify' });
+      }
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+      assert.equal(receipt.status, mutate ? 'failed' : 'completed');
+      if (mutate) assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_write_unauthorized/);
+      assert.equal(JSON.stringify(receipt).includes('private-read-only-sentinel'), false);
+      assert.equal(JSON.stringify(receipt).includes('unauthorized-replacement'), false);
+    });
+  }
+});
+
+test('required artifact review v10: ignored write-authorized outputs remain supported', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  await writeFile(resolve(fixture.workspace, '.gitignore'), 'reports/result.json\n');
+  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace }).status, 0);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async ({ workspace }) => {
+    await mkdir(resolve(workspace, 'reports'));
+    await writeFile(resolve(workspace, 'reports/result.json'), '{}');
+    return fixture.providerResult;
+  } });
+  assert.equal(receipt.status, 'completed');
+});
+
+test('required artifacts prevent successful completion when the signed output is missing', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.commandResults[0]?.commandId, 'provider.codex');
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_missing/);
+});
+
+test('required artifacts accept regular files, including empty files, without exposing contents', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json', 'reports/empty.txt']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/result.json'), 'private fixture output');
+      await writeFile(resolve(workspace, 'reports/empty.txt'), '');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed');
+  assert.equal(JSON.stringify(receipt).includes('private fixture output'), false);
+  const durable = await readFile(resolve(fixture.root, 'receipts', `${receipt.taskId}.json`), 'utf8');
+  assert.equal(durable.includes('private fixture output'), false);
+});
+
+test('required artifacts fail if any required file is missing', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/present.json', 'reports/missing.json']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/present.json'), '{}');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_missing/);
+});
+
+test('required artifacts reject ambiguous or unauthorized references before provider execution', async (t) => {
+  for (const artifact of ['', '../outside.txt', '/tmp/outside.txt', 'C:/outside.txt', 'reports\\result.json',
+    'reports/../outside.txt', 'reports/./result.json', 'reports//result.json', 'reports/result:stream',
+    'reports/NUL.txt', 'reports/result.', 'reports/result ', 'reports/*.json', 'outside/result.json']) {
+    await t.test(JSON.stringify(artifact), async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_(invalid|unauthorized)|Task failed schema validation/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifacts check the final state after registered acceptance commands', async (t) => {
+  for (const operation of ['create', 'remove'] as const) {
+    await t.test(operation, async (child) => {
+      const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
+      const script = operation === 'create'
+        ? 'const fs=require("node:fs");fs.mkdirSync("reports",{recursive:true});fs.writeFileSync("reports/result.json","{}");'
+        : 'require("node:fs").unlinkSync("reports/result.json");';
+      fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e', script], timeoutSeconds: 5 };
+      fixture.unsigned.authority.commands.push({ commandId: 'verify' });
+      fixture.unsigned.acceptance.commands.push({ commandId: 'verify' });
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          if (operation === 'remove') {
+            await mkdir(resolve(workspace, 'reports'));
+            await writeFile(resolve(workspace, 'reports/result.json'), '{}');
+          }
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.commandResults[1]?.commandId, 'verify');
+      assert.equal(receipt.commandResults[1]?.exitCode, 0);
+      assert.equal(receipt.status, operation === 'create' ? 'completed' : 'failed');
+      if (operation === 'remove') assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_missing/);
+    });
+  }
+});
+
+test('required artifacts reject directories and hard-linked files', async (t) => {
+  for (const kind of ['directory', 'hardlink'] as const) {
+    await t.test(kind, async (child) => {
+      const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
+      const outside = resolve(fixture.root, 'outside.txt');
+      await writeFile(outside, 'outside-content-sentinel');
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await mkdir(resolve(workspace, 'reports'));
+          if (kind === 'directory') await mkdir(resolve(workspace, 'reports/result.json'));
+          else await link(outside, resolve(workspace, 'reports/result.json'));
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, 'failed');
+      assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_(not_file|unsafe)/);
+      assert.equal(JSON.stringify(receipt).includes('outside-content-sentinel'), false);
+      assert.equal(await readFile(outside, 'utf8'), 'outside-content-sentinel');
+    });
+  }
+});
+
+test('required artifacts reject a linked parent directory without disclosing the target', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/linked/result.json']);
+  const outside = resolve(fixture.root, 'outside');
+  await mkdir(outside);
+  await writeFile(resolve(outside, 'result.json'), 'outside-content-sentinel');
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      await mkdir(resolve(workspace, 'reports'));
+      await symlink(outside, resolve(workspace, 'reports/linked'), 'junction');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_unsafe/);
+  assert.equal(JSON.stringify(receipt).includes('outside-content-sentinel'), false);
+  assert.equal(JSON.stringify(receipt).includes(outside), false);
+});
+
+test('required artifacts reject unreadable files', { skip: process.platform === 'win32' }, async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/result.json'), '{}');
+      await chmod(resolve(workspace, 'reports/result.json'), 0o000);
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_unreadable/);
+});
+
+test('required artifacts preserve provider failure and cancelled status', async (t) => {
+  for (const kind of ['provider-failure', 'cancelled'] as const) {
+    await t.test(kind, async (child) => {
+      const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
+      const controller = new AbortController();
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), signal: controller.signal,
+        providerExecutor: async () => {
+          if (kind === 'cancelled') controller.abort();
+          return { ...fixture.providerResult, exitCode: kind === 'provider-failure' ? 1 : 0 };
+        } });
+      assert.equal(receipt.status, kind === 'cancelled' ? 'cancelled' : 'failed');
+      assert.equal(receipt.commandResults[0]?.exitCode, kind === 'provider-failure' ? 1 : 0);
+    });
+  }
+});
+
+test('required artifacts keep failed receipts durable and suppress duplicate execution', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const task = fixture.signed();
+  let calls = 0;
+  const input = { ...fixture.input, task, providerExecutor: async () => { calls++; return fixture.providerResult; } };
+  const first = await executeTask(input);
+  const duplicate = await executeTask(input);
+  assert.equal(first.status, 'failed');
+  assert.equal(duplicate.status, 'failed');
+  assert.equal(calls, 1);
+});
+
+test('required artifacts cannot emit an executed acknowledgement after missing output', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const decisionKeys = generateKeyPairSync('ed25519');
+  const base = { ...fixture.unsigned, target: { ...fixture.unsigned.target, endpointId: randomUUID() },
+    requiredCapabilities: ['action_decision_receipts_v1'] as const };
+  const actionDecision = embedDecision(base, 'release', decisionKeys.privateKey, new Date());
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed({ ...base, actionDecision }),
+    actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
+    providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.status, 'failed');
+  assert.equal(receipt.actionAcknowledgement?.disposition, 'unknown');
+});
+
+test('required artifact review: signed output paths reach the provider without user instruction duplication', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace, instructions }) => {
+      const matched = instructions.match(/<dharma_required_artifacts>\n([\s\S]*?)\n<\/dharma_required_artifacts>/);
+      assert.ok(matched, 'provider must receive the separately signed artifact list');
+      const outputs = JSON.parse(matched[1]!);
+      assert.deepEqual(outputs, ['reports/result.json']);
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, outputs[0]!), '{}');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed');
+});
+
+test('required artifact review: superscript Windows device aliases are rejected before provider execution', async (t) => {
+  for (const artifact of ['reports/COM\u00b9', 'reports/COM\u00b2.json', 'reports/COM\u00b3',
+    'reports/LPT\u00b9', 'reports/LPT\u00b2.txt', 'reports/lpt\u00b3']) {
+    await t.test(artifact, async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid|Task failed schema validation/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review: portable case and normalization collisions are rejected before execution', async (t) => {
+  for (const artifacts of [['reports/A.json', 'reports/a.json'], ['reports/Result.json', 'Reports/result.json'],
+    ['reports/\u00e9.json', 'reports/e\u0301.json']]) {
+    await t.test(JSON.stringify(artifacts), async (child) => {
+      const fixture = await requiredArtifactFixture(child, artifacts);
+      fixture.unsigned.authority.readPaths = ['.'];
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review: unusable component and total path lengths are rejected before execution', async (t) => {
+  for (const artifact of ['reports/' + 'x'.repeat(256), 'reports/' + '\u00e9'.repeat(128),
+    'reports/' + Array(25).fill('x'.repeat(200)).join('/')]) {
+    await t.test('UTF8 bytes ' + Buffer.byteLength(artifact), async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid|Task failed schema validation/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review v3: console aliases and lone surrogates fail before provider execution', async (t) => {
+  for (const artifact of ['reports/CONIN$', 'reports/conout$', 'reports/ConIn$.txt', 'reports/CONOUT$.json',
+    'reports/\ud800', 'reports/\ud801', 'reports/\udc00', 'reports/x\udfff.json']) {
+    await t.test(JSON.stringify(artifact), async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review v3: metadata does not consume the schema instruction allowance', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const instructions = 'x'.repeat(20_000);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed({ instructions }),
+    providerExecutor: async ({ workspace, instructions: formatted }) => {
+      assert.ok(formatted.startsWith(instructions + '\n'));
+      assert.match(formatted, /reports\/result.json/);
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/result.json'), '{}');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed');
+});
+
+test('required artifact review v3: full artifact list and paired Unicode retain bounded instructions', async (t) => {
+  const artifacts = Array.from({ length: 100 }, (_, index) => `reports/${index}-${'x'.repeat(90)}-\ud83d\ude00.json`);
+  const fixture = await requiredArtifactFixture(t, artifacts);
+  const formatted = providerInstructionsForTask(fixture.signed({ instructions: 'x'.repeat(20_000) }));
+  const matched = formatted.match(/<dharma_required_artifacts>\n([\s\S]*?)\n<\/dharma_required_artifacts>/);
+  assert.ok(matched);
+  assert.deepEqual(JSON.parse(matched[1]!), artifacts);
+  assert.ok(formatted.length < 276_001);
+  assert.throws(() => providerInstructionsForTask(fixture.signed({ instructions: 'x'.repeat(20_001) })),
+    /Provider instructions exceed the execution limit/);
+});
+
+test('required artifact review v3: raw artifact count is bounded before metadata formatting', async (t) => {
+  const artifacts = Array.from({ length: 10_000 }, (_, index) => `reports/${index}-${'x'.repeat(30)}.json`);
+  const fixture = await requiredArtifactFixture(t, artifacts);
+  assert.throws(() => providerInstructionsForTask(fixture.signed()), /required_artifact_invalid/);
+});
+
+test('required artifact review v4: Git preserves Unicode paths in tracked and untracked results', async (t) => {
+  for (const tracked of [false, true]) {
+    await t.test(tracked ? 'tracked' : 'untracked', async (child) => {
+      const artifact = 'reports/\ud83d\ude00 output.json';
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await mkdir(resolve(workspace, 'reports'));
+          await writeFile(resolve(workspace, artifact), '{}');
+          if (tracked) assert.equal(spawnSync('git', ['add', '--', artifact], { cwd: workspace }).status, 0);
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, 'completed');
+    });
+  }
+});
+
+test('required artifact review v4: delimiter-safe paths do not widen signed write scope', async (t) => {
+  for (const outside of ['outside/\ud83d\ude00.json', ' reports/leak.txt']) {
+    await t.test(JSON.stringify(outside), async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await mkdir(resolve(workspace, outside.split('/')[0]!));
+          await writeFile(resolve(workspace, outside), '{}');
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, 'failed');
+      const expected = 'Error: Provider changed a path outside the signed task authority.';
+      assert.equal(receipt.commandResults.at(-1)?.stderrSha256,
+        `sha256:${createHash('sha256').update(expected).digest('hex')}`);
+    });
+  }
+});
+
+test('required artifact review v5: Unicode caseless aliases fail before provider execution', async (t) => {
+  for (const pair of [['reports/\u03c3.json', 'reports/\u03c2.json'], ['reports/\u00df.json', 'reports/\u1e9e.json']]) {
+    const fixture = await requiredArtifactFixture(t, pair);
+    let calls = 0;
+    await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+      providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+    assert.equal(calls, 0);
+  }
+});
+
+test('required artifact review v5: signed schemas bound raw artifact entries before deduplication', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const task = fixture.signed({ target: { ...fixture.unsigned.target, endpointId: randomUUID() } });
+  for (const [artifacts, valid] of [[Array(100).fill('reports/a'), true], [Array(101).fill('reports/a'), false],
+    [['x'.repeat(1000)], true], [['x'.repeat(1001)], false]] as [string[], boolean][]) {
+    const value = { ...task, acceptance: { ...task.acceptance, requiredArtifacts: artifacts } };
+    assert.equal(validateTaskEnvelopeContract(value).ok, valid);
+    assert.equal(validateTaskActionContract(canonicalTaskActionForTask(value, randomUUID())).ok, valid);
+  }
+});
+
+test('required artifact review v6: acceptance count reserves capacity for a durable failure receipt', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const task = fixture.signed({ target: { ...fixture.unsigned.target, endpointId: randomUUID() } });
+  for (const [count, valid] of [[98, true], [99, false]] as [number, boolean][]) {
+    const value = { ...task, acceptance: { ...task.acceptance,
+      commands: Array.from({ length: count }, () => ({ commandId: 'verify' })) } };
+    assert.equal(validateTaskEnvelopeContract(value).ok, valid);
+    assert.equal(validateTaskActionContract(canonicalTaskActionForTask(value, randomUUID())).ok, valid);
+  }
+  const oversized = fixture.signed({ acceptance: { ...fixture.unsigned.acceptance,
+    commands: Array.from({ length: 99 }, () => ({ commandId: 'verify' })) } });
+  let calls = 0;
+  await assert.rejects(executeTask({ ...fixture.input, task: oversized,
+    providerExecutor: async () => { calls++; return fixture.providerResult; } }), /schema validation|receipt capacity/);
+  assert.equal(calls, 0);
+});
+
+test('required artifact review v8: signed schemas reject empty artifact references', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['']);
+  const task = fixture.signed({ target: { ...fixture.unsigned.target, endpointId: randomUUID() } });
+  assert.equal(validateTaskEnvelopeContract(task).ok, false);
+  assert.equal(validateTaskActionContract(canonicalTaskActionForTask(task, randomUUID())).ok, false);
+});
+
+test('required artifact review v8: impossible ancestor file requirements fail before effects', async (t) => {
+  for (const artifacts of [['reports/result', 'reports/result/details.json'],
+    ['reports/result/details.json', 'reports/result'], ['reports/RESULT', 'reports/result/details.json'],
+    ['reports/\u00e9', 'reports/e\u0301/details.json']]) {
+    await t.test(JSON.stringify(artifacts), async (child) => {
+      const fixture = await requiredArtifactFixture(child, artifacts);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
 
 test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));

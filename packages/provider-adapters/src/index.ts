@@ -231,10 +231,25 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
   child.stdin.end(input.stdin);
 });
 
+function windowsArgumentUnits(argument: string): number {
+  if (argument.length === 0) return 2;
+  if (!/[ \t"]/.test(argument)) return argument.length;
+  // Match libuv's non-verbatim quoting, counting UTF-16 units, not bytes.
+  let units = argument.length + 2;
+  let escapeBackslashes = true;
+  for (let index = argument.length - 1; index >= 0; index--) {
+    if (argument[index] === '\\' && escapeBackslashes) units++;
+    else if (argument[index] === '"') { units++; escapeBackslashes = true; }
+    else escapeBackslashes = false;
+  }
+  return units;
+}
+
 export async function executeProviderTask(input: {
   provider: ProviderId;
   workspace: string;
   instructions: string;
+  artifactContext?: string;
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
   allowWrites: boolean;
@@ -246,6 +261,11 @@ export async function executeProviderTask(input: {
 }): Promise<ProviderExecutionResult> {
   if (!insideWorkspace(input.workspace, input.workspace)) throw new Error('Provider workspace is invalid.');
   if (!input.instructions.trim() || input.instructions.length > 20_000) throw new Error('Provider task instructions are invalid.');
+  if (input.artifactContext !== undefined
+    && (typeof input.artifactContext !== 'string' || input.artifactContext.length > 256_000)) {
+    throw new Error('Provider artifact context is invalid.');
+  }
+  const instructions = input.instructions + (input.artifactContext ?? '');
   if (input.taskKnowledge) {
     validateTaskKnowledgeScope(input.taskKnowledge);
     if (input.provider !== 'codex' || input.allowWrites
@@ -256,7 +276,7 @@ export async function executeProviderTask(input: {
   const runner = input.runner || defaultProcessRunner;
   let command: string;
   let argv: string[];
-  let stdin = input.instructions;
+  let stdin = instructions;
   let temporaryDirectory: string | null = null;
   let agyLogPath: string | null = null;
   if (input.provider === 'codex') {
@@ -306,7 +326,7 @@ export async function executeProviderTask(input: {
     // defense in depth and must not be treated as delegated write authority.
     const guardedInstructions = [
       'Operate only inside the current repository. Use file-reading tools only. Do not modify files, run shell commands, use the network, or inspect parent/sibling directories.',
-      input.instructions,
+      instructions,
     ].join('\n\n');
     argv = [
       '--new-project',
@@ -330,12 +350,20 @@ export async function executeProviderTask(input: {
     const usagePath = resolve(temporaryDirectory, 'usage.json');
     const guardedInstructions = [
       'Operate only inside the current repository. Remain in safe mode. Read files only. Do not modify files, run shell commands, use the network, or inspect parent or sibling directories.',
-      input.instructions,
+      instructions,
     ].join('\n\n');
     argv = ['--ignore-user-config', '--safe-mode', '--usage-file', usagePath, '--oneshot', guardedInstructions];
     stdin = '';
   }
   try {
+    if (input.provider === 'agy' || input.provider === 'hermes') {
+      const argumentsSize = process.platform === 'win32'
+        ? [command, ...argv].reduce((sum, argument) => sum + windowsArgumentUnits(argument) + 1, 0)
+        : [command, ...argv].reduce((sum, argument) => sum + Buffer.byteLength(argument, 'utf8') + 1, 0);
+      if (argumentsSize > (process.platform === 'win32' ? 32_760 : 65_536)) {
+        throw new Error('Provider argument size exceeds the supported platform limit.');
+      }
+    }
     const result = await runner({
       command, argv, cwd: input.workspace, stdin,
       timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
