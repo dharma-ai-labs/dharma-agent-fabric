@@ -5,8 +5,12 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { approvedPackages, assertSourceSnapshot, assertProvenance, publishBoundedRelease } from './publish-onboarding-release.mjs';
+import * as publisher from './publish-onboarding-release.mjs';
 
 const head = 'a'.repeat(40);
+const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
+const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
+const integrity = item => item.name === '@dharma-ai-labs/agent-fabric-contracts' ? existingContractsIntegrity : `sha512-${item.version}`;
 
 test('merged artifact correction is admitted without admitting further product changes', () => {
   const root = join(import.meta.dirname, '..');
@@ -60,27 +64,30 @@ test('npm bin linking leaves a tracked executable launcher clean on Linux', { sk
 });
 function fixture() {
   const effects = [];
+  const verified = [];
   const published = new Map();
+  published.set(approvedPackages[0].name, {name: approvedPackages[0].name, version: approvedPackages[0].version,
+    dist: {integrity: existingContractsIntegrity, attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/contracts'}}});
   const io = {
     verifySource: async (expected) => { assert.equal(expected, head); },
     manifest: async (item) => ({ name: item.name, version: item.version }),
-    pack: async (item) => ({ integrity: `sha512-${item.version}`, filename: `${item.version}.tgz` }),
+    pack: async (item) => ({ integrity: integrity(item), filename: `${item.version}.tgz` }),
     lookup: async (item) => published.get(item.name) || null,
     publish: async (item) => {
       effects.push(item.name);
       published.set(item.name, { name: item.name, version: item.version, dist: {
-        integrity: `sha512-${item.version}`, attestations: { url: `https://registry.npmjs.org/-/npm/v1/attestations/${encodeURIComponent(item.name)}@${item.version}` },
+        integrity: integrity(item), attestations: { url: `https://registry.npmjs.org/-/npm/v1/attestations/${encodeURIComponent(item.name)}@${item.version}` },
       } });
     },
-    verifyPublished: async () => {},
+    verifyPublished: async (item, _packed, _metadata, source) => { verified.push({name: item.name, source}); },
   };
-  return { io, effects };
+  return { io, effects, verified };
 }
 
 test('publishes precisely the approved dependency closure before the CLI correction', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
-  assert.deepEqual(effects, approvedPackages.map((item) => item.name));
+  assert.deepEqual(effects, approvedPackages.slice(1).map((item) => item.name));
   assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
     ['@dharma-ai-labs/agent-fabric-contracts', '0.1.16'],
     ['@dharma-ai-labs/agent-fabric-provider-adapters', '0.1.34'],
@@ -98,8 +105,11 @@ for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
       const original = io.manifest;
       io.manifest = async (item) => ({ ...await original(item), ...(item.name === '@dharma-ai-labs/agent-fabric' ? { [defect]: 'wrong' } : {}) });
     }
-    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.name === '@dharma-ai-labs/agent-fabric'
-      ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : `sha512-${item.version}` } } : null;
+    if (defect === 'integrity' || defect === 'provenance') {
+      const original = io.lookup;
+      io.lookup = async (item) => item.name === '@dharma-ai-labs/agent-fabric'
+        ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : integrity(item) } } : original(item);
+    }
     await assert.rejects(publishBoundedRelease(head, io));
     assert.deepEqual(effects, []);
   });
@@ -109,7 +119,7 @@ test('matching existing integrity and provenance are verified, never republished
   const { io, effects } = fixture();
   let checked = 0;
   io.lookup = async (item) => ({ name: item.name, version: item.version, dist: {
-    integrity: `sha512-${item.version}`, attestations: { url: `https://registry.npmjs.org/-/npm/v1/attestations/${encodeURIComponent(item.name)}@${item.version}` },
+    integrity: integrity(item), attestations: { url: `https://registry.npmjs.org/-/npm/v1/attestations/${encodeURIComponent(item.name)}@${item.version}` },
   } });
   io.verifyPublished = async () => { checked++; };
   await publishBoundedRelease(head, io);
@@ -164,8 +174,77 @@ test('uncertain intermediate publication stops before later dependencies and CLI
     effects.push(item.name);
     if (effects.length === 2) throw new Error('uncertain second publication');
   };
+  const lookup = io.lookup;
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
-    dist: {integrity: `sha512-${item.version}`, attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : null;
+    dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
   await assert.rejects(publishBoundedRelease(head, io), /uncertain second publication/);
-  assert.deepEqual(effects, approvedPackages.slice(0, 2).map((item) => item.name));
+  assert.deepEqual(effects, approvedPackages.slice(1, 3).map((item) => item.name));
+});
+
+test('already reconciled contracts require their exact original publication source', async () => {
+  const {io, verified} = fixture();
+  await publishBoundedRelease(head, io);
+  assert.equal(verified.find(x => x.name === approvedPackages[0].name).source, existingContractsSource);
+  assert.ok(verified.filter(x => x.name !== approvedPackages[0].name).every(x => x.source === head));
+});
+
+test('missing known published contracts block all writes rather than republishing', async () => {
+  const {io, effects} = fixture();
+  io.lookup = async () => null;
+  await assert.rejects(publishBoundedRelease(head, io), /reconciled artifact unavailable/);
+  assert.deepEqual(effects, []);
+});
+
+test('changed known contracts bytes block all writes', async () => {
+  const {io, effects} = fixture();
+  const pack = io.pack;
+  io.pack = async item => item.name === approvedPackages[0].name ? {integrity: 'changed', filename: 'changed.tgz'} : pack(item);
+  await assert.rejects(publishBoundedRelease(head, io), /reconciled artifact integrity mismatch/);
+  assert.deepEqual(effects, []);
+});
+
+test('readback permits delayed visibility with bounded read-only polling', async () => {
+  assert.equal(typeof publisher.lookupPublishedArtifact, 'function');
+  let time = 0;
+  const timeouts = [];
+  const metadata = {name: 'fixture'};
+  const result = await publisher.lookupPublishedArtifact(async timeout => {
+    timeouts.push(timeout);
+    return time >= 180000 ? metadata : null;
+  }, {now: () => time, sleep: async ms => {time += ms;}});
+  assert.equal(result, metadata);
+  assert.equal(time, 180000);
+  assert.equal(timeouts.length, 7);
+  assert.ok(timeouts.every(x => x > 0 && x <= 30000));
+});
+
+test('readback stops network admission at six minutes with no write retry', async () => {
+  assert.equal(typeof publisher.lookupPublishedArtifact, 'function');
+  let time = 0;
+  let reads = 0;
+  const result = await publisher.lookupPublishedArtifact(async () => {reads++; return null;},
+    {now: () => time, sleep: async ms => {time += ms;}});
+  assert.equal(result, null);
+  assert.equal(time, 360000);
+  assert.equal(reads, 12);
+});
+
+test('readback errors fail immediately rather than retrying denied or failed reads', async () => {
+  assert.equal(typeof publisher.lookupPublishedArtifact, 'function');
+  let reads = 0;
+  let sleeps = 0;
+  await assert.rejects(publisher.lookupPublishedArtifact(async () => {reads++; throw new Error('registry denied');},
+    {now: () => 0, sleep: async () => {sleeps++;}}), /registry denied/);
+  assert.equal(reads, 1);
+  assert.equal(sleeps, 0);
+});
+
+test('readback rejects a response arriving after its admission budget', async () => {
+  assert.equal(typeof publisher.lookupPublishedArtifact, 'function');
+  let time = 0;
+  let sleeps = 0;
+  const result = await publisher.lookupPublishedArtifact(async () => {time = 360001; return {name: 'late'};},
+    {now: () => time, sleep: async () => {sleeps++;}});
+  assert.equal(result, null);
+  assert.equal(sleeps, 0);
 });

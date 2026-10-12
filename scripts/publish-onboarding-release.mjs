@@ -10,7 +10,9 @@ const source = 'bb072701c002bc1cdc68a4bec16fb6ea38d8dd7c';
 const tree = 'b6012b4a75c41996f9a5644857817a0d90ef1c29';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16' },
+  { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
+    existingArtifact: Object.freeze({source: '6c7d48916de11ccc837933a7ef7e8d2600184b54',
+      integrity: 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ=='}) },
   { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.34' },
   { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.36' },
   { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33' },
@@ -36,10 +38,12 @@ export async function publishBoundedRelease(expectedHead, io) {
     assert.equal(manifest.name, item.name, 'approved package name mismatch');
     assert.equal(manifest.version, item.version, 'approved package version mismatch');
     const packed = await io.pack(item);
+    if (item.existingArtifact) assert.equal(packed.integrity, item.existingArtifact.integrity, 'reconciled artifact integrity mismatch');
     const existing = await io.lookup(item);
+    if (item.existingArtifact) assert.ok(existing, 'reconciled artifact unavailable; no republish allowed');
     if (existing) {
       assertArtifact(item, packed, existing);
-      await io.verifyPublished(item, packed, existing, expectedHead);
+      await io.verifyPublished(item, packed, existing, item.existingArtifact?.source || expectedHead);
     }
     prepared.push({ item, packed, existing });
   }
@@ -67,10 +71,25 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
 }
 
-async function publicGet(url, json = true) {
+export async function lookupPublishedArtifact(read, {now = () => performance.now(),
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms))} = {}) {
+  const deadline = now() + 360_000;
+  // Poll metadata only. Publication is never retried by this reconciliation path.
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const remaining = deadline - now();
+    if (remaining <= 0) return null;
+    const value = await read(Math.min(30_000, Math.ceil(remaining)));
+    if (now() >= deadline) return null;
+    if (value) return value;
+    await sleep(Math.max(0, Math.min(30_000, deadline - now())));
+  }
+  return null;
+}
+
+async function publicGet(url, json = true, timeoutMs = 30_000) {
   const target = new URL(url);
   assert.equal(target.origin, 'https://registry.npmjs.org', 'unexpected registry origin');
-  const response = await fetch(target, { redirect: 'error', signal: AbortSignal.timeout(30_000) });
+  const response = await fetch(target, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
   if (response.status === 404) return null;
   assert.ok(response.ok, `registry HTTP ${response.status}`);
   return json ? response.json() : Buffer.from(await response.arrayBuffer());
@@ -117,12 +136,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     manifest: async (item) => JSON.parse(readFileSync(join(root, item.workspace, 'package.json'), 'utf8')),
     pack: async (item) => JSON.parse(npm('pack', '--workspace', item.workspace, '--json', '--pack-destination', directory))[0],
     lookup: async (item, justPublished = false) => {
-      for (let attempt = 0; attempt < (justPublished ? 5 : 1); attempt++) {
-        const metadata = await publicGet(`https://registry.npmjs.org/${encodeURIComponent(item.name)}/${item.version}`);
-        if (metadata) return metadata;
-        if (justPublished) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-      }
-      return null;
+      const read = timeout => publicGet(`https://registry.npmjs.org/${encodeURIComponent(item.name)}/${item.version}`, true, timeout);
+      return justPublished ? lookupPublishedArtifact(read) : read(30_000);
     },
     publish: async (item, packed) => {
       console.log(`Publishing approved ${item.name}@${item.version} ${packed.integrity}`);
