@@ -233,15 +233,17 @@ test('review regression: checkpointed fence replay retains its admitted generati
     const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
     const generation = '67f61652-a5eb-46e4-930c-9478cd4a9c31';
     const currentGeneration = '97f61652-a5eb-46e4-930c-9478cd4a9c31';
-    const fenceId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';let tamper = false;
+    const fenceId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';let rolledOver = false, fencePosts = 0;
     const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
       baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
     const transport = { signedGet: async () => ({}), signedPost: async (route: string, raw: unknown) => {
       if (!route.endsWith('/fence')) throw new Error('lost_upload');
+      fencePosts++;
+      if (rolledOver) throw new Error('HTTP 403: fabric_repository_candidate_fence_binding_denied');
       const body = raw as Record<string, unknown>;
       return { ok: true, organizationId: scope.organizationId, candidate: null, fence: { fenceId,
         operationId: body.operationId, ...ids, sourceSnapshotHash: body.sourceSnapshotHash,
-        sourceManifestHash: body.sourceManifestHash, policyGenerationId: tamper ? currentGeneration : generation,
+        sourceManifestHash: body.sourceManifestHash, policyGenerationId: generation,
         state: 'fenced', createdAt: '2030-01-02T00:00:00.000Z' } };
     } };
     await assert.rejects(synchronizeRepositoryCandidate({ scope, outboxRoot, transport, snapshot: await snapshot(root),
@@ -253,13 +255,20 @@ test('review regression: checkpointed fence replay retains its admitted generati
     const path = join(outboxRoot, `${ids.workspaceId}.json`);
     const archivePath = join(outboxRoot, 'fenced', `${ids.workspaceId}.${fenceId}.json`);
     const before = await readFile(path, 'utf8'), archiveBefore = await readFile(archivePath, 'utf8');
+    rolledOver = true;
     const replay = await fenceRepositoryRestorationUpload({ ...input, policyGenerationId: currentGeneration });
     assert.deepEqual(replay.fence, fenced.fence);
     await checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced: replay });
-    tamper = true;
-    await assert.rejects(fenceRepositoryRestorationUpload({ ...input, policyGenerationId: currentGeneration }), /fence/);
+    assert.equal(fencePosts, 1);
     assert.equal(await readFile(path, 'utf8'), before);
     assert.equal(await readFile(archivePath, 'utf8'), archiveBefore);
+    const tampered = JSON.parse(before);tampered.fence.policyGenerationId = currentGeneration;
+    await writeFile(path, canonicalize(tampered) + '\n');
+    const tamperedBytes = await readFile(path, 'utf8');
+    const changed = await fenceRepositoryRestorationUpload({ ...input, policyGenerationId: currentGeneration });
+    await assert.rejects(checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced: changed }), /archive changed/);
+    assert.equal(await readFile(path, 'utf8'), tamperedBytes);
+    assert.equal(await readFile(archivePath, 'utf8'), archiveBefore);assert.equal(fencePosts, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

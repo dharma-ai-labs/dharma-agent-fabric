@@ -453,6 +453,15 @@ export async function fenceRepositoryRestorationUpload(input: {
       consolidation: pending.consolidation, restorationAttempt: pending.restoration.attemptId,
       restorationContext: restorationContext(pending.restoration) }) === pending.operationId,
   'Repository restoration fence checkpoint is invalid.');
+  const schemaDirectory = fileURLToPath(new URL('./schemas/', import.meta.url));
+  if (pending.state === 'fenced') {
+    // Containment is already durable. Reposting under a newer policy cannot
+    // change this receipt; the guarded checkpoint verifies the immutable archive.
+    requireFact((await validateContract(schemaDirectory,
+      'https://schemas.dharma-ai.io/repository-candidate-fence/v1#/$defs/fence', pending.fence)).ok,
+    'Repository restoration fence receipt schema is invalid.');
+    return { checkpointHash: sha256(canonicalize(pending)), pending, fence: pending.fence!, candidate: null };
+  }
   const body = {
       schema: 'dharma.repository-candidate-fence/v1', operationId: pending.operationId,
       workspaceId: scope.workspaceId, repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
@@ -460,7 +469,6 @@ export async function fenceRepositoryRestorationUpload(input: {
       ...(pending.restoration.attemptId ? { restorationAttempt: pending.restoration.attemptId } : {}),
       ...(restorationContext(pending.restoration) ? { restorationContext: restorationContext(pending.restoration) } : {}),
     };
-  const schemaDirectory = fileURLToPath(new URL('./schemas/', import.meta.url));
   requireFact((await validateContract(schemaDirectory, 'https://schemas.dharma-ai.io/repository-candidate-fence/v1', body)).ok
     && Buffer.byteLength(canonicalize(body)) <= 4096, 'Repository restoration fence metadata is invalid.');
   const response = await input.transport.signedPost(
@@ -469,14 +477,11 @@ export async function fenceRepositoryRestorationUpload(input: {
     && Object.hasOwn(response, 'candidate') && Object.hasOwn(response, 'fence')
     && (response.candidate === null) !== (response.fence === null), 'Repository restoration fence response is invalid.');
   const fence = response.fence === null ? null : checkedFence(response.fence, scope, pending.operationId,
-    pending.snapshotHash, pending.sourceManifestHash,
-    pending.state === 'fenced' ? pending.fence!.policyGenerationId : input.policyGenerationId);
+    pending.snapshotHash, pending.sourceManifestHash, input.policyGenerationId);
   requireFact(!fence || (await validateContract(schemaDirectory,
     'https://schemas.dharma-ai.io/repository-candidate-fence/v1#/$defs/fence', fence)).ok,
   'Repository restoration fence receipt schema is invalid.');
   const candidate = fence ? null : receipt(response, scope, pending.operationId, pending.snapshotHash, pending.restoration.priorReleaseId);
-  requireFact(pending.state !== 'fenced' || fence && canonicalize(fence) === canonicalize(pending.fence),
-    'Repository restoration terminal fence changed.');
   return { checkpointHash: sha256(canonicalize(pending)), pending, fence, candidate };
 }
 
