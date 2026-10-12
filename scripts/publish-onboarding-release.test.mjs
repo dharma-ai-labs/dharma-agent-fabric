@@ -218,14 +218,14 @@ test('readback permits delayed visibility with bounded read-only polling', async
   assert.ok(timeouts.every(x => x > 0 && x <= 30000));
 });
 
-test('readback stops network admission at six minutes with no write retry', async () => {
+test('readback makes at most twelve reads with no unused final delay', async () => {
   assert.equal(typeof publisher.lookupPublishedArtifact, 'function');
   let time = 0;
   let reads = 0;
   const result = await publisher.lookupPublishedArtifact(async () => {reads++; return null;},
     {now: () => time, sleep: async ms => {time += ms;}});
   assert.equal(result, null);
-  assert.equal(time, 360000);
+  assert.equal(time, 330000);
   assert.equal(reads, 12);
 });
 

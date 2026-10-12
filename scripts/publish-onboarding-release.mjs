@@ -81,6 +81,7 @@ export async function lookupPublishedArtifact(read, {now = () => performance.now
     const value = await read(Math.min(30_000, remaining));
     if (now() >= deadline) return null;
     if (value) return value;
+    if (attempt === 11) return null;
     await sleep(Math.max(0, Math.min(30_000, deadline - now())));
   }
   return null;
