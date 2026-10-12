@@ -342,6 +342,14 @@ export async function executeProviderTask(input: {
     stdin = '';
   }
   try {
+    if (input.provider === 'agy' || input.provider === 'hermes') {
+      const argumentsSize = process.platform === 'win32'
+        ? [command, ...argv].reduce((sum, argument) => sum + argument.length * 2 + 3, 0)
+        : [command, ...argv].reduce((sum, argument) => sum + Buffer.byteLength(argument, 'utf8') + 1, 0);
+      if (argumentsSize > (process.platform === 'win32' ? 32_760 : 65_536)) {
+        throw new Error('Provider argument size exceeds the supported platform limit.');
+      }
+    }
     const result = await runner({
       command, argv, cwd: input.workspace, stdin,
       timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,

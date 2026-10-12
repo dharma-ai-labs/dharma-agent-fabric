@@ -33,8 +33,13 @@ The signed required-file list is included as data in provider instructions;
 callers do not have to repeat it in their natural-language request.
 
 Artifact sets use conservative portable names: distinct entries cannot collide
-after NFC normalization and lowercase conversion, even on case-sensitive hosts.
-Exact repeated entries are deduplicated. Windows device-name restrictions include
+after NFC normalization and Unicode lower/upper/lower mapping, even on
+case-sensitive hosts. This catches final-sigma and sharp-S aliases; it is a
+conservative admission rule, not an exact implementation of every filesystem's
+Unicode version. Both signed envelope schemas cap raw entries at 100 and each
+reference at 1,000 Unicode characters. Bounded exact duplicates remain compatible
+and are deduplicated; they still count toward the raw-entry cap.
+Windows device-name restrictions include
 the superscript COM/LPT aliases and CONIN$/CONOUT$. Ill-formed Unicode (lone
 surrogates) is rejected rather than replaced during filesystem encoding.
 Components are limited to 255 UTF-8 bytes.
@@ -47,6 +52,10 @@ from the existing 20,000-unit task/context instruction limit. This accommodates
 the schema's 100 paths of up to 1,000 characters without consuming task text's
 allowance. Neither instructions nor signed paths are truncated; provider and
 task budget enforcement still applies. Empty lists add no metadata.
+Agy/Hermes carry text in argv and fail before process invocation if the complete
+argument estimate exceeds 32,760 conservatively quoted UTF-16 units on Windows
+or 65,536 UTF-8 bytes elsewhere. Codex/Claude use stdin. These supported limits
+do not attest provider acceptance or all operating-system environment limits.
 
 Missing, unreadable, non-file, symbolic-link/junction or hard-linked artifacts
 fail acceptance. Artifact contents and target paths are not copied into failure

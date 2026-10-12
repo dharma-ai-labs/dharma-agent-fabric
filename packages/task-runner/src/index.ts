@@ -215,8 +215,10 @@ function pathWithinPolicy(candidate: string, patterns: string[]) {
 }
 
 function requiredArtifactReferences(task: TaskEnvelope, worktree?: string): string[] {
+  if (task.acceptance.requiredArtifacts.length > 100) throw new Error('required_artifact_invalid');
   const portableNames = new Map<string, string>();
   for (const artifact of task.acceptance.requiredArtifacts) {
+    if (artifact.length > 2000 || [...artifact].length > 1000) throw new Error('required_artifact_invalid');
     const parts = artifact.split('/');
     const fullPath = worktree ? resolve(worktree, artifact) : artifact;
     const pathLength = process.platform === 'win32' ? fullPath.length : Buffer.byteLength(fullPath, 'utf8');
@@ -228,7 +230,7 @@ function requiredArtifactReferences(task: TaskEnvelope, worktree?: string): stri
         || /^(con|conin\$|conout\$|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(\.|$)/i.test(part))) {
       throw new Error('required_artifact_invalid');
     }
-    const portable = artifact.normalize('NFC').toLowerCase();
+    const portable = artifact.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().normalize('NFC');
     const previous = portableNames.get(portable);
     if (previous !== undefined && previous !== artifact) throw new Error('required_artifact_invalid');
     portableNames.set(portable, artifact);

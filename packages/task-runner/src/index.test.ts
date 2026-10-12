@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 import {
   actionDecisionDigest,
   signCanonicalObject,
+  validateTaskEnvelopeContract,
+  validateTaskActionContract,
   type ActionDecisionEnvelope,
   type ActionDecisionReceipt,
 } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -256,7 +258,7 @@ test('required artifact review: superscript Windows device aliases are rejected 
       const fixture = await requiredArtifactFixture(child, [artifact]);
       let calls = 0;
       await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
-        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid|Task failed schema validation/);
       assert.equal(calls, 0);
     });
   }
@@ -283,7 +285,7 @@ test('required artifact review: unusable component and total path lengths are re
       const fixture = await requiredArtifactFixture(child, [artifact]);
       let calls = 0;
       await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
-        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid|Task failed schema validation/);
       assert.equal(calls, 0);
     });
   }
@@ -328,10 +330,10 @@ test('required artifact review v3: full artifact list and paired Unicode retain 
     /Provider instructions exceed the execution limit/);
 });
 
-test('required artifact review v3: generated artifact metadata has an independent hard bound', async (t) => {
+test('required artifact review v3: raw artifact count is bounded before metadata formatting', async (t) => {
   const artifacts = Array.from({ length: 10_000 }, (_, index) => `reports/${index}-${'x'.repeat(30)}.json`);
   const fixture = await requiredArtifactFixture(t, artifacts);
-  assert.throws(() => providerInstructionsForTask(fixture.signed()), /Required artifact metadata exceeds the execution limit/);
+  assert.throws(() => providerInstructionsForTask(fixture.signed()), /required_artifact_invalid/);
 });
 
 test('required artifact review v4: Git preserves Unicode paths in tracked and untracked results', async (t) => {
@@ -366,6 +368,27 @@ test('required artifact review v4: delimiter-safe paths do not widen signed writ
       assert.equal(receipt.commandResults.at(-1)?.stderrSha256,
         `sha256:${createHash('sha256').update(expected).digest('hex')}`);
     });
+  }
+});
+
+test('required artifact review v5: Unicode caseless aliases fail before provider execution', async (t) => {
+  for (const pair of [['reports/\u03c3.json', 'reports/\u03c2.json'], ['reports/\u00df.json', 'reports/\u1e9e.json']]) {
+    const fixture = await requiredArtifactFixture(t, pair);
+    let calls = 0;
+    await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+      providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+    assert.equal(calls, 0);
+  }
+});
+
+test('required artifact review v5: signed schemas bound raw artifact entries before deduplication', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const task = fixture.signed({ target: { ...fixture.unsigned.target, endpointId: randomUUID() } });
+  for (const [artifacts, valid] of [[Array(100).fill('reports/a'), true], [Array(101).fill('reports/a'), false],
+    [['x'.repeat(1000)], true], [['x'.repeat(1001)], false]] as [string[], boolean][]) {
+    const value = { ...task, acceptance: { ...task.acceptance, requiredArtifacts: artifacts } };
+    assert.equal(validateTaskEnvelopeContract(value).ok, valid);
+    assert.equal(validateTaskActionContract(canonicalTaskActionForTask(value, randomUUID())).ok, valid);
   }
 });
 

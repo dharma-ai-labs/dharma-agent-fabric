@@ -331,8 +331,10 @@
         },
         "requiredArtifacts": {
           "type": "array",
+          "maxItems": 100,
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 1000
           }
         },
         "externalEffectReceiptCommandId": {

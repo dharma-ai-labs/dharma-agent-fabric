@@ -504,6 +504,18 @@ test('artifact context has a separate bounded stdin allowance without enlarging 
   await assert.rejects(executeProviderTask({ ...input, ...{ artifactContext: 'x'.repeat(256_001) } }), /artifact context is invalid/);
 });
 
+test('artifact context rejects oversized argv providers before process invocation', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-artifact-argv-'));
+  for (const provider of ['agy', 'hermes'] as const) {
+    let calls = 0;
+    await assert.rejects(executeProviderTask({ provider, workspace, instructions: 'Read only.',
+      artifactContext: '\u00e9'.repeat(80_000), timeoutSeconds: 30, allowedCommandArgv: [], allowWrites: false,
+      runner: async () => { calls++; return { exitCode: 0, signal: null, timedOut: false,
+        stdout: Buffer.from('bounded result'), stderr: Buffer.alloc(0) }; } }), /Provider argument size exceeds the supported platform limit/);
+    assert.equal(calls, 0);
+  }
+});
+
 test('Codex task execution pins a validated configured model', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
   const previous = process.env.DHARMA_CODEX_MODEL;
