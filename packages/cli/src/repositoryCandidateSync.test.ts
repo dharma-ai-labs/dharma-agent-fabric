@@ -55,12 +55,13 @@ test('unadmitted restoration is fenced before checkpoint retirement and a distin
     assert.deepEqual(calls, ['UPLOAD']);assert.equal(await readFile(path, 'utf8'), before);
     const fenced = await fenceRepositoryRestorationUpload({ ...input, planHash: restoration.planHash,
       policyGenerationId: generation, expectedPreviousOperationId: null });
-    assert.equal(await readFile(path, 'utf8'), before);assert.equal(fenced.fence?.fenceId, fenceId);
+    const requested = canonicalize({ ...old, fenceRequestGenerationId: generation }) + '\n';
+    assert.equal(await readFile(path, 'utf8'), requested);assert.equal(fenced.fence?.fenceId, fenceId);
     await checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced });
     assert.equal(await readRepositoryRestorationAttempt({ outboxRoot, scope }), fenceId);
     assert.equal(await pollRepositoryCandidate(input), null);
     // A crash after durable archival but before the outbox rename must recover the same fence.
-    await writeFile(path, before);
+    await writeFile(path, requested);
     const recoveredFence = await fenceRepositoryRestorationUpload({ ...input, planHash: restoration.planHash,
       policyGenerationId: generation, expectedPreviousOperationId: null });
     await checkpointRepositoryRestorationFence({ outboxRoot, scope, fenced: recoveredFence });
@@ -69,7 +70,7 @@ test('unadmitted restoration is fenced before checkpoint retirement and a distin
     const retry = await synchronizeRepositoryCandidate({ ...input, restoration: { ...restoration, attemptId: fenceId } });
     assert.notEqual(retry.operationId, old.operationId);assert.deepEqual(calls, ['UPLOAD', 'FENCE', 'FENCE', 'UPLOAD']);
     const archive = JSON.parse(await readFile(join(outboxRoot, 'fenced', `${ids.workspaceId}.${fenceId}.json`), 'utf8'));
-    assert.deepEqual(archive.checkpoint, old);assert.equal(archive.fence.fenceId, fenceId);
+    assert.deepEqual(archive.checkpoint, JSON.parse(requested));assert.equal(archive.fence.fenceId, fenceId);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -91,9 +92,9 @@ test('partial archive writes never publish a poisoned terminal receipt and retry
     } };
     await assert.rejects(synchronizeRepositoryCandidate({ scope, outboxRoot, transport, snapshot: await snapshot(root),
       initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration }), /lost_upload/);
-    const before = await readFile(path, 'utf8');
     const fenced = await fenceRepositoryRestorationUpload({ scope, outboxRoot, transport, planHash: restoration.planHash,
       policyGenerationId: generation, expectedPreviousOperationId: null });
+    const before = await readFile(path, 'utf8');
     fs.open = async (...args: Parameters<typeof fs.open>) => {
       const handle = await originalOpen(...args);
       if (String(args[0]).replaceAll('\\', '/').includes('/fenced/') && !injected) {
@@ -123,7 +124,8 @@ test('uncertain, malformed or foreign fence responses preserve the pending check
     const input = { transport, outboxRoot, scope, snapshot: await snapshot(root), initialRepository: false,
       expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
     await assert.rejects(synchronizeRepositoryCandidate(input), /lost_upload/);
-    const before = await readFile(path, 'utf8'), pending = JSON.parse(before);
+    const original = await readFile(path, 'utf8'), pending = { ...JSON.parse(original), fenceRequestGenerationId: generation };
+    const before = canonicalize(pending) + '\n';
     const fence = { fenceId: 'a7f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: pending.operationId,
       workspaceId: scope.workspaceId, repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
       sourceSnapshotHash: pending.snapshotHash, sourceManifestHash: pending.sourceManifestHash, policyGenerationId: generation,
@@ -227,6 +229,49 @@ test('review regression: encoded candidate respects the relay body limit before 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('lost fence response recovers durable request provenance across repeated policy rollover', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-fence-lost-response-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+    const path = join(outboxRoot, `${ids.workspaceId}.json`);
+    const firstGeneration = '67f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const laterGeneration = '97f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const fenceId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    let posts = 0;
+    const transport = { signedGet: async () => ({}), signedPost: async (route: string, raw: unknown) => {
+      if (!route.endsWith('/fence')) throw new Error('lost_upload');
+      const body = raw as Record<string, unknown>;
+      const saved = JSON.parse(await readFile(path, 'utf8'));
+      assert.equal(saved.fenceRequestGenerationId, firstGeneration, 'request provenance must be durable before POST');
+      assert.equal(body.requestPolicyGenerationId, firstGeneration);
+      if (++posts === 1) throw new Error('lost_successful_fence_response');
+      return { ok: true, organizationId: scope.organizationId, candidate: null, fence: { fenceId,
+        operationId: body.operationId, ...ids, sourceSnapshotHash: body.sourceSnapshotHash,
+        sourceManifestHash: body.sourceManifestHash, policyGenerationId: firstGeneration,
+        requestPolicyGenerationId: firstGeneration, state: 'fenced', createdAt: '2030-01-02T00:00:00.000Z' } };
+    } };
+    const upload = { scope, outboxRoot, transport, snapshot: await snapshot(root),
+      initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+    await assert.rejects(synchronizeRepositoryCandidate(upload), /lost_upload/);
+    const input = { scope, outboxRoot, transport, planHash: restoration.planHash,
+      policyGenerationId: firstGeneration, expectedPreviousOperationId: null };
+    await assert.rejects(fenceRepositoryRestorationUpload(input), /lost_successful_fence_response/);
+    const pending = await readFile(path, 'utf8');
+    await assert.rejects(synchronizeRepositoryCandidate(upload), /fence outcome must be reconciled/);
+    const recovered = await fenceRepositoryRestorationUpload({ ...input, policyGenerationId: laterGeneration });
+    assert.equal(await readFile(path, 'utf8'), pending);
+    assert.equal(recovered.fence?.policyGenerationId, firstGeneration);
+    await checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced: recovered });
+    const archivePath = join(outboxRoot, 'fenced', `${ids.workspaceId}.${fenceId}.json`);
+    const archive = await readFile(archivePath, 'utf8');
+    const replay = await fenceRepositoryRestorationUpload({ ...input, policyGenerationId: scope.workspaceId });
+    await checkpointRepositoryRestorationFence({ scope, outboxRoot, fenced: replay });
+    assert.equal(posts, 2);assert.equal(await readFile(archivePath, 'utf8'), archive);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('review regression: checkpointed fence replay retains its admitted generation after policy rollover', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-fence-policy-rollover-'));
   try {
@@ -263,6 +308,7 @@ test('review regression: checkpointed fence replay retains its admitted generati
     assert.equal(await readFile(path, 'utf8'), before);
     assert.equal(await readFile(archivePath, 'utf8'), archiveBefore);
     const tampered = JSON.parse(before);tampered.fence.policyGenerationId = currentGeneration;
+    tampered.fenceRequestGenerationId = currentGeneration;
     await writeFile(path, canonicalize(tampered) + '\n');
     const tamperedBytes = await readFile(path, 'utf8');
     const changed = await fenceRepositoryRestorationUpload({ ...input, policyGenerationId: currentGeneration });

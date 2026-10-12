@@ -48,6 +48,7 @@ type CandidateOutbox = {
   releaseId: string | null;
   restoration?: RestorationCheckpoint;
   fence?: RepositoryCandidateFence;
+  fenceRequestGenerationId?: string;
   registryReceiptHash?: string;
 };
 
@@ -66,6 +67,7 @@ type RestorationContext = { headCandidateId: string; priorReleaseId: string };
 type RepositoryCandidateFence = {
   fenceId: string; operationId: string; workspaceId: string; repositoryBindingId: string; repositoryAgentId: string;
   sourceSnapshotHash: string; sourceManifestHash: string; policyGenerationId: string;
+  requestPolicyGenerationId?: string;
   state: 'fenced'; createdAt: string;
 };
 
@@ -168,7 +170,8 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     'candidateId', 'state', 'releaseId'];
   requireFact(row.schema === 'dharma.repository-candidate-outbox/v1'
     && Reflect.ownKeys(row).every(key => typeof key === 'string')
-    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key) || ['restoration', 'fence', 'registryReceiptHash'].includes(key)),
+    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key)
+      || ['restoration', 'fence', 'fenceRequestGenerationId', 'registryReceiptHash'].includes(key)),
   'Repository candidate outbox is invalid.');
   const scope = checkedScope(row.scope as RepositoryCandidateScope);
   if (expectedScope) requireFact(canonicalize(scope) === canonicalize(expectedScope), 'Repository candidate outbox scope is invalid.');
@@ -197,14 +200,18 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     && HASH.test(row.registryReceiptHash), 'Repository restoration registry checkpoint is invalid.');
   requireFact((row.state === 'fenced') === Object.hasOwn(row, 'fence') && (row.state !== 'fenced' || Boolean(restoration)),
     'Repository candidate fence checkpoint is inconsistent.');
+  requireFact(!Object.hasOwn(row, 'fenceRequestGenerationId') || Boolean(restoration)
+    && typeof row.fenceRequestGenerationId === 'string' && UUID.test(row.fenceRequestGenerationId),
+  'Repository candidate fence request provenance is invalid.');
   const fence = row.state === 'fenced' ? checkedFence(row.fence, scope, String(row.operationId),
-    String(row.snapshotHash), String(row.sourceManifestHash)) : undefined;
+    String(row.snapshotHash), String(row.sourceManifestHash), row.fenceRequestGenerationId as string | undefined) : undefined;
   return { schema: 'dharma.repository-candidate-outbox/v1', scope,
     operationId: row.operationId as string, sourceManifestHash: row.sourceManifestHash as string,
     snapshotHash: row.snapshotHash as string, consolidation: consolidation as CandidateOutbox['consolidation'],
     candidateId: row.candidateId as string | null, state: row.state as CandidateOutbox['state'],
     releaseId: row.releaseId as string | null,
     ...(restoration ? { restoration } : {}), ...(fence ? { fence } : {}),
+    ...(typeof row.fenceRequestGenerationId === 'string' ? { fenceRequestGenerationId: row.fenceRequestGenerationId } : {}),
     ...(typeof row.registryReceiptHash === 'string' ? { registryReceiptHash: row.registryReceiptHash } : {}) };
 }
 
@@ -247,15 +254,21 @@ export async function checkpointRepositoryRestorationRegistry(input: {
 }
 
 function checkedFence(value: unknown, scope: RepositoryCandidateScope, operationId: string, snapshotHash: string,
-  sourceManifestHash: string, policyGenerationId?: string): RepositoryCandidateFence {
+  sourceManifestHash: string, requestPolicyGenerationId?: string): RepositoryCandidateFence {
   requireFact(value !== null && typeof value === 'object' && !Array.isArray(value), 'Repository candidate fence receipt is invalid.');
   const row = value as Record<string, unknown>;
-  requireFact(Object.keys(row).sort().join(',') === 'createdAt,fenceId,operationId,policyGenerationId,repositoryAgentId,repositoryBindingId,sourceManifestHash,sourceSnapshotHash,state,workspaceId'
+  const keys = ['createdAt', 'fenceId', 'operationId', 'policyGenerationId', 'repositoryAgentId', 'repositoryBindingId',
+    'sourceManifestHash', 'sourceSnapshotHash', 'state', 'workspaceId',
+    ...(Object.hasOwn(row, 'requestPolicyGenerationId') ? ['requestPolicyGenerationId'] : [])];
+  requireFact(Object.keys(row).sort().join(',') === keys.sort().join(',')
     && typeof row.fenceId === 'string' && UUID.test(row.fenceId) && row.operationId === operationId
     && row.workspaceId === scope.workspaceId && row.repositoryBindingId === scope.repositoryBindingId && row.repositoryAgentId === scope.repositoryAgentId
     && row.sourceSnapshotHash === snapshotHash && row.sourceManifestHash === sourceManifestHash && row.state === 'fenced'
     && typeof row.policyGenerationId === 'string' && UUID.test(row.policyGenerationId)
-    && (policyGenerationId === undefined || row.policyGenerationId === policyGenerationId)
+    && (!Object.hasOwn(row, 'requestPolicyGenerationId') || typeof row.requestPolicyGenerationId === 'string'
+      && UUID.test(row.requestPolicyGenerationId))
+    && (requestPolicyGenerationId === undefined || (Object.hasOwn(row, 'requestPolicyGenerationId')
+      ? row.requestPolicyGenerationId === requestPolicyGenerationId : row.policyGenerationId === requestPolicyGenerationId))
     && typeof row.createdAt === 'string' && Number.isFinite(Date.parse(row.createdAt))
     && new Date(row.createdAt).toISOString() === row.createdAt, 'Repository candidate fence receipt is inconsistent.');
   return row as RepositoryCandidateFence;
@@ -325,6 +338,8 @@ export async function synchronizeRepositoryCandidate(input: {
     restorationContext: restorationContext(restoration) });
   const path = outboxPath(input.outboxRoot, scope);
   const prior = await readOutbox(path, scope);
+  requireFact(prior?.state !== 'pending_upload' || !prior.fenceRequestGenerationId,
+    'Repository restoration fence outcome must be reconciled before any upload retry.');
   if (prior?.state === 'fenced') {
     requireFact(prior.fence && restoration?.attemptId === prior.fence.fenceId && prior.operationId !== operationId,
       'A fenced operation requires its verified new restoration attempt.');
@@ -444,7 +459,7 @@ export async function fenceRepositoryRestorationUpload(input: {
 }) {
   const scope = checkedScope(input.scope);
   requireFact(HASH.test(input.planHash) && UUID.test(input.policyGenerationId), 'Repository restoration fence authority is invalid.');
-  const pending = await readOutbox(outboxPath(input.outboxRoot, scope), scope);
+  let pending = await readOutbox(outboxPath(input.outboxRoot, scope), scope);
   requireFact(pending?.restoration && pending.restoration.planHash === input.planHash
     && pending.restoration.previousOperationId === input.expectedPreviousOperationId
     && ['pending_upload', 'fenced'].includes(pending.state) && pending.candidateId === null
@@ -462,12 +477,24 @@ export async function fenceRepositoryRestorationUpload(input: {
     'Repository restoration fence receipt schema is invalid.');
     return { checkpointHash: sha256(canonicalize(pending)), pending, fence: pending.fence!, candidate: null };
   }
+  // The command holds its registry mutation lock. Persist request provenance
+  // before transport so response loss cannot erase the original retry binding.
+  const restoration = pending.restoration;
+  if (!pending.fenceRequestGenerationId) {
+    pending = { ...pending, fenceRequestGenerationId: input.policyGenerationId };
+    await writeOutbox(outboxPath(input.outboxRoot, scope), pending);
+    if (process.platform !== 'win32') {
+      const parent = await open(resolve(input.outboxRoot), constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW || 0));
+      try { await parent.sync(); } finally { await parent.close(); }
+    }
+  }
   const body = {
       schema: 'dharma.repository-candidate-fence/v1', operationId: pending.operationId,
       workspaceId: scope.workspaceId, repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
       sourceSnapshotHash: pending.snapshotHash, sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation,
-      ...(pending.restoration.attemptId ? { restorationAttempt: pending.restoration.attemptId } : {}),
-      ...(restorationContext(pending.restoration) ? { restorationContext: restorationContext(pending.restoration) } : {}),
+      requestPolicyGenerationId: pending.fenceRequestGenerationId,
+      ...(restoration.attemptId ? { restorationAttempt: restoration.attemptId } : {}),
+      ...(restorationContext(restoration) ? { restorationContext: restorationContext(restoration) } : {}),
     };
   requireFact((await validateContract(schemaDirectory, 'https://schemas.dharma-ai.io/repository-candidate-fence/v1', body)).ok
     && Buffer.byteLength(canonicalize(body)) <= 4096, 'Repository restoration fence metadata is invalid.');
@@ -477,11 +504,11 @@ export async function fenceRepositoryRestorationUpload(input: {
     && Object.hasOwn(response, 'candidate') && Object.hasOwn(response, 'fence')
     && (response.candidate === null) !== (response.fence === null), 'Repository restoration fence response is invalid.');
   const fence = response.fence === null ? null : checkedFence(response.fence, scope, pending.operationId,
-    pending.snapshotHash, pending.sourceManifestHash, input.policyGenerationId);
+    pending.snapshotHash, pending.sourceManifestHash, pending.fenceRequestGenerationId);
   requireFact(!fence || (await validateContract(schemaDirectory,
     'https://schemas.dharma-ai.io/repository-candidate-fence/v1#/$defs/fence', fence)).ok,
   'Repository restoration fence receipt schema is invalid.');
-  const candidate = fence ? null : receipt(response, scope, pending.operationId, pending.snapshotHash, pending.restoration.priorReleaseId);
+  const candidate = fence ? null : receipt(response, scope, pending.operationId, pending.snapshotHash, restoration.priorReleaseId);
   return { checkpointHash: sha256(canonicalize(pending)), pending, fence, candidate };
 }
 
@@ -527,7 +554,8 @@ export async function checkpointRepositoryRestorationFence(input: {
   const scope = checkedScope(input.scope), path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
   requireFact(pending && sha256(canonicalize(pending)) === input.fenced.checkpointHash
     && input.fenced.fence && input.fenced.candidate === null, 'Repository restoration fence checkpoint changed.');
-  const fence = checkedFence(input.fenced.fence, scope, pending.operationId, pending.snapshotHash, pending.sourceManifestHash);
+  const fence = checkedFence(input.fenced.fence, scope, pending.operationId, pending.snapshotHash, pending.sourceManifestHash,
+    pending.fenceRequestGenerationId);
   const next: CandidateOutbox = { ...pending, state: 'fenced', fence };
   await archiveFencedCheckpoint(input.outboxRoot, next);
   if (canonicalize(next) !== canonicalize(pending)) await writeOutbox(path, next);

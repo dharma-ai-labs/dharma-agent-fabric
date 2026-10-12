@@ -14,6 +14,7 @@
     "repositoryAgentId": { "$ref": "#/$defs/uuid" },
     "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
     "sourceManifestHash": { "$ref": "#/$defs/hash" },
+    "requestPolicyGenerationId": { "$ref": "#/$defs/uuid" },
     "restorationAttempt": { "$ref": "#/$defs/uuid" },
     "restorationContext": {
       "type": "object", "additionalProperties": false, "required": ["headCandidateId", "priorReleaseId"],
@@ -45,6 +46,7 @@
         "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
         "sourceManifestHash": { "$ref": "#/$defs/hash" },
         "policyGenerationId": { "$ref": "#/$defs/uuid" },
+        "requestPolicyGenerationId": { "$ref": "#/$defs/uuid" },
         "state": { "const": "fenced" },
         "createdAt": { "type": "string", "format": "date-time" }
       }
