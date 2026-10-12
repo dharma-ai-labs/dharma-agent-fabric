@@ -334,6 +334,41 @@ test('required artifact review v3: generated artifact metadata has an independen
   assert.throws(() => providerInstructionsForTask(fixture.signed()), /Required artifact metadata exceeds the execution limit/);
 });
 
+test('required artifact review v4: Git preserves Unicode paths in tracked and untracked results', async (t) => {
+  for (const tracked of [false, true]) {
+    await t.test(tracked ? 'tracked' : 'untracked', async (child) => {
+      const artifact = 'reports/\ud83d\ude00 output.json';
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await mkdir(resolve(workspace, 'reports'));
+          await writeFile(resolve(workspace, artifact), '{}');
+          if (tracked) assert.equal(spawnSync('git', ['add', '--', artifact], { cwd: workspace }).status, 0);
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, 'completed');
+    });
+  }
+});
+
+test('required artifact review v4: delimiter-safe paths do not widen signed write scope', async (t) => {
+  for (const outside of ['outside/\ud83d\ude00.json', ' reports/leak.txt']) {
+    await t.test(JSON.stringify(outside), async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await mkdir(resolve(workspace, outside.split('/')[0]!));
+          await writeFile(resolve(workspace, outside), '{}');
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, 'failed');
+      const expected = 'Error: Provider changed a path outside the signed task authority.';
+      assert.equal(receipt.commandResults.at(-1)?.stderrSha256,
+        `sha256:${createHash('sha256').update(expected).digest('hex')}`);
+    });
+  }
+});
+
 test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');

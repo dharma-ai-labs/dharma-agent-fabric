@@ -1151,12 +1151,11 @@ export async function executeTask(input: {
     });
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
     const trackedChanges = await gitOutput(worktree, [
-      'diff', '--name-only', '--diff-filter=ACDMRTUXB', startingCommit, '--',
+      'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
     ]);
-    const untrackedChanges = await gitOutput(worktree, ['ls-files', '--others', '--exclude-standard']);
-    const changedPaths = `${trackedChanges}\n${untrackedChanges}`
-      .split(/\r?\n/)
-      .map((path) => path.trim())
+    const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard']);
+    const changedPaths = (trackedChanges + untrackedChanges)
+      .split('\0')
       .filter(Boolean);
     if (changedPaths.length > 0) {
       const writes = input.task.authority.writePaths;
