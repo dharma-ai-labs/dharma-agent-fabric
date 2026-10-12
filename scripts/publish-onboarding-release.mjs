@@ -6,11 +6,15 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '2d64a4957460b49f3aadfda86999d283b0234f90';
-const tree = '09faeaa0ad949c8b532fd034726c52739b4df519';
+const source = 'bb072701c002bc1cdc68a4bec16fb6ea38d8dd7c';
+const tree = 'b6012b4a75c41996f9a5644857817a0d90ef1c29';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.187' },
+  { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16' },
+  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.34' },
+  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.36' },
+  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.188' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -57,24 +61,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.equal(snapshot.lifecycleLauncher,
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
-  const allowed = new Set(['package-lock.json', 'packages/cli/package.json', 'packages/cli/src/index.ts',
-    'apps/relay-gateway/src/protocol.ts', 'apps/relay-gateway/src/protocol.test.ts',
-    'apps/relay-gateway/src/restorationTransport.test.ts',
-    'packages/cli/src/repositoryCandidateSync.ts', 'packages/cli/src/repositoryCandidateSync.test.ts',
-    'packages/cli/src/repositoryKnowledgeRetention.test.ts',
-    'packages/cli/src/repositorySourceSync.ts', 'packages/cli/src/repositorySourceSync.test.ts',
-    'packages/cli/src/repositorySourceInventoryClient.ts', 'packages/cli/src/repositorySourceRestoration.ts',
-    'packages/cli/src/repositorySourceRestorationCommand.test.ts', 'packages/cli/src/usage.ts',
-    'schemas/repository-knowledge-restoration-v1.schema.json',
-    'schemas/repository-candidate-fence-v1.schema.json',
-    'schemas/repository-candidate-upload-v1.schema.json',
-    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
+  const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
-  const baseline = structuredClone(snapshot.baselineManifest);
-  baseline.scripts['pack:verify'] = 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs';
-  baseline.scripts['publish:onboarding'] = 'node scripts/publish-onboarding-release.mjs';
-  assert.deepEqual(snapshot.manifest, baseline, 'unreviewed root manifest delta');
+  assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
 }
 
 async function publicGet(url, json = true) {

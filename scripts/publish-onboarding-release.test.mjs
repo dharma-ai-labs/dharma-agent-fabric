@@ -8,12 +8,12 @@ import { approvedPackages, assertSourceSnapshot, assertProvenance, publishBounde
 
 const head = 'a'.repeat(40);
 
-test('reviewed restoration snapshot is admitted without extending current publication authority', () => {
+test('merged artifact correction is admitted without admitting further product changes', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '2d64a4957460b49f3aadfda86999d283b0234f90';
-  const reviewed = '3ce9cb72351bde88a5ad9e0e68dada5d843bb656';
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'a8ea567ca7e06ce7ac43e633c1bfb60e21e1c79a');
+  const baseline = 'bb072701c002bc1cdc68a4bec16fb6ea38d8dd7c';
+  const reviewed = baseline;
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'b6012b4a75c41996f9a5644857817a0d90ef1c29');
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -21,11 +21,11 @@ test('reviewed restoration snapshot is admitted without extending current public
     baselineManifest: JSON.parse(git('show', `${baseline}:package.json`)),
     manifest: JSON.parse(git('show', `${reviewed}:package.json`))};
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
-  assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [...snapshot.changed,
-    'apps/relay-gateway/src/protocol.ts', 'apps/relay-gateway/src/protocol.test.ts',
-    'packages/cli/src/repositoryCandidateSync.test.ts'] }));
+  assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [
+    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs'] }));
   for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml',
-    'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md']) {
+    'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md',
+    'packages/contracts/package.json', 'package-lock.json', 'apps/relay-gateway/src/protocol.ts']) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, changed: [...snapshot.changed, forbidden]}),
       /unreviewed product source delta/);
   }
@@ -77,11 +77,17 @@ function fixture() {
   return { io, effects };
 }
 
-test('publishes precisely the approved CLI correction without republishing dependencies', async () => {
+test('publishes precisely the approved dependency closure before the CLI correction', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, approvedPackages.map((item) => item.name));
-  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [['@dharma-ai-labs/agent-fabric', '0.2.187']]);
+  assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
+    ['@dharma-ai-labs/agent-fabric-contracts', '0.1.16'],
+    ['@dharma-ai-labs/agent-fabric-provider-adapters', '0.1.34'],
+    ['@dharma-ai-labs/agent-fabric-task-runner', '0.1.36'],
+    ['@dharma-ai-labs/agent-fabric-evidence-reduction', '0.2.33'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.188'],
+  ]);
 });
 
 for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
@@ -90,9 +96,9 @@ for (const defect of ['source', 'name', 'version', 'integrity', 'provenance']) {
     if (defect === 'source') io.verifySource = async () => { throw new Error('source mismatch'); };
     if (defect === 'name' || defect === 'version') {
       const original = io.manifest;
-      io.manifest = async (item) => ({ ...await original(item), ...(item.version === '0.2.187' ? { [defect]: 'wrong' } : {}) });
+      io.manifest = async (item) => ({ ...await original(item), ...(item.name === '@dharma-ai-labs/agent-fabric' ? { [defect]: 'wrong' } : {}) });
     }
-    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.version === '0.2.187'
+    if (defect === 'integrity' || defect === 'provenance') io.lookup = async (item) => item.name === '@dharma-ai-labs/agent-fabric'
       ? { name: item.name, version: item.version, dist: { integrity: defect === 'integrity' ? 'wrong' : `sha512-${item.version}` } } : null;
     await assert.rejects(publishBoundedRelease(head, io));
     assert.deepEqual(effects, []);
@@ -107,7 +113,7 @@ test('matching existing integrity and provenance are verified, never republished
   } });
   io.verifyPublished = async () => { checked++; };
   await publishBoundedRelease(head, io);
-  assert.equal(checked, 1);
+  assert.equal(checked, approvedPackages.length);
   assert.deepEqual(effects, []);
 });
 
@@ -120,12 +126,13 @@ test('publication failure is not replayed and later packages remain unpublished'
 
 for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher']) {
   test(`source admission rejects changed ${defect}`, () => {
-    const snapshot = { head, ref: 'refs/heads/main', tree: '09faeaa0ad949c8b532fd034726c52739b4df519',
+    const manifest = { scripts: {
+      'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
+      'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
+    } };
+    const snapshot = { head, ref: 'refs/heads/main', tree: 'b6012b4a75c41996f9a5644857817a0d90ef1c29',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
-      changed: [], untracked: [], baselineManifest: { scripts: {} }, manifest: { scripts: {
-        'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
-        'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
-      } } };
+      changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest };
     assert.doesNotThrow(() => assertSourceSnapshot(head, snapshot));
     snapshot[defect] = ['changed', 'untracked'].includes(defect) ? ['packages/cli/other.js']
       : defect === 'manifest' ? { scripts: {} } : 'wrong';
@@ -140,4 +147,25 @@ test('provenance rejects another source commit even when package bytes match', (
   } } };
   const attestations = { attestations: [{ bundle: { dsseEnvelope: { payload: Buffer.from(JSON.stringify(statement)).toString('base64') } } }] };
   assert.throws(() => assertProvenance(approvedPackages[0], { integrity: 'sha512-YQ==' }, attestations, head), /publisher source mismatch/);
+});
+
+test('last-package preflight failure prevents every earlier dependency publication', async () => {
+  const { io, effects } = fixture();
+  const original = io.manifest;
+  io.manifest = async (item) => ({ ...await original(item),
+    ...(item.name === '@dharma-ai-labs/agent-fabric' ? {version: 'wrong'} : {}) });
+  await assert.rejects(publishBoundedRelease(head, io), /approved package version mismatch/);
+  assert.deepEqual(effects, []);
+});
+
+test('uncertain intermediate publication stops before later dependencies and CLI', async () => {
+  const { io, effects } = fixture();
+  io.publish = async (item) => {
+    effects.push(item.name);
+    if (effects.length === 2) throw new Error('uncertain second publication');
+  };
+  io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
+    dist: {integrity: `sha512-${item.version}`, attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : null;
+  await assert.rejects(publishBoundedRelease(head, io), /uncertain second publication/);
+  assert.deepEqual(effects, approvedPackages.slice(0, 2).map((item) => item.name));
 });
