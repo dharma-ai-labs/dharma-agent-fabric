@@ -333,6 +333,25 @@ test('review regression: identical-content rollback identity changing during the
   assert.ok(!f.calls.some(call => /snapshot-write|submit|registry-write/.test(call)));
 });
 
+test('review regression: workspace edits during the final head lookup prevent stale snapshot admission', async () => {
+  for (const wait of ['head', 'authority'] as const) {
+    const f = fixture();let changed = false, headChecked = false, localChecks = 0;
+    const authorization = { generationId: 'current-generation', policy: { automaticValidatedPublication: true } };
+    f.overrides.collectRepositorySourceRestoration = async () => ({
+      local: { manifest: { snapshotHash: 'local' } }, snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: authorization } },
+      expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
+      operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => {},
+      assertLocalCurrent: async () => { localChecks++;if (changed) throw new Error('repository_source_restoration_workspace_changed'); },
+      assertHeadCurrent: async () => { await Promise.resolve();headChecked = true;if (wait === 'head') changed = true; },
+    });
+    f.overrides.fetchRepositorySourceAuthorization = async () => {
+      await Promise.resolve();if (wait === 'authority' && headChecked) changed = true;return authorization;
+    };
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /workspace_changed/);
+    assert.ok(localChecks >= 2);assert.ok(!f.calls.some(call => /snapshot-write|submit|registry-write/.test(call)));
+  }
+});
+
 test('review regression: runtime starting during submission retains admission without committing a registry receipt', async () => {
   for (const process of ['relay', 'supervisor'] as const) {
     const f = fixture();let submitted = false;
@@ -379,8 +398,9 @@ test('dry-run reads the official legacy enrollment anchor in place without secur
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-21), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
-    'local-recheck', 'head-recheck', 'authorization', 'supervisor-state', 'relay-state', 'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'supervisor-state', 'relay-state', 'registry-write', 'registry-checkpoint']);
+  assert.deepEqual(f.calls.slice(-24), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
+    'local-recheck', 'head-recheck', 'authorization', 'supervisor-state', 'relay-state', 'local-recheck', 'supervisor-state', 'relay-state',
+    'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'supervisor-state', 'relay-state', 'registry-write', 'registry-checkpoint']);
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.snapshotHash, 'snapshot');

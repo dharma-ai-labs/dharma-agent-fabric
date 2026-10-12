@@ -5908,6 +5908,11 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
       throw new Error('repository_source_restoration_requires_stopped_relay');
     }
+    // Network head/authority waits can outlive the preceding local scan.
+    await collected.assertLocalCurrent();
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
     await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.local, candidateOnly: true });
     if (collected.snapshot.manifest.snapshotHash !== collected.local.manifest.snapshotHash) {
       await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });

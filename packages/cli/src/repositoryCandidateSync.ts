@@ -601,6 +601,9 @@ export async function adoptRepositoryCandidate(input: {
   if (prior?.state === 'fenced') {
     requireFact(prior.operationId !== candidate.operationId, 'A fenced operation cannot be adopted.');
     await archiveFencedCheckpoint(input.outboxRoot, prior);
+    // Registry adoption is not a new restoration. Keep its terminal retry
+    // identity active until a restoration explicitly carries this fence ID.
+    return candidate;
   } else if (prior?.restoration) {
     requireFact(['published', 'blocked'].includes(prior.state), 'An unresolved restoration checkpoint cannot be replaced by adoption.');
     if (prior.operationId === candidate.operationId) {
