@@ -475,6 +475,115 @@ test('real guarded registry and durable outbox retain a terminal response across
   }
 });
 
+test('same-operation onboarding adopts retained restoration baselines and marks only a durable registry save', async () => {
+  const indexText = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const source = ts.createSourceFile('index.ts', indexText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const onboard = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'onboard') as ts.FunctionDeclaration;
+  const statements = onboard.body!.statements;
+  const candidateIndex = statements.findIndex(node => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some(value => value.name.getText(source) === 'candidate'));
+  const providersIndex = statements.findIndex(node => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some(value => value.name.getText(source) === 'providers'));
+  assert.ok(candidateIndex >= 0 && providersIndex > candidateIndex);
+  const tail = statements.slice(candidateIndex + 1, providersIndex).map(node => node.getText(source)).join('\n');
+  const returned = statements.findLast(node => ts.isReturnStatement(node)) as ts.ReturnStatement;
+  const publicCandidate = (returned.expression as ts.ObjectLiteralExpression).properties.find(node => ts.isPropertyAssignment(node)
+    && node.name.getText(source) === 'repositoryCandidate') as ts.PropertyAssignment;
+  const publicCode = ts.transpileModule(`function projectCandidate(candidate: any) { return ${publicCandidate.initializer.getText(source)}; }`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS } }).outputText;
+  const helperNames = ['saveWorkspaceRecord', 'saveRegistry', 'writeJsonAtomic', 'acquirePidLock'];
+  const code = ts.transpileModule(source.statements.filter(node => ts.isFunctionDeclaration(node)
+    && node.name && helperNames.includes(node.name.text)).map(node => node.getText(source)).join('\n')
+    + `\nasync function saveAdoption() { ${tail}\nreturn registered; }`,
+  { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const state of ['published', 'blocked'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-onboarding-restoration-reconcile-'));
+    try {
+      const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+      const inventory = await snapshot(root), path = join(outboxRoot, `${ids.workspaceId}.json`);
+      const registryPath = join(root, 'registry', 'workspaces.json');
+      const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+        baselineSnapshotHash: `sha256:${'d'.repeat(64)}`, previousOperationId: null,
+        priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+      let posts = 0;
+      const input = { scope, outboxRoot, snapshot: inventory, initialRepository: false,
+        expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`,
+        transport: { signedGet: async () => ({}), signedPost: async (_route: string, raw: unknown) => {
+          posts++;const body = raw as Record<string, string>;
+          return { ok: true, organizationId: scope.organizationId, candidate: {
+            candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+            snapshotHash: body.sourceSnapshotHash, state,
+            releaseId: state === 'published' ? '97f61652-a5eb-46e4-930c-9478cd4a9c31' : null } };
+        } } };
+      const receipt = await synchronizeRepositoryCandidate({ ...input, restoration });
+      const original = { ...scope, repositoryPackage: { ...receipt, generation: 18,
+        sourceManifestHash: sha256(canonicalize(inventory.manifest)), consolidationMode: 'repository_update',
+        sourcePolicyGenerationId: inventory.manifest.sourceAuthorization!.generationId } };
+      const sibling = { workspaceId: 'sibling', marker: 'preserve' };
+      await mkdir(dirname(registryPath), { recursive: true });
+      await writeFile(registryPath, JSON.stringify([original, sibling]));
+      const before = await readFile(path, 'utf8');let failure: 'save' | 'marker' | null = null, conflict = false;
+      const forged = JSON.parse(before);
+      forged.restoration.attemptId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31';
+      const forgedBytes = JSON.stringify(forged);await writeFile(path, forgedBytes);
+      await assert.rejects(adoptRepositoryCandidate({ scope, outboxRoot, candidate: receipt,
+        sourceManifestHash: original.repositoryPackage.sourceManifestHash, consolidationMode: 'repository_update' }), /checkpoint operation is invalid/);
+      assert.equal(await readFile(path, 'utf8'), forgedBytes);await writeFile(path, before);
+      const run = async () => {
+        const candidate = await adoptRepositoryCandidate({ scope, outboxRoot, candidate: receipt,
+          sourceManifestHash: original.repositoryPackage.sourceManifestHash, consolidationMode: 'repository_update' });
+        const projected = runInNewContext(publicCode + '\nprojectCandidate', { exports: {} },
+          { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } })(candidate);
+        assert.deepEqual(JSON.parse(JSON.stringify(projected)), receipt);
+        const rows = JSON.parse(await readFile(registryPath, 'utf8'));
+        const registered = rows.find((row: { workspaceId: string }) => row.workspaceId === scope.workspaceId);
+        return (runInNewContext(code + '\nsaveAdoption', { exports: {}, ...fs, structuredClone, canonicalize,
+          dirname, resolve, process, randomUUID, setTimeout, currentBootstrapHostScope: () => undefined,
+          dharmaHome: () => root, workspaceRegistryPath: () => registryPath,
+          registered, canonicalPackage: original.repositoryPackage, candidate, submitPackage: false, refreshPolicy: false,
+          initialSnapshot: inventory, sourceAuthorization: inventory.manifest.sourceAuthorization, sha256,
+          candidateScope: scope, outboxRoot,
+          readFile: async (...args: any[]) => {
+            if (args[0] === registryPath && conflict) {
+              conflict = false;
+              await fs.writeFile(registryPath, JSON.stringify([{ ...registered,
+                repositoryPackage: { ...registered.repositoryPackage, generation: 99 } }, sibling]));
+            }
+            return (fs.readFile as (...values: any[]) => Promise<any>)(...args);
+          },
+          rename: async (from: string, to: string) => {
+            if (to === registryPath && failure === 'save') throw new Error('injected_registry_save_failure');
+            return fs.rename(from, to);
+          }, checkpointRepositoryRestorationRegistry: async (value: Parameters<typeof checkpointRepositoryRestorationRegistry>[0]) => {
+            if (failure === 'marker') throw new Error('injected_registry_marker_failure');
+            await checkpointRepositoryRestorationRegistry(value);
+          },
+        }, { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } }) as () => Promise<any>)();
+      };
+      conflict = true;await assert.rejects(run(), /compare_and_swap/);
+      assert.equal(JSON.parse(await readFile(path, 'utf8')).registryReceiptHash, undefined);
+      assert.equal(JSON.parse(await readFile(registryPath, 'utf8'))[0].repositoryPackage.generation, 99);
+      await writeFile(registryPath, JSON.stringify([original, sibling]));failure = 'save';
+      await assert.rejects(run(), /injected_registry_save_failure/);
+      assert.equal(await readFile(path, 'utf8'), before);
+      assert.deepEqual(JSON.parse(await readFile(registryPath, 'utf8')), [original, sibling]);
+      failure = 'marker';await assert.rejects(run(), /injected_registry_marker_failure/);
+      assert.equal(JSON.parse(await readFile(path, 'utf8')).registryReceiptHash, undefined);
+      await assert.rejects(synchronizeRepositoryCandidate({ ...input,
+        expectedLatestSourceFingerprint: `sha256:${'e'.repeat(64)}` }), /registry reconciliation/);
+      failure = null;const saved = (await run()).repositoryPackage;
+      assert.equal(saved.localBaselineSnapshotHash, state === 'blocked' ? restoration.baselineSnapshotHash : restoration.localSnapshotHash);
+      assert.equal(saved.publishedLocalSnapshotHash, state === 'published' ? restoration.localSnapshotHash : restoration.baselineSnapshotHash);
+      assert.equal(saved.pendingLocalOperationId, null);assert.equal(saved.pendingLocalSnapshotHash, null);
+      assert.match(JSON.parse(await readFile(path, 'utf8')).registryReceiptHash, /^sha256:/);
+      assert.equal(posts, 1);
+      assert.deepEqual(JSON.parse(await readFile(registryPath, 'utf8')).find((row: { workspaceId: string }) => row.workspaceId === 'sibling'), sibling);
+      await synchronizeRepositoryCandidate({ ...input, expectedLatestSourceFingerprint: `sha256:${'e'.repeat(64)}` });
+      assert.equal(posts, 2);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 test('candidate upload schema validates actual legacy and restoration wire bodies and rejects malformed provenance', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-upload-contract-'));
   try {

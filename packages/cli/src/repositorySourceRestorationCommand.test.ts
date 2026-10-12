@@ -98,7 +98,7 @@ function fixture() {
   const calls: string[] = [];
   const workspace = { organizationId: 'org_fixture', workspaceId: 'workspace', repositoryBindingId: 'binding',
     repositoryAgentId: 'agent', accessMode: 'source_connected', path: '/synthetic',
-    repositoryPackage: { generation: 18, pendingLocalOperationId: null as string | null } };
+    repositoryPackage: { state: 'published', generation: 18, pendingLocalOperationId: null as string | null } };
   const overrides: Record<string, unknown> = {};
   let savedRecord: { repositoryPackage: Record<string, unknown> } | undefined;
   const defaults = {
@@ -213,6 +213,17 @@ test('restoration planning has no source, registry or activation writes', async 
   assert.ok(!f.calls.some(call => /write|submit|relay-state/.test(call)));
 });
 
+test('fresh restoration rejects an ordinary adopted nonterminal candidate before source collection', async () => {
+  for (const state of ['accepted', 'processing']) {
+    for (const mode of ['dry-run', 'apply']) {
+      const f = fixture();f.workspace.repositoryPackage.state = state;
+      await assert.rejects(f.run(mode === 'apply' ? f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])
+        : f.flags(['dry-run', true])), /publication_pending/);
+      assert.ok(!f.calls.some(call => /collect|snapshot-write|submit|registry-write/.test(call)));
+    }
+  }
+});
+
 test('review regression: fresh registry CAS failure precedes every source write and admission', async () => {
   const f = fixture();
   f.overrides.saveWorkspaceRecord = async () => { throw new Error('workspace_registry_compare_and_swap_failed'); };
@@ -296,7 +307,8 @@ test('review regression: source or workspace authority lost during the final loc
 
 test('review regression: admitted restoration reconciles historical authority after policy rollover without republishing', async () => {
   for (const state of ['accepted', 'processing', 'published', 'blocked'] as const) {
-    const f = fixture();const historical = { generationId: 'admission-generation', policy: { automaticValidatedPublication: true } };
+    const f = fixture();f.workspace.repositoryPackage.state = state;
+    const historical = { generationId: 'admission-generation', policy: { automaticValidatedPublication: true } };
     f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
       localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: null,
       priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',

@@ -592,7 +592,10 @@ export async function adoptRepositoryCandidate(input: {
   sourceManifestHash: string;
   consolidationMode: CandidateOutbox['consolidation']['mode'];
   candidate: RepositoryCandidateReceipt;
-}): Promise<RepositoryCandidateReceipt> {
+}): Promise<RepositoryCandidateReceipt & { restorationRegistryBaseline?: {
+  localBaselineSnapshotHash: string | null; publishedLocalSnapshotHash: string | null;
+  pendingLocalSnapshotHash: null; pendingLocalOperationId: null;
+} }> {
   const scope = checkedScope(input.scope);
   requireFact(HASH.test(input.sourceManifestHash), 'Canonical repository candidate manifest hash is invalid.');
   const candidate = receipt({ ok: true, organizationId: scope.organizationId, candidate: input.candidate },
@@ -612,7 +615,19 @@ export async function adoptRepositoryCandidate(input: {
       requireFact(prior.candidateId === candidate.candidateId && prior.snapshotHash === candidate.snapshotHash
         && prior.sourceManifestHash === input.sourceManifestHash && prior.state === candidate.state && prior.releaseId === candidate.releaseId
         && prior.consolidation.mode === input.consolidationMode, 'Restoration adoption changed its checkpoint.');
-      return candidate;
+      requireFact(prior.consolidation.mode === 'repository_update' && Boolean(prior.consolidation.expectedLatestSourceFingerprint)
+        && repositoryCandidateOperationId({ scope, snapshotHash: prior.snapshotHash,
+          sourceManifestHash: prior.sourceManifestHash, consolidation: prior.consolidation,
+          restorationAttempt: prior.restoration.attemptId, restorationContext: restorationContext(prior.restoration) }) === prior.operationId,
+      'Repository restoration checkpoint operation is invalid.');
+      requireFact(candidate.state !== 'published' || candidate.releaseId !== prior.restoration.priorReleaseId,
+        'Repository restoration cannot reuse the archived release identity.');
+      // Internal save metadata only; never add it to a signed candidate receipt.
+      return { ...candidate, restorationRegistryBaseline: {
+        localBaselineSnapshotHash: prior.state === 'blocked' ? prior.restoration.baselineSnapshotHash : prior.restoration.localSnapshotHash,
+        publishedLocalSnapshotHash: prior.state === 'published' ? prior.restoration.localSnapshotHash : prior.restoration.baselineSnapshotHash,
+        pendingLocalSnapshotHash: null, pendingLocalOperationId: null,
+      } };
     }
     assertRestorationReconciled(prior);
   }

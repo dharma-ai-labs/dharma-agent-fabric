@@ -5857,6 +5857,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     }
   }
   if (workspace.repositoryPackage.pendingLocalOperationId) throw new Error('repository_source_restoration_workspace_not_authorized');
+  if (!['published', 'blocked'].includes(workspace.repositoryPackage.state)) {
+    throw new Error('repository_source_restoration_publication_pending');
+  }
   const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
     workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
   const restorationAttempt = await readRepositoryRestorationAttempt({ scope,
@@ -6204,7 +6207,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const retryBlockedInitial = canonicalPackage.state === 'blocked' && canonicalPackage.generation === 0
     && canonicalPackage.consolidationMode === 'initial_repository';
   const submitPackage = canonicalPackage.state === 'absent' || refreshPolicy || retryBlockedInitial;
-  const candidate = await staged('package_publication', async () => submitPackage
+  const candidate: Awaited<ReturnType<typeof adoptRepositoryCandidate>> = await staged('package_publication', async () => submitPackage
     ? await synchronizeRepositoryCandidate({ transport: fabric, outboxRoot, scope: candidateScope,
       snapshot: initialSnapshot, initialRepository: canonicalPackage.generation === 0,
       ...(retryBlockedInitial ? { blockedCandidate: {
@@ -6218,6 +6221,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
         snapshotHash: canonicalPackage.snapshotHash!, state: canonicalPackage.state as RepositoryCandidateReceipt['state'],
         releaseId: canonicalPackage.releaseId,
       } }));
+  const beforePackageSave = registered;
+  const restorationRegistryBaseline = candidate.restorationRegistryBaseline;
   registered = { ...registered, repositoryPackage: {
     state: candidate.state, candidateId: candidate.candidateId, operationId: candidate.operationId,
     snapshotHash: candidate.snapshotHash,
@@ -6238,8 +6243,13 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     pendingLocalOperationId: submitPackage
       ? candidate.state === 'accepted' || candidate.state === 'processing'
         ? candidate.operationId : null : null,
+    ...restorationRegistryBaseline,
   } };
-  await saveWorkspaceRecord(registered);
+  await saveWorkspaceRecord(registered, restorationRegistryBaseline ? {
+    expected: beforePackageSave,
+    afterSave: saved => checkpointRepositoryRestorationRegistry({ outboxRoot, scope: candidateScope,
+      repositoryPackage: saved.repositoryPackage! }),
+  } : undefined);
   const providers = await staged('role_registration', async () => receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
   ));
@@ -6304,7 +6314,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       writePaths: generatedPolicy.tasks.writePaths,
     },
     repositorySkill: installed,
-    repositoryCandidate: candidate,
+    repositoryCandidate: { candidateId: candidate.candidateId, operationId: candidate.operationId,
+      snapshotHash: candidate.snapshotHash, state: candidate.state, releaseId: candidate.releaseId },
     firstLearningEvidence: {
       discovered: discoveredTrajectories,
       disclosureReady,
