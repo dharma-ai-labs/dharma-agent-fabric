@@ -214,6 +214,58 @@ function pathWithinPolicy(candidate: string, patterns: string[]) {
   });
 }
 
+function requiredArtifactReferences(task: TaskEnvelope): string[] {
+  for (const artifact of task.acceptance.requiredArtifacts) {
+    const parts = artifact.split('/');
+    if (!artifact || /[\\\x00-\x1f\x7f:*?"<>|]/.test(artifact)
+      || parts.some((part) => !part || part === '.' || part === '..' || /[. ]$/.test(part)
+        || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(part))) {
+      throw new Error('required_artifact_invalid');
+    }
+    if (!pathWithinPolicy(artifact, task.authority.readPaths)) {
+      throw new Error('required_artifact_unauthorized');
+    }
+  }
+  return [...new Set(task.acceptance.requiredArtifacts)];
+}
+
+async function verifyRequiredArtifacts(worktree: string, artifacts: string[], assertCurrent: () => void): Promise<void> {
+  for (const artifact of artifacts) {
+    assertCurrent();
+    try {
+      let current = worktree;
+      const parts = artifact.split('/');
+      for (const [index, part] of parts.entries()) {
+        current = assertPathWithinWorkspace(worktree, resolve(current, part));
+        const metadata = await lstat(current);
+        if (metadata.isSymbolicLink()) throw new Error('required_artifact_unsafe');
+        if (index < parts.length - 1) {
+          if (!metadata.isDirectory()) throw new Error('required_artifact_not_file');
+          continue;
+        }
+        if (!metadata.isFile()) throw new Error('required_artifact_not_file');
+        if (metadata.nlink !== 1) throw new Error('required_artifact_unsafe');
+        if ((metadata.mode & 0o444) === 0) throw new Error('required_artifact_unreadable');
+        // Open without reading contents; reject substituted final targets where supported.
+        const handle = await open(current, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+        try {
+          const opened = await handle.stat();
+          if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== metadata.dev || opened.ino !== metadata.ino) {
+            throw new Error('required_artifact_unsafe');
+          }
+        } finally { await handle.close(); }
+      }
+      assertCurrent();
+    } catch (error) {
+      if (error instanceof Error && /^required_artifact_[a-z_]+$/.test(error.message)) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      throw new Error(code === 'ENOENT' ? 'required_artifact_missing'
+        : code === 'EACCES' || code === 'EPERM' ? 'required_artifact_unreadable'
+        : code === 'ELOOP' ? 'required_artifact_unsafe' : 'required_artifact_unavailable');
+    }
+  }
+}
+
 export function assertTaskWithinLocalPolicy(task: TaskEnvelope, policy: OrganizationPolicy) {
   if (task.authority.writePaths.some((path) => !pathWithinPolicy(path, policy.tasks.writePaths))) {
     throw new Error('Task write authority exceeds the local organization policy.');
@@ -901,6 +953,7 @@ export async function executeTask(input: {
   for (const path of [...input.task.authority.readPaths, ...input.task.authority.writePaths]) {
     assertPathWithinWorkspace(input.workspace, path);
   }
+  const requiredArtifacts = requiredArtifactReferences(input.task);
   const allowed = new Set(input.task.authority.commands.map(({ commandId }) => commandId));
   for (const { commandId } of input.task.acceptance.commands) {
     if (!allowed.has(commandId)) throw new Error(`Acceptance command is outside task authority: ${commandId}`);
@@ -1114,6 +1167,12 @@ export async function executeTask(input: {
         });
       }
       if (result.exitCode !== 0 || result.timedOut) { status = input.signal?.aborted ? 'cancelled' : 'failed'; break; }
+    }
+    if (status === 'completed') {
+      await verifyRequiredArtifacts(worktree, requiredArtifacts, () => {
+        if (input.signal?.aborted) throw new Error('required_artifact_interrupted');
+        if (remainingTaskMs() <= 0) throw new Error('required_artifact_expired');
+      });
     }
     } catch (error) {
       status = input.signal?.aborted ? 'cancelled' : 'failed';

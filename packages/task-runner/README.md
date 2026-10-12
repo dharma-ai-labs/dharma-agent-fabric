@@ -21,6 +21,26 @@ enforcement acknowledgement: `executed` after complete execution, `unknown`
 after an indeterminate release attempt, or `contained` for a valid non-release.
 Tasks that omit the capability retain the previous behavior and receipt shape.
 
+## Required Artifacts
+
+`acceptance.requiredArtifacts` names workspace-relative regular files that must
+be present and readable after the provider and registered acceptance commands,
+before the runner records completion. References use `/` separators, must be
+within signed read authority, and cannot contain traversal, empty segments,
+wildcards, Windows device names or ambiguous platform-specific aliases.
+Invalid or unauthorized references are rejected before provider execution.
+
+Missing, unreadable, non-file, symbolic-link/junction or hard-linked artifacts
+fail acceptance. Artifact contents and target paths are not copied into failure
+messages. Empty regular files satisfy presence, not quality; an empty required
+list preserves existing behavior. A late failure after released work retains an
+`unknown` action acknowledgement rather than claiming containment or execution.
+
+This is a final-state completion check, not an OS sandbox, immutable artifact
+snapshot, quality grader or proof of external effects. It does not prevent all
+concurrent filesystem mutation; native containment and independent acceptance
+remain separate requirements.
+
 - [Task execution boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/06-task-execution-and-a2a.md)
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/task-runner)
