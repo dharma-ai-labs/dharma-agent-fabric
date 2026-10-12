@@ -66,8 +66,16 @@ messages. Empty regular files satisfy presence, not quality; an empty required
 list preserves existing behavior. A late failure after released work retains an
 `unknown` action acknowledgement rather than claiming containment or execution.
 
+Required paths without signed write authority must already exist before the
+provider starts. The runner fingerprints their regular-file metadata and hashes
+their contents without exposing either, then checks them after the provider and
+after acceptance commands. Ignored files do not gain write authority from being
+required artifacts. Write-authorized outputs still use final presence checks.
+Git path inventories must be complete and NUL-terminated; exceeding the bounded
+capture limit fails closed rather than authorizing a partial inventory.
+
 This is a final-state completion check, not an OS sandbox, immutable artifact
-snapshot, quality grader or proof of external effects. It does not prevent all
+snapshot, quality grader or proof of external effects. The integrity checks do not prevent all
 concurrent filesystem mutation; native containment and independent acceptance
 remain separate requirements.
 

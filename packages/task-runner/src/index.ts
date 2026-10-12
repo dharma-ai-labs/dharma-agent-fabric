@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
@@ -244,7 +244,14 @@ function requiredArtifactReferences(task: TaskEnvelope, worktree?: string): stri
   return [...new Set(task.acceptance.requiredArtifacts)];
 }
 
-async function verifyRequiredArtifacts(worktree: string, artifacts: string[], assertCurrent: () => void): Promise<void> {
+function artifactFileState(metadata: Stats): string {
+  return JSON.stringify([metadata.dev, metadata.ino, metadata.mode, metadata.nlink, metadata.size,
+    metadata.mtimeMs, metadata.ctimeMs, metadata.birthtimeMs]);
+}
+
+async function verifyRequiredArtifacts(worktree: string, artifacts: string[], assertCurrent: () => void,
+  integrity?: { paths: ReadonlySet<string>; expected?: ReadonlyMap<string, string> }): Promise<Map<string, string>> {
+  const fingerprints = new Map<string, string>();
   for (const artifact of artifacts) {
     assertCurrent();
     try {
@@ -268,6 +275,25 @@ async function verifyRequiredArtifacts(worktree: string, artifacts: string[], as
           if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== metadata.dev || opened.ino !== metadata.ino) {
             throw new Error('required_artifact_unsafe');
           }
+          if (integrity?.paths.has(artifact)) {
+            const digest = createHash('sha256');
+            const buffer = Buffer.alloc(65_536);
+            let position = 0;
+            while (true) {
+              assertCurrent();
+              const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+              if (bytesRead === 0) break;
+              digest.update(buffer.subarray(0, bytesRead));
+              position += bytesRead;
+            }
+            const finalState = artifactFileState(await handle.stat());
+            if (finalState !== artifactFileState(opened)) throw new Error('required_artifact_write_unauthorized');
+            const fingerprint = finalState + ':' + digest.digest('hex');
+            if (integrity.expected && integrity.expected.get(artifact) !== fingerprint) {
+              throw new Error('required_artifact_write_unauthorized');
+            }
+            fingerprints.set(artifact, fingerprint);
+          }
         } finally { await handle.close(); }
       }
       assertCurrent();
@@ -279,6 +305,7 @@ async function verifyRequiredArtifacts(worktree: string, artifacts: string[], as
         : code === 'ELOOP' ? 'required_artifact_unsafe' : 'required_artifact_unavailable');
     }
   }
+  return fingerprints;
 }
 
 export function assertTaskWithinLocalPolicy(task: TaskEnvelope, policy: OrganizationPolicy) {
@@ -326,6 +353,7 @@ async function runProcess(command: string, argv: string[], options: {
   timeoutMs: number;
   signal?: AbortSignal;
   maximumOutputBytes?: number;
+  requireCompleteOutput?: boolean;
   environment?: Record<string, string>;
 }): Promise<Omit<CommandResult, 'commandId'>> {
   return new Promise((accept, reject) => {
@@ -366,6 +394,10 @@ async function runProcess(command: string, argv: string[], options: {
       options.signal?.removeEventListener('abort', cancel);
       const stdoutBuffer = Buffer.concat(stdout);
       const stderrBuffer = Buffer.concat(stderr);
+      if (options.requireCompleteOutput && (stdoutBytes > outputLimit || stderrBytes > outputLimit)) {
+        reject(new Error('Process output exceeds the supported limit.'));
+        return;
+      }
       accept({
         exitCode: code,
         signal,
@@ -385,7 +417,7 @@ async function git(repository: string, argv: string[]): Promise<void> {
 }
 
 async function gitOutput(repository: string, argv: string[]) {
-  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000 });
+  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000, requireCompleteOutput: true });
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   return result.stdout;
 }
@@ -1092,6 +1124,14 @@ export async function executeTask(input: {
       await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD']);
       await git(worktree, ['switch', '-c', branch]);
       const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
+    const assertArtifactCurrent = () => {
+      if (input.signal?.aborted) throw new Error('required_artifact_interrupted');
+      if (remainingTaskMs() <= 0) throw new Error('required_artifact_expired');
+    };
+    const readOnlyArtifacts = requiredArtifacts.filter(artifact => !pathWithinPolicy(artifact, input.task.authority.writePaths));
+    const readOnlyPaths = new Set(readOnlyArtifacts);
+    const readOnlyFingerprints = await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, { paths: readOnlyPaths });
+    const artifactIntegrity = { paths: readOnlyPaths, expected: readOnlyFingerprints };
     const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
     const formattedTask = formatProviderInstructionsForTask(input.task);
     const artifactContext = formattedTask.artifactMetadataLength
@@ -1156,13 +1196,15 @@ export async function executeTask(input: {
       failureCategory: providerResult.failureCategory,
     });
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
+    await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, artifactIntegrity);
     const trackedChanges = await gitOutput(worktree, [
       'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
     ]);
     const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard']);
-    const changedPaths = (trackedChanges + untrackedChanges)
-      .split('\0')
-      .filter(Boolean);
+    if ((trackedChanges && !trackedChanges.endsWith('\0')) || (untrackedChanges && !untrackedChanges.endsWith('\0'))) {
+      throw new Error('Git path output was incomplete.');
+    }
+    const changedPaths = [...trackedChanges.split('\0'), ...untrackedChanges.split('\0')].filter(Boolean);
     if (changedPaths.length > 0) {
       const writes = input.task.authority.writePaths;
       if (writes.length === 0 || changedPaths.some((path) => !pathWithinPolicy(path, writes))) {
@@ -1206,10 +1248,7 @@ export async function executeTask(input: {
       if (result.exitCode !== 0 || result.timedOut) { status = input.signal?.aborted ? 'cancelled' : 'failed'; break; }
     }
     if (status === 'completed') {
-      await verifyRequiredArtifacts(worktree, requiredArtifacts, () => {
-        if (input.signal?.aborted) throw new Error('required_artifact_interrupted');
-        if (remainingTaskMs() <= 0) throw new Error('required_artifact_expired');
-      });
+      await verifyRequiredArtifacts(worktree, requiredArtifacts, assertArtifactCurrent, artifactIntegrity);
     }
     } catch (error) {
       status = input.signal?.aborted ? 'cancelled' : 'failed';

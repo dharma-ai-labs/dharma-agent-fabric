@@ -4,7 +4,8 @@ import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import {
   actionDecisionDigest,
   signCanonicalObject,
@@ -67,6 +68,94 @@ async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string
     input: { policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey,
       receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')) } };
 }
+
+test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
+  for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {
+    await t.test(stream, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const originalSpawn = childProcess.spawn;
+      const body = stream === 'unterminated' ? 'reports/partial'
+        : 'reports/a\0'.repeat(99_999) + 'reports/zzextra\0';
+      const outputPath = resolve(fixture.root, 'synthetic-git-output');
+      await writeFile(outputPath, body);
+      let intercepted = 0;
+      const patch = child.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
+        if (command === 'git' && (stream === 'untracked-overflow' ? argv[0] === 'ls-files' : argv[0] === 'diff')) {
+          intercepted++;
+          return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], options);
+        }
+        return originalSpawn(command, argv, options);
+      });
+      syncBuiltinESMExports();
+      try {
+        const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+          providerExecutor: async ({ workspace }) => {
+            if (stream !== 'untracked-overflow') await writeFile(resolve(workspace, 'outside.txt'), 'fixture');
+            return fixture.providerResult;
+          } });
+        assert.equal(intercepted, 1);
+        assert.equal(receipt.status, 'failed');
+        assert.match(receipt.commandResults.at(-1)?.stderr || '', /output.*limit|Git path output was incomplete/);
+      } finally { patch.mock.restore(); syncBuiltinESMExports(); }
+    });
+  }
+});
+
+test('required artifact review v10: ignored outputs require signed write authority', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  await writeFile(resolve(fixture.workspace, '.gitignore'), 'reports/result.json\n');
+  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace }).status, 0);
+  fixture.unsigned.authority.writePaths = ['reports/allowed/**'];
+  let calls = 0;
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      calls++;
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/result.json'), 'forbidden ignored output');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'failed');
+  assert.equal(calls, 0);
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_missing/);
+});
+
+test('required artifact review v10: existing read-only artifacts remain unchanged through acceptance', async (t) => {
+  for (const mutate of [false, true]) {
+    await t.test(mutate ? 'changed by acceptance' : 'unchanged', async (child) => {
+      const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
+      await mkdir(resolve(fixture.workspace, 'reports'));
+      await writeFile(resolve(fixture.workspace, 'reports/result.json'), 'private-read-only-sentinel');
+      assert.equal(spawnSync('git', ['add', 'reports/result.json'], { cwd: fixture.workspace }).status, 0);
+      assert.equal(spawnSync('git', ['commit', '-qm', 'existing output'], { cwd: fixture.workspace }).status, 0);
+      fixture.unsigned.authority.writePaths = ['reports/allowed/**'];
+      if (mutate) {
+        fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e',
+          'require("node:fs").writeFileSync("reports/result.json","unauthorized-replacement");'], timeoutSeconds: 5 };
+        fixture.unsigned.authority.commands.push({ commandId: 'verify' });
+        fixture.unsigned.acceptance.commands.push({ commandId: 'verify' });
+      }
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+      assert.equal(receipt.status, mutate ? 'failed' : 'completed');
+      if (mutate) assert.match(receipt.commandResults.at(-1)?.stderr || '', /required_artifact_write_unauthorized/);
+      assert.equal(JSON.stringify(receipt).includes('private-read-only-sentinel'), false);
+      assert.equal(JSON.stringify(receipt).includes('unauthorized-replacement'), false);
+    });
+  }
+});
+
+test('required artifact review v10: ignored write-authorized outputs remain supported', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  await writeFile(resolve(fixture.workspace, '.gitignore'), 'reports/result.json\n');
+  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace }).status, 0);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async ({ workspace }) => {
+    await mkdir(resolve(workspace, 'reports'));
+    await writeFile(resolve(workspace, 'reports/result.json'), '{}');
+    return fixture.providerResult;
+  } });
+  assert.equal(receipt.status, 'completed');
+});
 
 test('required artifacts prevent successful completion when the signed output is missing', async (t) => {
   const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
