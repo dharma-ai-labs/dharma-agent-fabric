@@ -234,6 +234,61 @@ test('required artifacts cannot emit an executed acknowledgement after missing o
   assert.equal(receipt.actionAcknowledgement?.disposition, 'unknown');
 });
 
+test('required artifact review: signed output paths reach the provider without user instruction duplication', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace, instructions }) => {
+      const matched = instructions.match(/<dharma_required_artifacts>\n([\s\S]*?)\n<\/dharma_required_artifacts>/);
+      assert.ok(matched, 'provider must receive the separately signed artifact list');
+      const outputs = JSON.parse(matched[1]!);
+      assert.deepEqual(outputs, ['reports/result.json']);
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, outputs[0]!), '{}');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed');
+});
+
+test('required artifact review: superscript Windows device aliases are rejected before provider execution', async (t) => {
+  for (const artifact of ['reports/COM\u00b9', 'reports/COM\u00b2.json', 'reports/COM\u00b3',
+    'reports/LPT\u00b9', 'reports/LPT\u00b2.txt', 'reports/lpt\u00b3']) {
+    await t.test(artifact, async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review: portable case and normalization collisions are rejected before execution', async (t) => {
+  for (const artifacts of [['reports/A.json', 'reports/a.json'], ['reports/Result.json', 'Reports/result.json'],
+    ['reports/\u00e9.json', 'reports/e\u0301.json']]) {
+    await t.test(JSON.stringify(artifacts), async (child) => {
+      const fixture = await requiredArtifactFixture(child, artifacts);
+      fixture.unsigned.authority.readPaths = ['.'];
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review: unusable component and total path lengths are rejected before execution', async (t) => {
+  for (const artifact of ['reports/' + 'x'.repeat(256), 'reports/' + '\u00e9'.repeat(128),
+    'reports/' + Array(25).fill('x'.repeat(200)).join('/')]) {
+    await t.test('UTF8 bytes ' + Buffer.byteLength(artifact), async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
 test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');

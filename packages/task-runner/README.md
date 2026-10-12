@@ -29,6 +29,16 @@ before the runner records completion. References use `/` separators, must be
 within signed read authority, and cannot contain traversal, empty segments,
 wildcards, Windows device names or ambiguous platform-specific aliases.
 Invalid or unauthorized references are rejected before provider execution.
+The signed required-file list is included as data in provider instructions;
+callers do not have to repeat it in their natural-language request.
+
+Artifact sets use conservative portable names: distinct entries cannot collide
+after NFC normalization and lowercase conversion, even on case-sensitive hosts.
+Exact repeated entries are deduplicated. Windows device-name restrictions include
+the superscript COM/LPT aliases. Components are limited to 255 UTF-8 bytes.
+Resolved paths are limited to 259 UTF-16 units on Windows (without changing
+long-path settings), 1023 UTF-8 bytes on macOS and 4095 on Linux. These supported
+runner limits do not establish every filesystem or registered tool's limits.
 
 Missing, unreadable, non-file, symbolic-link/junction or hard-linked artifacts
 fail acceptance. Artifact contents and target paths are not copied into failure
