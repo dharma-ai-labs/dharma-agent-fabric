@@ -53,7 +53,7 @@ import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { validateRepositorySourceAuthorization, type RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
@@ -5804,17 +5804,26 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
       if (recovered.candidate.state === 'published' && recovered.candidate.releaseId === recovered.priorReleaseId) {
         throw new Error('repository_source_restoration_archived_release_reused');
       }
-      for (const hash of new Set([recovered.localSnapshotHash, recovered.candidate.snapshotHash,
+      let admissionAuthorization: RepositorySourceAuthorization | undefined;
+      for (const hash of new Set([recovered.candidate.snapshotHash, recovered.localSnapshotHash,
         ...(recovered.baselineSnapshotHash ? [recovered.baselineSnapshotHash] : [])])) {
         const snapshot = await readRepositoryPackageSnapshot(workspace.path, hash);
         if (!snapshot || snapshot.manifest.organizationId !== scope.organizationId || snapshot.manifest.workspaceId !== workspaceId
           || snapshot.manifest.knowledge?.repositoryAgentId !== scope.repositoryAgentId
-          || (hash === recovered.localSnapshotHash || hash === recovered.candidate.snapshotHash)
-            && canonicalize(snapshot.manifest.sourceAuthorization) !== canonicalize(authorization)
           || hash === recovered.candidate.snapshotHash && sha256(canonicalize(snapshot.manifest)) !== recovered.sourceManifestHash) {
           throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
         }
+        if (hash === recovered.localSnapshotHash || hash === recovered.candidate.snapshotHash) {
+          // Admission provenance may predate the current policy. It is bound to
+          // the durable manifest, never reused as authority to upload or activate.
+          const historical = validateRepositorySourceAuthorization(snapshot.manifest.sourceAuthorization, scope);
+          if (admissionAuthorization && canonicalize(historical) !== canonicalize(admissionAuthorization)) {
+            throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
+          }
+          admissionAuthorization = historical;
+        }
       }
+      if (!admissionAuthorization) throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
       const currentAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
       if (canonicalize(currentAuthorization) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
       if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
@@ -5825,7 +5834,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
       const pending = candidate.state === 'accepted' || candidate.state === 'processing';
       await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
         ...candidate, sourceManifestHash: recovered.sourceManifestHash, consolidationMode: 'repository_update',
-        sourcePolicyGenerationId: currentAuthorization.generationId,
+        sourcePolicyGenerationId: admissionAuthorization.generationId,
         localBaselineSnapshotHash: candidate.state === 'blocked' ? recovered.baselineSnapshotHash : recovered.localSnapshotHash,
         publishedLocalSnapshotHash: candidate.state === 'published' ? recovered.localSnapshotHash : recovered.baselineSnapshotHash,
         pendingLocalSnapshotHash: pending ? recovered.localSnapshotHash : null,
@@ -5890,6 +5899,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
       throw new Error('repository_source_restoration_requires_stopped_relay');
     }
     await collected.assertLocalCurrent();
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
     await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.local, candidateOnly: true });
     if (collected.snapshot.manifest.snapshotHash !== collected.local.manifest.snapshotHash) {
       await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });

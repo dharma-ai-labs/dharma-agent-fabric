@@ -465,6 +465,22 @@ test('restoration collects a fresh update with the stable signed prior and lates
   assert.deepEqual(await readFile(resolve(f.workspace, CATALOG)), f.initialCatalogBytes);
 });
 
+test('restoration accepts the shared repository head from another authorized workspace, not another repository', async t => {
+  const f = await restorationFixture(t);
+  f.body.source.workspaceId = '88888888-8888-4888-8888-888888888888';
+  const result = await collectRepositorySourceRestoration(f.input);
+  await result.assertCurrent();
+  assert.equal(result.headCandidateId, f.body.source.candidateId);
+  assert.equal(result.snapshot.manifest.workspaceId, scope.workspaceId);
+  assert.equal(result.snapshot.manifest.sourceAuthorization?.workspaceId, scope.workspaceId);
+  for (const key of ['repositoryBindingId', 'repositoryAgentId'] as const) {
+    await assert.rejects(collectRepositorySourceRestoration({ ...f.input, transport: {
+      signedGet: async route => route.startsWith('/agent-fabric/repository-source-policy')
+        ? f.transport.signedGet(route) : { ...structuredClone(f.body), [key]: '88888888-8888-4888-8888-888888888888' },
+    } }), /restoration_reference_invalid/);
+  }
+});
+
 test('restoration fails closed if the head or workspace changes between plan and submission', async t => {
   const f = await restorationFixture(t);
   const result = await collectRepositorySourceRestoration(f.input);

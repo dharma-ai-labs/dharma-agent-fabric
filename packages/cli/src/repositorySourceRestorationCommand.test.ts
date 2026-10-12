@@ -256,6 +256,48 @@ test('review regression: final local currentness is checked after authority wait
   assert.ok(!f.calls.some(call => /snapshot-write|submit/.test(call)));
 });
 
+test('review regression: a relay or supervisor restart during the final local scan prevents all source writes', async () => {
+  for (const process of ['relay', 'supervisor'] as const) {
+    const f = fixture();let restarted = false;
+    f.overrides.relayProcessState = async () => process === 'relay' && restarted ? 'running' : 'stopped';
+    f.overrides.relaySupervisorProcessState = async () => process === 'supervisor' && restarted ? 'running' : 'stopped';
+    f.overrides.collectRepositorySourceRestoration = async () => ({
+      local: { manifest: { snapshotHash: 'local' } }, snapshot: { manifest: { snapshotHash: 'snapshot',
+        sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
+      expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
+      operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
+      assertCurrent: async () => {}, assertLocalCurrent: async () => { restarted = true; },
+    });
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
+    assert.ok(!f.calls.some(call => /snapshot-write|submit|registry-write/.test(call)));
+  }
+});
+
+test('review regression: admitted restoration reconciles historical authority after policy rollover without republishing', async () => {
+  for (const state of ['accepted', 'processing', 'published', 'blocked'] as const) {
+    const f = fixture();const historical = { generationId: 'admission-generation', policy: { automaticValidatedPublication: true } };
+    f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
+      localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: null,
+      priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
+      candidate: { state, operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot',
+        releaseId: state === 'published' ? 'release' : null } });
+    f.overrides.readRepositoryPackageSnapshot = async () => ({ manifest: {
+      organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
+      sourceAuthorization: historical } });
+    let historicalChecks = 0, currentChecks = 0;
+    f.overrides.validateRepositorySourceAuthorization = (value: typeof historical, _scope: unknown, now?: Date) => {
+      if (value.generationId === historical.generationId) { historicalChecks++;assert.equal(now, undefined); }
+      else { currentChecks++;assert.ok(now); }
+      return value;
+    };
+    const result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
+    assert.equal(result.stage, 'repository_restoration_candidate_recovered');assert.equal(result.serverSourceMutation, false);
+    assert.equal(f.saved()?.repositoryPackage.sourcePolicyGenerationId, 'admission-generation');
+    assert.ok(historicalChecks >= 2);assert.ok(currentChecks >= 3);
+    assert.ok(!f.calls.some(call => /snapshot-write|submit|collect/.test(call)));
+  }
+});
+
 test('review regression: an acknowledged fence survives a later source-policy rollover', async () => {
   const f = fixture();let changed = false;
   f.overrides.fetchRepositorySourceAuthorization = async () => ({ generationId: changed ? 'replacement' : 'current-generation',
@@ -287,8 +329,8 @@ test('dry-run reads the official legacy enrollment anchor in place without secur
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-15), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
-    'local-recheck', 'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write', 'registry-checkpoint']);
+  assert.deepEqual(f.calls.slice(-17), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
+    'local-recheck', 'supervisor-state', 'relay-state', 'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write', 'registry-checkpoint']);
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.snapshotHash, 'snapshot');
@@ -351,9 +393,9 @@ test('recovery rejects unavailable CAS, revoked publication, or a restarted supe
       localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: mode === 'registry' ? 'different' : null,
       priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
       candidate: { state: 'published', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'release' } });
-    f.overrides.readRepositoryPackageSnapshot = async () => mode === 'cas' ? null : ({ manifest: {
+    f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => mode === 'cas' ? null : ({ manifest: {
       organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
-      sourceAuthorization: { generationId: mode === 'snapshot-generation' ? 'foreign-generation' : 'current-generation',
+      sourceAuthorization: { generationId: mode === 'snapshot-generation' && hash === 'local' ? 'foreign-generation' : 'current-generation',
         policy: { automaticValidatedPublication: true } } } });
     if (mode === 'revoked') f.overrides.fetchRepositorySourceAuthorization = async () => ({ policy: { automaticValidatedPublication: false } });
     let authorityChecks = 0;
