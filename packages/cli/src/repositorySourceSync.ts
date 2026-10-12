@@ -56,13 +56,19 @@ export function advanceRepositorySourceBaseline(record: {
 
 export async function recoverPublishedLocalSourceBaseline(input: BoundRepositorySource & {
   workspace: string;
-  record: { state: string; snapshotHash?: string | null; pendingLocalOperationId?: string | null };
+  record: { state: string; snapshotHash?: string | null; publishedLocalSnapshotHash?: string | null;
+    pendingLocalOperationId?: string | null };
 }): Promise<string | null> {
   const { record } = input;
-  if (record.state !== 'published' || record.pendingLocalOperationId || !record.snapshotHash) return null;
-  if (!HASH.test(record.snapshotHash)) throw new Error('Published repository source baseline hash is invalid.');
+  if (record.state !== 'published' || record.pendingLocalOperationId) return null;
+  // New receipts explicitly retain the pre-merge local snapshot. A merged
+  // candidate in the same CAS does not prove its remote files existed locally.
+  const hash = Object.hasOwn(record, 'publishedLocalSnapshotHash')
+    ? record.publishedLocalSnapshotHash : record.snapshotHash;
+  if (!hash) return null;
+  if (!HASH.test(hash)) throw new Error('Published repository source baseline hash is invalid.');
   let snapshot: RepositoryPackageSnapshot;
-  try { snapshot = await readRepositoryPackageSnapshot(input.workspace, record.snapshotHash); }
+  try { snapshot = await readRepositoryPackageSnapshot(input.workspace, hash); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     if (error instanceof SyntaxError || error instanceof TypeError) {
@@ -76,7 +82,7 @@ export async function recoverPublishedLocalSourceBaseline(input: BoundRepository
     || manifest.sourceAuthorization?.repositoryAgentId !== input.repositoryAgentId) {
     throw new Error('Published repository source baseline scope is invalid.');
   }
-  return record.snapshotHash;
+  return hash;
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$(?![\s\S])/i;
 const HASH = /^sha256:[a-f0-9]{64}$(?![\s\S])/;

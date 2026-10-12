@@ -62,6 +62,7 @@ test('relay permits only bounded repository collaboration and package routes', (
   for (const pathname of [
     `/api/v1/orgs/org_customer/agent-fabric/repository-source-policy?workspaceId=${id}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates/${other}?workspaceId=${id}&operationId=${operationId}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}&operationId=${operationId}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}&category=release-safety`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-questions/${other}?workspaceId=${id}`,
@@ -72,6 +73,9 @@ test('relay permits only bounded repository collaboration and package routes', (
   }
   for (const pathname of [
     `/api/v1/orgs/org_customer/agent-fabric/repository-source-policy?workspaceId=all`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}&operationId=${operationId}&admin=true`,
+    `/api/v1/orgs/org_customer/agent-fabric/repository-agents/${id}/package-candidates?workspaceId=${id}&operationId=${operationId}&workspaceId=${other}`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-roles?workspaceId=${id}&admin=true`,
     `/api/v1/orgs/org_customer/agent-fabric/repository-questions/all?workspaceId=${id}`,
     `/api/v1/orgs/org_customer/agent-fabric/skills/${id}/repository-package/chunks?rolloutId=${other}&workspaceId=${id}&provider=codex&fileIndex=-1&chunkIndex=0`,
@@ -94,7 +98,10 @@ test('relay permits only signed, bounded repository source reads', () => {
   const blob = `${prefix}/${candidateId}/blobs/sha256%3A${'a'.repeat(64)}`;
   for (const pathname of [
     `${prefix}?workspaceId=${id}`,
+    `${prefix}?workspaceId=${id}&restoration=true`,
+    `${prefix}?workspaceId=${id}&restoration=true&restorationOperationId=sha256%3A${'b'.repeat(64)}`,
     `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&restoration=true`,
     `${blob}?workspaceId=${id}&path=approved+reports%2Fnotes%23one.md`,
   ]) {
     assert.doesNotThrow(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }));
@@ -104,7 +111,14 @@ test('relay permits only signed, bounded repository source reads', () => {
     prefix,
     `${prefix}?workspaceId=all`,
     `${prefix}?workspaceId=${id}&admin=true`,
+    `${prefix}?workspaceId=${id}&restoration=false`,
+    `${prefix}?workspaceId=${id}&restoration=true&restoration=true`,
+    `${prefix}?workspaceId=${id}&restorationOperationId=sha256%3A${'b'.repeat(64)}`,
+    `${prefix}?workspaceId=${id}&restoration=true&restorationOperationId=all`,
+    `${prefix}?workspaceId=${id}&restoration=true&restorationOperationId=sha256%3A${'b'.repeat(64)}&admin=true`,
     `${blob}?workspaceId=${id}`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&restoration=false`,
+    `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&restoration=true&restorationOperationId=sha256%3A${'b'.repeat(64)}`,
     `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md&admin=true`,
     `${blob}?path=skills%2Fcodex%2FSKILL.md&workspaceId=${id}`,
     `${blob}?workspaceId=${id}&path=skills%2Fcodex%2FSKILL.md/raw`,
@@ -114,6 +128,17 @@ test('relay permits only signed, bounded repository source reads', () => {
   }
   assert.throws(() => parseRelayRequest({ ...request, method: 'GET',
     pathname: `${prefix}?workspaceId=${id}`, body: '{}' }), /get_body_forbidden/);
+});
+
+test('repository operation fencing permits only a signed metadata POST capped at four KiB', () => {
+  const path = '/api/v1/orgs/org_customer/agent-fabric/repository-agents/d327bcce-2314-4c92-a6b7-13ec5570c1ee/package-candidates/fence';
+  assert.doesNotThrow(() => parseRelayRequest({ ...request, pathname: path, body: 'x'.repeat(4096) }));
+  assert.throws(() => parseRelayRequest({ ...request, pathname: path, body: 'x'.repeat(4097) }), /body_too_large/);
+  for (const pathname of [path + '?admin=true', path + '/all', path + '/', path.replace('/fence', '/cancel')]) {
+    assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);
+  }
+  assert.throws(() => parseRelayRequest({ ...request, pathname: path, method: 'GET', body: '' }), /route_not_allowed/);
+  assert.throws(() => parseRelayRequest({ ...request, pathname: path, headers: {} }), /signed_headers_required/);
 });
 
 test('relay permits only the bounded trajectory-head reconciliation route', () => {

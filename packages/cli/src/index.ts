@@ -53,7 +53,7 @@ import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
 import { inventoryRepositoryPackage, readRepositoryPackageSnapshot, readRepositorySourceBaselineSnapshot, serializeRepositoryPackageSnapshot, writeRepositoryPackageSnapshot } from './repositoryPackage.js';
-import { validateRepositorySourceAuthorization } from './repositorySourceAuthorization.js';
+import { validateRepositorySourceAuthorization, type RepositorySourceAuthorization } from './repositorySourceAuthorization.js';
 import { createNamedPeerContentAuthorization } from './namedPeerContentAuthorization.js';
 import { advanceRepositorySourceBaseline, BlockedRepositorySourceRetry, fetchRepositorySourceAuthorization, recoverPublishedLocalSourceBaseline, repositorySourceComparisonBaseline, repositorySourcePollInvalidatesWatcher, RepositorySourceWatcher,
   scanRepositorySourceChanges, seedRepositorySourceWatcher } from './repositorySourceSync.js';
@@ -69,6 +69,7 @@ import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionS
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
+import { collectRepositorySourceRestoration } from './repositorySourceRestoration.js';
 import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
 import { fetchPublishedRepositorySource } from './repositorySourceInventoryClient.js';
 import { activateRepositorySourceResolution, readActiveRepositorySourceResolution,
@@ -77,7 +78,8 @@ import { prepareProvidersIndependently, startSkillPreparationPump } from './skil
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { publishSkillPreparationCache, takeSkillPreparationCache } from './skillPreparationCache.js';
-import { adoptRepositoryCandidate, pollRepositoryCandidate, synchronizeRepositoryCandidate,
+import { adoptRepositoryCandidate, checkpointRepositoryRestorationCandidate, checkpointRepositoryRestorationFence, checkpointRepositoryRestorationRegistry,
+  fenceRepositoryRestorationUpload, readRepositoryRestorationAttempt, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate,
   type RepositoryCandidateReceipt } from './repositoryCandidateSync.js';
 import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type RepositoryRoleScope } from './repositoryRoleMetadata.js';
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
@@ -138,7 +140,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.186';
+const VERSION = '0.2.187';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1627,13 +1629,18 @@ async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
   }
 }
 
-async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
+async function saveWorkspaceRecord(entry: WorkspaceRecord, guard?: {
+  expected: WorkspaceRecord; beforeSave?: () => Promise<void>;
+  preparePackage?: () => Promise<WorkspaceRecord['repositoryPackage']>;
+  afterSave?: (saved: WorkspaceRecord) => Promise<void>;
+}): Promise<void> {
   const scope = currentBootstrapHostScope();
   const step = <T>(operation: () => Promise<T>): Promise<T> => scope ? scope.step(operation) : operation();
   let release: (() => Promise<void>) | undefined;
   try {
     await scope?.assert();
-    const snapshot = scope ? structuredClone(entry) : entry;
+    let snapshot = structuredClone(entry);
+    const expected = guard ? structuredClone(guard.expected) : undefined;
     await step(async () => {release = await acquirePidLock(`${workspaceRegistryPath()}.mutation.lock`, 10_000,
       'Workspace registry is busy; preserve it for recovery.');});
     const value = await step(() => readFile(workspaceRegistryPath(), 'utf8')).catch(error => {
@@ -1641,7 +1648,13 @@ async function saveWorkspaceRecord(entry: WorkspaceRecord): Promise<void> {
     });
     const items = JSON.parse(value) as WorkspaceRecord[];
     if (!Array.isArray(items)) throw new Error('Workspace registry is invalid; preserve it for recovery.');
+    if (expected && canonicalize(items.find(item => item.workspaceId === snapshot.workspaceId) ?? null) !== canonicalize(expected)) {
+      throw new Error('workspace_registry_compare_and_swap_failed');
+    }
+    if (guard?.beforeSave) await step(guard.beforeSave);
+    if (guard?.preparePackage) snapshot = { ...snapshot, repositoryPackage: await step(guard.preparePackage) };
     await saveRegistry([...items.filter(item => item.workspaceId !== snapshot.workspaceId), snapshot]);
+    if (guard?.afterSave) await step(() => guard.afterSave!(snapshot));
   } catch (error) {
     if (!scope) throw error;
     if (error instanceof Error && error.message === 'codex_setup_host_lock_cleanup_unconfirmed') throw error;
@@ -5710,6 +5723,241 @@ async function repositoryInstallerRecoveryCommand(flags: Map<string, string | bo
     nextAction: 'Resume pinned onboarding; recovery is not signed skill installation or activation.' };
 }
 
+export async function repositoryRestoreCommand(flags: Map<string, string | boolean>) {
+  flags = new Map(flags);
+  const allowed = new Set(['workspace-id', 'dry-run', 'apply', 'plan-hash', 'fence-upload', 'json']);
+  if ([...flags].some(([key, value]) => !allowed.has(key)
+    || (['workspace-id', 'plan-hash'].includes(key) ? typeof value !== 'string' || !value : value !== true))
+    || flags.has('apply') === flags.has('dry-run') || flags.has('apply') !== flags.has('plan-hash')
+    || flags.has('fence-upload') && !flags.has('apply')) {
+    throw new Error('repository_source_restoration_option_invalid');
+  }
+  const workspaceId = required(flags, 'workspace-id'), apply = flags.has('apply');
+  const config = await readDeviceConfig();
+  const workspace = (await registry()).find(row => row.workspaceId === workspaceId && row.organizationId === config?.organizationId);
+  if (!config || !workspace?.repositoryBindingId || !workspace.repositoryAgentId
+    || workspace.accessMode === 'knowledge_only' || !workspace.repositoryPackage
+    || workspace.repositoryPackage.generation < 1 || !apply && workspace.repositoryPackage.pendingLocalOperationId) {
+    throw new Error('repository_source_restoration_workspace_not_authorized');
+  }
+  // An explicit recovery must not race the relay's candidate outbox or silently
+  // undo containment. The operator uses the normal owned relay stop/start flow.
+  if (apply && (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped')) {
+    throw new Error('repository_source_restoration_requires_stopped_relay');
+  }
+  const policy = await loadVerifiedWorkspacePolicy(resolve(workspace.path, '.dharma', 'approved-policy.json'), workspaceId);
+  if (!policy.serverAuthorization) throw new Error('repository_source_restoration_workspace_not_authorized');
+  await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+  const enrollment = await loadDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope(), readOnly: !apply });
+  const fabric = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(), readOnly: !apply });
+  await fabric.openSession(VERSION);
+  const scope = { organizationId: workspace.organizationId, workspaceId,
+    repositoryBindingId: workspace.repositoryBindingId, repositoryAgentId: workspace.repositoryAgentId };
+  if (apply) {
+    const authorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+    if (!authorization.policy.automaticValidatedPublication) throw new Error('repository_source_restoration_publication_denied');
+    if (flags.has('fence-upload')) {
+      if (workspace.repositoryPackage.pendingLocalOperationId) throw new Error('repository_source_restoration_workspace_not_authorized');
+      let fenced: Awaited<ReturnType<typeof fenceRepositoryRestorationUpload>> | undefined;
+      const assertFenceAuthority = async () => {
+        const current = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+        if (canonicalize(current) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
+        await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+        if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+          throw new Error('repository_source_restoration_requires_stopped_relay');
+        }
+      };
+      await saveWorkspaceRecord(workspace, { expected: workspace, beforeSave: async () => {
+        await assertFenceAuthority();
+        fenced = await fenceRepositoryRestorationUpload({ transport: fabric, scope,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), planHash: required(flags, 'plan-hash'),
+          policyGenerationId: authorization.generationId,
+          expectedPreviousOperationId: workspace.repositoryPackage!.operationId ?? null });
+        // Persist acknowledged containment even if source authority rolls over
+        // during the request. This receipt cannot authorize another upload.
+        if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+          throw new Error('repository_source_restoration_requires_stopped_relay');
+        }
+        if (fenced.fence) await checkpointRepositoryRestorationFence({ scope, fenced,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
+        await assertFenceAuthority();
+      } });
+      if (!fenced) throw new Error('repository_source_restoration_fence_unavailable');
+      return { ok: true, stage: fenced.fence ? 'repository_restoration_upload_fenced' : 'repository_restoration_admission_found',
+        fence: fenced.fence, candidate: fenced.candidate, localMutation: true, serverSourceMutation: false,
+        serverOperationFenced: Boolean(fenced.fence), activated: false,
+        nextAction: fenced.fence ? 'Obtain a fresh restoration dry-run plan before applying; retain the terminal fence archive.'
+          : 'Retry the original plan without --fence-upload to reconcile the admitted candidate; no operation was cancelled.' };
+    }
+    const recovered = await recoverRepositoryRestorationCandidate({ transport: fabric, scope,
+      outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), planHash: required(flags, 'plan-hash') });
+    if (recovered) {
+      const currentOperationId = workspace.repositoryPackage.operationId ?? null;
+      if (currentOperationId !== recovered.previousOperationId && currentOperationId !== recovered.candidate.operationId) {
+        throw new Error('repository_source_restoration_checkpoint_registry_changed');
+      }
+      if (workspace.repositoryPackage.pendingLocalOperationId
+        && workspace.repositoryPackage.pendingLocalOperationId !== recovered.candidate.operationId) {
+        throw new Error('repository_source_restoration_checkpoint_registry_changed');
+      }
+      if (recovered.candidate.state === 'published' && recovered.candidate.releaseId === recovered.priorReleaseId) {
+        throw new Error('repository_source_restoration_archived_release_reused');
+      }
+      let admissionAuthorization: RepositorySourceAuthorization | undefined;
+      for (const hash of new Set([recovered.candidate.snapshotHash, recovered.localSnapshotHash,
+        ...(recovered.baselineSnapshotHash ? [recovered.baselineSnapshotHash] : [])])) {
+        const snapshot = await readRepositoryPackageSnapshot(workspace.path, hash);
+        if (!snapshot || snapshot.manifest.organizationId !== scope.organizationId || snapshot.manifest.workspaceId !== workspaceId
+          || snapshot.manifest.knowledge?.repositoryAgentId !== scope.repositoryAgentId
+          || hash === recovered.candidate.snapshotHash && sha256(canonicalize(snapshot.manifest)) !== recovered.sourceManifestHash) {
+          throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
+        }
+        // Historical policy may predate admission, but every retained snapshot
+        // must belong to this exact repository binding, including the baseline.
+        const historical = validateRepositorySourceAuthorization(snapshot.manifest.sourceAuthorization, scope);
+        if (hash === recovered.localSnapshotHash || hash === recovered.candidate.snapshotHash) {
+          if (admissionAuthorization && canonicalize(historical) !== canonicalize(admissionAuthorization)) {
+            throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
+          }
+          admissionAuthorization = historical;
+        }
+      }
+      if (!admissionAuthorization) throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
+      const currentAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+      if (canonicalize(currentAuthorization) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
+      if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+        throw new Error('repository_source_restoration_requires_stopped_relay');
+      }
+      await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
+      const candidate = recovered.candidate;
+      const pending = candidate.state === 'accepted' || candidate.state === 'processing';
+      await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
+        ...candidate, sourceManifestHash: recovered.sourceManifestHash, consolidationMode: 'repository_update',
+        sourcePolicyGenerationId: admissionAuthorization.generationId,
+        localBaselineSnapshotHash: candidate.state === 'blocked' ? recovered.baselineSnapshotHash : recovered.localSnapshotHash,
+        publishedLocalSnapshotHash: candidate.state === 'published' ? recovered.localSnapshotHash : recovered.baselineSnapshotHash,
+        pendingLocalSnapshotHash: pending ? recovered.localSnapshotHash : null,
+        pendingLocalOperationId: pending ? candidate.operationId : null } }, { expected: workspace,
+        beforeSave: async () => {
+          const lockedAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+          if (canonicalize(lockedAuthorization) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
+          await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+          if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+            throw new Error('repository_source_restoration_requires_stopped_relay');
+          }
+          await checkpointRepositoryRestorationCandidate({ scope, recovered,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') }); },
+        afterSave: saved => checkpointRepositoryRestorationRegistry({ scope, repositoryPackage: saved.repositoryPackage!,
+          outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') }) });
+      return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_recovered',
+        planHash: recovered.planHash, candidate, priorReleaseId: recovered.priorReleaseId,
+        localMutation: true, serverSourceMutation: false, activated: false,
+        nextAction: 'Resume the owned relay; recovery only reconciled the existing candidate receipt.' };
+    }
+  }
+  if (workspace.repositoryPackage.pendingLocalOperationId) throw new Error('repository_source_restoration_workspace_not_authorized');
+  if (!['published', 'blocked'].includes(workspace.repositoryPackage.state)) {
+    throw new Error('repository_source_restoration_publication_pending');
+  }
+  const baseline = repositorySourceComparisonBaseline(workspace.repositoryPackage,
+    workspace.repositoryPackage.publishedLocalSnapshotHash ?? null);
+  const restorationAttempt = await readRepositoryRestorationAttempt({ scope,
+    outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
+  const collected = await collectRepositorySourceRestoration({ ...scope, workspace: workspace.path, transport: fabric,
+    restorationAttempt,
+    serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: enrollment.serverPublicKeyEd25519 }, format: 'jwk' }),
+    loadPublishedLocalBaseline: () => baseline ? readRepositoryPackageSnapshot(workspace.path, baseline) : Promise.resolve(null),
+    loadResolution: () => readActiveRepositorySourceResolution(workspace.path) });
+  const planHash = sha256(canonicalize({ schema: 'dharma.repository-restoration-plan/v1', ...scope,
+    priorReleaseId: collected.priorReleaseId, priorGeneration: collected.priorGeneration,
+    headCandidateId: collected.headCandidateId, headSnapshotHash: collected.headSnapshotHash, operationId: collected.operationId,
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
+    localSnapshotHash: collected.local.manifest.snapshotHash, snapshotHash: collected.snapshot.manifest.snapshotHash }));
+  if (!apply) return { ok: true, stage: 'repository_restoration_planned', dryRun: true, planHash,
+    priorReleaseId: collected.priorReleaseId, priorGeneration: collected.priorGeneration,
+    headCandidateId: collected.headCandidateId, operationId: collected.operationId,
+    expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
+    snapshotHash: collected.snapshot.manifest.snapshotHash, localMutation: false, serverSourceMutation: false,
+    protocolSessionCreated: true, activated: false, published: false };
+  if (required(flags, 'plan-hash') !== planHash) throw new Error('repository_source_restoration_plan_changed');
+  let candidate: RepositoryCandidateReceipt | undefined;
+  await saveWorkspaceRecord(workspace, { expected: workspace, preparePackage: async () => {
+    await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
+    await collected.assertCurrent();
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
+    const finalAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+    if (canonicalize(finalAuthorization) !== canonicalize(collected.snapshot.manifest.sourceAuthorization)) {
+      throw new Error('repository_source_restoration_policy_changed');
+    }
+    await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+    const sourcePolicyGenerationId = collected.snapshot.manifest.sourceAuthorization?.generationId;
+    if (!sourcePolicyGenerationId) throw new Error('repository_source_restoration_policy_changed');
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
+    await collected.assertLocalCurrent();
+    await collected.assertHeadCurrent();
+    const postScanAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+    if (canonicalize(postScanAuthorization) !== canonicalize(collected.snapshot.manifest.sourceAuthorization)) {
+      throw new Error('repository_source_restoration_policy_changed');
+    }
+    await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
+    // Network head/authority waits can outlive the preceding local scan.
+    await collected.assertLocalCurrent();
+    // These are bounded observations, not a filesystem/server transaction.
+    // Later edits require a new plan; never replace the immutable plan bytes.
+    await collected.assertHeadCurrent();
+    const admissionAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
+    if (canonicalize(admissionAuthorization) !== canonicalize(collected.snapshot.manifest.sourceAuthorization)) {
+      throw new Error('repository_source_restoration_policy_changed');
+    }
+    await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization!);
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
+    await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.local, candidateOnly: true });
+    if (collected.snapshot.manifest.snapshotHash !== collected.local.manifest.snapshotHash) {
+      await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });
+    }
+    candidate = await synchronizeRepositoryCandidate({ transport: fabric,
+      outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates'), scope,
+      snapshot: collected.snapshot, initialRepository: false,
+      expectedLatestSourceFingerprint: collected.expectedLatestSourceFingerprint,
+      restoration: { planHash, localSnapshotHash: collected.local.manifest.snapshotHash,
+        baselineSnapshotHash: baseline, previousOperationId: workspace.repositoryPackage!.operationId ?? null,
+        priorReleaseId: collected.priorReleaseId, headCandidateId: collected.headCandidateId,
+        ...(restorationAttempt ? { attemptId: restorationAttempt } : {}) } });
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
+    if (candidate.state === 'published' && candidate.releaseId === collected.priorReleaseId) {
+      throw new Error('repository_source_restoration_archived_release_reused');
+    }
+    const pending = candidate.state === 'accepted' || candidate.state === 'processing';
+    return { ...workspace.repositoryPackage!,
+      ...candidate, sourceManifestHash: sha256(canonicalize(collected.snapshot.manifest)), consolidationMode: 'repository_update',
+      sourcePolicyGenerationId,
+      localBaselineSnapshotHash: candidate.state === 'blocked' ? baseline : collected.local.manifest.snapshotHash,
+      publishedLocalSnapshotHash: candidate.state === 'published' ? collected.local.manifest.snapshotHash : baseline,
+      pendingLocalSnapshotHash: pending ? collected.local.manifest.snapshotHash : null,
+      pendingLocalOperationId: pending ? candidate.operationId : null };
+  }, afterSave: saved => checkpointRepositoryRestorationRegistry({ scope, repositoryPackage: saved.repositoryPackage!,
+    outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') }) });
+  if (!candidate) throw new Error('repository_source_restoration_admission_unavailable');
+  return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_submitted', planHash, candidate,
+    priorReleaseId: collected.priorReleaseId, localMutation: true, serverSourceMutation: true, activated: false,
+    nextAction: 'Resume the owned relay; evaluation, signing, delivery and activation must pass independently.' };
+}
+
 export async function repositorySourceResolutionCommand(flags: Map<string, string | boolean>) {
   flags = new Map(flags);
   const allowed = new Set(['workspace-id', 'dry-run', 'prepare', 'apply', 'plan-hash', 'choose-reviewed-local', 'json']);
@@ -5959,7 +6207,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const retryBlockedInitial = canonicalPackage.state === 'blocked' && canonicalPackage.generation === 0
     && canonicalPackage.consolidationMode === 'initial_repository';
   const submitPackage = canonicalPackage.state === 'absent' || refreshPolicy || retryBlockedInitial;
-  const candidate = await staged('package_publication', async () => submitPackage
+  const candidate: Awaited<ReturnType<typeof adoptRepositoryCandidate>> = await staged('package_publication', async () => submitPackage
     ? await synchronizeRepositoryCandidate({ transport: fabric, outboxRoot, scope: candidateScope,
       snapshot: initialSnapshot, initialRepository: canonicalPackage.generation === 0,
       ...(retryBlockedInitial ? { blockedCandidate: {
@@ -5973,6 +6221,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
         snapshotHash: canonicalPackage.snapshotHash!, state: canonicalPackage.state as RepositoryCandidateReceipt['state'],
         releaseId: canonicalPackage.releaseId,
       } }));
+  const beforePackageSave = registered;
+  const restorationRegistryBaseline = candidate.restorationRegistryBaseline;
   registered = { ...registered, repositoryPackage: {
     state: candidate.state, candidateId: candidate.candidateId, operationId: candidate.operationId,
     snapshotHash: candidate.snapshotHash,
@@ -5980,7 +6230,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       ? sha256(canonicalize(initialSnapshot.manifest)) : canonicalPackage.sourceManifestHash,
     releaseId: candidate.releaseId,
     generation: candidate.state === 'published' ? Math.max(1, canonicalPackage.generation) : canonicalPackage.generation,
-    consolidationMode: canonicalPackage.generation === 0 ? 'initial_repository'
+    consolidationMode: restorationRegistryBaseline ? 'repository_update' : canonicalPackage.generation === 0 ? 'initial_repository'
       : refreshPolicy ? 'repository_update' : canonicalPackage.consolidationMode,
     sourcePolicyGenerationId: submitPackage ? sourceAuthorization.generationId : canonicalPackage.sourcePolicyGenerationId,
     localBaselineSnapshotHash: initialSnapshot.manifest.snapshotHash,
@@ -5993,8 +6243,13 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     pendingLocalOperationId: submitPackage
       ? candidate.state === 'accepted' || candidate.state === 'processing'
         ? candidate.operationId : null : null,
+    ...restorationRegistryBaseline,
   } };
-  await saveWorkspaceRecord(registered);
+  await saveWorkspaceRecord(registered, restorationRegistryBaseline ? {
+    expected: beforePackageSave,
+    afterSave: saved => checkpointRepositoryRestorationRegistry({ outboxRoot, scope: candidateScope,
+      repositoryPackage: saved.repositoryPackage! }),
+  } : undefined);
   const providers = await staged('role_registration', async () => receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
   ));
@@ -6059,7 +6314,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       writePaths: generatedPolicy.tasks.writePaths,
     },
     repositorySkill: installed,
-    repositoryCandidate: candidate,
+    repositoryCandidate: { candidateId: candidate.candidateId, operationId: candidate.operationId,
+      snapshotHash: candidate.snapshotHash, state: candidate.state, releaseId: candidate.releaseId },
     firstLearningEvidence: {
       discovered: discoveredTrajectories,
       disclosureReady,
@@ -8350,14 +8606,24 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
             }
             const baseline = advanceRepositorySourceBaseline(canonicalWorkspace.repositoryPackage, current);
             const invalidateSourceWatcher = repositorySourcePollInvalidatesWatcher(canonicalWorkspace.repositoryPackage, current);
-            canonicalWorkspace = { ...canonicalWorkspace, repositoryPackage: { ...canonicalWorkspace.repositoryPackage,
+            const previousWorkspace = canonicalWorkspace;
+            const updatedWorkspace = { ...canonicalWorkspace, repositoryPackage: { ...canonicalWorkspace.repositoryPackage,
               state: current.state, candidateId: current.candidateId, operationId: current.operationId,
               snapshotHash: current.snapshotHash, releaseId: current.releaseId,
               ...baseline,
               generation: current.state === 'published' ? Math.max(1, canonicalWorkspace.repositoryPackage.generation) : canonicalWorkspace.repositoryPackage.generation } };
-            publishedLocalSnapshotHash = baseline.publishedLocalSnapshotHash;
-            if (invalidateSourceWatcher) repositorySourceWatcher.invalidate();
-            await saveWorkspaceRecord(canonicalWorkspace);
+            await saveWorkspaceRecord(updatedWorkspace, { expected: previousWorkspace,
+              afterSave: async saved => {
+                // The registry is committed even if the following marker fails.
+                // Keep the next poll's CAS anchored to that saved state.
+                canonicalWorkspace = saved;
+                publishedLocalSnapshotHash = baseline.publishedLocalSnapshotHash;
+                if (invalidateSourceWatcher) repositorySourceWatcher.invalidate();
+                await checkpointRepositoryRestorationRegistry({
+                  scope: { organizationId: saved.organizationId, workspaceId: saved.workspaceId,
+                    repositoryBindingId: saved.repositoryBindingId!, repositoryAgentId: saved.repositoryAgentId! },
+                  repositoryPackage: saved.repositoryPackage!, outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') });
+              } });
           }
         } catch { repositorySourceFailures += 1; }
       }
@@ -8718,6 +8984,12 @@ export async function run(argv: string[]): Promise<Output> {
       throw new Error('repository_source_resolution_option_invalid');
     }
     return repositorySourceResolutionCommand(flags);
+  }
+  if (command === 'repositories' && subcommand === 'restore') {
+    if (positional.length !== 2 || [...repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('repository_source_restoration_option_invalid');
+    }
+    return repositoryRestoreCommand(flags);
   }
   if (command === 'repositories' && ['role-register', 'role-discover', 'ask', 'reply'].includes(String(subcommand))) {
     const action = subcommand === 'role-register' ? 'register' : subcommand === 'role-discover' ? 'discover' : subcommand;
