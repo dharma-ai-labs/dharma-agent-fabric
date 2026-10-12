@@ -316,6 +316,7 @@
       "properties": {
         "commands": {
           "type": "array",
+          "maxItems": 98,
           "items": {
             "type": "object",
             "additionalProperties": false,

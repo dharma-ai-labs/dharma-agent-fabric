@@ -39,6 +39,9 @@ conservative admission rule, not an exact implementation of every filesystem's
 Unicode version. Both signed envelope schemas cap raw entries at 100 and each
 reference at 1,000 Unicode characters. Bounded exact duplicates remain compatible
 and are deduplicated; they still count toward the raw-entry cap.
+Acceptance commands are capped at 98, reserving the 100-result receipt capacity
+for one provider result and one late runner failure. Excess commands are rejected
+before effects, rather than losing the durable failure receipt.
 Windows device-name restrictions include
 the superscript COM/LPT aliases and CONIN$/CONOUT$. Ill-formed Unicode (lone
 surrogates) is rejected rather than replaced during filesystem encoding.

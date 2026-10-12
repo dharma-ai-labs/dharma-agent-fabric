@@ -395,6 +395,7 @@ export function verifyTaskEnvelope(
 ): void {
   const contract = validateTaskEnvelopeContract(task);
   if (!contract.ok) throw new Error(`Task failed schema validation: ${JSON.stringify(contract.errors)}`);
+  if (task.acceptance.commands.length > 98) throw new Error('Task acceptance command count exceeds receipt capacity.');
   if (!task.signature) throw new Error('Task signature is required.');
   if (Date.parse(task.expiresAt) <= now.getTime()) throw new Error('Task has expired.');
   const { signature, ...unsigned } = task;

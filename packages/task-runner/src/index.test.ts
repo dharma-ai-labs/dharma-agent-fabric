@@ -392,6 +392,23 @@ test('required artifact review v5: signed schemas bound raw artifact entries bef
   }
 });
 
+test('required artifact review v6: acceptance count reserves capacity for a durable failure receipt', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const task = fixture.signed({ target: { ...fixture.unsigned.target, endpointId: randomUUID() } });
+  for (const [count, valid] of [[98, true], [99, false]] as [number, boolean][]) {
+    const value = { ...task, acceptance: { ...task.acceptance,
+      commands: Array.from({ length: count }, () => ({ commandId: 'verify' })) } };
+    assert.equal(validateTaskEnvelopeContract(value).ok, valid);
+    assert.equal(validateTaskActionContract(canonicalTaskActionForTask(value, randomUUID())).ok, valid);
+  }
+  const oversized = fixture.signed({ acceptance: { ...fixture.unsigned.acceptance,
+    commands: Array.from({ length: 99 }, () => ({ commandId: 'verify' })) } });
+  let calls = 0;
+  await assert.rejects(executeTask({ ...fixture.input, task: oversized,
+    providerExecutor: async () => { calls++; return fixture.providerResult; } }), /schema validation|receipt capacity/);
+  assert.equal(calls, 0);
+});
+
 test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');
