@@ -231,6 +231,20 @@ export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promis
   child.stdin.end(input.stdin);
 });
 
+function windowsArgumentUnits(argument: string): number {
+  if (argument.length === 0) return 2;
+  if (!/[ \t"]/.test(argument)) return argument.length;
+  // Match libuv's non-verbatim quoting, counting UTF-16 units, not bytes.
+  let units = argument.length + 2;
+  let escapeBackslashes = true;
+  for (let index = argument.length - 1; index >= 0; index--) {
+    if (argument[index] === '\\' && escapeBackslashes) units++;
+    else if (argument[index] === '"') { units++; escapeBackslashes = true; }
+    else escapeBackslashes = false;
+  }
+  return units;
+}
+
 export async function executeProviderTask(input: {
   provider: ProviderId;
   workspace: string;
@@ -344,7 +358,7 @@ export async function executeProviderTask(input: {
   try {
     if (input.provider === 'agy' || input.provider === 'hermes') {
       const argumentsSize = process.platform === 'win32'
-        ? [command, ...argv].reduce((sum, argument) => sum + argument.length * 2 + 3, 0)
+        ? [command, ...argv].reduce((sum, argument) => sum + windowsArgumentUnits(argument) + 1, 0)
         : [command, ...argv].reduce((sum, argument) => sum + Buffer.byteLength(argument, 'utf8') + 1, 0);
       if (argumentsSize > (process.platform === 'win32' ? 32_760 : 65_536)) {
         throw new Error('Provider argument size exceeds the supported platform limit.');

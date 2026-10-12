@@ -516,6 +516,77 @@ test('artifact context rejects oversized argv providers before process invocatio
   }
 });
 
+test('Windows argv review v9: schema-valid prompts are not double-counted', { skip: process.platform !== 'win32' }, async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-windows-argv-'));
+  for (const provider of ['agy', 'hermes'] as const) {
+    for (const [name, instructions] of [
+      ['ASCII', 'x'.repeat(20_000)],
+      ['spaces', 'x '.repeat(10_000)],
+      ['UTF16', '\u{1f642}'.repeat(10_000)],
+      ['backslashes', '\\x'.repeat(10_000)],
+    ]) {
+      await t.test(`${provider} ${name}`, async () => {
+        let calls = 0;
+        await executeProviderTask({ provider, workspace, instructions: instructions!, timeoutSeconds: 30,
+          allowedCommandArgv: [], allowWrites: false,
+          runner: async () => { calls++; return { exitCode: 0, signal: null, timedOut: false,
+            stdout: Buffer.from('bounded result'), stderr: Buffer.alloc(0) }; } });
+        assert.equal(calls, 1);
+      });
+    }
+  }
+});
+
+test('Windows argv review v9: quoted limit includes separators and terminator', { skip: process.platform !== 'win32' }, async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-windows-boundary-'));
+  const quoted = (argument: string) => argument === '' ? '""' : !/[ \t"]/.test(argument) ? argument
+    : '"' + argument.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"';
+  for (const provider of ['agy', 'hermes'] as const) {
+    await t.test(provider, async () => {
+      const instructions = 'Read.';
+      let seed: { command: string; argv: string[] } | undefined;
+      const result = { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('bounded result'), stderr: Buffer.alloc(0) };
+      await executeProviderTask({ provider, workspace, instructions, timeoutSeconds: 30, allowedCommandArgv: [], allowWrites: false,
+        runner: async (call) => { seed = call; return result; } });
+      assert.ok(seed);
+      const observed = seed;
+      const size = (suffix: string) => [observed.command, ...observed.argv.map(argument => argument.endsWith(instructions) ? argument + suffix : argument)]
+        .reduce((sum, argument) => sum + quoted(argument).length + 1, 0);
+      for (const tail of ['', '"', '\\', '\\\\"', ' \t', '\u{1f642}']) {
+        const suffix = 'x'.repeat(32_760 - size(tail)) + tail;
+        assert.equal(size(suffix), 32_760);
+        let calls = 0;
+        const input = { provider, workspace, instructions, artifactContext: suffix, timeoutSeconds: 30,
+          allowedCommandArgv: [], allowWrites: false,
+          runner: async (call: Parameters<NonNullable<Parameters<typeof executeProviderTask>[0]['runner']>>[0]) => {
+            calls++;
+            assert.equal([call.command, ...call.argv].reduce((sum, argument) => sum + quoted(argument).length + 1, 0), 32_760);
+            return result;
+          } };
+        await executeProviderTask(input);
+        assert.equal(calls, 1);
+        calls = 0;
+        await assert.rejects(executeProviderTask({ ...input, artifactContext: 'x' + suffix }), /Provider argument size exceeds/);
+        assert.equal(calls, 0);
+      }
+    });
+  }
+});
+
+test('Windows argv review v9: escaping expansion is rejected before invocation', { skip: process.platform !== 'win32' }, async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-windows-escaping-'));
+  for (const provider of ['agy', 'hermes'] as const) {
+    for (const instructions of ['"'.repeat(20_000), '\\'.repeat(20_000)]) {
+      let calls = 0;
+      await assert.rejects(executeProviderTask({ provider, workspace, instructions, timeoutSeconds: 30,
+        allowedCommandArgv: [], allowWrites: false,
+        runner: async () => { calls++; return { exitCode: 0, signal: null, timedOut: false,
+          stdout: Buffer.from('bounded result'), stderr: Buffer.alloc(0) }; } }), /Provider argument size exceeds/);
+      assert.equal(calls, 0);
+    }
+  }
+});
+
 test('Codex task execution pins a validated configured model', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
   const previous = process.env.DHARMA_CODEX_MODEL;
