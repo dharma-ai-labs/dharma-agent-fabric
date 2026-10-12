@@ -545,17 +545,22 @@ test('terminal history collision and expired final conflict approval stop before
 });
 
 test('recovery validates a non-null comparison baseline before checkpoint or registry writes', async () => {
-  for (const state of ['processing', 'published', 'blocked']) for (const mode of ['missing', 'foreign']) {
+  for (const state of ['processing', 'published', 'blocked']) for (const mode of ['missing', 'foreign', 'foreign-binding']) {
     const f = fixture();
     f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
       localSnapshotHash: 'local', baselineSnapshotHash: 'baseline', previousOperationId: null,
       priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan', candidate: {
         state, operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: state === 'published' ? 'new-release' : null } });
     f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => hash === 'baseline' && mode === 'missing' ? null : ({ manifest: {
-      organizationId: hash === 'baseline' ? 'org_other' : 'org_fixture', workspaceId: 'workspace',
+      organizationId: hash === 'baseline' && mode === 'foreign' ? 'org_other' : 'org_fixture', workspaceId: 'workspace',
       knowledge: { repositoryAgentId: 'agent' }, sourceAuthorization: {
+        repositoryBindingId: hash === 'baseline' && mode === 'foreign-binding' ? 'foreign-binding' : 'binding',
         generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
-    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /checkpoint_snapshot_invalid/);
+    f.overrides.validateRepositorySourceAuthorization = (value: { repositoryBindingId?: string }, scope: { repositoryBindingId: string }) => {
+      if (value.repositoryBindingId && value.repositoryBindingId !== scope.repositoryBindingId) throw new Error('baseline_foreign_binding');
+      return value;
+    };
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /checkpoint_snapshot_invalid|baseline_foreign_binding/);
     assert.ok(!f.calls.some(call => /write|submit/.test(call)));
   }
 });

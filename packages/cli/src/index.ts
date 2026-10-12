@@ -5813,10 +5813,10 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
           || hash === recovered.candidate.snapshotHash && sha256(canonicalize(snapshot.manifest)) !== recovered.sourceManifestHash) {
           throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
         }
+        // Historical policy may predate admission, but every retained snapshot
+        // must belong to this exact repository binding, including the baseline.
+        const historical = validateRepositorySourceAuthorization(snapshot.manifest.sourceAuthorization, scope);
         if (hash === recovered.localSnapshotHash || hash === recovered.candidate.snapshotHash) {
-          // Admission provenance may predate the current policy. It is bound to
-          // the durable manifest, never reused as authority to upload or activate.
-          const historical = validateRepositorySourceAuthorization(snapshot.manifest.sourceAuthorization, scope);
           if (admissionAuthorization && canonicalize(historical) !== canonicalize(admissionAuthorization)) {
             throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
           }
