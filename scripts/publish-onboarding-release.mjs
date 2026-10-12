@@ -76,9 +76,9 @@ export async function lookupPublishedArtifact(read, {now = () => performance.now
   const deadline = now() + 360_000;
   // Poll metadata only. Publication is never retried by this reconciliation path.
   for (let attempt = 0; attempt < 12; attempt++) {
-    const remaining = deadline - now();
+    const remaining = Math.floor(deadline - now());
     if (remaining <= 0) return null;
-    const value = await read(Math.min(30_000, Math.ceil(remaining)));
+    const value = await read(Math.min(30_000, remaining));
     if (now() >= deadline) return null;
     if (value) return value;
     await sleep(Math.max(0, Math.min(30_000, deadline - now())));

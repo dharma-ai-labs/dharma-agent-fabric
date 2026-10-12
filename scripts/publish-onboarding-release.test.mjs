@@ -248,3 +248,17 @@ test('readback rejects a response arriving after its admission budget', async ()
   assert.equal(result, null);
   assert.equal(sleeps, 0);
 });
+
+test('sub-millisecond readback budget admits no new network request', async () => {
+  let time = 0;
+  let clocks = 0;
+  let reads = 0;
+  let sleeps = 0;
+  const result = await publisher.lookupPublishedArtifact(async () => {reads++; return null;}, {
+    now: () => {if (clocks++ > 0 && time === 0) time = 359999.75; return time;},
+    sleep: async ms => {sleeps++; time += ms;},
+  });
+  assert.equal(result, null);
+  assert.equal(reads, 0);
+  assert.equal(sleeps, 0);
+});
