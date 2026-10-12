@@ -5899,6 +5899,7 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
       throw new Error('repository_source_restoration_requires_stopped_relay');
     }
     await collected.assertLocalCurrent();
+    await collected.assertHeadCurrent();
     const postScanAuthorization = validateRepositorySourceAuthorization(await fetchRepositorySourceAuthorization(fabric, scope), scope, new Date());
     if (canonicalize(postScanAuthorization) !== canonicalize(collected.snapshot.manifest.sourceAuthorization)) {
       throw new Error('repository_source_restoration_policy_changed');
@@ -5919,6 +5920,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
         baselineSnapshotHash: baseline, previousOperationId: workspace.repositoryPackage!.operationId ?? null,
         priorReleaseId: collected.priorReleaseId, headCandidateId: collected.headCandidateId,
         ...(restorationAttempt ? { attemptId: restorationAttempt } : {}) } });
+    if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+      throw new Error('repository_source_restoration_requires_stopped_relay');
+    }
     if (candidate.state === 'published' && candidate.releaseId === collected.priorReleaseId) {
       throw new Error('repository_source_restoration_archived_release_reused');
     }

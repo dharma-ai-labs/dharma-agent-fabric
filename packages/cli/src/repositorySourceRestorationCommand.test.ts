@@ -129,6 +129,7 @@ function fixture() {
         generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } }, expectedLatestSourceFingerprint: 'head',
       headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot', operationId: 'operation',
       priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => { calls.push('recheck'); },
+      assertHeadCurrent: async () => { calls.push('head-recheck'); },
       assertLocalCurrent: async () => { calls.push('local-recheck'); } }; },
     canonicalize: JSON.stringify, sha256: () => 'reviewed-plan', dharmaHome: () => '/synthetic/device',
     writeRepositoryPackageSnapshot: async (input: { snapshot: { manifest: { snapshotHash: string } }; candidateOnly: boolean }) => {
@@ -244,7 +245,7 @@ test('review regression: final local currentness is checked after authority wait
       sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
     expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
     operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
-    assertCurrent: async () => { f.calls.push('recheck'); },
+    assertCurrent: async () => { f.calls.push('recheck'); }, assertHeadCurrent: async () => {},
     assertLocalCurrent: async () => { if (stale) throw new Error('repository_source_restoration_workspace_changed'); },
   });
   let reads = 0;
@@ -266,7 +267,7 @@ test('review regression: a relay or supervisor restart during the final local sc
         sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
       expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
       operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
-      assertCurrent: async () => {}, assertLocalCurrent: async () => { restarted = true; },
+      assertCurrent: async () => {}, assertHeadCurrent: async () => {}, assertLocalCurrent: async () => { restarted = true; },
     });
     await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
     assert.ok(!f.calls.some(call => /snapshot-write|submit|registry-write/.test(call)));
@@ -281,7 +282,7 @@ test('review regression: source or workspace authority lost during the final loc
       local: { manifest: { snapshotHash: 'local' } }, snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: authorization } },
       expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
       operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
-      assertCurrent: async () => {}, assertLocalCurrent: async () => { scanned = true; },
+      assertCurrent: async () => {}, assertHeadCurrent: async () => {}, assertLocalCurrent: async () => { scanned = true; },
     });
     f.overrides.fetchRepositorySourceAuthorization = async () => mode === 'source' && scanned
       ? { ...authorization, generationId: 'replacement-generation' } : authorization;
@@ -318,6 +319,35 @@ test('review regression: admitted restoration reconciles historical authority af
   }
 });
 
+test('review regression: identical-content rollback identity changing during the local scan prevents admission', async () => {
+  const f = fixture();let changed = false;
+  f.overrides.collectRepositorySourceRestoration = async () => ({
+    local: { manifest: { snapshotHash: 'local' } }, snapshot: { manifest: { snapshotHash: 'snapshot',
+      sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
+    expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
+    operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => {},
+    assertLocalCurrent: async () => { changed = true; },
+    assertHeadCurrent: async () => { if (changed) throw new Error('repository_source_restoration_head_changed'); },
+  });
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /head_changed/);
+  assert.ok(!f.calls.some(call => /snapshot-write|submit|registry-write/.test(call)));
+});
+
+test('review regression: runtime starting during submission retains admission without committing a registry receipt', async () => {
+  for (const process of ['relay', 'supervisor'] as const) {
+    const f = fixture();let submitted = false;
+    f.overrides.relayProcessState = async () => process === 'relay' && submitted ? 'running' : 'stopped';
+    f.overrides.relaySupervisorProcessState = async () => process === 'supervisor' && submitted ? 'running' : 'stopped';
+    f.overrides.synchronizeRepositoryCandidate = async () => {
+      submitted = true;f.calls.push('submit');
+      return { state: 'accepted', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null };
+    };
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
+    assert.equal(f.calls.filter(call => call === 'submit').length, 1);
+    assert.ok(!f.calls.some(call => /registry-write|registry-checkpoint/.test(call)));
+  }
+});
+
 test('review regression: an acknowledged fence survives a later source-policy rollover', async () => {
   const f = fixture();let changed = false;
   f.overrides.fetchRepositorySourceAuthorization = async () => ({ generationId: changed ? 'replacement' : 'current-generation',
@@ -349,8 +379,8 @@ test('dry-run reads the official legacy enrollment anchor in place without secur
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-18), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
-    'local-recheck', 'authorization', 'supervisor-state', 'relay-state', 'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write', 'registry-checkpoint']);
+  assert.deepEqual(f.calls.slice(-21), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
+    'local-recheck', 'head-recheck', 'authorization', 'supervisor-state', 'relay-state', 'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'supervisor-state', 'relay-state', 'registry-write', 'registry-checkpoint']);
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.snapshotHash, 'snapshot');
@@ -452,7 +482,7 @@ test('workspace authority superseded during final awaited reads cannot persist o
       generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
     expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
     operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
-    assertCurrent: async () => { await Promise.resolve();superseded = true; },
+    assertCurrent: async () => { await Promise.resolve();superseded = true; }, assertHeadCurrent: async () => {},
   });
   await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /workspace_authorization_superseded/);
   assert.ok(!f.calls.some(call => /write|submit/.test(call)));
@@ -468,7 +498,7 @@ test('source policy rollover during final awaited reads cannot write a stale pen
       generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
     expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
     operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
-    assertCurrent: async () => { await Promise.resolve();changed = true; },
+    assertCurrent: async () => { await Promise.resolve();changed = true; }, assertHeadCurrent: async () => {},
   });
   await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /policy_changed/);
   assert.ok(!f.calls.some(call => /write|submit/.test(call)));

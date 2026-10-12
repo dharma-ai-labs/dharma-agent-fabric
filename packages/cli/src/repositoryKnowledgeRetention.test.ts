@@ -530,6 +530,7 @@ test('identical source fingerprints do not conceal a changed rolled-back candida
   const f = await restorationFixture(t), result = await collectRepositorySourceRestoration(f.input);
   f.body.source.candidateId = randomUUID();
   await assert.rejects(result.assertCurrent(), /restoration_head_changed/);
+  await assert.rejects(result.assertHeadCurrent(), /restoration_head_changed/);
 });
 
 test('later rollback of identical content has a distinct restoration operation', async t => {

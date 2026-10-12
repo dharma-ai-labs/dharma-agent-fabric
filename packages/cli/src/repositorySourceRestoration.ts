@@ -111,7 +111,7 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
     }
     retained.assertCurrent();
   };
-  const assertCurrent = async () => {
+  const assertHeadCurrent = async () => {
     retained.assertCurrent();
     const current = await fetchRepositorySourceAuthorization(input.transport, input);
     if (canonicalize(current) !== canonicalize(authorization)) throw new Error('repository_source_restoration_policy_changed');
@@ -121,10 +121,13 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
       || !next.catalogBytes.equals(retained.catalogBytes) || !next.manifestBytes.equals(retained.manifestBytes)) {
       throw new Error('repository_source_restoration_head_changed');
     }
+  };
+  const assertCurrent = async () => {
+    await assertHeadCurrent();
     await assertLocalCurrent();
   };
   await assertCurrent();
   return { local, snapshot, expectedLatestSourceFingerprint: retained.sourceFingerprint,
     headCandidateId: retained.headCandidateId, headSnapshotHash: retained.headSnapshotHash, operationId,
-    priorReleaseId: retained.releaseId, priorGeneration: retained.generation, assertCurrent, assertLocalCurrent };
+    priorReleaseId: retained.releaseId, priorGeneration: retained.generation, assertCurrent, assertLocalCurrent, assertHeadCurrent };
 }
