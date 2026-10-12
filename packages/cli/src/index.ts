@@ -5762,11 +5762,16 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
         && workspace.repositoryPackage.pendingLocalOperationId !== recovered.candidate.operationId) {
         throw new Error('repository_source_restoration_checkpoint_registry_changed');
       }
-      for (const hash of [recovered.localSnapshotHash, recovered.candidate.snapshotHash]) {
+      if (recovered.candidate.state === 'published' && recovered.candidate.releaseId === recovered.priorReleaseId) {
+        throw new Error('repository_source_restoration_archived_release_reused');
+      }
+      for (const hash of new Set([recovered.localSnapshotHash, recovered.candidate.snapshotHash,
+        ...(recovered.baselineSnapshotHash ? [recovered.baselineSnapshotHash] : [])])) {
         const snapshot = await readRepositoryPackageSnapshot(workspace.path, hash);
         if (!snapshot || snapshot.manifest.organizationId !== scope.organizationId || snapshot.manifest.workspaceId !== workspaceId
           || snapshot.manifest.knowledge?.repositoryAgentId !== scope.repositoryAgentId
-          || canonicalize(snapshot.manifest.sourceAuthorization) !== canonicalize(authorization)
+          || (hash === recovered.localSnapshotHash || hash === recovered.candidate.snapshotHash)
+            && canonicalize(snapshot.manifest.sourceAuthorization) !== canonicalize(authorization)
           || hash === recovered.candidate.snapshotHash && sha256(canonicalize(snapshot.manifest)) !== recovered.sourceManifestHash) {
           throw new Error('repository_source_restoration_checkpoint_snapshot_invalid');
         }
@@ -5786,7 +5791,11 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
         publishedLocalSnapshotHash: candidate.state === 'published' ? recovered.localSnapshotHash : recovered.baselineSnapshotHash,
         pendingLocalSnapshotHash: pending ? recovered.localSnapshotHash : null,
         pendingLocalOperationId: pending ? candidate.operationId : null } }, { expected: workspace,
-        beforeSave: async () => { await checkpointRepositoryRestorationCandidate({ scope, recovered,
+        beforeSave: async () => {
+          if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+            throw new Error('repository_source_restoration_requires_stopped_relay');
+          }
+          await checkpointRepositoryRestorationCandidate({ scope, recovered,
           outboxRoot: resolve(dharmaHome(), 'relay', 'repository-candidates') }); } });
       return { ok: candidate.state !== 'blocked', stage: 'repository_restoration_candidate_recovered',
         planHash: recovered.planHash, candidate, priorReleaseId: recovered.priorReleaseId,
@@ -5828,6 +5837,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
   await assertWorkspaceAuthorizationCurrent(workspaceId, policy.serverAuthorization);
   const sourcePolicyGenerationId = collected.snapshot.manifest.sourceAuthorization?.generationId;
   if (!sourcePolicyGenerationId) throw new Error('repository_source_restoration_policy_changed');
+  if (await relaySupervisorProcessState() !== 'stopped' || await relayProcessState() !== 'stopped') {
+    throw new Error('repository_source_restoration_requires_stopped_relay');
+  }
   await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.local, candidateOnly: true });
   if (collected.snapshot.manifest.snapshotHash !== collected.local.manifest.snapshotHash) {
     await writeRepositoryPackageSnapshot({ workspace: workspace.path, snapshot: collected.snapshot, candidateOnly: true });
@@ -5839,6 +5851,9 @@ export async function repositoryRestoreCommand(flags: Map<string, string | boole
     restoration: { planHash, localSnapshotHash: collected.local.manifest.snapshotHash,
       baselineSnapshotHash: baseline, previousOperationId: workspace.repositoryPackage.operationId ?? null,
       priorReleaseId: collected.priorReleaseId } });
+  if (candidate.state === 'published' && candidate.releaseId === collected.priorReleaseId) {
+    throw new Error('repository_source_restoration_archived_release_reused');
+  }
   const pending = candidate.state === 'accepted' || candidate.state === 'processing';
   await saveWorkspaceRecord({ ...workspace, repositoryPackage: { ...workspace.repositoryPackage,
     ...candidate, sourceManifestHash: sha256(canonicalize(collected.snapshot.manifest)), consolidationMode: 'repository_update',

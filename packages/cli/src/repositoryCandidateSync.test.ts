@@ -30,7 +30,7 @@ test('durable restoration checkpoint recovers a terminal receipt by exact scoped
           const journal = JSON.parse(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'));
           assert.deepEqual(journal.restoration, restoration);assert.equal(journal.state, 'pending_upload');
           accepted = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: request.operationId,
-            snapshotHash: request.sourceSnapshotHash, state, releaseId: state === 'published' ? restoration.priorReleaseId : null };
+            snapshotHash: request.sourceSnapshotHash, state, releaseId: state === 'published' ? '97f61652-a5eb-46e4-930c-9478cd4a9c31' : null };
           return { ok: true, organizationId: scope.organizationId, candidate: accepted };
         },
         signedGet: async (route: string) => {
@@ -92,7 +92,7 @@ test('lost terminal POST response recovers by operation lookup without a second 
       signedPost: async (_route: string, value: unknown) => {
         calls.push('POST');const body = value as Record<string, unknown>;
         candidate = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
-          snapshotHash: body.sourceSnapshotHash, state: 'published', releaseId: restoration.priorReleaseId };
+          snapshotHash: body.sourceSnapshotHash, state: 'published', releaseId: '97f61652-a5eb-46e4-930c-9478cd4a9c31' };
         throw new Error('simulated_lost_POST_response');
       },
       signedGet: async (route: string) => {
@@ -110,7 +110,9 @@ test('lost terminal POST response recovers by operation lookup without a second 
     }
     assert.deepEqual(calls, ['POST', 'GET', 'GET']);
     candidate = null;
-    assert.equal(await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), null);
+    const before = await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8');
+    await assert.rejects(recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), /upload_unresolved/);
+    assert.equal(await readFile(join(root, 'outbox', `${ids.workspaceId}.json`), 'utf8'), before);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -147,7 +149,7 @@ test('lost pending response checkpoints recovery durably and normal polling reac
       await checkpointRepositoryRestorationCandidate({ ...input, recovered: retried! });
       candidate = { ...candidate, state: 'processing' };
       assert.equal((await pollRepositoryCandidate(input))?.state, 'processing');
-      candidate = { ...candidate, state: 'published', releaseId: restoration.priorReleaseId };
+      candidate = { ...candidate, state: 'published', releaseId: '97f61652-a5eb-46e4-930c-9478cd4a9c31' };
       assert.equal((await pollRepositoryCandidate(input))?.state, 'published');
       const path = join(input.outboxRoot, `${scope.workspaceId}.json`), bytes = await readFile(path, 'utf8');
       const stored = JSON.parse(bytes);
@@ -172,6 +174,72 @@ test('lost pending response checkpoints recovery durably and normal polling reac
       await assert.rejects(checkpointRepositoryRestorationCandidate({ ...input, recovered: retried!,
         scope: { ...scope, repositoryAgentId: '97f61652-a5eb-46e4-930c-9478cd4a9c31' } }), /outbox scope/);
       assert.equal(await readFile(path, 'utf8'), bytes);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('empty lookup does not retire an unknown upload that can be accepted later', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-late-admission-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids };
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    let serverCandidate: Record<string, unknown> | null = null, admitLate = () => {}, posts = 0;
+    const transport = { signedPost: async (_route: string, body: unknown) => {
+      posts++;const request = body as Record<string, unknown>;
+      admitLate = () => { serverCandidate = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: request.operationId,
+        snapshotHash: request.sourceSnapshotHash, state: 'processing', releaseId: null }; };
+      throw new Error('transport_outcome_unknown');
+    }, signedGet: async () => ({ ok: true, organizationId: scope.organizationId, candidate: serverCandidate }) };
+    const input = { transport, scope, outboxRoot: join(root, 'outbox'), snapshot: await snapshot(root),
+      initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+    await assert.rejects(synchronizeRepositoryCandidate(input), /outcome_unknown/);
+    const path = join(input.outboxRoot, `${scope.workspaceId}.json`), before = await readFile(path, 'utf8');
+    await assert.rejects(recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }), /upload_unresolved/);
+    assert.equal(await readFile(path, 'utf8'), before);
+    admitLate();
+    const recovered = await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash });
+    assert.ok(recovered);await checkpointRepositoryRestorationCandidate({ ...input, recovered });
+    assert.equal((await pollRepositoryCandidate(input))?.state, 'processing');assert.equal(posts, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('archived release identity is rejected at upload, recovery, checkpoint and normal polling', async () => {
+  for (const phase of ['upload', 'recovery', 'checkpoint', 'poll', 'terminal-poll']) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-archived-release-'));
+    try {
+      const scope = { organizationId: 'org_fixture', ...ids };
+      const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+        baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+      let candidate: Record<string, unknown> = {};
+      const transport = { signedPost: async (_route: string, body: unknown) => {
+        const request = body as Record<string, unknown>;
+        candidate = { candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: request.operationId,
+          snapshotHash: request.sourceSnapshotHash, state: 'published', releaseId: restoration.priorReleaseId };
+        return { ok: true, organizationId: scope.organizationId,
+          candidate: phase === 'upload' ? candidate : { ...candidate, state: 'accepted', releaseId: null } };
+      }, signedGet: async () => ({ ok: true, organizationId: scope.organizationId, candidate }) };
+      const input = { transport, scope, outboxRoot: join(root, 'outbox'), snapshot: await snapshot(root),
+        initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`, restoration };
+      const path = join(input.outboxRoot, `${scope.workspaceId}.json`);
+      if (phase === 'upload') {
+        await assert.rejects(synchronizeRepositoryCandidate(input), /archived release/);
+        assert.equal(JSON.parse(await readFile(path, 'utf8')).state, 'pending_upload');continue;
+      }
+      await synchronizeRepositoryCandidate(input);
+      if (phase === 'terminal-poll') {
+        const stored = JSON.parse(await readFile(path, 'utf8'));
+        await writeFile(path, JSON.stringify({ ...stored, ...candidate }));
+      }
+      const before = await readFile(path, 'utf8');
+      const operation = phase === 'recovery'
+        ? recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash })
+        : phase === 'checkpoint' ? checkpointRepositoryRestorationCandidate({ ...input, recovered: {
+          ...restoration, sourceManifestHash: JSON.parse(before).sourceManifestHash,
+          candidate: candidate as unknown as Awaited<ReturnType<typeof synchronizeRepositoryCandidate>> } })
+          : pollRepositoryCandidate(input);
+      await assert.rejects(operation, /archived release/);
+      assert.equal(await readFile(path, 'utf8'), before);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });

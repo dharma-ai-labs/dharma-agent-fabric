@@ -96,7 +96,8 @@ function checkedScope(value: RepositoryCandidateScope): RepositoryCandidateScope
   return { ...value };
 }
 
-function receipt(value: unknown, scope: RepositoryCandidateScope, operationId: string, snapshotHash: string): RepositoryCandidateReceipt {
+function receipt(value: unknown, scope: RepositoryCandidateScope, operationId: string, snapshotHash: string,
+  archivedReleaseId?: string): RepositoryCandidateReceipt {
   requireFact(value !== null && typeof value === 'object' && !Array.isArray(value), 'Repository candidate response is invalid.');
   const response = value as Record<string, unknown>;
   requireFact(response.ok === true && response.organizationId === scope.organizationId
@@ -113,6 +114,8 @@ function receipt(value: unknown, scope: RepositoryCandidateScope, operationId: s
     && (candidate.releaseId === null || typeof candidate.releaseId === 'string' && UUID.test(candidate.releaseId))
     && (candidate.state === 'published') === (candidate.releaseId !== null),
   'Repository candidate receipt is inconsistent.');
+  requireFact(candidate.state !== 'published' || candidate.releaseId !== archivedReleaseId,
+    'Repository restoration cannot reuse the archived release identity.');
   return candidate as RepositoryCandidateReceipt;
 }
 
@@ -252,14 +255,14 @@ export async function synchronizeRepositoryCandidate(input: {
   if (pending.candidateId) {
     const query = new URLSearchParams({ workspaceId: scope.workspaceId, operationId });
     accepted = receipt(await input.transport.signedGet(`${route}/${encodeURIComponent(pending.candidateId)}?${query}`),
-      scope, operationId, snapshot.manifest.snapshotHash);
+      scope, operationId, snapshot.manifest.snapshotHash, restoration?.priorReleaseId);
   } else {
     accepted = receipt(await input.transport.signedPost(route, {
       schema: 'dharma.repository-candidate-upload/v1', operationId, workspaceId: scope.workspaceId,
       repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
       sourceSnapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash: pending.sourceManifestHash,
       consolidation: pending.consolidation, snapshot,
-    }), scope, operationId, snapshot.manifest.snapshotHash);
+    }), scope, operationId, snapshot.manifest.snapshotHash, restoration?.priorReleaseId);
   }
   await writeOutbox(path, { ...pending, candidateId: accepted.candidateId, state: accepted.state, releaseId: accepted.releaseId });
   return accepted;
@@ -283,8 +286,10 @@ export async function recoverRepositoryRestorationCandidate(input: {
   const suffix = pending.candidateId ? `/${encodeURIComponent(pending.candidateId)}` : '';
   const response = await input.transport.signedGet(
     `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates${suffix}?${query}`);
-  if (!pending.candidateId && response.ok === true && response.organizationId === scope.organizationId && response.candidate === null) return null;
-  const candidate = receipt(response, scope, pending.operationId, pending.snapshotHash);
+  if (!pending.candidateId && response.ok === true && response.organizationId === scope.organizationId && response.candidate === null) {
+    throw new Error('repository_source_restoration_upload_unresolved');
+  }
+  const candidate = receipt(response, scope, pending.operationId, pending.snapshotHash, pending.restoration.priorReleaseId);
   requireFact(!pending.candidateId || candidate.candidateId === pending.candidateId, 'Repository restoration checkpoint candidate changed.');
   return { candidate, sourceManifestHash: pending.sourceManifestHash, ...pending.restoration };
 }
@@ -307,7 +312,7 @@ export async function checkpointRepositoryRestorationCandidate(input: {
       sourceManifestHash: pending.sourceManifestHash, consolidation: pending.consolidation }) === pending.operationId,
   'Repository restoration checkpoint changed.');
   const candidate = receipt({ ok: true, organizationId: scope.organizationId, candidate: recovered.candidate },
-    scope, pending.operationId, pending.snapshotHash);
+    scope, pending.operationId, pending.snapshotHash, pending.restoration.priorReleaseId);
   requireFact(!pending.candidateId || pending.candidateId === candidate.candidateId,
     'Repository restoration checkpoint candidate changed.');
   requireFact(!['published', 'blocked'].includes(pending.state)
@@ -327,6 +332,8 @@ export async function pollRepositoryCandidate(input: {
   const pending = await readOutbox(path, scope);
   if (!pending || pending.state === 'pending_upload') return null;
   if (pending.state === 'published' || pending.state === 'blocked') {
+    requireFact(pending.state !== 'published' || pending.releaseId !== pending.restoration?.priorReleaseId,
+      'Repository restoration cannot reuse the archived release identity.');
     return { candidateId: pending.candidateId!, operationId: pending.operationId, snapshotHash: pending.snapshotHash,
       state: pending.state, releaseId: pending.releaseId };
   }
@@ -334,7 +341,7 @@ export async function pollRepositoryCandidate(input: {
   const query = new URLSearchParams({ workspaceId: scope.workspaceId, operationId: pending.operationId });
   const current = receipt(await input.transport.signedGet(
     `${route}/${encodeURIComponent(pending.candidateId!)}?${query}`,
-  ), scope, pending.operationId, pending.snapshotHash);
+  ), scope, pending.operationId, pending.snapshotHash, pending.restoration?.priorReleaseId);
   await writeOutbox(path, { ...pending, candidateId: current.candidateId, state: current.state, releaseId: current.releaseId });
   return current;
 }

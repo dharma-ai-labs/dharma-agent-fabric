@@ -148,7 +148,7 @@ test('dry-run reads the official legacy enrollment anchor in place without secur
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-11), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization',
+  assert.deepEqual(f.calls.slice(-13), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
     'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write']);
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
@@ -191,7 +191,7 @@ test('submission survives a lost registry write and recovery checkpoints before 
       const result = await f.run(flags);
       assert.equal(result.stage, 'repository_restoration_candidate_recovered');
       assert.equal(result.serverSourceMutation, false);assert.equal(result.activated, false);
-      assert.deepEqual(f.calls.slice(-5), ['supervisor-state', 'relay-state', 'authorization', 'outbox-write', 'registry-write']);
+      assert.deepEqual(f.calls.slice(-5), ['authorization', 'supervisor-state', 'relay-state', 'outbox-write', 'registry-write']);
       assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).sourcePolicyGenerationId, 'current-generation');
       assert.equal(f.workspace.repositoryPackage.pendingLocalOperationId,
         state === 'accepted' || state === 'processing' ? 'operation' : null);
@@ -229,7 +229,7 @@ test('recovery rejects unavailable CAS, revoked publication, or a restarted supe
 });
 
 test('running or unknown supervisor, including a final-check restart, cannot write or submit', async () => {
-  for (const state of ['running', 'unknown']) for (const stoppedChecks of [0, 1, 2]) {
+  for (const state of ['running', 'unknown']) for (const stoppedChecks of [0, 1, 2, 3]) {
     const f = fixture();let checks = 0;
     f.overrides.relaySupervisorProcessState = async () => ++checks <= stoppedChecks ? 'stopped' : state;
     await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
@@ -308,6 +308,56 @@ test('terminal history collision and expired final conflict approval stop before
     await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), new RegExp(reason));
     assert.ok(!f.calls.some(call => /write|submit/.test(call)));
   }
+});
+
+test('recovery validates a non-null comparison baseline before checkpoint or registry writes', async () => {
+  for (const state of ['processing', 'published', 'blocked']) for (const mode of ['missing', 'foreign']) {
+    const f = fixture();
+    f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
+      localSnapshotHash: 'local', baselineSnapshotHash: 'baseline', previousOperationId: null,
+      priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan', candidate: {
+        state, operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: state === 'published' ? 'new-release' : null } });
+    f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => hash === 'baseline' && mode === 'missing' ? null : ({ manifest: {
+      organizationId: hash === 'baseline' ? 'org_other' : 'org_fixture', workspaceId: 'workspace',
+      knowledge: { repositoryAgentId: 'agent' }, sourceAuthorization: {
+        generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /checkpoint_snapshot_invalid/);
+    assert.ok(!f.calls.some(call => /write|submit/.test(call)));
+  }
+});
+
+test('archived release identity cannot be recorded as a fresh or recovered restoration', async () => {
+  for (const recovered of [false, true]) {
+    const f = fixture();
+    const candidate = { state: 'published', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'stable' };
+    f.overrides.synchronizeRepositoryCandidate = async () => candidate;
+    if (recovered) f.overrides.recoverRepositoryRestorationCandidate = async () => ({
+      planHash: 'reviewed-plan', localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: null,
+      priorReleaseId: 'stable', sourceManifestHash: 'reviewed-plan', candidate });
+    await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /archived_release_reused/);
+    assert.ok(!f.calls.includes('outbox-write'));assert.ok(!f.calls.includes('registry-write'));
+  }
+});
+
+test('runtime restarted during final authority or registry-lock waits stops before protected writes', async () => {
+  const f = fixture();let running = false, checks = 0;
+  f.overrides.assertWorkspaceAuthorizationCurrent = async () => { if (++checks === 3) running = true; };
+  f.overrides.relaySupervisorProcessState = async () => running ? 'running' : 'stopped';
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
+  assert.ok(!f.calls.some(call => /write|submit/.test(call)));
+  const r = fixture();
+  r.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan', localSnapshotHash: 'local',
+    baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
+    candidate: { state: 'processing', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null } });
+  r.overrides.readRepositoryPackageSnapshot = async () => ({ manifest: { organizationId: 'org_fixture', workspaceId: 'workspace',
+    knowledge: { repositoryAgentId: 'agent' }, sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
+  let restart = false;
+  r.overrides.relaySupervisorProcessState = async () => restart ? 'running' : 'stopped';
+  r.overrides.saveWorkspaceRecord = async (_record: unknown, guard: { beforeSave: () => Promise<void> }) => {
+    restart = true;await guard.beforeSave();throw new Error('unexpected_registry_write');
+  };
+  await assert.rejects(r.run(r.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /requires_stopped_relay/);
+  assert.ok(!r.calls.some(call => /write|submit/.test(call)));
 });
 
 test('changed plan, revoked authorization, pending source and live/unknown relay cannot submit', async () => {
