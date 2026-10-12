@@ -488,6 +488,22 @@ test('Codex task execution uses stdin, workspace sandboxing, and disabled networ
   assert.equal(result.exitCode, 0);
 });
 
+test('artifact context has a separate bounded stdin allowance without enlarging task text', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-artifact-context-'));
+  const metadata = { artifactContext: '\n\n<dharma_required_artifacts>["reports/output.json"]</dharma_required_artifacts>' };
+  let stdin = '';
+  const input = { provider: 'codex' as const, workspace, instructions: 'x'.repeat(20_000), timeoutSeconds: 30,
+    allowedCommandArgv: [], allowWrites: false, ...metadata,
+    runner: async (call: Parameters<NonNullable<Parameters<typeof executeProviderTask>[0]['runner']>>[0]) => {
+      stdin = call.stdin;
+      return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('{"type":"result"}\n'), stderr: Buffer.alloc(0) };
+    } };
+  await executeProviderTask(input);
+  assert.equal(stdin, input.instructions + metadata.artifactContext);
+  await assert.rejects(executeProviderTask({ ...input, instructions: 'x'.repeat(20_001) }), /instructions are invalid/);
+  await assert.rejects(executeProviderTask({ ...input, ...{ artifactContext: 'x'.repeat(256_001) } }), /artifact context is invalid/);
+});
+
 test('Codex task execution pins a validated configured model', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-model-'));
   const previous = process.env.DHARMA_CODEX_MODEL;

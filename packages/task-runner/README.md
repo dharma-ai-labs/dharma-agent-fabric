@@ -35,10 +35,18 @@ callers do not have to repeat it in their natural-language request.
 Artifact sets use conservative portable names: distinct entries cannot collide
 after NFC normalization and lowercase conversion, even on case-sensitive hosts.
 Exact repeated entries are deduplicated. Windows device-name restrictions include
-the superscript COM/LPT aliases. Components are limited to 255 UTF-8 bytes.
+the superscript COM/LPT aliases and CONIN$/CONOUT$. Ill-formed Unicode (lone
+surrogates) is rejected rather than replaced during filesystem encoding.
+Components are limited to 255 UTF-8 bytes.
 Resolved paths are limited to 259 UTF-16 units on Windows (without changing
 long-path settings), 1023 UTF-8 bytes on macOS and 4095 on Linux. These supported
 runner limits do not establish every filesystem or registered tool's limits.
+
+Generated artifact metadata has its own 256,000 UTF-16-unit hard bound, separate
+from the existing 20,000-unit task/context instruction limit. This accommodates
+the schema's 100 paths of up to 1,000 characters without consuming task text's
+allowance. Neither instructions nor signed paths are truncated; provider and
+task budget enforcement still applies. Empty lists add no metadata.
 
 Missing, unreadable, non-file, symbolic-link/junction or hard-linked artifacts
 fail acceptance. Artifact contents and target paths are not copied into failure

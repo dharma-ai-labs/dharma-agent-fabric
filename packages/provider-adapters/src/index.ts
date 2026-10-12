@@ -235,6 +235,7 @@ export async function executeProviderTask(input: {
   provider: ProviderId;
   workspace: string;
   instructions: string;
+  artifactContext?: string;
   timeoutSeconds: number;
   allowedCommandArgv: string[][];
   allowWrites: boolean;
@@ -246,6 +247,11 @@ export async function executeProviderTask(input: {
 }): Promise<ProviderExecutionResult> {
   if (!insideWorkspace(input.workspace, input.workspace)) throw new Error('Provider workspace is invalid.');
   if (!input.instructions.trim() || input.instructions.length > 20_000) throw new Error('Provider task instructions are invalid.');
+  if (input.artifactContext !== undefined
+    && (typeof input.artifactContext !== 'string' || input.artifactContext.length > 256_000)) {
+    throw new Error('Provider artifact context is invalid.');
+  }
+  const instructions = input.instructions + (input.artifactContext ?? '');
   if (input.taskKnowledge) {
     validateTaskKnowledgeScope(input.taskKnowledge);
     if (input.provider !== 'codex' || input.allowWrites
@@ -256,7 +262,7 @@ export async function executeProviderTask(input: {
   const runner = input.runner || defaultProcessRunner;
   let command: string;
   let argv: string[];
-  let stdin = input.instructions;
+  let stdin = instructions;
   let temporaryDirectory: string | null = null;
   let agyLogPath: string | null = null;
   if (input.provider === 'codex') {
@@ -306,7 +312,7 @@ export async function executeProviderTask(input: {
     // defense in depth and must not be treated as delegated write authority.
     const guardedInstructions = [
       'Operate only inside the current repository. Use file-reading tools only. Do not modify files, run shell commands, use the network, or inspect parent/sibling directories.',
-      input.instructions,
+      instructions,
     ].join('\n\n');
     argv = [
       '--new-project',
@@ -330,7 +336,7 @@ export async function executeProviderTask(input: {
     const usagePath = resolve(temporaryDirectory, 'usage.json');
     const guardedInstructions = [
       'Operate only inside the current repository. Remain in safe mode. Read files only. Do not modify files, run shell commands, use the network, or inspect parent or sibling directories.',
-      input.instructions,
+      instructions,
     ].join('\n\n');
     argv = ['--ignore-user-config', '--safe-mode', '--usage-file', usagePath, '--oneshot', guardedInstructions];
     stdin = '';

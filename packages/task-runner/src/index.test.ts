@@ -289,6 +289,51 @@ test('required artifact review: unusable component and total path lengths are re
   }
 });
 
+test('required artifact review v3: console aliases and lone surrogates fail before provider execution', async (t) => {
+  for (const artifact of ['reports/CONIN$', 'reports/conout$', 'reports/ConIn$.txt', 'reports/CONOUT$.json',
+    'reports/\ud800', 'reports/\ud801', 'reports/\udc00', 'reports/x\udfff.json']) {
+    await t.test(JSON.stringify(artifact), async (child) => {
+      const fixture = await requiredArtifactFixture(child, [artifact]);
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { calls++; return fixture.providerResult; } }), /required_artifact_invalid/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('required artifact review v3: metadata does not consume the schema instruction allowance', async (t) => {
+  const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
+  const instructions = 'x'.repeat(20_000);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed({ instructions }),
+    providerExecutor: async ({ workspace, instructions: formatted }) => {
+      assert.ok(formatted.startsWith(instructions + '\n'));
+      assert.match(formatted, /reports\/result.json/);
+      await mkdir(resolve(workspace, 'reports'));
+      await writeFile(resolve(workspace, 'reports/result.json'), '{}');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed');
+});
+
+test('required artifact review v3: full artifact list and paired Unicode retain bounded instructions', async (t) => {
+  const artifacts = Array.from({ length: 100 }, (_, index) => `reports/${index}-${'x'.repeat(90)}-\ud83d\ude00.json`);
+  const fixture = await requiredArtifactFixture(t, artifacts);
+  const formatted = providerInstructionsForTask(fixture.signed({ instructions: 'x'.repeat(20_000) }));
+  const matched = formatted.match(/<dharma_required_artifacts>\n([\s\S]*?)\n<\/dharma_required_artifacts>/);
+  assert.ok(matched);
+  assert.deepEqual(JSON.parse(matched[1]!), artifacts);
+  assert.ok(formatted.length < 276_001);
+  assert.throws(() => providerInstructionsForTask(fixture.signed({ instructions: 'x'.repeat(20_001) })),
+    /Provider instructions exceed the execution limit/);
+});
+
+test('required artifact review v3: generated artifact metadata has an independent hard bound', async (t) => {
+  const artifacts = Array.from({ length: 10_000 }, (_, index) => `reports/${index}-${'x'.repeat(30)}.json`);
+  const fixture = await requiredArtifactFixture(t, artifacts);
+  assert.throws(() => providerInstructionsForTask(fixture.signed()), /Required artifact metadata exceeds the execution limit/);
+});
+
 test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');
