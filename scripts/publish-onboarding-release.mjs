@@ -67,6 +67,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     'packages/cli/src/repositorySourceRestorationCommand.test.ts', 'packages/cli/src/usage.ts',
     'schemas/repository-knowledge-restoration-v1.schema.json',
     'schemas/repository-candidate-fence-v1.schema.json',
+    'schemas/repository-candidate-upload-v1.schema.json',
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');

@@ -100,6 +100,17 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
       includeApprovedOutputs: true, requireAtlasAssociation: true, expectedLatestSourceFingerprint: retained.sourceFingerprint },
     restorationAttempt: input.restorationAttempt,
     restorationContext: { headCandidateId: retained.headCandidateId, priorReleaseId: retained.releaseId } });
+  const assertLocalCurrent = async () => {
+    retained.assertCurrent();
+    const currentLocal = await inventoryRepositoryPackage({ ...input, retainedKnowledge: retained, sourceAuthorization: authorization });
+    if (currentLocal.manifest.sourceFingerprint !== local.manifest.sourceFingerprint) throw new Error('repository_source_restoration_workspace_changed');
+    if (resolution) {
+      const active = await input.loadResolution();
+      if (!active || canonicalize(active) !== canonicalize(resolution)) throw new Error('repository_source_resolution_withdrawn');
+      reconcileRepositorySourceSnapshot({ local: currentLocal, previousLocal, published, resolution: active });
+    }
+    retained.assertCurrent();
+  };
   const assertCurrent = async () => {
     retained.assertCurrent();
     const current = await fetchRepositorySourceAuthorization(input.transport, input);
@@ -110,17 +121,10 @@ export async function collectRepositorySourceRestoration(input: BoundRepositoryS
       || !next.catalogBytes.equals(retained.catalogBytes) || !next.manifestBytes.equals(retained.manifestBytes)) {
       throw new Error('repository_source_restoration_head_changed');
     }
-    const currentLocal = await inventoryRepositoryPackage({ ...input, retainedKnowledge: retained, sourceAuthorization: current });
-    if (currentLocal.manifest.sourceFingerprint !== local.manifest.sourceFingerprint) throw new Error('repository_source_restoration_workspace_changed');
-    if (resolution) {
-      const active = await input.loadResolution();
-      if (!active || canonicalize(active) !== canonicalize(resolution)) throw new Error('repository_source_resolution_withdrawn');
-      reconcileRepositorySourceSnapshot({ local: currentLocal, previousLocal, published, resolution: active });
-    }
-    retained.assertCurrent();
+    await assertLocalCurrent();
   };
   await assertCurrent();
   return { local, snapshot, expectedLatestSourceFingerprint: retained.sourceFingerprint,
     headCandidateId: retained.headCandidateId, headSnapshotHash: retained.headSnapshotHash, operationId,
-    priorReleaseId: retained.releaseId, priorGeneration: retained.generation, assertCurrent };
+    priorReleaseId: retained.releaseId, priorGeneration: retained.generation, assertCurrent, assertLocalCurrent };
 }

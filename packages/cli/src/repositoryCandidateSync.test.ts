@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { runInNewContext } from 'node:vm';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { canonicalize } from '@dharma-ai-labs/agent-fabric-contracts';
-import { checkpointRepositoryRestorationCandidate, checkpointRepositoryRestorationFence, fenceRepositoryRestorationUpload,
+import ts from 'typescript';
+import { canonicalize, sha256, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import { adoptRepositoryCandidate, checkpointRepositoryRestorationCandidate, checkpointRepositoryRestorationFence, checkpointRepositoryRestorationRegistry, fenceRepositoryRestorationUpload,
   readRepositoryRestorationAttempt, pollRepositoryCandidate, recoverRepositoryRestorationCandidate, synchronizeRepositoryCandidate } from './repositoryCandidateSync.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
@@ -225,6 +228,183 @@ async function snapshot(root: string) {
   await initializeRepositoryKnowledge(input);
   return inventoryRepositoryPackage(input);
 }
+
+test('review regression: terminal restoration cannot be replaced before registry reconciliation', async () => {
+  for (const state of ['published', 'blocked'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-terminal-restoration-'));
+    try {
+      const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+      const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: `sha256:${'c'.repeat(64)}`,
+        baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+      let posts = 0;
+      const transport = { signedGet: async () => ({}), signedPost: async (_route: string, raw: unknown) => {
+        posts++;const body = raw as Record<string, unknown>;
+        return { ok: true, organizationId: scope.organizationId, candidate: {
+          candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+          snapshotHash: body.sourceSnapshotHash, state, releaseId: state === 'published' ? '97f61652-a5eb-46e4-930c-9478cd4a9c31' : null } };
+      } };
+      const input = { scope, outboxRoot, transport, snapshot: await snapshot(root), initialRepository: false,
+        expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}` };
+      await synchronizeRepositoryCandidate({ ...input, restoration });
+      const path = join(outboxRoot, `${ids.workspaceId}.json`), before = await readFile(path, 'utf8');
+      await assert.rejects(synchronizeRepositoryCandidate({ ...input, expectedLatestSourceFingerprint: `sha256:${'e'.repeat(64)}` }),
+        /registry reconciliation/);
+      assert.equal(posts, 1);assert.equal(await readFile(path, 'utf8'), before);
+      const candidate = (await pollRepositoryCandidate(input))!;
+      await assert.rejects(adoptRepositoryCandidate({ ...input, candidate: { ...candidate, operationId: `sha256:${'e'.repeat(64)}` },
+        sourceManifestHash: JSON.parse(before).sourceManifestHash, consolidationMode: 'repository_update' }), /registry reconciliation/);
+      await adoptRepositoryCandidate({ ...input, candidate, sourceManifestHash: JSON.parse(before).sourceManifestHash,
+        consolidationMode: 'repository_update' });
+      assert.equal(await readFile(path, 'utf8'), before);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('real guarded registry and durable outbox retain a terminal response across failed save and resumed scan', async () => {
+  const indexText = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const indexSource = ts.createSourceFile('index.ts', indexText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const helpers = ['saveWorkspaceRecord', 'saveRegistry', 'writeJsonAtomic', 'acquirePidLock'];
+  const helperCode = ts.transpileModule(indexSource.statements.filter(node => ts.isFunctionDeclaration(node)
+    && node.name && helpers.includes(node.name.text)).map(node => node.getText(indexSource)).join('\n'),
+  { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const state of ['published', 'blocked'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-real-registry-outbox-'));
+    try {
+      const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox');
+      const registryPath = join(root, 'registry', 'workspaces.json'), inventory = await snapshot(root);
+      const original = { ...scope, repositoryPackage: { operationId: null, state: 'published', generation: 18 } };
+      const sibling = { workspaceId: 'sibling', marker: 'preserve' };
+      await mkdir(dirname(registryPath), { recursive: true });
+      await writeFile(registryPath, JSON.stringify([original, sibling]));
+      const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: inventory.manifest.snapshotHash,
+        baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+      let posts = 0, candidate: Awaited<ReturnType<typeof synchronizeRepositoryCandidate>> | undefined;
+      const transport = { signedGet: async () => ({ ok: true, organizationId: scope.organizationId, candidate }),
+        signedPost: async (_route: string, raw: unknown) => {
+          posts++;const body = raw as Record<string, string>;
+          return { ok: true, organizationId: scope.organizationId, candidate: {
+            candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+            snapshotHash: body.sourceSnapshotHash, state, releaseId: state === 'published' ? '97f61652-a5eb-46e4-930c-9478cd4a9c31' : null } };
+        } };
+      const input = { scope, outboxRoot, transport, snapshot: inventory, initialRepository: false,
+        expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}` };
+      const resumedScan = () => synchronizeRepositoryCandidate({ ...input, expectedLatestSourceFingerprint: `sha256:${'e'.repeat(64)}` });
+      let failRegistry = true, interleavingObserved = false;
+      const save = runInNewContext(helperCode + '\nsaveWorkspaceRecord', { exports: {}, ...fs, structuredClone, canonicalize,
+        dirname, resolve, process, randomUUID, setTimeout, currentBootstrapHostScope: () => undefined,
+        dharmaHome: () => root, workspaceRegistryPath: () => registryPath,
+        rename: async (from: string, to: string) => {
+          if (to === registryPath && failRegistry) {
+            await assert.rejects(resumedScan(), /registry reconciliation/);interleavingObserved = true;
+            throw new Error('injected_registry_rename_failure');
+          }
+          return fs.rename(from, to);
+        },
+      }, { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } }) as
+        (record: unknown, guard: { expected: unknown; beforeSave?: () => Promise<void>;
+          preparePackage?: () => Promise<unknown>; afterSave?: (record: any) => Promise<void> }) => Promise<void>;
+      let admissionEntered = false;
+      await assert.rejects(save(original, { expected: { ...original, repositoryPackage: { operationId: 'stale' } },
+        preparePackage: async () => { admissionEntered = true;await synchronizeRepositoryCandidate({ ...input, restoration }); } }), /compare_and_swap/);
+      assert.equal(admissionEntered, false);assert.equal(posts, 0);
+      const packageFor = (receipt: NonNullable<typeof candidate>) => ({ ...receipt,
+        sourceManifestHash: sha256(canonicalize(inventory.manifest)), consolidationMode: 'repository_update', generation: 18,
+        localBaselineSnapshotHash: state === 'blocked' ? null : restoration.localSnapshotHash,
+        publishedLocalSnapshotHash: state === 'published' ? restoration.localSnapshotHash : null,
+        pendingLocalSnapshotHash: null, pendingLocalOperationId: null });
+      await assert.rejects(save(original, { expected: original, preparePackage: async () => {
+        candidate = await synchronizeRepositoryCandidate({ ...input, restoration });return packageFor(candidate);
+      }, afterSave: saved => checkpointRepositoryRestorationRegistry({ ...input, repositoryPackage: saved.repositoryPackage }) }), /injected_registry_rename_failure/);
+      assert.equal(interleavingObserved, true);assert.equal(posts, 1);
+      assert.deepEqual(JSON.parse(await readFile(registryPath, 'utf8')), [original, sibling]);
+      const path = join(outboxRoot, `${ids.workspaceId}.json`), before = await readFile(path, 'utf8');
+      assert.equal(JSON.parse(before).registryReceiptHash, undefined);
+      await assert.rejects(resumedScan(), /registry reconciliation/);assert.equal(await readFile(path, 'utf8'), before);
+      const recovered = (await recoverRepositoryRestorationCandidate({ ...input, planHash: restoration.planHash }))!;
+      failRegistry = false;
+      await save({ ...original, repositoryPackage: packageFor(recovered.candidate) }, { expected: original,
+        beforeSave: async () => { await checkpointRepositoryRestorationCandidate({ ...input, recovered }); },
+        afterSave: saved => checkpointRepositoryRestorationRegistry({ ...input, repositoryPackage: saved.repositoryPackage }) });
+      assert.equal(posts, 1);assert.match(JSON.parse(await readFile(path, 'utf8')).registryReceiptHash, /^sha256:/);
+      const rows = JSON.parse(await readFile(registryPath, 'utf8'));
+      assert.deepEqual(rows.find((row: { workspaceId: string }) => row.workspaceId === 'sibling'), sibling);
+      assert.equal(rows.find((row: { workspaceId: string }) => row.workspaceId === scope.workspaceId).repositoryPackage.operationId, candidate!.operationId);
+      await resumedScan();assert.equal(posts, 2);
+      await assert.rejects(fs.lstat(`${registryPath}.mutation.lock`), { code: 'ENOENT' });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('candidate upload schema validates actual legacy and restoration wire bodies and rejects malformed provenance', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-candidate-upload-contract-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, inventory = await snapshot(root);
+    const attemptId = 'a7f61652-a5eb-46e4-930c-9478cd4a9c31', headCandidateId = 'b7f61652-a5eb-46e4-930c-9478cd4a9c31';
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: inventory.manifest.snapshotHash,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31', attemptId, headCandidateId };
+    const schemaDirectory = new URL('./schemas/', import.meta.url);
+    for (const mode of ['legacy-initial', 'legacy-update', 'restoration'] as const) {
+      let body: Record<string, any> = {};
+      await synchronizeRepositoryCandidate({ scope, snapshot: inventory, outboxRoot: join(root, mode),
+        initialRepository: mode === 'legacy-initial',
+        ...(mode !== 'legacy-initial' ? { expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}` } : {}),
+        ...(mode === 'restoration' ? { restoration } : {}),
+        transport: { signedGet: async () => ({}), signedPost: async (_route, raw) => {
+          body = raw as typeof body;return { ok: true, organizationId: scope.organizationId, candidate: {
+            candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+            snapshotHash: body.sourceSnapshotHash, state: 'accepted', releaseId: null } };
+        } } });
+      const validate = (value: unknown) => validateContract(fileURLToPath(schemaDirectory),
+        'https://schemas.dharma-ai.io/repository-candidate-upload/v1', value);
+      assert.equal((await validate(body)).ok, true);
+      if (mode === 'restoration') {
+        assert.equal(body.restorationAttempt, attemptId);assert.equal(body.restorationContext.headCandidateId, headCandidateId);
+        for (const changed of [
+          { ...body, restorationAttempt: `${attemptId}\n` }, { ...body, restorationContext: { ...body.restorationContext, token: 'forbidden' } },
+          { ...body, restorationContext: { priorReleaseId: restoration.priorReleaseId } },
+          { ...body, consolidation: { ...body.consolidation, mode: 'initial_repository' } },
+          { ...body, consolidation: { mode: 'repository_update', includeApprovedOutputs: true, requireAtlasAssociation: true } },
+          { ...body, snapshot: { ...body.snapshot, privateKey: 'forbidden' } },
+        ]) assert.equal((await validate(changed)).ok, false);
+      } else assert.equal(body.restorationContext, undefined);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a terminal poll invalidates the previous registry marker and preserves provenance until its exact reconciliation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-marker-'));
+  try {
+    const scope = { organizationId: 'org_fixture', ...ids }, outboxRoot = join(root, 'outbox'), inventory = await snapshot(root);
+    const restoration = { planHash: `sha256:${'b'.repeat(64)}`, localSnapshotHash: inventory.manifest.snapshotHash,
+      baselineSnapshotHash: null, previousOperationId: null, priorReleaseId: '87f61652-a5eb-46e4-930c-9478cd4a9c31' };
+    let terminal = false;
+    let candidate: Awaited<ReturnType<typeof synchronizeRepositoryCandidate>>;
+    const input = { scope, outboxRoot, snapshot: inventory, initialRepository: false, expectedLatestSourceFingerprint: `sha256:${'a'.repeat(64)}`,
+      transport: { signedPost: async (_route: string, raw: unknown) => {
+        const body = raw as Record<string, string>;return { ok: true, organizationId: scope.organizationId, candidate: {
+          candidateId: '77f61652-a5eb-46e4-930c-9478cd4a9c31', operationId: body.operationId,
+          snapshotHash: body.sourceSnapshotHash, state: 'accepted', releaseId: null } };
+      }, signedGet: async () => ({ ok: true, organizationId: scope.organizationId,
+        candidate: terminal ? { ...candidate, state: 'published', releaseId: '97f61652-a5eb-46e4-930c-9478cd4a9c31' } : candidate }) } };
+    candidate = await synchronizeRepositoryCandidate({ ...input, restoration });
+    const saved = { ...candidate, sourceManifestHash: sha256(canonicalize(inventory.manifest)), consolidationMode: 'repository_update',
+      localBaselineSnapshotHash: restoration.localSnapshotHash, publishedLocalSnapshotHash: null,
+      pendingLocalSnapshotHash: restoration.localSnapshotHash, pendingLocalOperationId: candidate.operationId };
+    await checkpointRepositoryRestorationRegistry({ ...input, repositoryPackage: saved });
+    terminal = true;candidate = (await pollRepositoryCandidate(input))!;
+    const path = join(outboxRoot, `${ids.workspaceId}.json`), before = await readFile(path, 'utf8');
+    await assert.rejects(synchronizeRepositoryCandidate({ ...input, expectedLatestSourceFingerprint: `sha256:${'e'.repeat(64)}` }), /registry reconciliation/);
+    await assert.rejects(checkpointRepositoryRestorationRegistry({ ...input, repositoryPackage: saved }), /registry receipt/);
+    assert.equal(await readFile(path, 'utf8'), before);
+    const terminalSaved = { ...saved, ...candidate, publishedLocalSnapshotHash: restoration.localSnapshotHash,
+      pendingLocalSnapshotHash: null, pendingLocalOperationId: null };
+    await assert.rejects(checkpointRepositoryRestorationRegistry({ ...input,
+      repositoryPackage: { ...terminalSaved, localBaselineSnapshotHash: `sha256:${'e'.repeat(64)}` } }), /registry receipt/);
+    assert.equal(await readFile(path, 'utf8'), before);
+    await checkpointRepositoryRestorationRegistry({ ...input, repositoryPackage: terminalSaved });
+    await synchronizeRepositoryCandidate({ ...input, expectedLatestSourceFingerprint: `sha256:${'e'.repeat(64)}` });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('lost terminal POST response recovers by operation lookup without a second upload', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-restoration-lost-response-'));

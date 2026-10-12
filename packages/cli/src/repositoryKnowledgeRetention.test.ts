@@ -470,6 +470,7 @@ test('restoration fails closed if the head or workspace changes between plan and
   const result = await collectRepositorySourceRestoration(f.input);
   await f.put('README.md', '# Changed after plan\n');
   await assert.rejects(result.assertCurrent(), /restoration_workspace_changed/);
+  await assert.rejects(result.assertLocalCurrent(), /restoration_workspace_changed/);
   await f.put('README.md', '# Shared repository');
   f.body.source.sourceFingerprint = H;
   await assert.rejects(result.assertCurrent(), /restoration_head_changed/);

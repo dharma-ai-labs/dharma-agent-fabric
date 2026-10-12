@@ -19,6 +19,45 @@ const saveCode = ts.transpileModule(saveDeclaration.getText(source), {
   compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS },
 }).outputText;
 
+test('relay adopts a committed registry receipt before retryable marker failure, but never before a failed save', async () => {
+  let poll: ts.IfStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(source) === 'current && canonicalWorkspace.repositoryPackage') poll = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);assert.ok(poll);
+  const pollCode = ts.transpileModule(`async function pollOnce(current: any) { ${poll.getText(source)} }`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS } }).outputText;
+  for (const mode of ['marker-failed', 'save-failed', 'same'] as const) {
+    const original = { workspaceId: 'workspace', organizationId: 'org_fixture', repositoryBindingId: 'binding', repositoryAgentId: 'agent',
+      repositoryPackage: { state: 'processing', candidateId: 'candidate', operationId: 'operation', generation: 18 } };
+    let records: unknown[] = [structuredClone(original)], saves = 0, checkpoints = 0, locked = false;
+    const context = { exports: {}, structuredClone, canonicalize: JSON.stringify,
+      canonicalWorkspace: structuredClone(original), publishedLocalSnapshotHash: null, repositorySourceWatcher: { invalidate: () => {} },
+      advanceRepositorySourceBaseline: () => ({ publishedLocalSnapshotHash: 'local' }), repositorySourcePollInvalidatesWatcher: () => false,
+      currentBootstrapHostScope: () => undefined, workspaceRegistryPath: () => '/synthetic/registry.json',
+      dharmaHome: () => '/synthetic', resolve: (...args: string[]) => args.join('/'),
+      acquirePidLock: async () => { locked = true;return async () => { locked = false; }; },
+      readFile: async () => JSON.stringify(records), saveRegistry: async (next: unknown[]) => {
+        assert.equal(locked, true);if (mode === 'save-failed') throw new Error('registry_failure');
+        records = structuredClone(next);saves++;
+      },
+      checkpointRepositoryRestorationRegistry: async () => {
+        assert.equal(locked, true);if (++checkpoints === 1 && mode === 'marker-failed') throw new Error('marker_failure');
+      },
+    };
+    const run = runInNewContext(saveCode + '\n' + pollCode + '\npollOnce', context,
+      { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } }) as (value: unknown) => Promise<void>;
+    const current = { state: 'published', candidateId: 'candidate', operationId: 'operation', snapshotHash: 'snapshot', releaseId: 'release' };
+    if (mode === 'same') await run(current);
+    else await assert.rejects(run(current), mode === 'marker-failed' ? /marker_failure/ : /registry_failure/);
+    assert.equal(locked, false);
+    assert.equal(context.canonicalWorkspace.repositoryPackage.state, mode === 'save-failed' ? 'processing' : 'published');
+    if (mode === 'marker-failed') { await run(current);assert.equal(checkpoints, 2);assert.equal(saves, 2); }
+    if (mode === 'save-failed') { assert.equal(checkpoints, 0);assert.equal(saves, 0); }
+  }
+});
+
 test('official guarded registry save compares the current locked record before any outbox checkpoint', async () => {
   for (const mode of ['same', 'operation-changed', 'scope-changed', 'missing', 'checkpoint-failed']) {
     const expected = { workspaceId: 'workspace', organizationId: 'org_fixture', repositoryPackage: { operationId: 'previous' } };
@@ -83,12 +122,14 @@ function fixture() {
     checkpointRepositoryRestorationCandidate: async (input: { recovered: { candidate: unknown } }) => {
       calls.push('outbox-write');return input.recovered.candidate;
     },
+    checkpointRepositoryRestorationRegistry: async () => { calls.push('registry-checkpoint'); },
     collectRepositorySourceRestoration: async () => { calls.push('collect');return {
       local: { manifest: { snapshotHash: 'local' } },
       snapshot: { manifest: { snapshotHash: 'snapshot', sourceAuthorization: {
         generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } }, expectedLatestSourceFingerprint: 'head',
       headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot', operationId: 'operation',
-      priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => { calls.push('recheck'); } }; },
+      priorReleaseId: 'stable', priorGeneration: 17, assertCurrent: async () => { calls.push('recheck'); },
+      assertLocalCurrent: async () => { calls.push('local-recheck'); } }; },
     canonicalize: JSON.stringify, sha256: () => 'reviewed-plan', dharmaHome: () => '/synthetic/device',
     writeRepositoryPackageSnapshot: async (input: { snapshot: { manifest: { snapshotHash: string } }; candidateOnly: boolean }) => {
       assert.equal(input.candidateOnly, true);calls.push(`snapshot-write:${input.snapshot.manifest.snapshotHash}`);
@@ -98,9 +139,14 @@ function fixture() {
       assert.equal((input.restoration as Record<string, unknown>).headCandidateId, 'rolled-back-head');
       return { state: 'accepted', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: null };
     },
-    saveWorkspaceRecord: async (record: { repositoryPackage: Record<string, unknown> }, guard?: { beforeSave?: () => Promise<void> }) => {
+    saveWorkspaceRecord: async (record: { repositoryPackage: Record<string, unknown> }, guard?: {
+      beforeSave?: () => Promise<void>; preparePackage?: () => Promise<Record<string, unknown>>;
+      afterSave?: (record: unknown) => Promise<void>;
+    }) => {
       await guard?.beforeSave?.();
+      if (guard?.preparePackage) record = { ...record, repositoryPackage: await guard.preparePackage() };
       calls.push('registry-write');savedRecord = record;
+      await guard?.afterSave?.(record);
     },
   };
   const run = (flags: Map<string, string | boolean>) => {
@@ -154,7 +200,7 @@ test('fencing refuses changed authority and running clients before checkpoint re
     const run = f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'], ['fence-upload', true]));
     if (mode === 'candidate-won') assert.equal((await run).stage, 'repository_restoration_admission_found');
     else await assert.rejects(run, /workspace_not_authorized|policy_changed|requires_stopped_relay/);
-    assert.ok(!f.calls.includes('fence-checkpoint'));assert.ok(!f.calls.includes('submit'));
+    assert.equal(f.calls.includes('fence-checkpoint'), mode === 'revoked');assert.ok(!f.calls.includes('submit'));
   }
 });
 
@@ -164,6 +210,60 @@ test('restoration planning has no source, registry or activation writes', async 
   assert.equal(result.localMutation, false);assert.equal(result.serverSourceMutation, false);
   assert.ok(f.calls.includes('protected-anchor-readonly'));assert.ok(!f.calls.includes('protected-anchor'));
   assert.ok(!f.calls.some(call => /write|submit|relay-state/.test(call)));
+});
+
+test('review regression: fresh registry CAS failure precedes every source write and admission', async () => {
+  const f = fixture();
+  f.overrides.saveWorkspaceRecord = async () => { throw new Error('workspace_registry_compare_and_swap_failed'); };
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /compare_and_swap_failed/);
+  assert.ok(!f.calls.some(call => /snapshot-write|submit/.test(call)));
+});
+
+test('review regression: recovery revalidates changed source authority inside the registry lock', async () => {
+  const f = fixture();let locked = false;
+  f.overrides.recoverRepositoryRestorationCandidate = async () => ({ planHash: 'reviewed-plan',
+    localSnapshotHash: 'local', baselineSnapshotHash: null, previousOperationId: null,
+    priorReleaseId: 'prior', sourceManifestHash: 'reviewed-plan',
+    candidate: { state: 'published', operationId: 'operation', candidateId: 'candidate', snapshotHash: 'snapshot', releaseId: 'release' } });
+  f.overrides.readRepositoryPackageSnapshot = async () => ({ manifest: {
+    organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
+    sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
+  f.overrides.fetchRepositorySourceAuthorization = async () => ({ generationId: locked ? 'replacement' : 'current-generation',
+    policy: { automaticValidatedPublication: true } });
+  f.overrides.saveWorkspaceRecord = async (_record: unknown, guard: { beforeSave?: () => Promise<void> }) => {
+    locked = true;await guard.beforeSave?.();f.calls.push('registry-write');
+  };
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /policy_changed/);
+  assert.ok(!f.calls.some(call => /outbox-write|registry-write/.test(call)));
+});
+
+test('review regression: final local currentness is checked after authority waits', async () => {
+  const f = fixture();let stale = false;
+  f.overrides.collectRepositorySourceRestoration = async () => ({
+    local: { manifest: { snapshotHash: 'local' } }, snapshot: { manifest: { snapshotHash: 'snapshot',
+      sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } },
+    expectedLatestSourceFingerprint: 'head', headCandidateId: 'rolled-back-head', headSnapshotHash: 'head-snapshot',
+    operationId: 'operation', priorReleaseId: 'stable', priorGeneration: 17,
+    assertCurrent: async () => { f.calls.push('recheck'); },
+    assertLocalCurrent: async () => { if (stale) throw new Error('repository_source_restoration_workspace_changed'); },
+  });
+  let reads = 0;
+  f.overrides.fetchRepositorySourceAuthorization = async () => {
+    if (++reads >= 2) stale = true;
+    return { generationId: 'current-generation', policy: { automaticValidatedPublication: true } };
+  };
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'])), /workspace_changed/);
+  assert.ok(!f.calls.some(call => /snapshot-write|submit/.test(call)));
+});
+
+test('review regression: an acknowledged fence survives a later source-policy rollover', async () => {
+  const f = fixture();let changed = false;
+  f.overrides.fetchRepositorySourceAuthorization = async () => ({ generationId: changed ? 'replacement' : 'current-generation',
+    policy: { automaticValidatedPublication: true } });
+  f.overrides.fenceRepositoryRestorationUpload = async () => { changed = true;return { candidate: null, fence: { fenceId: 'terminal' } }; };
+  f.overrides.checkpointRepositoryRestorationFence = async () => { f.calls.push('fence-checkpoint'); };
+  await assert.rejects(f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan'], ['fence-upload', true])), /policy_changed/);
+  assert.ok(f.calls.includes('fence-checkpoint'));assert.ok(!f.calls.includes('registry-write'));
 });
 
 test('dry-run reads the official legacy enrollment anchor in place without secure-store migration', async () => {
@@ -187,8 +287,8 @@ test('dry-run reads the official legacy enrollment anchor in place without secur
 test('restoration submits only the reviewed plan through normal candidate gates without activation', async () => {
   const f = fixture(), result = await f.run(f.flags(['apply', true], ['plan-hash', 'reviewed-plan']));
   assert.equal(result.stage, 'repository_restoration_candidate_submitted');assert.equal(result.activated, false);
-  assert.deepEqual(f.calls.slice(-13), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
-    'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write']);
+  assert.deepEqual(f.calls.slice(-15), ['authorization', 'supervisor-state', 'relay-state', 'recheck', 'supervisor-state', 'relay-state', 'authorization', 'supervisor-state', 'relay-state',
+    'local-recheck', 'snapshot-write:local', 'snapshot-write:snapshot', 'submit', 'registry-write', 'registry-checkpoint']);
   assert.equal(f.saved()?.repositoryPackage.localBaselineSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.pendingLocalSnapshotHash, 'local');
   assert.equal(f.saved()?.repositoryPackage.snapshotHash, 'snapshot');
@@ -217,11 +317,14 @@ test('submission survives a lost registry write and recovery checkpoints before 
     f.overrides.readRepositoryPackageSnapshot = async (_path: string, hash: string) => ({ manifest: {
       snapshotHash: hash, organizationId: 'org_fixture', workspaceId: 'workspace', knowledge: { repositoryAgentId: 'agent' },
       sourceAuthorization: { generationId: 'current-generation', policy: { automaticValidatedPublication: true } } } });
-    f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace, guard?: { beforeSave?: () => Promise<void> }) => {
+    f.overrides.saveWorkspaceRecord = async (record: typeof f.workspace, guard?: { beforeSave?: () => Promise<void>;
+      preparePackage?: () => Promise<typeof record.repositoryPackage>; afterSave?: (record: unknown) => Promise<void> }) => {
       await guard?.beforeSave?.();
+      if (guard?.preparePackage) record = { ...record, repositoryPackage: await guard.preparePackage() };
       f.calls.push('registry-write');
       if (++writes === 1) throw new Error('simulated_registry_write_failure');
       Object.assign(f.workspace, record);
+      await guard?.afterSave?.(record);
     };
     const flags = f.flags(['apply', true], ['plan-hash', 'reviewed-plan']);
     await assert.rejects(f.run(flags), /simulated_registry_write_failure/);
@@ -230,7 +333,7 @@ test('submission survives a lost registry write and recovery checkpoints before 
       const result = await f.run(flags);
       assert.equal(result.stage, 'repository_restoration_candidate_recovered');
       assert.equal(result.serverSourceMutation, false);assert.equal(result.activated, false);
-      assert.deepEqual(f.calls.slice(-5), ['authorization', 'supervisor-state', 'relay-state', 'outbox-write', 'registry-write']);
+      assert.deepEqual(f.calls.slice(-6), ['authorization', 'supervisor-state', 'relay-state', 'outbox-write', 'registry-write', 'registry-checkpoint']);
       assert.equal((f.workspace.repositoryPackage as Record<string, unknown>).sourcePolicyGenerationId, 'current-generation');
       assert.equal(f.workspace.repositoryPackage.pendingLocalOperationId,
         state === 'accepted' || state === 'processing' ? 'operation' : null);

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/repository-candidate-upload/v1",
+  "title": "Repository Candidate Upload",
+  "description": "Device-signed source submission. Restoration context and attempt are operation provenance, not enrollment or activation authority.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operationId", "workspaceId", "repositoryBindingId", "repositoryAgentId", "sourceSnapshotHash", "sourceManifestHash", "consolidation", "snapshot"],
+  "properties": {
+    "schema": { "const": "dharma.repository-candidate-upload/v1" },
+    "operationId": { "$ref": "#/$defs/hash" },
+    "workspaceId": { "$ref": "#/$defs/uuid" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+    "sourceSnapshotHash": { "$ref": "#/$defs/hash" },
+    "sourceManifestHash": { "$ref": "#/$defs/hash" },
+    "restorationAttempt": { "$ref": "#/$defs/uuid" },
+    "restorationContext": {
+      "type": "object", "additionalProperties": false, "required": ["headCandidateId", "priorReleaseId"],
+      "properties": { "headCandidateId": { "$ref": "#/$defs/uuid" }, "priorReleaseId": { "$ref": "#/$defs/uuid" } }
+    },
+    "consolidation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "includeApprovedOutputs", "requireAtlasAssociation"],
+      "properties": {
+        "mode": { "enum": ["initial_repository", "repository_update"] },
+        "includeApprovedOutputs": { "const": true }, "requireAtlasAssociation": { "const": true },
+        "expectedLatestSourceFingerprint": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "capturedAt", "manifest", "blobs"],
+      "properties": {
+        "schema": { "const": "dharma.repository-package-snapshot/v1" },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "manifest": { "anyOf": [
+          { "$ref": "https://schemas.dharma-ai.io/repository-package/v1" },
+          { "$ref": "https://schemas.dharma-ai.io/repository-package/v2" },
+          { "$ref": "https://schemas.dharma-ai.io/repository-package/v3" }
+        ] },
+        "blobs": { "type": "array", "maxItems": 4096, "items": {
+          "type": "object", "additionalProperties": false, "required": ["sha256", "contentBase64"],
+          "properties": { "sha256": { "$ref": "#/$defs/hash" },
+            "contentBase64": { "type": "string", "maxLength": 8388608, "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$(?![\\s\\S])" } }
+        } }
+      }
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "consolidation": { "type": "object", "properties": { "mode": { "const": "initial_repository" } } } } },
+      "then": { "properties": { "consolidation": { "type": "object", "properties": { "expectedLatestSourceFingerprint": false } } } } },
+    { "if": { "anyOf": [{ "required": ["restorationAttempt"] }, { "required": ["restorationContext"] }] },
+      "then": { "properties": { "consolidation": {
+        "type": "object", "properties": { "mode": { "const": "repository_update" }, "expectedLatestSourceFingerprint": { "$ref": "#/$defs/hash" } }, "required": ["expectedLatestSourceFingerprint"]
+      } } } }
+  ],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])" },
+    "uuid": { "type": "string", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][0-9a-f]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\\s\\S])" }
+  }
+}

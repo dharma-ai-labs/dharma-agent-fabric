@@ -48,6 +48,7 @@ type CandidateOutbox = {
   releaseId: string | null;
   restoration?: RestorationCheckpoint;
   fence?: RepositoryCandidateFence;
+  registryReceiptHash?: string;
 };
 
 type RestorationCheckpoint = {
@@ -167,7 +168,7 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     'candidateId', 'state', 'releaseId'];
   requireFact(row.schema === 'dharma.repository-candidate-outbox/v1'
     && Reflect.ownKeys(row).every(key => typeof key === 'string')
-    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key) || key === 'restoration' || key === 'fence'),
+    && keys.every(key => Object.hasOwn(row, key)) && Object.keys(row).every(key => keys.includes(key) || ['restoration', 'fence', 'registryReceiptHash'].includes(key)),
   'Repository candidate outbox is invalid.');
   const scope = checkedScope(row.scope as RepositoryCandidateScope);
   if (expectedScope) requireFact(canonicalize(scope) === canonicalize(expectedScope), 'Repository candidate outbox scope is invalid.');
@@ -192,6 +193,8 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
         && HASH.test(consolidation.expectedLatestSourceFingerprint)),
   'Repository candidate consolidation is invalid.');
   const restoration = Object.hasOwn(row, 'restoration') ? restorationCheckpoint(row.restoration) : undefined;
+  requireFact(!Object.hasOwn(row, 'registryReceiptHash') || Boolean(restoration) && typeof row.registryReceiptHash === 'string'
+    && HASH.test(row.registryReceiptHash), 'Repository restoration registry checkpoint is invalid.');
   requireFact((row.state === 'fenced') === Object.hasOwn(row, 'fence') && (row.state !== 'fenced' || Boolean(restoration)),
     'Repository candidate fence checkpoint is inconsistent.');
   const fence = row.state === 'fenced' ? checkedFence(row.fence, scope, String(row.operationId),
@@ -201,7 +204,46 @@ function outbox(value: unknown, expectedScope?: RepositoryCandidateScope): Candi
     snapshotHash: row.snapshotHash as string, consolidation: consolidation as CandidateOutbox['consolidation'],
     candidateId: row.candidateId as string | null, state: row.state as CandidateOutbox['state'],
     releaseId: row.releaseId as string | null,
-    ...(restoration ? { restoration } : {}), ...(fence ? { fence } : {}) };
+    ...(restoration ? { restoration } : {}), ...(fence ? { fence } : {}),
+    ...(typeof row.registryReceiptHash === 'string' ? { registryReceiptHash: row.registryReceiptHash } : {}) };
+}
+
+function registryReceiptHash(pending: CandidateOutbox) {
+  return sha256(canonicalize({ scope: pending.scope, operationId: pending.operationId, candidateId: pending.candidateId,
+    snapshotHash: pending.snapshotHash, sourceManifestHash: pending.sourceManifestHash, state: pending.state,
+    releaseId: pending.releaseId, restoration: pending.restoration }));
+}
+
+function assertRestorationReconciled(pending: CandidateOutbox) {
+  requireFact(!pending.restoration || pending.registryReceiptHash === registryReceiptHash(pending),
+    'Repository restoration requires registry reconciliation before replacement.');
+}
+
+// Called under the registry mutation lock, only after its durable save. A crash
+// before this marker leaves provenance retained and exact recovery retryable.
+export async function checkpointRepositoryRestorationRegistry(input: {
+  outboxRoot: string; scope: RepositoryCandidateScope;
+  repositoryPackage: {
+    state: string; candidateId: string | null; operationId: string | null; snapshotHash: string | null;
+    releaseId: string | null; sourceManifestHash: string | null; consolidationMode: string | null;
+    localBaselineSnapshotHash?: string | null; publishedLocalSnapshotHash?: string | null;
+    pendingLocalSnapshotHash?: string | null; pendingLocalOperationId?: string | null;
+  };
+}): Promise<void> {
+  const scope = checkedScope(input.scope), path = outboxPath(input.outboxRoot, scope), pending = await readOutbox(path, scope);
+  if (!pending?.restoration || pending.state === 'fenced') return;
+  const saved = input.repositoryPackage;
+  const restoration = pending.restoration, inFlight = ['accepted', 'processing'].includes(pending.state);
+  requireFact(STATES.has(pending.state as RepositoryCandidateState)
+    && ['state', 'candidateId', 'operationId', 'snapshotHash', 'releaseId', 'sourceManifestHash'].every(key =>
+    saved[key as keyof typeof saved] === pending[key as keyof CandidateOutbox])
+    && saved.consolidationMode === 'repository_update'
+    && saved.localBaselineSnapshotHash === (pending.state === 'blocked' ? restoration.baselineSnapshotHash : restoration.localSnapshotHash)
+    && saved.publishedLocalSnapshotHash === (pending.state === 'published' ? restoration.localSnapshotHash : restoration.baselineSnapshotHash)
+    && saved.pendingLocalSnapshotHash === (inFlight ? restoration.localSnapshotHash : null)
+    && saved.pendingLocalOperationId === (inFlight ? pending.operationId : null),
+  'Repository restoration registry receipt does not match its durable checkpoint.');
+  await writeOutbox(path, { ...pending, registryReceiptHash: registryReceiptHash(pending) });
 }
 
 function checkedFence(value: unknown, scope: RepositoryCandidateScope, operationId: string, snapshotHash: string,
@@ -292,6 +334,7 @@ export async function synchronizeRepositoryCandidate(input: {
     requireFact(['published', 'blocked', 'fenced'].includes(prior.state)
       || input.blockedCandidate?.candidateId === prior.candidateId,
     'A different repository candidate is still pending.');
+    if (prior.state !== 'fenced') assertRestorationReconciled(prior);
   }
   const pending: CandidateOutbox = prior?.operationId === operationId ? prior : {
     schema: 'dharma.repository-candidate-outbox/v1', scope, operationId,
@@ -303,6 +346,17 @@ export async function synchronizeRepositoryCandidate(input: {
     && canonicalize(pending.consolidation) === canonicalize(consolidation)
     && canonicalize(pending.restoration ?? null) === canonicalize(restoration ?? null),
   'Repository candidate outbox does not match the current upload.');
+  const body = {
+    schema: 'dharma.repository-candidate-upload/v1', operationId, workspaceId: scope.workspaceId,
+    repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
+    sourceSnapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash: pending.sourceManifestHash,
+    consolidation: pending.consolidation, snapshot,
+    ...(restoration?.attemptId ? { restorationAttempt: restoration.attemptId } : {}),
+    ...(restorationContext(restoration) ? { restorationContext: restorationContext(restoration) } : {}),
+  };
+  requireFact((await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
+    'https://schemas.dharma-ai.io/repository-candidate-upload/v1', body)).ok
+    && Buffer.byteLength(canonicalize(body)) <= 8_388_608, 'Repository candidate upload contract is invalid.');
   await writeOutbox(path, pending);
   const route = `/agent-fabric/repository-agents/${encodeURIComponent(scope.repositoryAgentId)}/package-candidates`;
   let accepted: RepositoryCandidateReceipt;
@@ -311,14 +365,7 @@ export async function synchronizeRepositoryCandidate(input: {
     accepted = receipt(await input.transport.signedGet(`${route}/${encodeURIComponent(pending.candidateId)}?${query}`),
       scope, operationId, snapshot.manifest.snapshotHash, restoration?.priorReleaseId);
   } else {
-    accepted = receipt(await input.transport.signedPost(route, {
-      schema: 'dharma.repository-candidate-upload/v1', operationId, workspaceId: scope.workspaceId,
-      repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: scope.repositoryAgentId,
-      sourceSnapshotHash: snapshot.manifest.snapshotHash, sourceManifestHash: pending.sourceManifestHash,
-      consolidation: pending.consolidation, snapshot,
-      ...(restoration?.attemptId ? { restorationAttempt: restoration.attemptId } : {}),
-      ...(restorationContext(restoration) ? { restorationContext: restorationContext(restoration) } : {}),
-    }), scope, operationId, snapshot.manifest.snapshotHash, restoration?.priorReleaseId);
+    accepted = receipt(await input.transport.signedPost(route, body), scope, operationId, snapshot.manifest.snapshotHash, restoration?.priorReleaseId);
   }
   await writeOutbox(path, { ...pending, candidateId: accepted.candidateId, state: accepted.state, releaseId: accepted.releaseId });
   return accepted;
@@ -518,8 +565,16 @@ export async function adoptRepositoryCandidate(input: {
   if (prior?.state === 'fenced') {
     requireFact(prior.operationId !== candidate.operationId, 'A fenced operation cannot be adopted.');
     await archiveFencedCheckpoint(input.outboxRoot, prior);
-  } else requireFact(!prior?.restoration || ['published', 'blocked'].includes(prior.state),
-    'An unresolved restoration checkpoint cannot be replaced by adoption.');
+  } else if (prior?.restoration) {
+    requireFact(['published', 'blocked'].includes(prior.state), 'An unresolved restoration checkpoint cannot be replaced by adoption.');
+    if (prior.operationId === candidate.operationId) {
+      requireFact(prior.candidateId === candidate.candidateId && prior.snapshotHash === candidate.snapshotHash
+        && prior.sourceManifestHash === input.sourceManifestHash && prior.state === candidate.state && prior.releaseId === candidate.releaseId
+        && prior.consolidation.mode === input.consolidationMode, 'Restoration adoption changed its checkpoint.');
+      return candidate;
+    }
+    assertRestorationReconciled(prior);
+  }
   requireFact(candidate.state !== 'accepted' || candidate.candidateId !== null,
     'Canonical repository candidate is incomplete.');
   await writeOutbox(outboxPath(input.outboxRoot, scope), {
