@@ -5,6 +5,7 @@ import {compileFunction} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
+import {captureCodexSetupPromptBinding} from './codexSetupUserPrompt.js';
 import {parseCliOptions, sourceRepositoryFingerprint} from './index.js';
 
 // Real public-command binding; only its subsequent native startup is synthetic.
@@ -13,11 +14,17 @@ async function fixture() {
   let starts = 0, supplied: any, allowed = true, nested = false;
   const input = {workspace: resolve('synthetic-source'), name: 'implementer', signal: new AbortController().signal,
     current: async () => allowed, reserve: async () => true, maximumProviderCostCents: 25,
+    initialUserPrompt: '',
+    initialUserPromptBinding: {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://github.com/demo/source.git'},
     expectedAccountEmail: 'synthetic@example.test', intent: {schema: 'dharma.codex-setup-intent/v1',
       operationId: id(1), setupReference: id(2), organizationId: 'org_demo', recipientMembershipId: id(3),
       hostContextId: id(4), origin: 'https://hq.example', repositoryFingerprint: sourceRepositoryFingerprint('https://github.com/demo/source.git').fingerprint,
       scopeDigest: `sha256:${'b'.repeat(64)}`, contractDigest: `sha256:${'c'.repeat(64)}`, policyRevision: 'policy-v1',
       issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()}};
+  input.initialUserPrompt = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: ${input.initialUserPromptBinding.recipientEmail}. Organization: ${input.intent.organizationId}.\n`
+    + `Selected repository: ${input.initialUserPromptBinding.repositoryRemoteUrl}. Fingerprint: ${input.intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${input.intent.setupReference}. Fixed expiry: ${input.intent.expiresAt}.\n`;
   const scope = prepareCodexBootstrapHost({intent: input.intent as Parameters<typeof prepareCodexBootstrapHost>[0]['intent'],
     workspace: input.workspace, signal: input.signal, current: input.current});
   const argv = ['bootstrap', ...[...scope.flags].flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)])];
@@ -30,7 +37,7 @@ async function fixture() {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});
   assert.equal(compiled.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
   const dependencies = {currentBootstrapHostScope: () => nested ? {} : undefined,
-    prepareCodexBootstrapHost, parseCliOptions, resolve, Buffer, URL, sourceRepositoryFingerprint,
+    prepareCodexBootstrapHost, parseCliOptions, resolve, Buffer, URL, sourceRepositoryFingerprint, captureCodexSetupPromptBinding,
     openCodexBootstrapNativeHost: async (value: unknown) => {starts++; supplied = value; return {threadId: 'synthetic-native'};}};
   const open = compileFunction(`${compiled.outputText}\nreturn openCodexBootstrapFromPortalCommand;`, ['exports', ...Object.keys(dependencies)])(
     {}, ...Object.values(dependencies)) as (value: any) => Promise<any>;
@@ -46,11 +53,34 @@ test('portal command enters the owning host with only the fixed recipient/source
   assert.notEqual(f.supplied.intent, f.input.intent); assert.equal(f.supplied.reserve, f.input.reserve);
   assert.equal(f.supplied.maximumProviderCostCents, 25); assert.equal('portalArgs' in f.supplied, false);
 });
+
+test('portal entry never silently substitutes a controller message for an absent original public prompt', async () => {
+  for (const initialUserPrompt of [undefined, '', null]) {
+    const f = await fixture();
+    await assert.rejects(f.open({...f.input, initialUserPrompt, portalArgs: f.argv}), /public_prompt_invalid/);
+    assert.equal(f.starts, 0);
+  }
+});
 test('matching public selected-repository URL is validated, never cloned or passed as startup authority', async () => {
   const f = await fixture();
   const args = [...f.argv, '--repository-url-base64url', Buffer.from('https://github.com/demo/source.git').toString('base64url')];
   await f.open({...f.input, portalArgs: args}); assert.equal(f.starts, 1);
   assert.equal('repository-url-base64url' in f.supplied, false); assert.equal(f.supplied.workspace, f.input.workspace);
+});
+
+test('portal command preserves original public user prompt while command args remain separately validated', async () => {
+  const f = await fixture();
+  const initialUserPrompt = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: synthetic@example.test. Organization: ${f.input.intent.organizationId}.\n`
+    + `Selected repository: https://github.com/demo/source.git. Fingerprint: ${f.input.intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${f.input.intent.setupReference}. Fixed expiry: ${f.input.intent.expiresAt}.\n`;
+  const initialUserPromptBinding = {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://github.com/demo/source.git'};
+  await f.open({...f.input, initialUserPrompt, initialUserPromptBinding, portalArgs: f.argv});
+  assert.equal(f.supplied.initialUserPrompt, initialUserPrompt);
+  assert.equal(f.starts, 1);
+  const args = [...f.argv, '--grant', 'private-canary'];
+  await assert.rejects(f.open({...f.input, initialUserPrompt, initialUserPromptBinding, portalArgs: args}), /portal_command_mismatch/);
+  assert.equal(f.starts, 1, 'presentation never substitutes for validated public command scope');
 });
 for (const cause of ['command', 'extra', 'duplicate', 'grant', 'private-prompt', 'resume', 'join', 'dry-run', 'help',
   'recipient', 'reference', 'organization', 'origin', 'policy', 'scope', 'contract', 'workspace', 'provider', 'incomplete'] as const) {

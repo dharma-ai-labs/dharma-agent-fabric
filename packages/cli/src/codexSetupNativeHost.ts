@@ -1,10 +1,11 @@
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import {verifyCodexSetupReadOnlyProfile, type CodexToolHandler, type CodexToolResult}
   from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import {drainBootstrapHostChildren, prepareCodexBootstrapHost, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {createCodexSetupAdmission, type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
 import {startNamedCodexSetupThread} from './namedCodexThread.js';
+import {captureCodexSetupUserPrompt, type CodexSetupPromptBinding} from './codexSetupUserPrompt.js';
 
 type Admission = Parameters<typeof createCodexSetupAdmission>[0];
 type Input = {
@@ -12,6 +13,10 @@ type Input = {
   transport: CodexStdioTransport; workspace: string; name: string; intent: CodexSetupIntent;
   openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void | Promise<void>}>;
   signal: AbortSignal; maximumProviderCostCents: number;
+  /** Exact public portal text, not authority or a controller-written substitute. */
+  initialUserPrompt?: string;
+  /** Public recipient/source fields from the verified portal, not provider email. */
+  initialUserPromptBinding?: CodexSetupPromptBinding;
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   /** Requalifies package/source, provider account, host ownership and signed scope. */
   current(): Promise<boolean>;
@@ -43,6 +48,9 @@ export async function startCodexSetupNativeHost(input: Input) {
   const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace, current: input.current,
     signal: AbortSignal.any([input.signal, transport.signal])});
   const {scope, intent} = prepared, connectionId = randomUUID();
+  let initialUserPrompt: string | undefined;
+  try {initialUserPrompt = captureCodexSetupUserPrompt(input.initialUserPrompt, intent, input.initialUserPromptBinding);}
+  catch (error) {scope.close(); throw error;}
   const filesystem = Object.freeze({...input.additionalFilesystemRules});
   let threadId = '', turnId = '', closed = false, terminalObserved = false;
   let admission: ReturnType<typeof createCodexSetupAdmission> | undefined;
@@ -93,7 +101,7 @@ export async function startCodexSetupNativeHost(input: Input) {
     };
     await verifyProfile();
     await scope.step(async () => {journal = await openJournal(scope);});
-    threadId = await startNamedCodexSetupThread(transport, workspace, name, scope);
+    threadId = await startNamedCodexSetupThread(transport, workspace, name, scope, initialUserPrompt !== undefined);
     unsubscribe = transport.onNotification(value => {
       const event = record(value), params = record(event?.params), turn = record(params?.turn);
       if (event?.method !== 'turn/completed' || params?.threadId !== threadId || typeof turn?.id !== 'string') return;
@@ -122,7 +130,7 @@ export async function startCodexSetupNativeHost(input: Input) {
     await scope.step(async () => {
       const started = record(await transport.request('turn/start', {
         threadId, cwd: workspace, approvalPolicy: 'never', permissions: 'dharma_bridge',
-        input: [{type: 'text', text: `Perform the recipient-bound Agent Fabric setup using dharma_setup_reference with operationId ${intent.operationId} and setupReference ${intent.setupReference}. Browser approval remains required for the intended recipient. In-progress is not readiness. If functions.exec returns a running cell, use functions.wait on that same cell until the setup tool returns a terminal result or the approved operation expires. Prefer 120000ms waits instead of rapid polling. Do not end this turn or send a final answer while the setup tool is pending: ending the original turn cancels setup, even when browser approval is still pending. Never terminate or restart the setup operation merely to report that approval is needed. Do not run setup shell commands, read private storage, request broader permissions or use peer tools during setup.`}],
+        input: [{type: 'text', text: initialUserPrompt ?? `Perform the recipient-bound Agent Fabric setup using dharma_setup_reference with operationId ${intent.operationId} and setupReference ${intent.setupReference}. Browser approval remains required for the intended recipient. In-progress is not readiness. If functions.exec returns a running cell, use functions.wait on that same cell until the setup tool returns a terminal result or the approved operation expires. Prefer 120000ms waits instead of rapid polling. Do not end this turn or send a final answer while the setup tool is pending: ending the original turn cancels setup, even when browser approval is still pending. Never terminate or restart the setup operation merely to report that approval is needed. Do not run setup shell commands, read private storage, request broader permissions or use peer tools during setup.`}],
       }));
       const turn = record(started?.turn);
       if (typeof turn?.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(turn.id)) throw new Error('codex_setup_native_start_failed');
@@ -151,7 +159,8 @@ export async function startCodexSetupNativeHost(input: Input) {
       qualifyHost: async () => scope.current()});
     if (completions.has(turnId)) {terminalObserved = true; withdraw();}
     bind();
-    return Object.freeze({threadId, turnId, close, settled});
+    return Object.freeze({threadId, turnId, close, settled,
+      initialUserPromptSha256: initialUserPrompt === undefined ? undefined : createHash('sha256').update(initialUserPrompt).digest('hex')});
   } catch (error) {
     await close();
     const safe = new Set(['codex_setup_native_input_invalid', 'codex_setup_native_profile_unavailable',

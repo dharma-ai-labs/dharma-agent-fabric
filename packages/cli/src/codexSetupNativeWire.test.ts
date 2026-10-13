@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {randomBytes} from 'node:crypto';
+import {createHash, randomBytes} from 'node:crypto';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
@@ -24,7 +24,7 @@ test('native owner composition is exposed through the public CLI library, not a 
 const server = `
 const lines = require('node:readline').createInterface({input: process.stdin});
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
-let name = '', cwd = '';
+let name = '', cwd = '', setupDescription = '';
 lines.on('line', line => {
   const value = JSON.parse(line), respond = result => send({id: value.id, result});
   if (value.method === 'initialize') respond({userAgent: 'native-setup-wire-fixture'});
@@ -33,25 +33,30 @@ lines.on('line', line => {
     filesystem: {':minimal': 'read', ':workspace_roots': {'.': 'read'}}, network: {enabled: false}}}}});
   else if (value.method === 'thread/start') {
     if (value.params.permissions !== 'dharma_bridge' || value.params.dynamicTools.at(-1).name !== 'dharma_setup_reference') process.exit(3);
+    setupDescription = value.params.dynamicTools.at(-1).description;
     cwd = value.params.cwd; respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   } else if (value.method === 'thread/name/set') {name = value.params.name; respond({});}
   else if (value.method === 'thread/archive') respond({});
   else if (['thread/read', 'thread/unarchive', 'thread/resume'].includes(value.method)) respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   else if (value.method === 'turn/start') {
+    send({method: 'fixture/prompt', params: {count: value.params.input.length,
+      hash: require('node:crypto').createHash('sha256').update(value.params.input[0].text).digest('hex'),
+      bound: setupDescription.includes('${id(1)}') && setupDescription.includes('${id(2)}')}});
     send({id: 'fixture_call', method: 'item/tool/call', params: {threadId: 'synthetic_thread', turnId: 'synthetic_turn',
       callId: 'fixture_call', tool: 'dharma_setup_reference', namespace: null,
       arguments: {operationId: '${id(1)}', setupReference: '${id(2)}'}}});
     respond({turn: {id: 'synthetic_turn', status: 'inProgress'}});
   } else if (value.method === 'turn/interrupt') respond({});
   else if (value.id === 'fixture_call' && value.result) {
-    send({method: 'fixture/disposition', params: value.result});
+    if (process.argv[1] !== 'omit-disposition') send({method: 'fixture/disposition', params: value.result});
     send({method: 'turn/completed', params: {threadId: 'synthetic_thread', turn: {id: 'synthetic_turn', status: 'completed'}}});
   }
 });
 `;
 
 async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>[0],
-  disposition: Promise<unknown>, journalScope: () => BootstrapHostScope | undefined) => Promise<void>) {
+  disposition: Promise<unknown>, journalScope: () => BootstrapHostScope | undefined) => Promise<void>, startupDelayMs = 0, omitDisposition = false) {
+  assert.ok(startupDelayMs >= 0 && startupDelayMs <= 6000);
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-native-setup-wire-'));
   const workspace = resolve(root, 'source'), now = Date.now();
   const contract = await loadAgentFabricOnboardingContract();
@@ -67,19 +72,30 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
   let vault: ScopedLocalVault | undefined;
   let readiness: ReturnType<typeof createCodexSetupReadinessOwner> | undefined;
   let journalScope: BootstrapHostScope | undefined;
-  let timer: NodeJS.Timeout | undefined;
+  let timer: NodeJS.Timeout | undefined, fixtureTimer: NodeJS.Timeout | undefined;
   try {
-    transport = await openCodexAppServerTransport({command: process.execPath, argv: ['-e', server], cwd: root,
+    transport = await openCodexAppServerTransport({command: process.execPath, argv: ['-e', server, ...(omitDisposition ? ['omit-disposition'] : [])], cwd: root,
       environment: process.platform === 'win32' ? {SystemRoot: process.env.SystemRoot} : {}, requestTimeoutMs: 2000,
       toolCallTimeoutMs: 2000, experimentalApi: true});
     const owned = transport;
     const disposition = new Promise<unknown>((done, fail) => {
-      timer = setTimeout(() => fail(new Error('synthetic_native_disposition_missing')), 5000);
       unsubscribe = owned.onNotification((raw: unknown) => {
         const event = raw as {method?: string; params?: unknown};
-        if (event.method === 'fixture/disposition') done(event.params);
+        if (event.method === 'fixture/prompt' && !timer) {
+          timer = setTimeout(() => fail(new Error('synthetic_native_disposition_missing')), 5000);
+        }
+        if (event.method === 'fixture/disposition') {
+          if (timer) clearTimeout(timer);
+          done(event.params);
+        }
       });
     });
+    // Host preparation can precede the caller's await; retain rejection for that await.
+    void disposition.catch(() => {});
+    const fixtureDeadline = new Promise<never>((_done, fail) => {
+      fixtureTimer = setTimeout(() => fail(new Error('synthetic_native_fixture_deadline')), 30_000);
+    });
+    void fixtureDeadline.catch(() => {});
     const digest = `sha256:${'a'.repeat(64)}`;
     const observation: LocalCodexSetupReadiness = {schema: 'dharma.local-codex-setup-readiness/v1',
       operationId: id(1), organizationId: 'org_demo', membershipId: id(3), deviceId: id(5), workspaceId: id(6),
@@ -90,7 +106,8 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
       contractDigest: prepared.intent.contractDigest, cliVersion: '0.2.153', relayPid: 123,
       relayPolledAt: new Date(now - 500).toISOString(), startupBackend: 'systemd-user', firstLearning: 'no_eligible_history',
       verifiedAt: new Date(now).toISOString(), expiresAt: prepared.intent.expiresAt};
-    await run({transport, workspace, name: 'implementer', intent: prepared.intent,
+    if (startupDelayMs) await new Promise(done => setTimeout(done, startupDelayMs));
+    await Promise.race([run({transport, workspace, name: 'implementer', intent: prepared.intent,
       openJournal: async scope => {
         journalScope = scope;
         vault = await LocalVault.open({root: resolve(root, 'vault'), masterKey: Buffer.from(key, 'base64')}, scope);
@@ -103,9 +120,9 @@ async function fixture(run: (input: Parameters<typeof startCodexSetupNativeHost>
         if (!readiness) throw new Error('fixture_readiness_owner_missing');
         return readiness.record(lease);
       },
-      verifyReadiness: async (...args) => readiness ? readiness.verify(...args) : false}, disposition, () => journalScope);
+      verifyReadiness: async (...args) => readiness ? readiness.verify(...args) : false}, disposition, () => journalScope), fixtureDeadline]);
   } finally {
-    if (timer) clearTimeout(timer); unsubscribe(); prepared.scope.close();
+    if (timer) clearTimeout(timer); if (fixtureTimer) clearTimeout(fixtureTimer); unsubscribe(); prepared.scope.close();
     try {await transport?.close();} finally {
       try {await vault?.close();} finally {await rm(root, {recursive: true, force: true});}
     }
@@ -126,6 +143,51 @@ test('native registration, encrypted readiness/journal and early-call binding co
       assert.deepEqual(Object.keys(completed).sort(), ['operationId', 'readinessReceiptId', 'state']);
       await host.settled; assert.equal(executed, 1);
     } finally {await host.close();}
+  });
+});
+
+test('fixture watchdog bounds the native disposition, not prior host preparation', async () => {
+  await fixture(async (input, disposition) => {
+    const host = await startCodexSetupNativeHost(input);
+    try {
+      assert.equal((await disposition as {success: boolean}).success, true);
+      await host.settled;
+    } finally {await host.close();}
+  }, 5500);
+});
+
+test('fixture watchdog still rejects an absent native disposition', async () => {
+  await fixture(async (input, disposition) => {
+    const host = await startCodexSetupNativeHost(input);
+    try {
+      await assert.rejects(disposition, {message: 'synthetic_native_disposition_missing'});
+      await host.settled;
+    } finally {await host.close();}
+  }, 0, true);
+});
+
+test('original public prompt and host-bound tool compose over actual owned stdio without shell authentication', async () => {
+  await fixture(async (input, disposition) => {
+    const original = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+      + `Recipient: synthetic@example.test. Organization: ${input.intent.organizationId}.\n`
+      + `Selected repository: https://example.test/source.git. Fingerprint: ${input.intent.repositoryFingerprint}.\n`
+      + `Public setup reference: ${input.intent.setupReference}. Fixed expiry: ${input.intent.expiresAt}.\n`
+      + 'Use the host-bound setup tool; account checks belong to the trusted host.';
+    input.initialUserPrompt = original;
+    input.initialUserPromptBinding = {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://example.test/source.git'};
+    let observed: unknown;
+    const unsubscribe = input.transport.onNotification(raw => {
+      const event = raw as {method?: string; params?: unknown};
+      if (event.method === 'fixture/prompt') observed = event.params;
+    });
+    const host = await startCodexSetupNativeHost(input);
+    try {
+      assert.equal((await disposition as {success: boolean}).success, true);
+      await host.settled;
+      const hash = createHash('sha256').update(original).digest('hex');
+      assert.deepEqual(observed, {count: 1, hash, bound: true});
+      assert.equal(host.initialUserPromptSha256, hash);
+    } finally {unsubscribe(); await host.close();}
   });
 });
 

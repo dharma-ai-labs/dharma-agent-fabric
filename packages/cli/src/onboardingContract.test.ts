@@ -13,7 +13,7 @@ test('the installed onboarding contract forbids product-code workarounds', async
   assert.match(contract, /do not bypass enrollment/i);
   assert.match(contract, /exact failed stage, non-sensitive error, and correlation ID/i);
   assert.match(contract, /supported retry, reconciliation, rollback, or browser-authorized re-enrollment/i);
-  assert.match(contract, /same owned process/i);
+  assert.match(contract, /same native turn pending through recipient approval and final JSON/i);
   assert.match(contract, /never replay an expired or spent setup/i);
 });
 
@@ -21,7 +21,11 @@ test('the installed contract uses one agent-run public reference and exact recip
   const contract = await readFile(contractUrl, 'utf8');
   assert.match(contract, /public setup reference is not a bearer credential/i);
   assert.match(contract, /actual authenticated coding-agent conversation/i);
-  assert.match(contract, /agent runs the exact generated `--setup-reference` command/i);
+  assert.match(contract, /original public prompt as the single user message/i);
+  assert.match(contract, /registers the matching `dharma_setup_reference` tool/i);
+  assert.match(contract, /Do not run direct-CLI compatibility commands on this route/i);
+  assert.match(contract, /requires `initialUserPrompt`/);
+  assert.match(contract, /Missing text is refused, never replaced with a controller message/);
   assert.match(contract, /credentials move only from the trusted HTTPS endpoint into the native protected store/i);
   assert.match(contract, /never request a human terminal command, grant paste or keyring troubleshooting/i);
   assert.match(contract, /no supplementary manual setup command/i);

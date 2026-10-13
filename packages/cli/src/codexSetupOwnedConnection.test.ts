@@ -5,6 +5,8 @@ import {compileFunction} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
+import {captureCodexSetupUserPrompt, captureCodexSetupPromptBinding} from './codexSetupUserPrompt.js';
+import {sourceRepositoryFingerprint} from './index.js';
 
 // Actual declarations with explicitly synthetic provider/filesystem boundaries.
 async function declaration(file: string, name: string, dependencies: Record<string, unknown>) {
@@ -93,8 +95,10 @@ async function controllerFixture() {
   const connection = {transport: {original: true}, additionalFilesystemRules: {private: 'deny'},
     current: async () => allowed, close: async () => {connectionCloses++;}};
   const open = await declaration('index.ts', 'openCodexBootstrapNativeHost', {prepareCodexBootstrapHost,
+    captureCodexSetupUserPrompt, captureCodexSetupPromptBinding, sourceRepositoryFingerprint,
     currentBootstrapHostScope: () => undefined,
-    preflightBootstrapWorkspaceIdentity: async () => ({fingerprint: `sha256:${(sourceMatches ? 'a' : 'e').repeat(64)}`}),
+    preflightBootstrapWorkspaceIdentity: async () => ({fingerprint: sourceMatches
+      ? sourceRepositoryFingerprint('https://example.test/source.git').fingerprint : `sha256:${'e'.repeat(64)}`}),
     loadAgentFabricOnboardingContract: async () => ({sha256: (contractMatches ? 'c' : 'e').repeat(64)}),
     dharmaHome: () => resolve('synthetic-device-private'),
     openCodexSetupOwnedConnection: async () => {connections++; return connection;},
@@ -105,9 +109,10 @@ async function controllerFixture() {
     }});
   const input = {workspace: resolve('synthetic-source'), name: 'implementer', signal: new AbortController().signal,
     current: async () => allowed, reserve: async () => true, maximumProviderCostCents: 25,
+    initialUserPromptBinding: {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://example.test/source.git'},
     expectedAccountEmail: 'synthetic@example.test', intent: {schema: 'dharma.codex-setup-intent/v1',
       operationId: id(1), setupReference: id(2), organizationId: 'org_demo', recipientMembershipId: id(3),
-      hostContextId: id(4), origin: 'https://hq.example', repositoryFingerprint: `sha256:${'a'.repeat(64)}`,
+      hostContextId: id(4), origin: 'https://hq.example', repositoryFingerprint: sourceRepositoryFingerprint('https://example.test/source.git').fingerprint,
       scopeDigest: `sha256:${'b'.repeat(64)}`, contractDigest: `sha256:${'c'.repeat(64)}`, policyRevision: 'policy-v1',
       issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()}};
   return {open, input, connection, settle, get started() {return started;},
@@ -126,6 +131,66 @@ test('official controller carries only its owned connection and original budget 
 test('terminal native turn releases its owning connection without caller cleanup', async () => {
   const f = await controllerFixture(), host = await f.open(f.input);
   f.settle(); await host.settled; assert.equal(f.counts.connectionCloses, 1);
+});
+
+function publicPrompt(intent: {organizationId: string; repositoryFingerprint: string; setupReference: string; expiresAt: string}) {
+  return '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: synthetic@example.test. Organization: ${intent.organizationId}.\n`
+    + `Selected repository: https://example.test/source.git. Fingerprint: ${intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${intent.setupReference}. Fixed expiry: ${intent.expiresAt}.\n`
+    + 'Use the matching host-bound setup tool only.';
+}
+
+test('official controller forwards the original public user prompt to its native host', async () => {
+  const f = await controllerFixture(), prompt = publicPrompt(f.input.intent);
+  const host = await f.open({...f.input, expectedAccountEmail: 'provider-login@example.test', initialUserPrompt: prompt});
+  try {
+    assert.equal(f.started.initialUserPrompt, prompt);
+    assert.equal(f.started.initialUserPromptBinding.recipientEmail, 'synthetic@example.test');
+  }
+  finally {await host.close(); await host.settled;}
+});
+
+test('controller refuses misleading public presentation and foreign source binding before provider effects', async () => {
+  for (const kind of ['recipient', 'remote', 'missing-binding', 'foreign-source'] as const) {
+    const f = await controllerFixture();
+    const binding = {...f.input.initialUserPromptBinding};
+    let prompt = publicPrompt(f.input.intent);
+    if (kind === 'recipient') prompt = prompt.replace(binding.recipientEmail, 'foreign@example.test');
+    if (kind === 'remote') prompt = prompt.replace(binding.repositoryRemoteUrl, 'https://foreign.example/other.git');
+    if (kind === 'foreign-source') {
+      binding.repositoryRemoteUrl = 'https://foreign.example/other.git';
+      prompt = prompt.replace(f.input.initialUserPromptBinding.repositoryRemoteUrl, binding.repositoryRemoteUrl);
+    }
+    await assert.rejects(f.open({...f.input, initialUserPrompt: prompt,
+      initialUserPromptBinding: kind === 'missing-binding' ? undefined : binding}), /public_prompt_invalid/);
+    assert.equal(f.counts.connections, 0); assert.equal(f.counts.starts, 0);
+  }
+});
+
+test('official controller refuses invalid public prompt before provider connection or host effects', async () => {
+  const f = await controllerFixture();
+  await assert.rejects(async () => {
+    const host = await f.open({...f.input, initialUserPrompt: 'foreign-private-prompt'});
+    await host.close();
+  }, /^Error: codex_setup_public_prompt_invalid$/);
+  assert.deepEqual(f.counts, {connections: 0, starts: 0, connectionCloses: 0, hostCloses: 0});
+});
+
+test('official controller snapshots public prompt before asynchronous source and account checks', async () => {
+  const f = await controllerFixture(), prompt = publicPrompt(f.input.intent);
+  const input = {...f.input, initialUserPrompt: prompt};
+  input.current = async () => {
+    input.initialUserPrompt = 'foreign replacement';
+    input.initialUserPromptBinding.recipientEmail = 'foreign@example.test';
+    return true;
+  };
+  const host = await f.open(input);
+  try {
+    assert.equal(f.started.initialUserPrompt, prompt);
+    assert.equal(f.started.initialUserPromptBinding.recipientEmail, 'synthetic@example.test');
+  }
+  finally {await host.close(); await host.settled;}
 });
 for (const field of ['name', 'reserve', 'maximumProviderCostCents', 'intent'] as const) {
   test(`controller rejects invalid ${field} before connection effects`, async () => {

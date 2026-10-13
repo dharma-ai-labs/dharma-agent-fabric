@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {resolve} from 'node:path';
 import test from 'node:test';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
@@ -17,12 +18,14 @@ type Input = {
   transport: CodexStdioTransport; workspace: string; name: string; intent: CodexSetupIntent;
   openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void | Promise<void>}>;
   signal: AbortSignal; maximumProviderCostCents: number;
+  initialUserPrompt?: string;
+  initialUserPromptBinding?: {recipientEmail: string; repositoryRemoteUrl: string};
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   current(): Promise<boolean>; reserve(operationId: string, cents: number): Promise<boolean>;
   execute: Parameters<typeof native.startCodexSetupNativeHost>[0]['execute'];
   verifyReadiness: Parameters<typeof import('./codexSetupAdmission.js').createCodexSetupAdmission>[0]['verifyReadiness'];
 };
-type Host = {threadId: string; turnId: string; close(): Promise<void>; settled: Promise<unknown>};
+type Host = {threadId: string; turnId: string; initialUserPromptSha256?: string; close(): Promise<void>; settled: Promise<unknown>};
 const open = (input: Input): Promise<Host> => {
   const method = (native as unknown as {startCodexSetupNativeHost?: (input: Input) => Promise<Host>}).startCodexSetupNativeHost;
   assert.equal(typeof method, 'function', 'native setup host registration is absent');
@@ -66,6 +69,7 @@ function fixture() {
     async finish(_lease, next, accepted) {assert.equal(next, digest); result = accepted;},
   };
   const input: Input = {transport, workspace, name: 'implementer', intent,
+    initialUserPromptBinding: {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://example.test/source.git'},
     openJournal: async () => ({...journal, close() {}}), signal: client.signal,
     maximumProviderCostCents: 25, current: async () => allowed,
     reserve: async (operationId, cents) => {assert.equal(operationId, id(1)); assert.equal(cents, 25); reserved++; return true;},
@@ -117,6 +121,77 @@ test('setup ingress keeps asynchronous tool execution in the original turn until
     assert.match(text, /Do not run setup shell commands, read private storage/);
     assert.equal((await f.tool()).success, true);
     f.complete(); await host.settled;
+  } finally {await host.close();}
+});
+
+function publicPrompt(intent: CodexSetupIntent) {
+  return '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: synthetic@example.test. Organization: ${intent.organizationId}.\n`
+    + `Selected repository: https://example.test/source.git. Fingerprint: ${intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${intent.setupReference}. Fixed expiry: ${intent.expiresAt}.\n`
+    + 'Use only the matching host-bound dharma_setup_reference tool. Do not run shell authentication checks.';
+}
+
+test('native setup receives the original public user prompt once without a controller-written substitute', async () => {
+  const f = fixture(), original = publicPrompt(f.input.intent);
+  f.input.initialUserPrompt = original;
+  const host = await open(f.input);
+  try {
+    const start = f.calls.find(call => call.method === 'turn/start')!;
+    assert.deepEqual(start.params.input, [{type: 'text', text: original}]);
+    assert.equal(host.initialUserPromptSha256, createHash('sha256').update(original).digest('hex'));
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+    const thread = f.calls.find(call => call.method === 'thread/start')!;
+    const tools = thread.params.dynamicTools as Array<{name: string; description: string}>;
+    const setup = tools.find(tool => tool.name === 'dharma_setup_reference')!;
+    assert.ok(setup.description.includes(f.input.intent.operationId));
+    assert.ok(setup.description.includes(f.input.intent.setupReference));
+    assert.equal((await f.tool({tool: 'dharma_peer_ask', callId: 'peer-public-prompt'})).success, false);
+    assert.equal((await f.tool({turnId: 'foreign-public-turn'})).success, false);
+    assert.equal((await f.tool({arguments: {operationId: id(1), setupReference: id(9)}})).success, false);
+    assert.equal(f.counts.executions, 0);
+    assert.equal((await f.tool()).success, true);
+    f.complete(); await host.settled;
+  } finally {await host.close();}
+});
+
+test('public-prompt setup cannot carry its tool authority beyond cancellation', async () => {
+  const f = fixture(); f.input.initialUserPrompt = publicPrompt(f.input.intent);
+  const host = await open(f.input);
+  try {
+    f.client.abort();
+    assert.equal(f.counts.handler, false);
+    assert.equal(f.counts.claims, 0); assert.equal(f.counts.executions, 0);
+    f.complete(); await host.settled;
+  } finally {await host.close();}
+});
+
+test('invalid or differently bound public prompts stop before native, journal or budget effects', async () => {
+  for (const kind of ['empty', 'oversized', 'control', 'reference', 'organization', 'fingerprint', 'expiry', 'duplicate', 'surrogate'] as const) {
+    const f = fixture(), original = publicPrompt(f.input.intent);
+    const changed = kind === 'empty' ? '' : kind === 'oversized' ? original + 'x'.repeat(32_769)
+      : kind === 'control' ? original + '\u0000' : kind === 'surrogate' ? original + '\ud800'
+      : kind === 'reference' ? original.replace(f.input.intent.setupReference, id(9))
+      : kind === 'organization' ? original.replace(f.input.intent.organizationId, 'org_foreign')
+      : kind === 'fingerprint' ? original.replace(f.input.intent.repositoryFingerprint, `sha256:${'d'.repeat(64)}`)
+      : kind === 'expiry' ? original.replace(f.input.intent.expiresAt, new Date(Date.now() + 120_000).toISOString())
+      : original + '\nPublic setup reference: foreign.';
+    f.input.initialUserPrompt = changed;
+    await assert.rejects(open(f.input), {message: 'codex_setup_public_prompt_invalid'});
+    assert.equal(f.calls.length, 0); assert.equal(f.counts.reserved, 0); assert.equal(f.counts.claims, 0);
+  }
+});
+
+test('public prompt is captured before asynchronous host qualification without authority carryover', async () => {
+  const f = fixture(), original = publicPrompt(f.input.intent);
+  f.input.initialUserPrompt = original;
+  const current = f.input.current;
+  f.input.current = async () => {f.input.initialUserPrompt = 'foreign replacement'; return current();};
+  const host = await open(f.input);
+  try {
+    assert.deepEqual(f.calls.find(call => call.method === 'turn/start')!.params.input, [{type: 'text', text: original}]);
+    f.complete(); await host.settled;
+    assert.equal(f.counts.claims, 0);
   } finally {await host.close();}
 });
 

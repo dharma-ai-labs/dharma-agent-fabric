@@ -6,17 +6,23 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = 'bb072701c002bc1cdc68a4bec16fb6ea38d8dd7c';
-const tree = 'b6012b4a75c41996f9a5644857817a0d90ef1c29';
+const source = 'aacc27b5070923505f4712d66e6da5da767e1e3a';
+const tree = '37566e878dd097fd9253dcc45bbb7096010c326b';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
     existingArtifact: Object.freeze({source: '6c7d48916de11ccc837933a7ef7e8d2600184b54',
       integrity: 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ=='}) },
-  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.34' },
-  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.36' },
-  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33' },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.188' },
+  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.34',
+    existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
+      integrity: 'sha512-J7YNsv+3iBbRTNL/6m4aBVPv2NTFzR/u3svpruDU1tA/wXePxynPHm6yevocqfTBnDcjeJ6VyZRj0+bvJ1k+0Q=='}) },
+  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.36',
+    existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
+      integrity: 'sha512-OA5j8f/gxaXDn4cWiUwgoW+hCK+5DBPI8jtptPjiZBtT1VfSWjnkIh6Iitb4bvcPUYsCdLiCAjecB26ebcHexA=='}) },
+  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33',
+    existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
+      integrity: 'sha512-uJOnIe/zkiUCLxPXt4R1TUlULp8yUheD1V5jg1XHRYVDzD+xMxxETmwGR0z/8YVndR0sYxSfxt8wZi6jsweGYA=='}) },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.189' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -65,10 +71,17 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.equal(snapshot.lifecycleLauncher,
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
-  const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs']);
+  const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
+    'packages/cli/package.json', 'package-lock.json']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
+  const cliManifest = structuredClone(snapshot.baselineCliManifest);
+  cliManifest.version = '0.2.189';
+  assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
+  const lock = structuredClone(snapshot.baselineLock);
+  lock.packages['packages/cli'].version = '0.2.189';
+  assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
@@ -132,6 +145,10 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
         untracked: git('ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean),
         baselineManifest: JSON.parse(git('show', `${source}:package.json`)),
         manifest: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')),
+        baselineCliManifest: JSON.parse(git('show', `${source}:packages/cli/package.json`)),
+        cliManifest: JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')),
+        baselineLock: JSON.parse(git('show', `${source}:package-lock.json`)),
+        lock: JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')),
       });
     },
     manifest: async (item) => JSON.parse(readFileSync(join(root, item.workspace, 'package.json'), 'utf8')),
