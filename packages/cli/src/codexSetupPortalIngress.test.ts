@@ -24,7 +24,7 @@ async function declaration(name: string, dependencies: Record<string, unknown>) 
 
 // Actual CLI composition; only filesystem, remote preparation and provider
 // boundaries are synthetic. No enrolled client or model is used by these tests.
-async function fixture() {
+async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
   const process_ = Object.assign(new EventEmitter(), {platform: 'linux', getuid: () => 1000,
     cwd: () => '/home/synthetic/source', env: {DHARMA_HOME: '/home/synthetic/device', CODEX_HOME: '/home/synthetic/provider'},
     stdin: {synthetic: true}});
@@ -53,7 +53,12 @@ async function fixture() {
     required: (flags: Map<string, any>, key: string) => {if (!flags.get(key)) throw new Error('missing'); return flags.get(key);},
     readCodexSetupPublicStdin: async () => {counts.inputs++; return prepared.initialUserPrompt;},
     requestCodexSetupHostPreparation: async (input: any) => {
-      counts.preparations++; assert.equal(input.initialUserPrompt, prepared.initialUserPrompt);
+      counts.preparations++;
+      if (inputMode === 'portal' && counts.preparations === 1) {
+        assert.equal(input.initialUserPrompt, undefined);
+        assert.equal(input.portalContextSha256, 'f'.repeat(64));
+        assert.equal(input.portalPromptSha256, 'e'.repeat(64));
+      } else assert.equal(input.initialUserPrompt, prepared.initialUserPrompt);
       if (failPreparation || revokeBeforeTurn && counts.preparations > 1) throw new Error('codex_setup_portal_preparation_unavailable'); return prepared;
     }, VERSION: 'synthetic-version', realpath: async (path: string) => path,
     dharmaHome: () => process_.env.DHARMA_HOME, fileURLToPath: () => '/synthetic/index.js',
@@ -92,6 +97,10 @@ async function fixture() {
   });
   const flags = new Map<string, any>([['stdin', true], ['portal-url', 'https://hq.example'], ['organization-id', 'org_fixture'],
     ['setup-reference', reference], ['workspace', '/home/synthetic/source']]);
+  if (inputMode === 'portal') {
+    flags.delete('stdin'); flags.set('portal-context-sha256', 'f'.repeat(64)); flags.set('portal-prompt-sha256', 'e'.repeat(64));
+    Object.assign(prepared, {promptProvenance: 'verified_portal_prompt', nativeOriginalUserPromptAttested: false});
+  }
   return {ingress, flags, counts, prepared, process: process_,
     changeRuntime: () => {changed = true;}, denyBudget: () => {denyBudget = true;}, failClose: () => {failClose = true;},
     failPreparation: () => {failPreparation = true;}, foreignConfig: () => {foreignConfig = true;}, setResult: (value: any) => {result = value;},
@@ -121,6 +130,18 @@ if (process.argv.includes('--ingress-signal-fixture')) {
   await f.ingress(f.flags);
   throw new Error('signal fixture unexpectedly continued');
 }
+test('portal input completes composition without stdin or native-history access and retains provenance', async () => {
+  const f=await fixture('portal'); const result=await f.ingress(f.flags);
+  assert.equal(result.ok,true); assert.equal(f.counts.inputs,0); assert.equal(f.counts.hosts,1);
+  assert.equal(f.counts.preparations,2);
+  assert.equal(result.portalIngress.promptProvenance,'verified_portal_prompt');
+  assert.equal(result.portalIngress.nativeOriginalUserPromptAttested,false);
+});
+test('conflicting portal and stdin options fail before any provider, input or network effect', async () => {
+  const f=await fixture('portal');f.flags.set('stdin',true);
+  await assert.rejects(f.ingress(f.flags),/^Error: codex_setup_ingress_options_invalid$/);
+  assert.equal(f.counts.inputs+f.counts.preparations+f.counts.accounts+f.counts.hosts,0);
+});
 test('public dry-run prepares binding but launches no provider, reserves nothing and does not enroll', async () => {
   const f = await fixture(); f.flags.set('dry-run', true); const result = await f.ingress(f.flags);
   assert.equal(result.ok, true); assert.equal(result.effects, false); assert.equal(result.enrollmentChanged, false);

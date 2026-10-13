@@ -144,7 +144,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.191';
+const VERSION = '0.2.192';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3021,8 +3021,13 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
  * owns the resulting native connection and its original setup execution lease. */
 async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<Output> {
   const allowed = new Set(['portal-url', 'organization-id', 'setup-reference', 'workspace',
-    'maximum-provider-cost-cents', 'dry-run', 'stdin']);
-  if ([...flags.keys()].some(key => !allowed.has(key)) || flags.get('stdin') !== true
+    'maximum-provider-cost-cents', 'dry-run', 'stdin', 'portal-context-sha256', 'portal-prompt-sha256']);
+  const portalMode = flags.has('portal-context-sha256') || flags.has('portal-prompt-sha256');
+  if ([...flags.keys()].some(key => !allowed.has(key))
+    || (portalMode ? flags.has('stdin')
+      || typeof flags.get('portal-context-sha256') !== 'string' || !/^[a-f0-9]{64}$/.test(String(flags.get('portal-context-sha256')))
+      || typeof flags.get('portal-prompt-sha256') !== 'string' || !/^[a-f0-9]{64}$/.test(String(flags.get('portal-prompt-sha256')))
+      : flags.get('stdin') !== true)
     || flags.has('dry-run') && flags.get('dry-run') !== true
     || flags.has('maximum-provider-cost-cents') && typeof flags.get('maximum-provider-cost-cents') !== 'string') {
     throw new Error('codex_setup_ingress_options_invalid');
@@ -3033,13 +3038,17 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
   try {
     const origin = normalizeHqUrl(required(flags, 'portal-url'));
     const organizationId = required(flags, 'organization-id'), setupReference = required(flags, 'setup-reference');
-    const prompt = await readCodexSetupPublicStdin(process.stdin, controller.signal);
+    const inputPrompt = portalMode ? undefined : await readCodexSetupPublicStdin(process.stdin, controller.signal);
     const prepared = await requestCodexSetupHostPreparation({origin, organizationId, setupReference,
-      cliVersion: VERSION, initialUserPrompt: prompt, signal: controller.signal});
+      cliVersion: VERSION, signal: controller.signal,
+      ...(portalMode ? {portalContextSha256: String(flags.get('portal-context-sha256')),
+        portalPromptSha256: String(flags.get('portal-prompt-sha256'))} : {initialUserPrompt: inputPrompt})});
+    const prompt = prepared.initialUserPrompt;
     if (flags.has('dry-run')) return {ok: true, stage: 'setup_host_plan', effects: false,
       enrollmentChanged: false, requiresHostExecutionAdmission: true, requiresRecipientApproval: true,
       promptSha256: prepared.promptSha256, initialUserPromptSha256: prepared.initialUserPromptSha256,
         portalContextSha256: prepared.portalContextSha256,
+      promptProvenance: prepared.promptProvenance, nativeOriginalUserPromptAttested: false,
       organizationId, setupReference, recipientMembershipId: prepared.intent.recipientMembershipId,
       repositoryFingerprint: prepared.intent.repositoryFingerprint, expiresAt: prepared.intent.expiresAt};
     if (process.platform !== 'linux' || !process.getuid?.() || !process.env.DHARMA_HOME || !process.env.CODEX_HOME) {
@@ -3134,6 +3143,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
     }
     return {...result, portalIngress: {promptSha256: prepared.promptSha256,
         portalContextSha256: prepared.portalContextSha256,
+      promptProvenance: prepared.promptProvenance, nativeOriginalUserPromptAttested: false,
       initialUserPromptSha256: prepared.initialUserPromptSha256, operationId: prepared.intent.operationId,
         readinessReceiptId: completed.readinessReceiptId,
       nativeThreadId: host.threadId, nativeTurnId: host.turnId,
