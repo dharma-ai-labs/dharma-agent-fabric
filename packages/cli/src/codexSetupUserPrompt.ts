@@ -39,6 +39,7 @@ export function captureCodexSetupUserPrompt(value: unknown, intent: Readonly<Cod
   redactValue(value, stats);
   // Public setup prose includes documented paths, but never secret-bearing values.
   if ([...stats.classes].some(name => name !== 'local_path')
+    || /\b(?:proxy[_-]?authorization|authorization|set[_-]?cookie|cookie)["']?\s*[:=]\s*["']?\S+/i.test(value)
     || /\b(?:gh[pousr]_|github_pat_|sk_live_|sk_test_)[A-Za-z0-9_]{12,}|\bBearer\s+[A-Za-z0-9_.+-]{8,}/i.test(value)
     || /\b[A-Za-z0-9_]*(?:password|passwd|secret|api_key|access_token|refresh_token|credentials?|token)(?:_[A-Za-z0-9_]+)?["']?\s*[:=]\s*["']?[^\s"',;]+/i.test(value)) return invalid();
   const binding = captureCodexSetupPromptBinding(suppliedBinding), lines = value.split(/\r?\n/);

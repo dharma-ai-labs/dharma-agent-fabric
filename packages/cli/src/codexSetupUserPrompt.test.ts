@@ -92,3 +92,13 @@ test('public metadata booleans are not mistaken for credential assignments', () 
   const publicMetadata = prompt + 'directCredentialFileRead:false; providerCredentialRead:false;';
   assert.equal(captureCodexSetupUserPrompt(publicMetadata, intent, binding), publicMetadata);
 });
+
+test('authorization and cookie headers are refused regardless of credential scheme', () => {
+  for (const header of ['Authorization: Basic ' + Buffer.from('synthetic-user:synthetic-not-a-password').toString('base64'),
+    'Authorization: Digest synthetic-private-value', 'Proxy-Authorization: Negotiate synthetic-private-value',
+    'authorization=Token synthetic-private-value', '"authorization": "Custom synthetic-private-value"',
+    'Cookie: synthetic_session=synthetic-private-value', 'Set-Cookie: synthetic_session=synthetic-private-value']) {
+    assert.throws(() => captureCodexSetupUserPrompt(prompt + header, intent, binding),
+      /^Error: codex_setup_public_prompt_invalid$/);
+  }
+});
