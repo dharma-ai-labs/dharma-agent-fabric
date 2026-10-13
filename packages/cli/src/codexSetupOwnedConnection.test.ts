@@ -87,6 +87,20 @@ test('owning connection cancellation cooperatively closes only its captured tran
   await connection.close(); assert.equal(f.counts.closes, 1);
 });
 
+test('explicit current-account selection captures the official account and refuses a later switch', async () => {
+  const f = await connectionFixture();
+  const connection = await f.open({...f.input, expectedAccountEmail: undefined, accountSelection: 'current_authenticated'});
+  assert.equal(connection.accountEmail, 'synthetic@example.test');
+  f.setAccount('different@example.test'); assert.equal(await connection.current(), false);
+  await connection.close(); assert.equal(f.counts.closes, 1);
+});
+
+test('current-account selection never accepts a conflicting empty exact-account option', async () => {
+  const f = await connectionFixture();
+  await assert.rejects(f.open({...f.input, expectedAccountEmail: '', accountSelection: 'current_authenticated'}));
+  assert.equal(f.counts.launches, 0);
+});
+
 async function controllerFixture() {
   const now = Date.now(), id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
   let allowed = true, connections = 0, starts = 0, connectionCloses = 0, hostCloses = 0;

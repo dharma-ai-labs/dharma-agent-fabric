@@ -129,6 +129,9 @@ import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHo
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {openCodexSetupOwnedConnection} from './codexSetupOwnedConnection.js';
 import {captureCodexSetupUserPrompt, captureCodexSetupPromptBinding, type CodexSetupPromptBinding} from './codexSetupUserPrompt.js';
+import {requestCodexSetupHostPreparation} from './codexSetupPortalPreparation.js';
+import {readCodexSetupPublicStdin} from './codexSetupPublicStdin.js';
+import {reserveCodexSetupLaunch} from './codexSetupLaunchReservation.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
@@ -241,10 +244,13 @@ function print(value: Output): void {
 
 export function commandExitCode(argv: string[], value: Output): number {
   const { positional, flags } = parseCliOptions(argv);
-  if (positional[0] !== 'bootstrap' || flags.has('help') || flags.has('version')) return 0;
+  const setupIngress = positional[0] === 'setup' && positional[1] === 'codex';
+  if ((!setupIngress && positional[0] !== 'bootstrap') || flags.has('help') || flags.has('version')) return 0;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 1;
   const receipt = value as Record<string, unknown>;
   if (receipt.ok !== true) return 1;
+  if (setupIngress) return flags.has('dry-run') && receipt.stage === 'setup_host_plan' && receipt.effects === false
+    ? 0 : receipt.stage === 'complete' && receipt.sharedRepositoryReady === true ? 0 : 1;
   if (flags.has('setup-reference') && flags.has('dry-run') && receipt.stage === 'plan' && receipt.effects === false) return 0;
   return flags.has('complete') && (receipt.stage !== 'complete' || receipt.sharedRepositoryReady !== true) ? 1 : 0;
 }
@@ -2862,6 +2868,7 @@ export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof
     void settled.catch(() => {});
     return Object.freeze({threadId: host.threadId, turnId: host.turnId, close, settled,
       initialUserPromptSha256: host.initialUserPromptSha256,
+      get verifiedCompletion() {return ownedHost.verifiedCompletion;},
       get diagnostics() {return ownedHost.diagnostics;}});
   } catch {
     let cleanupFailed = false;
@@ -2932,6 +2939,7 @@ export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeo
   const root = resolve(dharmaHome(), 'vault');
   let completion: Awaited<ReturnType<typeof createCodexBootstrapCompletionOwner>> | undefined;
   let ownerScope: BootstrapHostScope | undefined;
+  let verifiedCompletion: Readonly<{operationId: string; setupReference: string; readinessReceiptId: string}> | undefined;
   const failures: Readonly<CodexSetupFailureDiagnostic>[] = [];
   const observeFailure: CodexSetupFailureObserver = failure => {if (failures.length < 16) failures.push(failure);};
   const host = await startCodexSetupNativeHost({...input,
@@ -2963,11 +2971,18 @@ export async function startCodexBootstrapNativeHost(input: Omit<Parameters<typeo
       return completion.execute(lease);
     },
     verifyReadiness: async (receiptId, intent, digest) => {
+      verifiedCompletion = undefined;
       if (!completion) return false;
-      return completion.verify(receiptId, intent, digest);
+      const verified = await completion.verify(receiptId, intent, digest);
+      // This callback runs after the original admission's journal readback. A
+      // completed native turn or another process's device config cannot set it.
+      if (verified) verifiedCompletion = Object.freeze({operationId: intent.operationId,
+        setupReference: intent.setupReference, readinessReceiptId: receiptId});
+      return verified;
     },
   });
-  return Object.freeze({...host, get diagnostics() {return Object.freeze([...failures]);}});
+  return Object.freeze({...host, get verifiedCompletion() {return verifiedCompletion;},
+    get diagnostics() {return Object.freeze([...failures]);}});
 }
 
 async function assertBootstrapStartupAnchor(organizationId: string, deviceId: string | null,
@@ -2999,6 +3014,135 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
   await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? ''));
   if (anchor.version !== VERSION) {
     throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
+  }
+}
+
+/** Official public ingress. Only this local client, never the website or model,
+ * owns the resulting native connection and its original setup execution lease. */
+async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<Output> {
+  const allowed = new Set(['portal-url', 'organization-id', 'setup-reference', 'workspace',
+    'maximum-provider-cost-cents', 'dry-run', 'stdin']);
+  if ([...flags.keys()].some(key => !allowed.has(key)) || flags.get('stdin') !== true
+    || flags.has('dry-run') && flags.get('dry-run') !== true) {
+    throw new Error('codex_setup_ingress_options_invalid');
+  }
+  const controller = new AbortController(), stop = () => controller.abort();
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, stop);
+  let host: Awaited<ReturnType<typeof openCodexBootstrapFromPortalCommand>> | undefined;
+  try {
+    const origin = normalizeHqUrl(required(flags, 'portal-url'));
+    const organizationId = required(flags, 'organization-id'), setupReference = required(flags, 'setup-reference');
+    const prompt = await readCodexSetupPublicStdin(process.stdin, controller.signal);
+    const prepared = await requestCodexSetupHostPreparation({origin, organizationId, setupReference,
+      cliVersion: VERSION, initialUserPrompt: prompt, signal: controller.signal});
+    if (flags.has('dry-run')) return {ok: true, stage: 'setup_host_plan', effects: false,
+      enrollmentChanged: false, requiresHostExecutionAdmission: true, requiresRecipientApproval: true,
+      promptSha256: prepared.promptSha256, initialUserPromptSha256: prepared.initialUserPromptSha256,
+      organizationId, setupReference, recipientMembershipId: prepared.intent.recipientMembershipId,
+      repositoryFingerprint: prepared.intent.repositoryFingerprint, expiresAt: prepared.intent.expiresAt};
+    if (process.platform !== 'linux' || !process.getuid?.() || !process.env.DHARMA_HOME || !process.env.CODEX_HOME) {
+      throw new Error('codex_setup_ingress_context_unqualified');
+    }
+    const workspace = await realpath(String(flags.get('workspace') || '.'));
+    const home = dharmaHome(), providerHome = process.env.CODEX_HOME, uid = process.getuid();
+    const environment = {home: process.env.DHARMA_HOME, provider: providerHome};
+    const currentDirectory = process.cwd(), file = fileURLToPath(import.meta.url), runtime = await lstat(file, {bigint: true});
+    const cents = boundedInteger(flags.get('maximum-provider-cost-cents'), 25, 1, 25, '--maximum-provider-cost-cents');
+    const privateDirectory = async (path: string, privateMode: boolean) => {
+      if (!isAbsolute(path) || resolve(path) !== path || !path.startsWith(resolve(homedir()) + '/')) return false;
+      const info = await lstat(path);
+      return info.isDirectory() && !info.isSymbolicLink() && info.uid === uid
+        && (info.mode & (privateMode ? 0o077 : 0o022)) === 0 && await realpath(path) === path;
+    };
+    const current = async () => {
+      if (controller.signal.aborted || Date.now() >= Date.parse(prepared.intent.expiresAt)
+        || process.getuid?.() !== uid || process.cwd() !== currentDirectory
+        || process.env.DHARMA_HOME !== environment.home || process.env.CODEX_HOME !== environment.provider) return false;
+      try {
+        const now = await lstat(file, {bigint: true});
+        return now.isFile() && !now.isSymbolicLink() && now.dev === runtime.dev && now.ino === runtime.ino
+          && now.size === runtime.size && now.mtimeNs === runtime.mtimeNs && now.ctimeNs === runtime.ctimeNs
+          && await privateDirectory(home, true) && await privateDirectory(providerHome, false)
+          && (await preflightBootstrapWorkspaceIdentity(workspace)).fingerprint === prepared.intent.repositoryFingerprint;
+      } catch {return false;}
+    };
+    if (!await current() || await detectBootstrapProvider(workspace) !== 'codex') {
+      throw new Error('codex_setup_ingress_context_unqualified');
+    }
+    // Read only public account identity through the official owned provider.
+    // It is not the portal recipient, a credential copy or a nested login shell.
+    const account = await openCodexSetupOwnedConnection({workspace, deviceHome: home,
+      accountSelection: 'current_authenticated', signal: controller.signal, current});
+    const expectedAccountEmail = account.accountEmail;
+    await account.close();
+    if (!await current()) throw new Error('codex_setup_ingress_context_unqualified');
+    const portalArgs = ['bootstrap', '--portal-url', origin, '--organization-id', organizationId,
+      '--setup-reference', setupReference, '--setup-recipient-membership-id', prepared.intent.recipientMembershipId,
+      '--setup-scope-digest', prepared.intent.scopeDigest, '--setup-contract-digest', prepared.intent.contractDigest,
+      '--workspace', workspace, '--repository-url-base64url',
+      Buffer.from(prepared.binding.repositoryRemoteUrl).toString('base64url'),
+      '--policy-revision', prepared.intent.policyRevision, '--complete'];
+    host = await openCodexBootstrapFromPortalCommand({workspace, name: 'setup-' + setupReference.slice(0, 8),
+      intent: prepared.intent, portalArgs, initialUserPrompt: prepared.initialUserPrompt,
+      initialUserPromptBinding: prepared.binding, expectedAccountEmail, signal: controller.signal,
+      current, maximumProviderCostCents: cents,
+        reserve: async (operationId, requested) => {
+          if (operationId !== prepared.intent.operationId || requested !== cents || !await current()) return false;
+          // Recheck the unchanged source consent immediately before the native
+          // turn reservation. This is still not browser approval or a policy lock.
+          const rechecked = await requestCodexSetupHostPreparation({origin, organizationId, setupReference,
+            cliVersion: VERSION, initialUserPrompt: prompt, signal: controller.signal});
+          if (rechecked.promptSha256 !== prepared.promptSha256
+            || canonicalize(rechecked.binding) !== canonicalize(prepared.binding)
+            || canonicalize({...rechecked.intent, operationId: prepared.intent.operationId,
+              hostContextId: prepared.intent.hostContextId, issuedAt: prepared.intent.issuedAt}) !== canonicalize(prepared.intent)) return false;
+          return reserveCodexSetupLaunch({home, organizationId, setupReference, operationId,
+            promptSha256: prepared.promptSha256, cents, current});
+        }});
+    await host.settled; await host.close();
+    if (!await current()) throw new Error('codex_setup_ingress_context_unqualified');
+      const completed = host.verifiedCompletion;
+      if (!completed || completed.operationId !== prepared.intent.operationId
+        || completed.setupReference !== setupReference || !UUID_PATTERN.test(completed.readinessReceiptId)) {
+        return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_ingress_readiness_unconfirmed',
+          nativeThreadId: host.threadId, nativeTurnId: host.turnId};
+      }
+    const config = await readDeviceConfig();
+    if (!config || config.organizationId !== organizationId || normalizeHqUrl(config.hqUrl) !== origin
+      || config.setupClaimReference !== setupReference
+      || config.setupClaimRepositoryFingerprint !== prepared.intent.repositoryFingerprint) {
+      return {ok: false, stage: 'setup_host_unconfirmed', effects: 'unconfirmed',
+        code: 'codex_setup_ingress_readiness_unconfirmed', setupReference,
+        nativeThreadId: host.threadId, nativeTurnId: host.turnId};
+    }
+    // One supported grant-free reconciliation, only for this consumed reference.
+    // No replacement identity, grant replay or automatic provider-turn retry.
+    const resume = parseCliOptions(portalArgs).flags;
+    for (const key of ['setup-reference', 'setup-recipient-membership-id', 'setup-scope-digest', 'setup-contract-digest']) resume.delete(key);
+    resume.set('resume', true);
+    const result = await bootstrap(resume);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_ingress_readiness_unconfirmed'};
+    }
+    return {...result, portalIngress: {promptSha256: prepared.promptSha256,
+      initialUserPromptSha256: prepared.initialUserPromptSha256, operationId: prepared.intent.operationId,
+        readinessReceiptId: completed.readinessReceiptId,
+      nativeThreadId: host.threadId, nativeTurnId: host.turnId,
+      reservedProviderCostCents: cents, actualUsd: null, liability: 'UNSETTLED_NOT_RELEASED',
+      hardInvoiceCapProven: false}};
+  } catch (error) {
+    const known = new Set(['codex_setup_ingress_options_invalid', 'codex_setup_public_input_unavailable',
+      'codex_setup_public_prompt_invalid', 'codex_setup_portal_preparation_unavailable',
+      'codex_setup_ingress_context_unqualified', 'codex_setup_owned_start_unqualified',
+      'codex_setup_owned_close_unconfirmed', 'codex_setup_owned_completion_unconfirmed']);
+    return {ok: false, stage: 'setup_host_unconfirmed',
+      code: error instanceof Error && known.has(error.message) ? error.message : 'codex_setup_ingress_unconfirmed',
+      requiresSupportedRecovery: true};
+  } finally {
+    controller.abort();
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.removeListener(signal, stop);
+    try {await host?.close();}
+    catch {return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_owned_close_unconfirmed'};}
   }
 }
 
@@ -8791,6 +8935,12 @@ export async function run(argv: string[]): Promise<Output> {
     }
     if (!prepared.flags.has('dry-run')) await originalCodexSetupSessionSender(setupScope);
     return setupScope.step(() => bootstrap(flags, setupScope));
+  }
+  if (command === 'setup' && subcommand === 'codex') {
+    if (positional.length !== 2 || [...repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('codex_setup_ingress_options_invalid');
+    }
+    return codexPortalSetup(flags);
   }
   if (command === 'relay' && subcommand === 'container-entrypoint') {
     if (positional.length === 2 && flags.size === 1 && flags.get('dry-run') === true) {
