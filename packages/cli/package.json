@@ -31,7 +31,7 @@
     "provenance": true
   },
   "scripts": {
-    "test": "node --test dist/*.test.js"
+    "test": "node --test --test-reporter=spec dist/*.test.js"
   },
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.16",
