@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = 'aacc27b5070923505f4712d66e6da5da767e1e3a';
-const tree = '37566e878dd097fd9253dcc45bbb7096010c326b';
+const source = '07bb40832c3945189985866a702359f4690cb735';
+const tree = 'f96b92c3be62d6a49175819a6b5db76c2a5d5f84';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -22,7 +22,7 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33',
     existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
       integrity: 'sha512-uJOnIe/zkiUCLxPXt4R1TUlULp8yUheD1V5jg1XHRYVDzD+xMxxETmwGR0z/8YVndR0sYxSfxt8wZi6jsweGYA=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.189' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.190' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -77,10 +77,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.189';
+  cliManifest.version = '0.2.190';
   assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.189';
+  lock.packages['packages/cli'].version = '0.2.190';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
 }
 
