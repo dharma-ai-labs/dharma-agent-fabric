@@ -15,9 +15,9 @@ const integrity = item => item.existingArtifact?.integrity || `sha512-${item.ver
 test('frozen native prompt candidate admits only the bounded CLI189 release delta', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '80230dba44c31f422133a0f20f6901a7f543d5f0';
+  const baseline = '70309bfbc68f7b0b4568fa3665e49abaf520fc0e';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '0bfb29c345b0833c1370907e2c684a0ddc5ab3e8');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'f9a262a7d1d8690b2b72ca9df8562650f8e9f85b');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
   const cliManifest = {...baselineCliManifest, version: '0.2.189'};
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
@@ -150,7 +150,7 @@ for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'm
       'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
       'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
     } };
-    const snapshot = { head, ref: 'refs/heads/main', tree: '0bfb29c345b0833c1370907e2c684a0ddc5ab3e8',
+    const snapshot = { head, ref: 'refs/heads/main', tree: 'f9a262a7d1d8690b2b72ca9df8562650f8e9f85b',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
       changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest,
       baselineCliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.188', dependencies: {}},
