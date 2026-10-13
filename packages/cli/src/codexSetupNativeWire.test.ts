@@ -141,6 +141,7 @@ test('original public prompt and host-bound tool compose over actual owned stdio
       + `Public setup reference: ${input.intent.setupReference}. Fixed expiry: ${input.intent.expiresAt}.\n`
       + 'Use the host-bound setup tool; account checks belong to the trusted host.';
     input.initialUserPrompt = original;
+    input.initialUserPromptBinding = {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://example.test/source.git'};
     let observed: unknown;
     const unsubscribe = input.transport.onNotification(raw => {
       const event = raw as {method?: string; params?: unknown};

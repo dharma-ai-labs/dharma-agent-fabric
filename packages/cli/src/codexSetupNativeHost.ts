@@ -5,7 +5,7 @@ import {verifyCodexSetupReadOnlyProfile, type CodexToolHandler, type CodexToolRe
 import {drainBootstrapHostChildren, prepareCodexBootstrapHost, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {createCodexSetupAdmission, type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
 import {startNamedCodexSetupThread} from './namedCodexThread.js';
-import {captureCodexSetupUserPrompt} from './codexSetupUserPrompt.js';
+import {captureCodexSetupUserPrompt, type CodexSetupPromptBinding} from './codexSetupUserPrompt.js';
 
 type Admission = Parameters<typeof createCodexSetupAdmission>[0];
 type Input = {
@@ -15,6 +15,8 @@ type Input = {
   signal: AbortSignal; maximumProviderCostCents: number;
   /** Exact public portal text, not authority or a controller-written substitute. */
   initialUserPrompt?: string;
+  /** Public recipient/source fields from the verified portal, not provider email. */
+  initialUserPromptBinding?: CodexSetupPromptBinding;
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   /** Requalifies package/source, provider account, host ownership and signed scope. */
   current(): Promise<boolean>;
@@ -47,7 +49,7 @@ export async function startCodexSetupNativeHost(input: Input) {
     signal: AbortSignal.any([input.signal, transport.signal])});
   const {scope, intent} = prepared, connectionId = randomUUID();
   let initialUserPrompt: string | undefined;
-  try {initialUserPrompt = captureCodexSetupUserPrompt(input.initialUserPrompt, intent);}
+  try {initialUserPrompt = captureCodexSetupUserPrompt(input.initialUserPrompt, intent, input.initialUserPromptBinding);}
   catch (error) {scope.close(); throw error;}
   const filesystem = Object.freeze({...input.additionalFilesystemRules});
   let threadId = '', turnId = '', closed = false, terminalObserved = false;

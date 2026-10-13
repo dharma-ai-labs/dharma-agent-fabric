@@ -128,7 +128,7 @@ import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHo
 // Trusted runtime composition only; these exports do not enable effectful setup.
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {openCodexSetupOwnedConnection} from './codexSetupOwnedConnection.js';
-import {captureCodexSetupUserPrompt} from './codexSetupUserPrompt.js';
+import {captureCodexSetupUserPrompt, captureCodexSetupPromptBinding, type CodexSetupPromptBinding} from './codexSetupUserPrompt.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
@@ -2816,14 +2816,21 @@ export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof
   'transport' | 'additionalFilesystemRules'> & {expectedAccountEmail: string}) {
   if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
   const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail,
-    initialUserPrompt: suppliedUserPrompt} = input;
+    initialUserPrompt: suppliedUserPrompt, initialUserPromptBinding: suppliedPromptBinding} = input;
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(name) || typeof reserve !== 'function'
     || !Number.isInteger(maximumProviderCostCents) || maximumProviderCostCents < 1 || maximumProviderCostCents > 10_000) {
     throw new Error('codex_setup_owned_input_invalid');
   }
   const prepared = prepareCodexBootstrapHost({intent: input.intent, workspace, signal, current});
   let initialUserPrompt: string | undefined;
-  try {initialUserPrompt = captureCodexSetupUserPrompt(suppliedUserPrompt, prepared.intent);}
+  let initialUserPromptBinding: CodexSetupPromptBinding | undefined;
+  try {
+    initialUserPromptBinding = suppliedUserPrompt === undefined ? undefined : captureCodexSetupPromptBinding(suppliedPromptBinding);
+    initialUserPrompt = captureCodexSetupUserPrompt(suppliedUserPrompt, prepared.intent, initialUserPromptBinding);
+    if (initialUserPromptBinding && sourceRepositoryFingerprint(initialUserPromptBinding.repositoryRemoteUrl).fingerprint !== prepared.intent.repositoryFingerprint) {
+      throw new Error('codex_setup_public_prompt_invalid');
+    }
+  }
   catch (error) {prepared.scope.close(); throw error;}
   let connection: Awaited<ReturnType<typeof openCodexSetupOwnedConnection>> | undefined;
   let host: Awaited<ReturnType<typeof startCodexBootstrapNativeHost>> | undefined;
@@ -2838,7 +2845,7 @@ export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof
     connection = await openCodexSetupOwnedConnection({workspace, deviceHome: dharmaHome(),
       expectedAccountEmail, signal, current});
     await prepared.scope.assert();
-    host = await startCodexBootstrapNativeHost({workspace, name, initialUserPrompt,
+    host = await startCodexBootstrapNativeHost({workspace, name, initialUserPrompt, initialUserPromptBinding,
       intent: prepared.intent, signal, maximumProviderCostCents,
       reserve, current: connection.current, transport: connection.transport,
       additionalFilesystemRules: connection.additionalFilesystemRules});
@@ -2870,6 +2877,7 @@ export async function openCodexBootstrapFromPortalCommand(input: Parameters<type
   & {portalArgs: readonly string[]}) {
   if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
   const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail, initialUserPrompt} = input;
+  const initialUserPromptBinding = initialUserPrompt === undefined ? undefined : captureCodexSetupPromptBinding(input.initialUserPromptBinding);
   if (!Array.isArray(input.portalArgs) || input.portalArgs.length > 64) {
     throw new Error('codex_setup_portal_command_mismatch');
   }
@@ -2911,7 +2919,7 @@ export async function openCodexBootstrapFromPortalCommand(input: Parameters<type
       }
     }
     await prepared.scope.assert();
-    return await openCodexBootstrapNativeHost({workspace, name, signal, current, reserve, maximumProviderCostCents, initialUserPrompt,
+    return await openCodexBootstrapNativeHost({workspace, name, signal, current, reserve, maximumProviderCostCents, initialUserPrompt, initialUserPromptBinding,
       expectedAccountEmail, intent: prepared.intent});
   } finally {prepared.scope.close();}
 }

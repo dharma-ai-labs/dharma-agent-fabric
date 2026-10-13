@@ -5,6 +5,7 @@ import {compileFunction} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
+import {captureCodexSetupPromptBinding} from './codexSetupUserPrompt.js';
 import {parseCliOptions, sourceRepositoryFingerprint} from './index.js';
 
 // Real public-command binding; only its subsequent native startup is synthetic.
@@ -30,7 +31,7 @@ async function fixture() {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});
   assert.equal(compiled.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
   const dependencies = {currentBootstrapHostScope: () => nested ? {} : undefined,
-    prepareCodexBootstrapHost, parseCliOptions, resolve, Buffer, URL, sourceRepositoryFingerprint,
+    prepareCodexBootstrapHost, parseCliOptions, resolve, Buffer, URL, sourceRepositoryFingerprint, captureCodexSetupPromptBinding,
     openCodexBootstrapNativeHost: async (value: unknown) => {starts++; supplied = value; return {threadId: 'synthetic-native'};}};
   const open = compileFunction(`${compiled.outputText}\nreturn openCodexBootstrapFromPortalCommand;`, ['exports', ...Object.keys(dependencies)])(
     {}, ...Object.values(dependencies)) as (value: any) => Promise<any>;
@@ -59,11 +60,12 @@ test('portal command preserves original public user prompt while command args re
     + `Recipient: synthetic@example.test. Organization: ${f.input.intent.organizationId}.\n`
     + `Selected repository: https://github.com/demo/source.git. Fingerprint: ${f.input.intent.repositoryFingerprint}.\n`
     + `Public setup reference: ${f.input.intent.setupReference}. Fixed expiry: ${f.input.intent.expiresAt}.\n`;
-  await f.open({...f.input, initialUserPrompt, portalArgs: f.argv});
+  const initialUserPromptBinding = {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://github.com/demo/source.git'};
+  await f.open({...f.input, initialUserPrompt, initialUserPromptBinding, portalArgs: f.argv});
   assert.equal(f.supplied.initialUserPrompt, initialUserPrompt);
   assert.equal(f.starts, 1);
   const args = [...f.argv, '--grant', 'private-canary'];
-  await assert.rejects(f.open({...f.input, initialUserPrompt, portalArgs: args}), /portal_command_mismatch/);
+  await assert.rejects(f.open({...f.input, initialUserPrompt, initialUserPromptBinding, portalArgs: args}), /portal_command_mismatch/);
   assert.equal(f.starts, 1, 'presentation never substitutes for validated public command scope');
 });
 for (const cause of ['command', 'extra', 'duplicate', 'grant', 'private-prompt', 'resume', 'join', 'dry-run', 'help',

@@ -19,6 +19,7 @@ type Input = {
   openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void | Promise<void>}>;
   signal: AbortSignal; maximumProviderCostCents: number;
   initialUserPrompt?: string;
+  initialUserPromptBinding?: {recipientEmail: string; repositoryRemoteUrl: string};
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   current(): Promise<boolean>; reserve(operationId: string, cents: number): Promise<boolean>;
   execute: Parameters<typeof native.startCodexSetupNativeHost>[0]['execute'];
@@ -68,6 +69,7 @@ function fixture() {
     async finish(_lease, next, accepted) {assert.equal(next, digest); result = accepted;},
   };
   const input: Input = {transport, workspace, name: 'implementer', intent,
+    initialUserPromptBinding: {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://example.test/source.git'},
     openJournal: async () => ({...journal, close() {}}), signal: client.signal,
     maximumProviderCostCents: 25, current: async () => allowed,
     reserve: async (operationId, cents) => {assert.equal(operationId, id(1)); assert.equal(cents, 25); reserved++; return true;},
