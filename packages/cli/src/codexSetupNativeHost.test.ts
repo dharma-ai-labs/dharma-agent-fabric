@@ -195,6 +195,18 @@ test('public prompt is captured before asynchronous host qualification without a
   } finally {await host.close();}
 });
 
+test('product grant contamination stops before native persistence, journal or model admission', async () => {
+  const f = fixture();
+  f.input.initialUserPrompt = publicPrompt(f.input.intent) + '\n' + ['dhab', 'SYNTHETIC_NOT_A_REAL_GRANT_20261013'].join('_');
+  let host: Host | undefined;
+  try {
+    await assert.rejects(async () => {host = await open(f.input);}, {message: 'codex_setup_public_prompt_invalid'});
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.counts.reserved, 0); assert.equal(f.counts.claims, 0); assert.equal(f.counts.executions, 0);
+    assert.equal(f.counts.handler, false); assert.equal(f.counts.listeners, 0);
+  } finally {f.complete(); await host?.close();}
+});
+
 test('early native tool waits for the verified turn/start response rather than guessing turn identity', async () => {
   const f = fixture(), request = f.transport.request;
   let resolveTurn!: (value: unknown) => void, early!: ReturnType<CodexToolHandler>;

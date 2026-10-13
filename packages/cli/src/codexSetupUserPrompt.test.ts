@@ -88,6 +88,15 @@ test('credential-contaminated public text is rejected before a persistent native
   }
 });
 
+test('capture rejects product bootstrap grants in otherwise valid public text', () => {
+  const synthetic = ['dhab', 'SYNTHETIC_NOT_A_REAL_GRANT_20261013'].join('_');
+  for (const contaminated of [synthetic, synthetic.toUpperCase(), `Unexpected private value: ${synthetic}`,
+    JSON.stringify({unrelated: synthetic})]) {
+    assert.throws(() => captureCodexSetupUserPrompt(prompt + contaminated, intent, binding),
+      /^Error: codex_setup_public_prompt_invalid$/);
+  }
+});
+
 test('public metadata booleans are not mistaken for credential assignments', () => {
   const publicMetadata = prompt + 'directCredentialFileRead:false; providerCredentialRead:false;';
   assert.equal(captureCodexSetupUserPrompt(publicMetadata, intent, binding), publicMetadata);
