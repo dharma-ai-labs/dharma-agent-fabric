@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/setup-launch-reservation/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "setupReference", "operationId", "promptSha256", "reservedProviderCostCents", "reservedAt", "expiresAt", "actualUsd", "status", "hardInvoiceCapProven", "integrity"],
+  "properties": {
+    "schema": {"const": "dharma.setup-launch-reservation/v1"},
+    "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$"},
+    "setupReference": {"type": "string", "format": "uuid"},
+    "operationId": {"type": "string", "format": "uuid"},
+    "promptSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reservedProviderCostCents": {"type": "integer", "minimum": 1, "maximum": 25},
+    "reservedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"const": null, "$comment": "Unsettled financial exposure does not automatically expire."},
+    "actualUsd": {"const": null},
+    "status": {"const": "UNSETTLED_NOT_RELEASED"},
+    "hardInvoiceCapProven": {"const": false},
+    "integrity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["algorithm", "payloadSha256"],
+      "properties": {
+        "algorithm": {"const": "sha256"},
+        "payloadSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "$comment": "Canonical public record payload digest excluding integrity. Corruption detection, not a signature or financial authority."
+    }
+  }
+}

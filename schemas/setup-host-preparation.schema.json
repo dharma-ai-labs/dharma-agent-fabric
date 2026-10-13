@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/setup-host-preparation/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "ok", "effects", "grantRedeemed", "approvalRequired", "sourcePolicyRevalidated", "preparedAt", "expiresAt", "promptSha256", "cliVersion", "binding", "context", "integrity"],
+  "properties": {
+    "schema": {"const": "dharma.setup-host-preparation/v1"},
+    "ok": {"const": true},
+    "effects": {"const": false},
+    "grantRedeemed": {"const": false},
+    "approvalRequired": {"const": true},
+    "sourcePolicyRevalidated": {"const": true, "$comment": "Read-only consent and policy snapshot; not an activation, lock or execution lease. Browser approval and consumption independently recheck."},
+    "integrity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["algorithm", "kind", "authenticity", "contextSha256"],
+      "properties": {
+        "algorithm": {"const": "sha256"}, "kind": {"const": "portal-context"},
+        "authenticity": {"const": "same-origin-https"},
+        "contextSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "$comment": "Immutable context digest independently pinned in the original authenticated portal-copied user message. Not a server signature or signed fresh preparedAt/sourcePolicy assertion."
+    },
+    "preparedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "promptSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "$comment": "SHA256 of UTF8 original portal prompt, normalizing CRLF to LF only. Actual native user-message bytes remain unchanged."},
+    "cliVersion": {"type": "string", "pattern": "^[0-9]+[.][0-9]+[.][0-9]+$"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["recipientEmail", "repositoryRemoteUrl"],
+      "properties": {
+        "recipientEmail": {"type": "string", "format": "email", "maxLength": 254},
+        "repositoryRemoteUrl": {"type": "string", "format": "uri", "maxLength": 2048}
+      }
+    },
+    "context": {
+      "type": "object", "additionalProperties": false,
+      "required": ["origin", "organizationId", "setupReference", "recipientMembershipId", "repositoryFingerprint", "policyRevision", "scopeDigest", "contractDigest"],
+      "properties": {
+        "origin": {"type": "string", "format": "uri", "maxLength": 2048},
+        "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$"},
+        "setupReference": {"type": "string", "format": "uuid"},
+        "recipientMembershipId": {"type": "string", "format": "uuid"},
+        "repositoryFingerprint": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "policyRevision": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+        "scopeDigest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "contractDigest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      }
+    }
+  }
+}

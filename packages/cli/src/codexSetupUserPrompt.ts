@@ -26,10 +26,8 @@ export function captureCodexSetupPromptBinding(value: unknown): CodexSetupPrompt
   return Object.freeze({recipientEmail, repositoryRemoteUrl});
 }
 
-/** Presentation consistency only. The original host intent and lease, never
- * model-visible prose, remain the authority for every protected setup effect. */
-export function captureCodexSetupUserPrompt(value: unknown, intent: Readonly<CodexSetupIntent>, suppliedBinding?: unknown): string | undefined {
-  if (value === undefined) return undefined;
+/** Reject credential-bearing public prose before network or persistence. */
+export function capturePublicCodexSetupPrompt(value: unknown): string {
   const invalid = (): never => {throw new Error('codex_setup_public_prompt_invalid');};
   if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > 32_768
     || Buffer.from(value, 'utf8').toString('utf8') !== value
@@ -43,7 +41,16 @@ export function captureCodexSetupUserPrompt(value: unknown, intent: Readonly<Cod
     || /\b(?:proxy[_-]?authorization|authorization|set[_-]?cookie|cookie)["']?\s*[:=]\s*["']?\S+/i.test(value)
     || /\b(?:gh[pousr]_|github_pat_|sk_live_|sk_test_)[A-Za-z0-9_]{12,}|\bBearer\s+[A-Za-z0-9_.+-]{8,}/i.test(value)
     || /\b[A-Za-z0-9_]*(?:password|passwd|secret|api_key|access_token|refresh_token|credentials?|token)(?:_[A-Za-z0-9_]+)?["']?\s*[:=]\s*["']?[^\s"',;]+/i.test(value)) return invalid();
-  const binding = captureCodexSetupPromptBinding(suppliedBinding), lines = value.split(/\r?\n/);
+  return value;
+}
+
+/** Presentation consistency only. The original host intent and lease, never
+ * model-visible prose, remain the authority for every protected setup effect. */
+export function captureCodexSetupUserPrompt(value: unknown, intent: Readonly<CodexSetupIntent>, suppliedBinding?: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  const prompt = capturePublicCodexSetupPrompt(value);
+  const invalid = (): never => {throw new Error('codex_setup_public_prompt_invalid');};
+  const binding = captureCodexSetupPromptBinding(suppliedBinding), lines = prompt.split(/\r?\n/);
   const only = (prefix: string) => {
     const selected = lines.filter(line => line.startsWith(prefix));
     if (selected.length !== 1) return invalid();
@@ -55,5 +62,5 @@ export function captureCodexSetupUserPrompt(value: unknown, intent: Readonly<Cod
     || only('Public setup reference: ') !== `Public setup reference: ${intent.setupReference}. Fixed expiry: ${intent.expiresAt}.`) {
     return invalid();
   }
-  return value;
+  return prompt;
 }

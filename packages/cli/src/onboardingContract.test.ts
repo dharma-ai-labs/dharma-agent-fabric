@@ -50,3 +50,13 @@ test('the installed guide names the supported knowledge and peer workflow', asyn
   assert.match(contract, /source edit, successful upload, or local snapshot alone is not publication/);
   assert.doesNotMatch(contract, /dhab_[A-Za-z0-9_-]+/);
 });
+
+test('the installed guide admits only the official original-message Linux setup handoff', async () => {
+  const contract = await readFile(contractUrl, 'utf8');
+  assert.match(contract, /`dharma setup codex --stdin`/);
+  assert.match(contract, /entire original public portal prompt unchanged/i);
+  assert.match(contract, /qualified private `DHARMA_HOME` and existing `CODEX_HOME`/);
+  assert.match(contract, /not attachment to an arbitrary existing desktop chat/i);
+  assert.match(contract, /never retry a refused, expired or interrupted setup/i);
+  assert.doesNotMatch(contract, /When the agent has no matching registered tool, it reports/);
+});

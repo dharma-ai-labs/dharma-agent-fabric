@@ -7,11 +7,18 @@ import {namedCodexFilesystem} from './namedCodexFilesystem.js';
 
 /** Internal controller connection, not a model-selected command or transport. */
 export async function openCodexSetupOwnedConnection(input: {
-  workspace: string; deviceHome: string; expectedAccountEmail: string;
+  workspace: string; deviceHome: string; expectedAccountEmail?: string;
+  /** Explicit local ingress selection; never use a portal recipient as provider identity. */
+  accountSelection?: 'current_authenticated';
   signal: AbortSignal; current(): Promise<boolean>;
 }) {
-  if (process.platform !== 'linux' || !input.expectedAccountEmail
-    || input.expectedAccountEmail.length > 254 || /[\s\u0000-\u001f\u007f]/.test(input.expectedAccountEmail)) {
+  const expectedAccountEmail = input.expectedAccountEmail;
+  const selectCurrent = input.accountSelection === 'current_authenticated';
+  if (process.platform !== 'linux' || selectCurrent === Boolean(input.expectedAccountEmail)
+    || selectCurrent && expectedAccountEmail !== undefined
+    || input.accountSelection !== undefined && !selectCurrent
+    || input.expectedAccountEmail !== undefined && (input.expectedAccountEmail.length > 254
+      || /[\s\u0000-\u001f\u007f]/.test(input.expectedAccountEmail))) {
     throw new Error('codex_setup_owned_route_unqualified');
   }
   const assert = async () => {
@@ -35,13 +42,18 @@ export async function openCodexSetupOwnedConnection(input: {
   const close = () => closing ??= transport.close();
   const abort = () => {void close().catch(() => {});};
   input.signal.addEventListener('abort', abort, {once: true});
+  let selectedAccountEmail = expectedAccountEmail;
   const current = async () => {
     if (input.signal.aborted || transport.signal.aborted || !await input.current()) return false;
     const result = await transport.request('account/read', {refreshToken: false}) as {
       account?: {type?: unknown; email?: unknown};
     };
+    const email = result?.account?.email;
+    if (result?.account?.type !== 'chatgpt' || typeof email !== 'string' || email.length > 254
+      || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(email)) return false;
+    if (selectCurrent && selectedAccountEmail === undefined) selectedAccountEmail = email;
     return !input.signal.aborted && !transport.signal.aborted
-      && result?.account?.type === 'chatgpt' && result.account.email === input.expectedAccountEmail
+      && email === selectedAccountEmail
       && await input.current() && !input.signal.aborted && !transport.signal.aborted;
   };
   try {
@@ -52,6 +64,7 @@ export async function openCodexSetupOwnedConnection(input: {
       filesystem.additionalFilesystemRules);
     await assert();
     return Object.freeze({transport, additionalFilesystemRules: filesystem.additionalFilesystemRules, current,
+      accountEmail: selectedAccountEmail!,
       close: async () => {input.signal.removeEventListener('abort', abort); await close();}});
   } catch {
     input.signal.removeEventListener('abort', abort);

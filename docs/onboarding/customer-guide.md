@@ -2,6 +2,22 @@
 
 This guide is for a company administrator connecting local coding agents and production agents to Dharma. It covers the customer-controlled journey from an accepted offer to observable execution, automatic evaluation, remediation, signed rollout, and rollback.
 
+## Selected Linux named-Codex route
+
+For the portal-selected original-message setup flow, follow the versioned
+[packaged onboarding contract](../../packages/cli/AGENT_FABRIC_ONBOARDING.md),
+not the broad lifecycle below. The user pastes one current recipient-bound portal
+prompt into the genuine Codex session. The agent uses its matching bound tool or
+the official `dharma setup codex --stdin` entry with that unchanged public prompt.
+This is an owned named-session handoff, not arbitrary desktop-chat attachment.
+Existing qualified protected homes and provider authentication are prerequisites;
+the intended recipient still approves the matching device in the browser.
+No supplemental human terminal commands, grant pasting or keyring troubleshooting
+are part of this route. Require the actual complete readiness and operational
+receipts; installation, source checks and this architectural lifecycle are not
+customer qualification. The remaining sections describe broader product paths
+and do not establish that automatic learning or every listed adapter is qualified.
+
 ## What the customer receives
 
 - an organization workspace at `https://www.dharma-ai.io/portal`;

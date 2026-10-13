@@ -14,6 +14,16 @@
   "oneOf": [
     {
       "type": "object", "additionalProperties": false,
+      "required": ["action", "organizationId", "setupReference", "promptSha256"],
+      "properties": {
+        "action": {"const": "prepare_host"},
+        "organizationId": {"type": "string", "maxLength": 256, "pattern": "^org_[A-Za-z0-9]+$"},
+        "setupReference": {"type": "string", "format": "uuid"},
+        "promptSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
       "required": ["action", "organizationId", "setupReference", "publicKeyEd25519", "credentialEncryptionPublicKey", "device"],
       "properties": {
         "action": { "const": "challenge" },
