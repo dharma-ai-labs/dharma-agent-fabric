@@ -3023,7 +3023,8 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
   const allowed = new Set(['portal-url', 'organization-id', 'setup-reference', 'workspace',
     'maximum-provider-cost-cents', 'dry-run', 'stdin']);
   if ([...flags.keys()].some(key => !allowed.has(key)) || flags.get('stdin') !== true
-    || flags.has('dry-run') && flags.get('dry-run') !== true) {
+    || flags.has('dry-run') && flags.get('dry-run') !== true
+    || flags.has('maximum-provider-cost-cents') && typeof flags.get('maximum-provider-cost-cents') !== 'string') {
     throw new Error('codex_setup_ingress_options_invalid');
   }
   const controller = new AbortController(), stop = () => controller.abort();
@@ -3121,6 +3122,12 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
     const resume = parseCliOptions(portalArgs).flags;
     for (const key of ['setup-reference', 'setup-recipient-membership-id', 'setup-scope-digest', 'setup-contract-digest']) resume.delete(key);
     resume.set('resume', true);
+    if (!await current()) throw new Error('codex_setup_ingress_context_unqualified');
+    // The owned native host is closed. This is now ordinary enrolled-device
+    // reconciliation: restore Node's normal termination instead of suppressing
+    // SIGINT/SIGTERM with a controller that bootstrap does not consume.
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.removeListener(signal, stop);
+    if (controller.signal.aborted) throw new Error('codex_setup_ingress_context_unqualified');
     const result = await bootstrap(resume);
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
       return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_ingress_readiness_unconfirmed'};

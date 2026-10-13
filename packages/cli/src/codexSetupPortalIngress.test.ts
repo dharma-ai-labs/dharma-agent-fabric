@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {posix} from 'node:path';
 import {compileFunction} from 'node:vm';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {EventEmitter} from 'node:events';
 import test from 'node:test';
 import ts from 'typescript';
@@ -39,6 +40,9 @@ async function fixture() {
   let changed = false, denyBudget = false, failClose = false, failPreparation = false, foreignConfig = false;
   let changeOnAccountClose = false, harness = 'codex', sourceMatches = true;
   let revokeBeforeTurn = false, dispatched = 0;
+  let cancelOnConfigRead = false, resumeSignalListeners: number[] | undefined;
+  let cancelDuringFinalCurrent = false, finalCurrentArmed = false;
+  let reconcile: (() => Promise<unknown>) | undefined;
   let completion: any = {operationId: prepared.intent.operationId, setupReference: reference,
     readinessReceiptId: '44444444-4444-4444-8444-444444444444'};
   let result: any = {ok: true, stage: 'complete', sharedRepositoryReady: true}, launched: any, resumed: Map<string, any> | undefined;
@@ -53,7 +57,10 @@ async function fixture() {
       if (failPreparation || revokeBeforeTurn && counts.preparations > 1) throw new Error('codex_setup_portal_preparation_unavailable'); return prepared;
     }, VERSION: 'synthetic-version', realpath: async (path: string) => path,
     dharmaHome: () => process_.env.DHARMA_HOME, fileURLToPath: () => '/synthetic/index.js',
-    lstat: async () => ({...info, ino: changed ? 99n : 2n}),
+    lstat: async () => {
+      if (finalCurrentArmed) {finalCurrentArmed = false; process_.emit('SIGINT');}
+      return {...info, ino: changed ? 99n : 2n};
+    },
     boundedInteger: (value: any, fallback: number, min: number, max: number) => {
       const n = value === undefined ? fallback : Number(value); if (!Number.isInteger(n) || n < min || n > max) throw new Error('invalid'); return n;
     }, isAbsolute: posix.isAbsolute, resolve: posix.resolve, homedir: () => '/home/synthetic',
@@ -70,10 +77,18 @@ async function fixture() {
         close: async () => {counts.closes++; if (failClose) throw new Error('PRIVATE_VENDOR_FAILURE');}};
     },
     reserveCodexSetupLaunch: async (input: any) => {counts.reserves++; return !denyBudget && await input.current();},
-    readDeviceConfig: async () => ({organizationId: 'org_fixture', hqUrl: 'https://hq.example',
-      setupClaimReference: foreignConfig ? 'foreign' : reference, setupClaimRepositoryFingerprint: prepared.intent.repositoryFingerprint}),
+    readDeviceConfig: async () => {
+      if (cancelOnConfigRead) process_.emit('SIGINT');
+      if (cancelDuringFinalCurrent) finalCurrentArmed = true;
+      return {organizationId: 'org_fixture', hqUrl: 'https://hq.example',
+        setupClaimReference: foreignConfig ? 'foreign' : reference, setupClaimRepositoryFingerprint: prepared.intent.repositoryFingerprint};
+    },
     UUID_PATTERN: /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
-    canonicalize, parseCliOptions, bootstrap: async (flags: Map<string, any>) => {counts.resumes++; resumed = flags; return result;},
+    canonicalize, parseCliOptions, bootstrap: async (flags: Map<string, any>) => {
+      counts.resumes++; resumed = flags;
+      resumeSignalListeners = ['SIGINT', 'SIGTERM'].map(signal => process_.listenerCount(signal));
+      return reconcile ? reconcile() : result;
+    },
   });
   const flags = new Map<string, any>([['stdin', true], ['portal-url', 'https://hq.example'], ['organization-id', 'org_fixture'],
     ['setup-reference', reference], ['workspace', '/home/synthetic/source']]);
@@ -84,7 +99,27 @@ async function fixture() {
     foreignSource: () => {sourceMatches = false;},
     setCompletion: (value: any) => {completion = value;},
     revokeBeforeTurn: () => {revokeBeforeTurn = true;}, get dispatched() {return dispatched;},
+    cancelOnConfigRead: () => {cancelOnConfigRead = true;}, get resumeSignalListeners() {return resumeSignalListeners;},
+    cancelDuringFinalCurrent: () => {cancelDuringFinalCurrent = true;},
+    setReconcile: (operation: () => Promise<unknown>) => {reconcile = operation;},
     get launched() {return launched;}, get resumed() {return resumed;}};
+}
+
+// A disposable Node process exercises real OS signals without native clients,
+// credentials, network, filesystem mutations or an actual bootstrap operation.
+if (process.argv.includes('--ingress-signal-fixture')) {
+  const f = await fixture();
+  f.process.once = (event, listener) => {process.once(event as string, listener); return f.process;};
+  f.process.removeListener = (event, listener) => {process.removeListener(event as string, listener); return f.process;};
+  f.process.listenerCount = process.listenerCount.bind(process);
+  f.setReconcile(async () => {
+    process.stdout.write('RECONCILIATION_PENDING\n');
+    await new Promise(resolve => setTimeout(resolve, 60000));
+    process.stdout.write('FORBIDDEN_LATER_EFFECT\n');
+    return {ok: true};
+  });
+  await f.ingress(f.flags);
+  throw new Error('signal fixture unexpectedly continued');
 }
 test('public dry-run prepares binding but launches no provider, reserves nothing and does not enroll', async () => {
   const f = await fixture(); f.flags.set('dry-run', true); const result = await f.ingress(f.flags);
@@ -92,6 +127,55 @@ test('public dry-run prepares binding but launches no provider, reserves nothing
   assert.deepEqual(f.counts, {inputs: 1, preparations: 1, accounts: 0, accountCloses: 0, hosts: 0, closes: 0, reserves: 0, resumes: 0});
   assert.equal(f.process.listenerCount('SIGINT'), 0); assert.equal(f.process.listenerCount('SIGTERM'), 0);
 });
+
+test('missing provider-cost value is rejected before public input or any admission', async () => {
+  const f = await fixture(); f.flags.set('maximum-provider-cost-cents', true);
+  await assert.rejects(f.ingress(f.flags), /codex_setup_ingress_options_invalid/);
+  assert.deepEqual(f.counts, {inputs: 0, preparations: 0, accounts: 0, accountCloses: 0, hosts: 0, closes: 0, reserves: 0, resumes: 0});
+});
+
+test('cancellation after original host completion prevents grant-free reconciliation', async () => {
+  const f = await fixture(); f.cancelOnConfigRead();
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false); assert.equal(f.counts.resumes, 0);
+  assert.equal(f.process.listenerCount('SIGINT'), 0); assert.equal(f.process.listenerCount('SIGTERM'), 0);
+});
+
+test('cancellation during final async context validation cannot cross into reconciliation', async () => {
+  const f = await fixture(); f.cancelDuringFinalCurrent();
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false); assert.equal(f.counts.resumes, 0);
+  assert.equal(f.process.listenerCount('SIGINT'), 0); assert.equal(f.process.listenerCount('SIGTERM'), 0);
+});
+
+test('post-host reconciliation restores normal SIGINT and SIGTERM handling before write-capable bootstrap', async () => {
+  const f = await fixture(); await f.ingress(f.flags);
+  assert.equal(f.counts.resumes, 1);
+  assert.deepEqual(f.resumeSignalListeners, [0, 0]);
+});
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  test(`actual ${signal} terminates pending reconciliation before a later effect`, {skip: process.platform !== 'linux', timeout: 15000}, async () => {
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--ingress-signal-fixture'],
+      {stdio: ['ignore', 'pipe', 'pipe']});
+    let output = '', errors = '', signalled = false, forced = false;
+    const timeout = setTimeout(() => {forced = true; child.kill('SIGKILL');}, 10000);
+    try {
+      child.stdout.on('data', chunk => {
+        output += String(chunk);
+        if (!signalled && output.includes('RECONCILIATION_PENDING')) {signalled = true; child.kill(signal);}
+      });
+      child.stderr.on('data', chunk => {errors += String(chunk);});
+      const ended = await new Promise<{code: number | null; signal: NodeJS.Signals | null}>((resolve, reject) => {
+        child.once('error', reject); child.once('close', (code, endedSignal) => resolve({code, signal: endedSignal}));
+      });
+      assert.equal(signalled, true, errors);
+      assert.equal(forced, false, 'cancellation was swallowed; owned fixture required forced cleanup');
+      assert.equal(ended.signal, signal); assert.equal(ended.code, null);
+      assert.doesNotMatch(output, /FORBIDDEN_LATER_EFFECT/);
+    } finally {clearTimeout(timeout); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');}
+  });
+}
 test('changed source consent is rechecked at the turn boundary before reservation or model dispatch', async () => {
   const f = await fixture(); f.revokeBeforeTurn();
   const result = await f.ingress(f.flags);
@@ -157,12 +241,14 @@ for (const reason of ['preparation', 'homes', 'budget', 'foreign-config', 'close
     assert.equal(f.process.listenerCount('SIGINT'), 0);
   });
 }
-test('actual CLI bin reaches public ingress and refuses extra authority options before stdin/network/provider', () => {
-  const result = spawnSync(process.execPath, [new URL('./bin.js', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
-    'setup', 'codex', '--stdin', '--grant', 'PUBLIC_TEST_NOT_A_GRANT'], {input: '', encoding: 'utf8', timeout: 15000});
-  assert.equal(result.status, 2); assert.match(result.stderr, /codex_setup_ingress_options_invalid/);
-  assert.equal(result.stdout, '');
-});
+for (const extra of [['--grant', 'PUBLIC_TEST_NOT_A_GRANT'], ['--maximum-provider-cost-cents']]) {
+  test(`actual CLI bin refuses ${extra[0]} before stdin/network/provider`, () => {
+    const result = spawnSync(process.execPath, [new URL('./bin.js', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+      'setup', 'codex', '--stdin', ...extra], {input: '', encoding: 'utf8', timeout: 15000});
+    assert.equal(result.status, 2); assert.match(result.stderr, /codex_setup_ingress_options_invalid/);
+    assert.equal(result.stdout, '');
+  });
+}
 test('setup ingress exit status requires complete shared readiness, not a terminal native turn', () => {
   const argv = ['setup', 'codex', '--stdin'];
   assert.equal(commandExitCode(argv, {ok: false, stage: 'setup_host_unconfirmed'}), 1);
