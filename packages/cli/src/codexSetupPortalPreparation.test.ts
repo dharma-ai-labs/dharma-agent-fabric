@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
 import test from 'node:test';
 import {requestCodexSetupHostPreparation} from './codexSetupPortalPreparation.js';
 
@@ -8,19 +9,26 @@ const reference = '11111111-1111-4111-8111-111111111111';
 const membership = '22222222-2222-4222-8222-222222222222';
 const binding = {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://github.com/example/synthetic.git'};
 const fingerprint = `sha256:${'a'.repeat(64)}`;
+const context = {origin: 'https://www.dharma-ai.io', organizationId: 'org_fixture',
+  setupReference: reference, recipientMembershipId: membership, repositoryFingerprint: fingerprint,
+  policyRevision: 'policy-v1', scopeDigest: `sha256:${'b'.repeat(64)}`, contractDigest: `sha256:${'c'.repeat(64)}`};
+const contextHash = (value: {cliVersion: string; expiresAt: string; binding: unknown; context: unknown}) =>
+  createHash('sha256').update('dharma.setup-host-context/v1\0').update(canonicalize({
+    cliVersion: value.cliVersion, expiresAt: value.expiresAt, binding: value.binding, context: value.context})).digest('hex');
+const originalPin = contextHash({cliVersion: '0.2.190', expiresAt: '2030-01-01T00:15:00.000Z', binding, context});
 const prompt = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
   + `Recipient: ${binding.recipientEmail}. Organization: org_fixture.\n`
   + `Selected repository: ${binding.repositoryRemoteUrl}. Fingerprint: ${fingerprint}.\n`
-  + `Public setup reference: ${reference}. Fixed expiry: 2030-01-01T00:15:00.000Z.\n`;
+  + `Public setup reference: ${reference}. Fixed expiry: 2030-01-01T00:15:00.000Z.\n`
+  + `Preparation context SHA256: ${originalPin}.\n`;
 function fixture() {
   let calls = 0;
   const response = {schema: 'dharma.setup-host-preparation/v1', ok: true, effects: false,
     grantRedeemed: false, approvalRequired: true, sourcePolicyRevalidated: true,
     preparedAt: new Date(now).toISOString(), expiresAt: '2030-01-01T00:15:00.000Z',
     promptSha256: createHash('sha256').update(prompt).digest('hex'), cliVersion: '0.2.190',
-    binding: {...binding}, context: {origin: 'https://www.dharma-ai.io', organizationId: 'org_fixture',
-      setupReference: reference, recipientMembershipId: membership, repositoryFingerprint: fingerprint,
-      policyRevision: 'policy-v1', scopeDigest: `sha256:${'b'.repeat(64)}`, contractDigest: `sha256:${'c'.repeat(64)}`}};
+    binding: {...binding}, context: {...context},
+    integrity: {algorithm: 'sha256', kind: 'portal-context', authenticity: 'same-origin-https', contextSha256: originalPin}};
   const input = {origin: response.context.origin, organizationId: 'org_fixture', setupReference: reference,
     cliVersion: '0.2.190', initialUserPrompt: prompt as unknown, signal: new AbortController().signal, now: () => now,
     fetcher: (async (url, options) => {
@@ -41,6 +49,17 @@ test('public preparation obtains independent server binding without invoking a p
   assert.deepEqual((result as any).binding, binding);
   assert.equal((result as any).initialUserPrompt, prompt);
   assert.equal((result as any).effects, false);
+  assert.equal(result.portalContextSha256, originalPin);
+});
+test('portal-pinned context is canonical across JSON object key order', async () => {
+  const f = fixture();
+  f.response.context = Object.fromEntries(Object.entries(f.response.context).reverse()) as typeof f.response.context;
+  assert.equal((await requestCodexSetupHostPreparation(f.input)).portalContextSha256, originalPin);
+});
+test('a replayed intact context cannot extend its fixed expiry', async () => {
+  const f = fixture();
+  await assert.rejects(requestCodexSetupHostPreparation({...f.input, now: () => now + 900001}));
+  assert.equal(f.calls, 1);
 });
 test('credential-shaped prose is rejected before any network admission', async () => {
   const f = fixture();
@@ -48,6 +67,26 @@ test('credential-shaped prose is rejected before any network admission', async (
   await assert.rejects(requestCodexSetupHostPreparation({...f.input, initialUserPrompt: prompt + canary}));
   assert.equal(f.calls, 0);
 });
+for (const field of ['recipientMembershipId', 'policyRevision', 'scopeDigest', 'contractDigest'] as const) {
+  test(`recomputed response integrity cannot substitute the original portal-pinned ${field}`, async () => {
+    const f = fixture();
+    if (field === 'recipientMembershipId') f.response.context[field] = reference;
+    else if (field === 'policyRevision') f.response.context[field] = 'foreign-policy';
+    else f.response.context[field] = 'sha256:' + 'f'.repeat(64);
+    f.response.integrity.contextSha256 = contextHash(f.response);
+    await assert.rejects(requestCodexSetupHostPreparation(f.input), /^Error: codex_setup_portal_preparation_unavailable$/);
+    assert.equal(f.calls, 1);
+  });
+}
+for (const reason of ['missing', 'duplicate'] as const) {
+  test(`a ${reason} original portal context pin is rejected before fetch`, async () => {
+    const f = fixture();
+    const value = reason === 'missing' ? prompt.replace(`Preparation context SHA256: ${originalPin}.\n`, '')
+      : prompt + `Preparation context SHA256: ${originalPin}.\n`;
+    await assert.rejects(requestCodexSetupHostPreparation({...f.input, initialUserPrompt: value}));
+    assert.equal(f.calls, 0);
+  });
+}
 test('bounded server clock lead waits without weakening issued-at or expiry validation', async () => {
   const f = fixture(); let localNow = now, waited = 0;
   f.response.preparedAt = new Date(now + 2208).toISOString();

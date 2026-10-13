@@ -15,6 +15,18 @@ the existing enrolled-device route, not another model turn. The read-only policy
 snapshot is not a lock or activation, and browser approval/SQL still recheck.
 The host rechecks that public binding at the native turn boundary.
 
+The immutable public context has a required canonical SHA256 pin in the original
+authenticated portal-copied prompt. The client captures that pin before fetch
+and compares the enumerated response context, recipient/source binding, CLI and
+fixed expiry against it. Response-supplied hashes alone are not trusted. Missing,
+duplicate or substituted pins fail before intent or provider admission.
+This is **portal-context integrity**, not a KMS/server signature. Same-origin
+HTTPS authenticates the response and fresh `preparedAt`/source-policy snapshot;
+those fresh assertions are not covered by the immutable digest. A deployment
+requiring independently signed freshness needs a separately reviewed root
+distribution contract and is not qualified by this route. Neither a key from
+the same response nor a postapproval enrollment keyset supplies that root.
+
 The official host reads its current account through owned `account/read`, pins
 that account and starts an owned named setup session with the scoped tool. It
 does not attach tools to an arbitrary existing desktop chat or copy provider
@@ -27,6 +39,19 @@ grant-free reconciliation. An unrelated/concurrent config write, malformed
 receipt or foreign operation cannot replace that proof. The local exclusive
 reference reservation retains unsettled exposure; it is not an invoice cap or
 an aggregate budget admission. Live workload authority remains separate.
+The reservation has its own versioned runtime schema and canonical corruption
+digest. File data and its containing directory are synced before admission;
+unsupported or failed directory operations fail closed and retain uncertainty.
+
+New portal host-entry references are capped at fifteen minutes, including
+teammate copies. Existing legacy references and their original deadlines remain
+unchanged; the legacy teammate TTL configuration is not modified. A same-key
+re-copy of an older pending prompt returns typed recovery, never relabels it as
+the new entry or silently creates another grant. Continue the original valid
+prompt, or explicitly close/reopen the normal portal copy control to request a
+fresh scoped prompt after rechecking source access. Issuance idempotency remains
+bound to immutable authority, not presentation versions. These are compatibility
+dispositions, not evidence that the old or new customer journey completed.
 
 ## Historical Component Assessment
 

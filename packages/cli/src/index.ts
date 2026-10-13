@@ -3038,6 +3038,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
     if (flags.has('dry-run')) return {ok: true, stage: 'setup_host_plan', effects: false,
       enrollmentChanged: false, requiresHostExecutionAdmission: true, requiresRecipientApproval: true,
       promptSha256: prepared.promptSha256, initialUserPromptSha256: prepared.initialUserPromptSha256,
+        portalContextSha256: prepared.portalContextSha256,
       organizationId, setupReference, recipientMembershipId: prepared.intent.recipientMembershipId,
       repositoryFingerprint: prepared.intent.repositoryFingerprint, expiresAt: prepared.intent.expiresAt};
     if (process.platform !== 'linux' || !process.getuid?.() || !process.env.DHARMA_HOME || !process.env.CODEX_HOME) {
@@ -3125,6 +3126,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
       return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_ingress_readiness_unconfirmed'};
     }
     return {...result, portalIngress: {promptSha256: prepared.promptSha256,
+        portalContextSha256: prepared.portalContextSha256,
       initialUserPromptSha256: prepared.initialUserPromptSha256, operationId: prepared.intent.operationId,
         readinessReceiptId: completed.readinessReceiptId,
       nativeThreadId: host.threadId, nativeTurnId: host.turnId,
