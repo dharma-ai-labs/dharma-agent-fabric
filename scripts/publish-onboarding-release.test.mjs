@@ -10,29 +10,37 @@ import * as publisher from './publish-onboarding-release.mjs';
 const head = 'a'.repeat(40);
 const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
-const integrity = item => item.name === '@dharma-ai-labs/agent-fabric-contracts' ? existingContractsIntegrity : `sha512-${item.version}`;
+const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('merged artifact correction is admitted without admitting further product changes', () => {
+test('frozen native prompt candidate admits only the bounded CLI189 release delta', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = 'bb072701c002bc1cdc68a4bec16fb6ea38d8dd7c';
+  const baseline = '439cf89ca1f1784dd444f75e099e2c873696bedd';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'b6012b4a75c41996f9a5644857817a0d90ef1c29');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'd91a492449f570e49c3a65915046a3159fce6f9e');
+  const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
+  const cliManifest = {...baselineCliManifest, version: '0.2.189'};
+  const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
+  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.189';
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
     changed: git('diff', '--name-only', baseline, reviewed).split('\n').filter(Boolean), untracked: [],
     baselineManifest: JSON.parse(git('show', `${baseline}:package.json`)),
-    manifest: JSON.parse(git('show', `${reviewed}:package.json`))};
+    manifest: JSON.parse(git('show', `${reviewed}:package.json`)), baselineCliManifest, cliManifest, baselineLock, lock};
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [
-    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs'] }));
+    'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
+    'packages/cli/package.json', 'package-lock.json'] }));
   for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml',
     'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md',
-    'packages/contracts/package.json', 'package-lock.json', 'apps/relay-gateway/src/protocol.ts']) {
+    'packages/contracts/package.json', 'apps/relay-gateway/src/protocol.ts']) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, changed: [...snapshot.changed, forbidden]}),
       /unreviewed product source delta/);
   }
+  assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliManifest: {...cliManifest, dependencies: {}}}), /CLI manifest delta/);
+  const foreignLock = structuredClone(lock); foreignLock.packages['packages/cli'].dependencies = {};
+  assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, lock: foreignLock}), /lockfile delta/);
 });
 
 test('npm bin linking leaves a tracked executable launcher clean on Linux', { skip: process.platform !== 'linux' }, () => {
@@ -66,8 +74,10 @@ function fixture() {
   const effects = [];
   const verified = [];
   const published = new Map();
-  published.set(approvedPackages[0].name, {name: approvedPackages[0].name, version: approvedPackages[0].version,
-    dist: {integrity: existingContractsIntegrity, attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/contracts'}}});
+  for (const item of approvedPackages.filter(item => item.existingArtifact)) {
+    published.set(item.name, {name: item.name, version: item.version,
+      dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/existing'}}});
+  }
   const io = {
     verifySource: async (expected) => { assert.equal(expected, head); },
     manifest: async (item) => ({ name: item.name, version: item.version }),
@@ -84,16 +94,16 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('publishes precisely the approved dependency closure before the CLI correction', async () => {
+test('verifies the immutable dependency closure and publishes only the CLI189 correction', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
-  assert.deepEqual(effects, approvedPackages.slice(1).map((item) => item.name));
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
   assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
     ['@dharma-ai-labs/agent-fabric-contracts', '0.1.16'],
     ['@dharma-ai-labs/agent-fabric-provider-adapters', '0.1.34'],
     ['@dharma-ai-labs/agent-fabric-task-runner', '0.1.36'],
     ['@dharma-ai-labs/agent-fabric-evidence-reduction', '0.2.33'],
-    ['@dharma-ai-labs/agent-fabric', '0.2.188'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.189'],
   ]);
 });
 
@@ -134,15 +144,19 @@ test('publication failure is not replayed and later packages remain unpublished'
   assert.equal(effects.length, 1);
 });
 
-for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher']) {
+for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher', 'cliManifest', 'lock']) {
   test(`source admission rejects changed ${defect}`, () => {
     const manifest = { scripts: {
       'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
       'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
     } };
-    const snapshot = { head, ref: 'refs/heads/main', tree: 'b6012b4a75c41996f9a5644857817a0d90ef1c29',
+    const snapshot = { head, ref: 'refs/heads/main', tree: 'd91a492449f570e49c3a65915046a3159fce6f9e',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
-      changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest };
+      changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest,
+      baselineCliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.188', dependencies: {}},
+      cliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.189', dependencies: {}},
+      baselineLock: {packages: {'packages/cli': {version: '0.2.188'}}},
+      lock: {packages: {'packages/cli': {version: '0.2.189'}}} };
     assert.doesNotThrow(() => assertSourceSnapshot(head, snapshot));
     snapshot[defect] = ['changed', 'untracked'].includes(defect) ? ['packages/cli/other.js']
       : defect === 'manifest' ? { scripts: {} } : 'wrong';
@@ -168,24 +182,25 @@ test('last-package preflight failure prevents every earlier dependency publicati
   assert.deepEqual(effects, []);
 });
 
-test('uncertain intermediate publication stops before later dependencies and CLI', async () => {
+test('uncertain CLI publication is not retried and never publishes a dependency', async () => {
   const { io, effects } = fixture();
   io.publish = async (item) => {
     effects.push(item.name);
-    if (effects.length === 2) throw new Error('uncertain second publication');
+    throw new Error('uncertain CLI publication');
   };
   const lookup = io.lookup;
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
-  await assert.rejects(publishBoundedRelease(head, io), /uncertain second publication/);
-  assert.deepEqual(effects, approvedPackages.slice(1, 3).map((item) => item.name));
+  await assert.rejects(publishBoundedRelease(head, io), /uncertain CLI publication/);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
 });
 
 test('already reconciled contracts require their exact original publication source', async () => {
   const {io, verified} = fixture();
   await publishBoundedRelease(head, io);
   assert.equal(verified.find(x => x.name === approvedPackages[0].name).source, existingContractsSource);
-  assert.ok(verified.filter(x => x.name !== approvedPackages[0].name).every(x => x.source === head));
+  assert.ok(verified.filter(x => x.name !== approvedPackages[0].name).every(x => x.source ===
+    (approvedPackages.find(item => item.name === x.name).existingArtifact?.source || head)));
 });
 
 test('missing known published contracts block all writes rather than republishing', async () => {
