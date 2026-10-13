@@ -21,7 +21,9 @@ test('the installed contract uses one agent-run public reference and exact recip
   const contract = await readFile(contractUrl, 'utf8');
   assert.match(contract, /public setup reference is not a bearer credential/i);
   assert.match(contract, /actual authenticated coding-agent conversation/i);
-  assert.match(contract, /original public prompt as the single user message/i);
+  assert.match(contract, /verified server-canonical public instructions \(CLI192 portal mode\)/i);
+  assert.match(contract, /provided original public prompt \(legacy stdin mode\)/i);
+  assert.match(contract, /Neither mode attests the enclosing human chat/i);
   assert.match(contract, /registers the matching `dharma_setup_reference` tool/i);
   assert.match(contract, /Do not run direct-CLI compatibility commands on this route/i);
   assert.match(contract, /requires `initialUserPrompt`/);
@@ -51,10 +53,13 @@ test('the installed guide names the supported knowledge and peer workflow', asyn
   assert.doesNotMatch(contract, /dhab_[A-Za-z0-9_-]+/);
 });
 
-test('the installed guide admits only the official original-message Linux setup handoff', async () => {
+test('the installed guide distinguishes canonical portal input from legacy stdin without an authority fallback', async () => {
   const contract = await readFile(contractUrl, 'utf8');
-  assert.match(contract, /`dharma setup codex --stdin`/);
-  assert.match(contract, /entire original public portal prompt unchanged/i);
+  assert.match(contract, /official `dharma setup codex` entry with `--portal-context-sha256` and `--portal-prompt-sha256`/);
+  assert.match(contract, /Legacy `--stdin` remains supported for an entire original public prompt and cannot combine with either portal pin/i);
+  assert.match(contract, /`nativeOriginalUserPromptAttested:false`/);
+  assert.match(contract, /legacy input is not a failure fallback/i);
+  assert.match(contract, /both npm prefix and cache beneath the approved checkout/);
   assert.match(contract, /qualified private `DHARMA_HOME` and existing `CODEX_HOME`/);
   assert.match(contract, /not attachment to an arbitrary existing desktop chat/i);
   assert.match(contract, /never retry a refused, expired or interrupted setup/i);

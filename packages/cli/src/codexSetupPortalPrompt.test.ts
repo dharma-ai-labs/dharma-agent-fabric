@@ -81,10 +81,11 @@ for(const cause of ['missing-pin','bad-digest','conflicting-stdin','cancelled'])
     await assert.rejects(requestCodexSetupHostPreparation(f.input));assert.equal(f.calls,0);
   });
 }
-for(const cause of ['prompt-change','context-change','secret','oversized','foreign-org','foreign-reference','expired','wrong-source','v1-downgrade','extra-field']){
+for(const cause of ['prompt-change','embedded-digest','context-change','secret','oversized','foreign-org','foreign-reference','expired','wrong-source','v1-downgrade','extra-field']){
   test('portal-input '+cause+' is rejected without reflecting response data',async()=>{
     const f=fixture();
     if(cause==='prompt-change'){f.response.publicPrompt+='Unexpected instruction\n';f.response.promptSha256=createHash('sha256').update(f.response.publicPrompt).digest('hex');}
+    if(cause==='embedded-digest'){f.response.publicPrompt=f.response.publicPrompt.replace('--portal-prompt-sha256 '+portalDigest,'--portal-prompt-sha256 '+'e'.repeat(64));f.response.promptSha256=createHash('sha256').update(f.response.publicPrompt).digest('hex');}
     if(cause==='context-change'){f.response.context.policyRevision='changed';f.response.integrity.contextSha256='e'.repeat(64);}
     if(cause==='secret')f.response.publicPrompt+='dhab_SYNTHETIC_PRIVATE_CANARY';
     if(cause==='oversized')f.response.publicPrompt+='x'.repeat(32768);

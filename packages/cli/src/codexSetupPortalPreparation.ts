@@ -79,6 +79,8 @@ export async function requestCodexSetupHostPreparation(input: {
       if (prepared.promptSource !== 'portal_setup_prompt'
         || prepared.portalPromptSha256 !== input.portalPromptSha256
         || codexSetupPortalPromptDigest(initialUserPrompt) !== input.portalPromptSha256) return fail();
+      const embeddedChecksum = /--portal-prompt-sha256 ([a-f0-9]{64})(?=[ \t\n]|$)/.exec(initialUserPrompt.replace(/\r\n/g, '\n'));
+      if (embeddedChecksum?.[1] !== input.portalPromptSha256) return fail();
       const returnedPins = [...initialUserPrompt.replace(/\r\n/g, '\n').matchAll(/^Preparation context SHA256: ([a-f0-9]{64})\.$/gm)];
       if (returnedPins.length !== 1 || returnedPins[0]![1] !== originalContextPin) return fail();
       initialUserPromptSha256 = createHash('sha256').update(initialUserPrompt, 'utf8').digest('hex');
