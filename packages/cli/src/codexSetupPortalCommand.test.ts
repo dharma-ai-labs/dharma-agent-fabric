@@ -14,11 +14,17 @@ async function fixture() {
   let starts = 0, supplied: any, allowed = true, nested = false;
   const input = {workspace: resolve('synthetic-source'), name: 'implementer', signal: new AbortController().signal,
     current: async () => allowed, reserve: async () => true, maximumProviderCostCents: 25,
+    initialUserPrompt: '',
+    initialUserPromptBinding: {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://github.com/demo/source.git'},
     expectedAccountEmail: 'synthetic@example.test', intent: {schema: 'dharma.codex-setup-intent/v1',
       operationId: id(1), setupReference: id(2), organizationId: 'org_demo', recipientMembershipId: id(3),
       hostContextId: id(4), origin: 'https://hq.example', repositoryFingerprint: sourceRepositoryFingerprint('https://github.com/demo/source.git').fingerprint,
       scopeDigest: `sha256:${'b'.repeat(64)}`, contractDigest: `sha256:${'c'.repeat(64)}`, policyRevision: 'policy-v1',
       issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60_000).toISOString()}};
+  input.initialUserPrompt = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: ${input.initialUserPromptBinding.recipientEmail}. Organization: ${input.intent.organizationId}.\n`
+    + `Selected repository: ${input.initialUserPromptBinding.repositoryRemoteUrl}. Fingerprint: ${input.intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${input.intent.setupReference}. Fixed expiry: ${input.intent.expiresAt}.\n`;
   const scope = prepareCodexBootstrapHost({intent: input.intent as Parameters<typeof prepareCodexBootstrapHost>[0]['intent'],
     workspace: input.workspace, signal: input.signal, current: input.current});
   const argv = ['bootstrap', ...[...scope.flags].flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)])];
@@ -46,6 +52,14 @@ test('portal command enters the owning host with only the fixed recipient/source
   assert.equal(f.starts, 1); assert.deepEqual(f.supplied.intent, f.input.intent);
   assert.notEqual(f.supplied.intent, f.input.intent); assert.equal(f.supplied.reserve, f.input.reserve);
   assert.equal(f.supplied.maximumProviderCostCents, 25); assert.equal('portalArgs' in f.supplied, false);
+});
+
+test('portal entry never silently substitutes a controller message for an absent original public prompt', async () => {
+  for (const initialUserPrompt of [undefined, '', null]) {
+    const f = await fixture();
+    await assert.rejects(f.open({...f.input, initialUserPrompt, portalArgs: f.argv}), /public_prompt_invalid/);
+    assert.equal(f.starts, 0);
+  }
 });
 test('matching public selected-repository URL is validated, never cloned or passed as startup authority', async () => {
   const f = await fixture();

@@ -1281,7 +1281,9 @@ test('repository onboarding skill records scoped API metadata without local path
   assert.match(skill, /bounded, task-related question/);
   assert.match(skill, /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   assert.doesNotMatch(skill, /--grant\s+['"]?dhab_|dhab_[A-Za-z0-9_-]+|bootstrapGrant|organizationApiToken/);
-  assert.match(skill, /agent runs the exact generated `--setup-reference` command/);
+  assert.match(skill, /original public prompt as the single user message/);
+  assert.match(skill, /registers the matching `dharma_setup_reference` tool/);
+  assert.match(skill, /Do not run direct-CLI compatibility commands on this route/);
   assert.match(skill, /public setup reference is not a bearer credential/);
   assert.match(connection, /workspace-northstar/);
   assert.equal(connection.includes(workspace), false);

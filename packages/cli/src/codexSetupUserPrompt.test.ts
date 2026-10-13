@@ -77,3 +77,18 @@ test('binding requires bounded public syntax and captures immutable plain fields
   supplied.recipientEmail = 'foreign@example.test';
   assert.deepEqual(captured, binding); assert.equal(Object.isFrozen(captured), true);
 });
+
+test('credential-contaminated public text is rejected before a persistent native prompt can be made', () => {
+  for (const contaminated of ['Authorization: Bearer synthetic-private-value', 'api_key=synthetic-private-value',
+    ['sk', 'live', 'syntheticprivatevalue123456'].join('_'), 'OPENAI_API_KEY=sk-syntheticprivatevalue1234567890',
+    'refresh_token=synthetic-private-value', 'password=synthetic-private-value',
+    'CLERK_SECRET_KEY=synthetic-private-value', 'DATABASE_PASSWORD=synthetic-private-value']) {
+    assert.throws(() => captureCodexSetupUserPrompt(prompt + contaminated, intent, binding),
+      /^Error: codex_setup_public_prompt_invalid$/);
+  }
+});
+
+test('public metadata booleans are not mistaken for credential assignments', () => {
+  const publicMetadata = prompt + 'directCredentialFileRead:false; providerCredentialRead:false;';
+  assert.equal(captureCodexSetupUserPrompt(publicMetadata, intent, binding), publicMetadata);
+});

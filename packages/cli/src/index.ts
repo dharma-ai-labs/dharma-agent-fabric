@@ -141,7 +141,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.188';
+const VERSION = '0.2.189';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2874,10 +2874,11 @@ export async function openCodexBootstrapNativeHost(input: Omit<Parameters<typeof
 
 /** Prepared controller ingress for the portal's public command, never a shell evaluator. */
 export async function openCodexBootstrapFromPortalCommand(input: Parameters<typeof openCodexBootstrapNativeHost>[0]
-  & {portalArgs: readonly string[]}) {
+  & {portalArgs: readonly string[]; initialUserPrompt: string; initialUserPromptBinding: CodexSetupPromptBinding}) {
   if (currentBootstrapHostScope()) throw new Error('codex_setup_host_context_conflict');
   const {workspace, name, signal, current, reserve, maximumProviderCostCents, expectedAccountEmail, initialUserPrompt} = input;
-  const initialUserPromptBinding = initialUserPrompt === undefined ? undefined : captureCodexSetupPromptBinding(input.initialUserPromptBinding);
+  if (typeof initialUserPrompt !== 'string' || !initialUserPrompt) throw new Error('codex_setup_public_prompt_invalid');
+  const initialUserPromptBinding = captureCodexSetupPromptBinding(input.initialUserPromptBinding);
   if (!Array.isArray(input.portalArgs) || input.portalArgs.length > 64) {
     throw new Error('codex_setup_portal_command_mismatch');
   }
