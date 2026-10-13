@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {randomBytes} from 'node:crypto';
+import {createHash, randomBytes} from 'node:crypto';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
@@ -24,7 +24,7 @@ test('native owner composition is exposed through the public CLI library, not a 
 const server = `
 const lines = require('node:readline').createInterface({input: process.stdin});
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
-let name = '', cwd = '';
+let name = '', cwd = '', setupDescription = '';
 lines.on('line', line => {
   const value = JSON.parse(line), respond = result => send({id: value.id, result});
   if (value.method === 'initialize') respond({userAgent: 'native-setup-wire-fixture'});
@@ -33,11 +33,15 @@ lines.on('line', line => {
     filesystem: {':minimal': 'read', ':workspace_roots': {'.': 'read'}}, network: {enabled: false}}}}});
   else if (value.method === 'thread/start') {
     if (value.params.permissions !== 'dharma_bridge' || value.params.dynamicTools.at(-1).name !== 'dharma_setup_reference') process.exit(3);
+    setupDescription = value.params.dynamicTools.at(-1).description;
     cwd = value.params.cwd; respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   } else if (value.method === 'thread/name/set') {name = value.params.name; respond({});}
   else if (value.method === 'thread/archive') respond({});
   else if (['thread/read', 'thread/unarchive', 'thread/resume'].includes(value.method)) respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   else if (value.method === 'turn/start') {
+    send({method: 'fixture/prompt', params: {count: value.params.input.length,
+      hash: require('node:crypto').createHash('sha256').update(value.params.input[0].text).digest('hex'),
+      bound: setupDescription.includes('${id(1)}') && setupDescription.includes('${id(2)}')}});
     send({id: 'fixture_call', method: 'item/tool/call', params: {threadId: 'synthetic_thread', turnId: 'synthetic_turn',
       callId: 'fixture_call', tool: 'dharma_setup_reference', namespace: null,
       arguments: {operationId: '${id(1)}', setupReference: '${id(2)}'}}});
@@ -126,6 +130,30 @@ test('native registration, encrypted readiness/journal and early-call binding co
       assert.deepEqual(Object.keys(completed).sort(), ['operationId', 'readinessReceiptId', 'state']);
       await host.settled; assert.equal(executed, 1);
     } finally {await host.close();}
+  });
+});
+
+test('original public prompt and host-bound tool compose over actual owned stdio without shell authentication', async () => {
+  await fixture(async (input, disposition) => {
+    const original = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+      + `Recipient: synthetic@example.test. Organization: ${input.intent.organizationId}.\n`
+      + `Selected repository: https://example.test/source.git. Fingerprint: ${input.intent.repositoryFingerprint}.\n`
+      + `Public setup reference: ${input.intent.setupReference}. Fixed expiry: ${input.intent.expiresAt}.\n`
+      + 'Use the host-bound setup tool; account checks belong to the trusted host.';
+    input.initialUserPrompt = original;
+    let observed: unknown;
+    const unsubscribe = input.transport.onNotification(raw => {
+      const event = raw as {method?: string; params?: unknown};
+      if (event.method === 'fixture/prompt') observed = event.params;
+    });
+    const host = await startCodexSetupNativeHost(input);
+    try {
+      assert.equal((await disposition as {success: boolean}).success, true);
+      await host.settled;
+      const hash = createHash('sha256').update(original).digest('hex');
+      assert.deepEqual(observed, {count: 1, hash, bound: true});
+      assert.equal(host.initialUserPromptSha256, hash);
+    } finally {unsubscribe(); await host.close();}
   });
 });
 

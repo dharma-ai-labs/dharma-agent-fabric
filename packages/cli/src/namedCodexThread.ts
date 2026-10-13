@@ -3,26 +3,35 @@ import type { CodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provi
 import { CODEX_PEER_TOOLS } from './codexPeerTools.js';
 import { CODEX_SETUP_TOOL } from './codexSetupAdmission.js';
 import type {BootstrapHostScope} from './bootstrapHostScope.js';
+import {inspectCodexBootstrapHostPreparation} from './bootstrapHostScope.js';
 
 export async function startNamedCodexThread(transport: CodexAppServerTransport, workspaceRoot: string, name: string) {
   return startThread(transport, workspaceRoot, name);
 }
 
 export async function startNamedCodexSetupThread(transport: CodexAppServerTransport,
-  workspaceRoot: string, name: string, scope: BootstrapHostScope) {
-  return startThread(transport, workspaceRoot, name, scope);
+  workspaceRoot: string, name: string, scope: BootstrapHostScope, bindPublicIntent = false) {
+  return startThread(transport, workspaceRoot, name, scope, bindPublicIntent);
 }
 
 async function startThread(transport: CodexAppServerTransport, workspaceRoot: string,
-  name: string, setupScope?: BootstrapHostScope) {
+  name: string, setupScope?: BootstrapHostScope, bindPublicIntent = false) {
   const request = (method: string, params: Record<string, unknown>) => setupScope
     ? setupScope.step(() => transport.request(method, params)) : transport.request(method, params);
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(name) || !isAbsolute(workspaceRoot) || resolve(workspaceRoot) !== workspaceRoot) {
     throw new Error('named_session_thread_invalid');
   }
+  let setupTool = CODEX_SETUP_TOOL;
+  if (setupScope && bindPublicIntent) {
+    const {intent} = await inspectCodexBootstrapHostPreparation(setupScope);
+    setupTool = {...CODEX_SETUP_TOOL, description: CODEX_SETUP_TOOL.description
+      + ` This original native host admits operationId ${intent.operationId} and setupReference ${intent.setupReference} only.`
+      + ' Use these exact public identifiers with the original portal prompt. Do not run setup shell or authentication commands, read private storage, change permissions or call peer tools.'
+      + ' Keep this tool pending through matching-recipient browser approval; in-progress is not readiness. If functions.exec yields a running cell, wait on that same cell until its terminal result. Do not end the original turn or restart setup while approval is pending.'};
+  }
   const created = await request('thread/start', { cwd: workspaceRoot,
     approvalPolicy: 'never', permissions: 'dharma_bridge', ephemeral: false,
-    dynamicTools: setupScope ? structuredClone([...CODEX_PEER_TOOLS, CODEX_SETUP_TOOL]) : CODEX_PEER_TOOLS }) as { thread?: { id?: string; cwd?: string; status?: { type?: string } } };
+    dynamicTools: setupScope ? structuredClone([...CODEX_PEER_TOOLS, setupTool]) : CODEX_PEER_TOOLS }) as { thread?: { id?: string; cwd?: string; status?: { type?: string } } };
   const thread = created?.thread;
   if (!thread || typeof thread.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(thread.id)
     || thread.cwd !== workspaceRoot || thread.status?.type !== 'idle') throw new Error('named_session_thread_invalid');

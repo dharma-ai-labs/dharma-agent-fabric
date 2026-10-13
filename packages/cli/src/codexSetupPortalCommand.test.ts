@@ -52,6 +52,20 @@ test('matching public selected-repository URL is validated, never cloned or pass
   await f.open({...f.input, portalArgs: args}); assert.equal(f.starts, 1);
   assert.equal('repository-url-base64url' in f.supplied, false); assert.equal(f.supplied.workspace, f.input.workspace);
 });
+
+test('portal command preserves original public user prompt while command args remain separately validated', async () => {
+  const f = await fixture();
+  const initialUserPrompt = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: synthetic@example.test. Organization: ${f.input.intent.organizationId}.\n`
+    + `Selected repository: https://github.com/demo/source.git. Fingerprint: ${f.input.intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${f.input.intent.setupReference}. Fixed expiry: ${f.input.intent.expiresAt}.\n`;
+  await f.open({...f.input, initialUserPrompt, portalArgs: f.argv});
+  assert.equal(f.supplied.initialUserPrompt, initialUserPrompt);
+  assert.equal(f.starts, 1);
+  const args = [...f.argv, '--grant', 'private-canary'];
+  await assert.rejects(f.open({...f.input, initialUserPrompt, portalArgs: args}), /portal_command_mismatch/);
+  assert.equal(f.starts, 1, 'presentation never substitutes for validated public command scope');
+});
 for (const cause of ['command', 'extra', 'duplicate', 'grant', 'private-prompt', 'resume', 'join', 'dry-run', 'help',
   'recipient', 'reference', 'organization', 'origin', 'policy', 'scope', 'contract', 'workspace', 'provider', 'incomplete'] as const) {
   test(`portal binding rejects ${cause} before native/store/model admission`, async () => {

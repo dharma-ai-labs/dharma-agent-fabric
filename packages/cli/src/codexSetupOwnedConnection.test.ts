@@ -5,6 +5,7 @@ import {compileFunction} from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import {prepareCodexBootstrapHost} from './bootstrapHostScope.js';
+import {captureCodexSetupUserPrompt} from './codexSetupUserPrompt.js';
 
 // Actual declarations with explicitly synthetic provider/filesystem boundaries.
 async function declaration(file: string, name: string, dependencies: Record<string, unknown>) {
@@ -93,6 +94,7 @@ async function controllerFixture() {
   const connection = {transport: {original: true}, additionalFilesystemRules: {private: 'deny'},
     current: async () => allowed, close: async () => {connectionCloses++;}};
   const open = await declaration('index.ts', 'openCodexBootstrapNativeHost', {prepareCodexBootstrapHost,
+    captureCodexSetupUserPrompt,
     currentBootstrapHostScope: () => undefined,
     preflightBootstrapWorkspaceIdentity: async () => ({fingerprint: `sha256:${(sourceMatches ? 'a' : 'e').repeat(64)}`}),
     loadAgentFabricOnboardingContract: async () => ({sha256: (contractMatches ? 'c' : 'e').repeat(64)}),
@@ -126,6 +128,39 @@ test('official controller carries only its owned connection and original budget 
 test('terminal native turn releases its owning connection without caller cleanup', async () => {
   const f = await controllerFixture(), host = await f.open(f.input);
   f.settle(); await host.settled; assert.equal(f.counts.connectionCloses, 1);
+});
+
+function publicPrompt(intent: {organizationId: string; repositoryFingerprint: string; setupReference: string; expiresAt: string}) {
+  return '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
+    + `Recipient: synthetic@example.test. Organization: ${intent.organizationId}.\n`
+    + `Selected repository: https://example.test/source.git. Fingerprint: ${intent.repositoryFingerprint}.\n`
+    + `Public setup reference: ${intent.setupReference}. Fixed expiry: ${intent.expiresAt}.\n`
+    + 'Use the matching host-bound setup tool only.';
+}
+
+test('official controller forwards the original public user prompt to its native host', async () => {
+  const f = await controllerFixture(), prompt = publicPrompt(f.input.intent);
+  const host = await f.open({...f.input, initialUserPrompt: prompt});
+  try {assert.equal(f.started.initialUserPrompt, prompt);}
+  finally {await host.close(); await host.settled;}
+});
+
+test('official controller refuses invalid public prompt before provider connection or host effects', async () => {
+  const f = await controllerFixture();
+  await assert.rejects(async () => {
+    const host = await f.open({...f.input, initialUserPrompt: 'foreign-private-prompt'});
+    await host.close();
+  }, /^Error: codex_setup_public_prompt_invalid$/);
+  assert.deepEqual(f.counts, {connections: 0, starts: 0, connectionCloses: 0, hostCloses: 0});
+});
+
+test('official controller snapshots public prompt before asynchronous source and account checks', async () => {
+  const f = await controllerFixture(), prompt = publicPrompt(f.input.intent);
+  const input = {...f.input, initialUserPrompt: prompt};
+  input.current = async () => {input.initialUserPrompt = 'foreign replacement'; return true;};
+  const host = await f.open(input);
+  try {assert.equal(f.started.initialUserPrompt, prompt);}
+  finally {await host.close(); await host.settled;}
 });
 for (const field of ['name', 'reserve', 'maximumProviderCostCents', 'intent'] as const) {
   test(`controller rejects invalid ${field} before connection effects`, async () => {
