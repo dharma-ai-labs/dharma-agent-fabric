@@ -146,7 +146,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.197';
+const VERSION = '0.2.198';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1536,6 +1536,17 @@ export async function preflightBootstrapWorkspaceIdentity(
   if (!gitRoot) throw new Error('Bootstrap workspace must be a Git repository.');
   const remote = await gitValue(workspace, ['config', '--get', 'remote.origin.url']);
   return sourceRepositoryFingerprint(remote, explicitKey);
+}
+
+// Requalification is itself the scope fence. Calling gitValue here would
+// re-enter that fence before dispatching either read-only metadata command.
+async function readBootstrapSourceIdentityForRequalification(workspace: string, signal: AbortSignal) {
+  const options = {timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal,
+    env: providerProcessEnvironment(process.env)};
+  const root = await execFileAsync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], options);
+  if (!root.stdout.trim()) throw new Error('Bootstrap workspace must be a Git repository.');
+  const remote = await execFileAsync('git', ['-C', workspace, 'config', '--get', 'remote.origin.url'], options);
+  return sourceRepositoryFingerprint(remote.stdout.trim() || null);
 }
 
 export function responseTextFromEvent(value: unknown): string | null {
@@ -3089,7 +3100,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
         return now.isFile() && !now.isSymbolicLink() && now.dev === runtime.dev && now.ino === runtime.ino
           && now.size === runtime.size && now.mtimeNs === runtime.mtimeNs && now.ctimeNs === runtime.ctimeNs
           && await privateDirectory(home, true) && await privateDirectory(providerHome, false)
-          && (await preflightBootstrapWorkspaceIdentity(workspace)).fingerprint === prepared.intent.repositoryFingerprint;
+          && (await readBootstrapSourceIdentityForRequalification(workspace, controller.signal)).fingerprint === prepared.intent.repositoryFingerprint;
       } catch {return false;}
     };
     if (!await current() || await detectBootstrapProvider(workspace) !== 'codex') {

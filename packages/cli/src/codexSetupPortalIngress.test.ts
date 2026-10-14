@@ -70,6 +70,7 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
       const n = value === undefined ? fallback : Number(value); if (!Number.isInteger(n) || n < min || n > max) throw new Error('invalid'); return n;
     }, isAbsolute: posix.isAbsolute, resolve: posix.resolve, homedir: () => '/home/synthetic',
     preflightBootstrapWorkspaceIdentity: async () => ({fingerprint: sourceMatches ? prepared.intent.repositoryFingerprint : 'foreign'}),
+    readBootstrapSourceIdentityForRequalification: async () => ({fingerprint: sourceMatches ? prepared.intent.repositoryFingerprint : 'foreign'}),
     detectBootstrapProvider: async () => harness,
     openCodexSetupOwnedConnection: async () => {counts.accounts++; return {accountEmail: 'provider@example.test', close: async () => {
       counts.accountCloses++; if (changeOnAccountClose) changed = true;
