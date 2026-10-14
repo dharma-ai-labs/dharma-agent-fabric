@@ -24,6 +24,28 @@ type ReceiverVault = Pick<LocalVault, 'listPendingCodexSetupSessions' | 'readCod
 type Sender = Readonly<{scope: BootstrapHostScope; vault: SenderVault; lease: Readonly<CodexSetupExecutionLease>;
   intent: Readonly<CodexSetupIntent>; active: {value: boolean}}>;
 const originalSenders = new WeakMap<BootstrapHostScope, Sender>();
+type SetupSessionAcknowledgment = Readonly<{operationId: string; intentDigest: string; requestHash: string;
+  resultHash: string; acceptedAt: string; resultRecordedAt: string}>;
+const acknowledgedSetupSessions = new WeakMap<BootstrapHostScope, SetupSessionAcknowledgment>();
+
+export function assertCodexSetupSessionPostCommitAcknowledged(scope: BootstrapHostScope, input: {
+  request: Readonly<LocalCodexSetupSessionRequest>; result: Readonly<LocalCodexSetupSessionResult>;
+  acceptedAt: string; resultRecordedAt: string;
+}): void {
+  const acknowledgment = acknowledgedSetupSessions.get(scope);
+  if (!acknowledgment || acknowledgment.operationId !== input.request.operationId
+    || acknowledgment.intentDigest !== input.request.intentDigest
+    || acknowledgment.requestHash !== sha256(canonicalize(input.request))
+    || acknowledgment.resultHash !== sha256(canonicalize(input.result))
+    || acknowledgment.acceptedAt !== input.acceptedAt
+    || acknowledgment.resultRecordedAt !== input.resultRecordedAt) {
+    throw new Error('setup_session_post_commit_unconfirmed');
+  }
+}
+
+export function clearCodexSetupSessionPostCommitAcknowledgment(scope: BootstrapHostScope): void {
+  acknowledgedSetupSessions.delete(scope);
+}
 
 /** Private original-lease continuation. Public-shaped JSON is not admission. */
 export async function withCodexSetupSessionSender<T>(input: {scope: BootstrapHostScope; vault: SenderVault;
@@ -79,11 +101,11 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
         if (typeof observation.acceptedAt !== 'string') throw new Error('setup_session_timing_unavailable');
         const observedAcceptance = Date.parse(observation.acceptedAt);
         if (!Number.isFinite(observedAcceptance) || new Date(observedAcceptance).toISOString() !== observation.acceptedAt
-          || observedAcceptance < issuedAt || observedAcceptance >= expiresAt
+          || observedAcceptance < issuedAt || observedAcceptance >= expiresAt || observedAcceptance > observedAt
           || (acceptedAt !== null && acceptedAt !== observation.acceptedAt)) throw new Error('setup_session_scope_changed');
         acceptedAt = observation.acceptedAt;
         if (!accepted) {
-          if (observedAcceptance > pendingDeadline) break;
+          if (observedAcceptance > pendingDeadline || observedAt >= pendingDeadline) break;
           // Acceptance is not readiness. Derive the remaining startup budget
           // from its authenticated vault timestamp, never from a late poll.
           accepted = true;
@@ -93,19 +115,40 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
           if (typeof observation.resultRecordedAt !== 'string') throw new Error('setup_session_timing_unavailable');
           const recordedAt = Date.parse(observation.resultRecordedAt);
           if (!Number.isFinite(recordedAt) || new Date(recordedAt).toISOString() !== observation.resultRecordedAt
-            || recordedAt < observedAcceptance || recordedAt >= expiresAt) throw new Error('setup_session_scope_changed');
-          if (recordedAt <= deadline) return parseLocalCodexSetupSessionResult(observation.result);
+            || recordedAt < observedAcceptance || recordedAt >= expiresAt || recordedAt > observedAt) {
+            throw new Error('setup_session_scope_changed');
+          }
+          if (recordedAt <= deadline && observedAt < deadline) {
+            const result = parseLocalCodexSetupSessionResult(observation.result);
+            const sender = originalSenders.get(input.scope);
+            if (sender?.active.value && currentBootstrapHostScope() === input.scope) {
+              const acknowledgment = Object.freeze({operationId: request.operationId, intentDigest: request.intentDigest,
+                requestHash: sha256(canonicalize(request)), resultHash: sha256(canonicalize(result)),
+                acceptedAt: observation.acceptedAt, resultRecordedAt: observation.resultRecordedAt});
+              const existing = acknowledgedSetupSessions.get(input.scope);
+              if (existing && canonicalize(existing) !== canonicalize(acknowledgment)) {
+                throw new Error('setup_session_scope_changed');
+              }
+              acknowledgedSetupSessions.set(input.scope, acknowledgment);
+            }
+            return result;
+          }
         } else if (observation.resultRecordedAt !== null) throw new Error('setup_session_scope_changed');
       } else if (observation.acceptedAt !== null || observation.result !== null || observation.resultRecordedAt !== null) {
         throw new Error('setup_session_scope_changed');
       }
       if (observedAt >= deadline) break;
+      // Reserve a small interval for the next protected read to complete
+      // before the authority deadline. A result first visible after that read
+      // is retained as evidence but cannot authorize success.
+      const remaining = deadline - observedAt;
+      if (remaining <= 25) break;
       // Waiting is not a protected effect. Requalify once on the next vault
       // observation instead of repeatedly exercising repository, account and
       // protected-store checks while no state can have changed locally.
       await new Promise<void>(resolveWait => {
         const finish = () => {clearTimeout(timer); input.scope.signal.removeEventListener('abort', finish); resolveWait();};
-        const timer = setTimeout(finish, Math.min(1_000, Math.max(1, deadline - Date.now())));
+        const timer = setTimeout(finish, Math.min(1_000, Math.max(1, remaining - 25)));
         input.scope.signal.addEventListener('abort', finish, {once: true});
         if (input.scope.signal.aborted) finish();
       });

@@ -120,8 +120,10 @@ import { namedCodexEnvironment } from './namedCodexEnvironment.js';
 import { namedCodexNodeOutputArguments } from './namedCodexNodeOutput.js';
 import { namedCodexFilesystem } from './namedCodexFilesystem.js';
 import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './namedSessionChildOwner.js';
-import {awaitCodexSetupSession, codexSetupSessionPolicyHash, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
-  originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
+import {assertCodexSetupSessionPostCommitAcknowledged, awaitCodexSetupSession,
+  clearCodexSetupSessionPostCommitAcknowledgment, codexSetupSessionPolicyHash, consumeCodexSetupSessions,
+  currentAcceptedSetupSessionScope, originalCodexSetupSessionSender,
+  withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {receiveCodexSetupChildStart, runCodexSetupChildStartup, sendCodexSetupChildStart,
   type CodexSetupChildMessage, type CodexSetupChildScope} from './codexSetupChildStartup.js';
 import {assertBootstrapHostSource, captureBootstrapHostChild, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation, prepareCodexBootstrapHost, runCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope, type CodexBootstrapHostInput} from './bootstrapHostScope.js';
@@ -2591,7 +2593,9 @@ async function readBootstrapRuntimeJson(path: string, scope: BootstrapHostScope)
 
 /** Actual scoped runtime readback. No callback-supplied ready flag or receipt ID. */
 async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope; intent: Readonly<CodexSetupIntent>;
-  flags: Map<string, string | boolean>}, vault: CodexCompletionVault, firstLearning: LocalCodexSetupReadiness['firstLearning'], intentDigest?: string) {
+  flags: Map<string, string | boolean>}, vault: CodexCompletionVault,
+  firstLearning: LocalCodexSetupReadiness['firstLearning'], intentDigest?: string,
+  requirePostCommitAcknowledgment = false) {
   const {scope, intent} = prepared, workspace = String(prepared.flags.get('workspace'));
   const step = <T>(operation: () => Promise<T>) => scope.step(operation);
   await scope.assert();
@@ -2736,6 +2740,9 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
       || result.bindingId !== binding.bindingId || result.sessionId !== binding.sessionId || result.sessionPid !== sessionPid
       || result.supervisorPid !== supervisorPid || result.sessionStartTicks !== processes[2]!.startTicks
       || result.supervisorStartTicks !== processes[0]!.startTicks) throw new Error('setup_runtime_session_unconfirmed');
+    if (requirePostCommitAcknowledgment) assertCodexSetupSessionPostCommitAcknowledged(scope, {
+      request, result, acceptedAt: handoff.acceptedAt!, resultRecordedAt: handoff.resultRecordedAt!,
+    });
   }
   const supervisor = await readBootstrapRuntimeJson(resolve(home, 'relay', 'supervisor-workspace.json'), scope) as Record<string, unknown>;
   if (supervisor.pid !== supervisorPid || supervisor.organizationId !== intent.organizationId || supervisor.deviceId !== config.deviceId
@@ -2797,7 +2804,8 @@ export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostSc
       const disposition = firstLearning ?? retained?.firstLearning;
       if (!disposition) throw new Error('setup_runtime_first_learning_unconfirmed');
       // Keep the original execution's disposition; reobserve all live state.
-      return runCodexBootstrapHostScope(scope, current => observeCodexBootstrapRuntime(current, vault, disposition, intentDigest));
+      return runCodexBootstrapHostScope(scope, current => observeCodexBootstrapRuntime(
+        current, vault, disposition, intentDigest, retained === undefined));
     }});
   return Object.freeze({
     execute: async (lease: Readonly<CodexSetupExecutionLease>) => {
@@ -2818,7 +2826,7 @@ export async function createCodexBootstrapCompletionOwner(scope: BootstrapHostSc
       } catch (error) {
         if (observeFailure) reportCodexSetupFailure(observeFailure, error, 'completion');
         throw error;
-      }
+      } finally {clearCodexSetupSessionPostCommitAcknowledgment(scope);}
     },
     verify: readiness.verify,
   });

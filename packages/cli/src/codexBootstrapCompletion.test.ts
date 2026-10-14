@@ -25,7 +25,8 @@ import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 import {applyServerEvidencePolicy, bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, materializeWorkspacePolicy, parseCliOptions} from './index.js';
-import {codexSetupSessionPolicyHash, originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
+import {clearCodexSetupSessionPostCommitAcknowledgment, codexSetupSessionPolicyHash,
+  originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -108,6 +109,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const dependencies: Record<string, unknown> = {
     resolve, Date, canonicalize, sha256, codexSetupSessionPolicyHash, selectDeviceWorkspace, parseLocalCodexSetupReadiness, parseNamedCodexSkillObservation,
     isNamedSessionOwnerReceipt, repositoryRelayObservationReady, discoverRepositoryRoleMetadata,
+    assertCodexSetupSessionPostCommitAcknowledged: () => {}, clearCodexSetupSessionPostCommitAcknowledgment,
     ENTRY_URL: 'file:///synthetic/index.js',
     fileURLToPath: (value: string | URL) => new URL(value).pathname.endsWith('/bin.js') ? resolve(root, 'bin.js') : entry,
     VERSION: '0.2.153',
