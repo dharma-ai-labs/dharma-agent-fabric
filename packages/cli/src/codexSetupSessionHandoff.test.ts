@@ -191,6 +191,30 @@ test('a frozen final clock tick permits only one zero-delay observation', async 
   });
 });
 
+test('acceptance starts a fresh bounded final-observation phase', async t => {
+  await fixture(async f => {
+    const now = Date.now(); let reads = 0;
+    const acceptedAt = new Date(now).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_cross_phase_final', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+        return {request: f.request, state: 'accepted' as const, acceptedAt,
+          result: reads === 3 ? result : null, resultRecordedAt: reads === 3 ? acceptedAt : null};
+      },
+    };
+    assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 1, acceptedWaitMs: 1}), result);
+    assert.equal(reads, 3);
+  });
+});
+
 test('a timely acceptance timestamp observed only after the pending deadline cannot authorize startup', async t => {
   await fixture(async f => {
     let now = Date.now(), reads = 0;

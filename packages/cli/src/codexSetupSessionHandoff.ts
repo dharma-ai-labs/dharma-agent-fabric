@@ -111,6 +111,7 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
           // from its authenticated vault timestamp, never from a late poll.
           accepted = true;
           deadline = Math.min(observedAcceptance + acceptedWaitMs, expiresAt);
+          immediateObservationScheduled = false;
         }
         if (observation.result) {
           if (typeof observation.resultRecordedAt !== 'string') throw new Error('setup_session_timing_unavailable');
