@@ -142,13 +142,20 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
       // before the authority deadline. A result first visible after that read
       // is retained as evidence but cannot authorize success.
       const remaining = deadline - observedAt;
-      if (remaining <= 25) break;
       // Waiting is not a protected effect. Requalify once on the next vault
       // observation instead of repeatedly exercising repository, account and
       // protected-store checks while no state can have changed locally.
       await new Promise<void>(resolveWait => {
-        const finish = () => {clearTimeout(timer); input.scope.signal.removeEventListener('abort', finish); resolveWait();};
-        const timer = setTimeout(finish, Math.min(1_000, Math.max(1, remaining - 25)));
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let immediate: ReturnType<typeof setImmediate> | undefined;
+        const finish = () => {
+          if (timer) clearTimeout(timer);
+          if (immediate) clearImmediate(immediate);
+          input.scope.signal.removeEventListener('abort', finish); resolveWait();
+        };
+        const delay = remaining > 25 ? Math.min(1_000, remaining - 25) : Math.floor(remaining / 2);
+        if (delay > 0) timer = setTimeout(finish, delay);
+        else immediate = setImmediate(finish);
         input.scope.signal.addEventListener('abort', finish, {once: true});
         if (input.scope.signal.aborted) finish();
       });

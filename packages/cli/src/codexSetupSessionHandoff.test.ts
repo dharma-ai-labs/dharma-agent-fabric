@@ -76,7 +76,7 @@ test('accepted wait rejects invalid budgets before staging any authority', async
   });
 });
 
-test('accepted wait avoids protected-scope churn and makes one final observation', async () => {
+test('accepted wait bounds protected-scope churn while retaining final observations', async () => {
   await fixture(async f => {
     let reads = 0, protectedSteps = 0;
     const acceptedAt = new Date().toISOString();
@@ -93,8 +93,8 @@ test('accepted wait avoids protected-scope churn and makes one final observation
     };
     await assert.rejects(awaitCodexSetupSession({vault, scope, request: f.request,
       leaseId: f.leaseId, acceptedWaitMs: 250}), /setup_session_accepted_unconfirmed/);
-    assert.equal(reads, 2);
-    assert.equal(protectedSteps, 3);
+    assert.ok(reads >= 2 && reads <= 8, `unexpected final observation count: ${reads}`);
+    assert.equal(protectedSteps, reads + 1);
   });
 });
 
@@ -144,6 +144,31 @@ test('pending wait observes a timely acceptance and result from its final idle i
       assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
         leaseId: f.leaseId, waitMs: 250}), result);
     } finally {clearTimeout(timer);}
+    assert.equal(reads, 2);
+  });
+});
+
+test('short valid pending budgets retain a bounded final observation', async t => {
+  await fixture(async f => {
+    let now = Date.now(), reads = 0;
+    const acceptedAt = new Date(now + 5).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_short_budget', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+        now += 5;
+        return {request: f.request, state: 'accepted' as const, acceptedAt,
+          result, resultRecordedAt: acceptedAt};
+      },
+    };
+    assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 20}), result);
     assert.equal(reads, 2);
   });
 });
