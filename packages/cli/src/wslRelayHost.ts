@@ -136,9 +136,11 @@ function taskPreamble(receipt: Receipt, operation: string): string {
     + `if ($current.User.Value -cne ${literal(receipt.windowsSid)}) {throw 'wsl_host_identity_conflict'}; `
     + lookup(receipt)
     + `function Assert-OwnedTask($value) { $actions=@($value.Actions); $triggers=@($value.Triggers); `
+    + `$definition=[xml](Export-ScheduledTask -TaskPath '\\' -TaskName ${literal(receipt.taskName)} -ErrorAction Stop); `
+    + `$principals=@($definition.Task.Principals.Principal); `
     + `if ($value.Description -cne ${literal(receipt.description)} -or $actions.Count -ne 1 `
     + `-or $actions[0].Execute -cne ${literal(receipt.executable)} -or $actions[0].Arguments -cne ${literal(receipt.arguments)} `
-    + `-or ($value.Principal.UserId -cne $current.User.Value -and $value.Principal.UserId -cne $current.Name) `
+    + `-or $principals.Count -ne 1 -or $principals[0].UserId -cne $current.User.Value `
     + `-or [string]$value.Principal.LogonType -ne 'Interactive' -or [string]$value.Principal.RunLevel -ne 'Limited' `
     + `-or $triggers.Count -ne 1 -or $triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or !$triggers[0].Enabled `
     + `-or ($triggers[0].UserId -cne $current.User.Value -and $triggers[0].UserId -cne $current.Name) `

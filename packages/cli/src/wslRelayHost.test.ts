@@ -103,6 +103,8 @@ test('WSL startup registers an exact user-logon host action instead of relying o
   assert.match(action, /-LogonType Interactive -RunLevel Limited/);
   assert.match(action, /New-ScheduledTaskTrigger -AtLogOn -User \$current\.Name/);
   assert.match(action, /New-ScheduledTaskPrincipal -UserId \$current\.Name/);
+  assert.match(action, /Export-ScheduledTask -TaskPath/);
+  assert.match(action, /\$principals\[0\]\.UserId -cne \$current\.User\.Value/);
   assert.doesNotMatch(action, /-Force|ExecutionPolicy|wsl.*--shutdown|sleep infinity/);
   const status = await relayAutostartStatus(options);
   assert.equal(status.state, 'enabled');
@@ -116,6 +118,32 @@ test('WSL startup registers an exact user-logon host action instead of relying o
   await disableRelayAutostart(options);
   assert(scripts.some(script => script.includes('dharma-wsl-host:disable')));
   await assert.rejects(readFile(join(options.home, 'relay', 'wsl-host.json')), {code: 'ENOENT'});
+});
+
+test('the actual WSL guard validates the persisted SID rather than a normalized account alias', {skip: process.platform !== 'win32'}, async t => {
+  const f = await fixture(t);await enableRelayAutostart(f.options);
+  const preamble=f.scripts.find(s=>s.includes('dharma-wsl-host:status'))!;
+  const start=preamble.indexOf('function '),end=preamble.indexOf('if ($null -eq $task)');
+  assert.ok(start>0&&end>start);
+  const guard=preamble.slice(start,end);
+  const task={Description:'synthetic',Actions:[{Execute:'C:\\Windows\\System32\\wsl.exe',Arguments:'synthetic'}],
+    Principal:{UserId:'',LogonType:'Interactive',RunLevel:'Limited'},
+    Triggers:[{CimClass:{CimClassName:'MSFT_TaskLogonTrigger'},Enabled:true,UserId:''}],
+    Settings:{MultipleInstances:'IgnoreNew',ExecutionTimeLimit:'PT0S',RestartCount:0,DisallowStartIfOnBatteries:false,StopIfGoingOnBatteries:false}};
+  const receipt=JSON.parse(await readFile(join(f.options.home,'relay','wsl-host.json'),'utf8'));
+  task.Description=receipt.description;task.Actions[0]!.Arguments=receipt.arguments;
+  for(const foreign of [false,true]){
+    const script=`$ErrorActionPreference='Stop';$current=[System.Security.Principal.WindowsIdentity]::GetCurrent(); `
+      + `$fixturePrincipalSid=${foreign?"'S-1-5-18'":'$current.User.Value'}; `
+      + `function Export-ScheduledTask { '<Task><Principals><Principal><UserId>'+$fixturePrincipalSid+'</UserId></Principal></Principals></Task>' }; `
+      + `$task=ConvertFrom-Json ([Console]::In.ReadToEnd());$task.Principal.UserId=($current.Name -split '\\\\')[-1]; `
+      + `$task.Triggers[0].UserId=$current.Name; ${guard}; `
+      + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned')}catch{[Console]::Out.Write('refused');`
+      + `if(!${foreign?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
+    const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+      {input:JSON.stringify(task),encoding:'utf8',timeout:15000,windowsHide:true});
+    assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,foreign?'refused':'owned',result.stderr);
+  }
 });
 
 test('a foreign WSL host task is refused before startup registration writes', async t => {
