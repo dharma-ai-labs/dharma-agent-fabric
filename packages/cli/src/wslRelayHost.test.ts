@@ -65,6 +65,32 @@ async function fixture(t: TestContext) {
   return {options, scripts, foreignTask: () => {exists = true;}, loseResponse: () => {loseRegistrationResponse = true;}};
 }
 
+test('optional WSL task lookup distinguishes exact absence from a failed scheduler read', async () => {
+  const source = await readFile(new URL('../src/wslRelayHost.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('wslRelayHost.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'lookup');
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration));
+  const compiled = ts.transpileModule(declaration.getText(ast), {compilerOptions: {
+    target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}}).outputText;
+  const lookup = compileFunction(compiled + '\nreturn lookup;', ['literal'])((s: string) => `'${s.replaceAll("'", "''")}'`);
+  const query = lookup({taskName: 'SyntheticFixture'});
+  assert.doesNotMatch(query, /SilentlyContinue/);
+  assert.match(query, /-ErrorAction Stop/);
+  assert.match(query, /CmdletizationQuery_NotFound,Get-ScheduledTask/);
+  assert.match(query, /ObjectNotFound/);
+  if (process.platform === 'win32') {
+    for (const id of ['CmdletizationQuery_NotFound,Get-ScheduledTask', 'AccessDenied', 'SchedulerUnavailable']) {
+      const script = `function Get-ScheduledTask { throw [System.Management.Automation.ErrorRecord]::new(`
+        + `[Exception]::new('synthetic'), '${id}', [System.Management.Automation.ErrorCategory]::ObjectNotFound, $null) }; `
+        + `try { ${query}; if($null -eq $task){[Console]::Out.Write('absent')} } catch {[Console]::Out.Write('failed')} `;
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+        Buffer.from(script, 'utf16le').toString('base64')], {encoding: 'utf8', timeout: 15000, windowsHide: true});
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, id.startsWith('CmdletizationQuery_NotFound,') ? 'absent' : 'failed');
+    }
+  }
+});
+
 test('WSL startup registers an exact user-logon host action instead of relying on systemd lifetime', async t => {
   const {options, scripts} = await fixture(t);
   await enableRelayAutostart(options);

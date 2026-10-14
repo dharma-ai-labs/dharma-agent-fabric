@@ -124,7 +124,10 @@ function sameReceipt(value: Receipt, target: Receipt): boolean {
 }
 
 function lookup(receipt: Receipt, required = false) {
-  return `$task=Get-ScheduledTask -TaskPath '\\' -TaskName ${literal(receipt.taskName)}${required ? '' : ' -ErrorAction SilentlyContinue'}; `;
+  const query = `$task=Get-ScheduledTask -TaskPath '\\' -TaskName ${literal(receipt.taskName)} -ErrorAction Stop; `;
+  return required ? query : `$task=$null; try { ${query} } catch { `
+    + `if ($_.FullyQualifiedErrorId -cne 'CmdletizationQuery_NotFound,Get-ScheduledTask' `
+    + `-or [string]$_.CategoryInfo.Category -ne 'ObjectNotFound') {throw} }; `;
 }
 
 function taskPreamble(receipt: Receipt, operation: string): string {
