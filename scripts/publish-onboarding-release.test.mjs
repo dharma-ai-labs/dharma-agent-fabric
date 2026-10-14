@@ -12,16 +12,16 @@ const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
 const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('frozen customer ingress candidate admits only the bounded CLI196 release delta', () => {
+test('frozen customer ingress candidate admits only the bounded CLI197 release delta', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '9eec96523e02621d88efb877339befba6eec21f5';
+  const baseline = '7fa01faf35290f2736c64c3a093b3c802b21670f';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '46d8f029f108d63171f0683be8b6ab4486f821ac');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'e2528b6a6210fe383507576573c51a9997fa0738');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
-  const cliManifest = {...baselineCliManifest, version: '0.2.196'};
+  const cliManifest = {...baselineCliManifest, version: '0.2.197'};
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
-  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.196';
+  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.197';
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -94,7 +94,7 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('verifies the immutable dependency closure and publishes only the CLI196 ingress', async () => {
+test('verifies the immutable dependency closure and publishes only the CLI197 ingress', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
@@ -103,7 +103,7 @@ test('verifies the immutable dependency closure and publishes only the CLI196 in
     ['@dharma-ai-labs/agent-fabric-provider-adapters', '0.1.34'],
     ['@dharma-ai-labs/agent-fabric-task-runner', '0.1.36'],
     ['@dharma-ai-labs/agent-fabric-evidence-reduction', '0.2.33'],
-    ['@dharma-ai-labs/agent-fabric', '0.2.196'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.197'],
   ]);
 });
 
@@ -150,13 +150,13 @@ for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'm
       'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
       'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
     } };
-    const snapshot = { head, ref: 'refs/heads/main', tree: '46d8f029f108d63171f0683be8b6ab4486f821ac',
+    const snapshot = { head, ref: 'refs/heads/main', tree: 'e2528b6a6210fe383507576573c51a9997fa0738',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
       changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest,
       baselineCliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.188', dependencies: {}},
-      cliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.196', dependencies: {}},
+      cliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.197', dependencies: {}},
       baselineLock: {packages: {'packages/cli': {version: '0.2.188'}}},
-      lock: {packages: {'packages/cli': {version: '0.2.196'}}} };
+      lock: {packages: {'packages/cli': {version: '0.2.197'}}} };
     assert.doesNotThrow(() => assertSourceSnapshot(head, snapshot));
     snapshot[defect] = ['changed', 'untracked'].includes(defect) ? ['packages/cli/other.js']
       : defect === 'manifest' ? { scripts: {} } : 'wrong';
