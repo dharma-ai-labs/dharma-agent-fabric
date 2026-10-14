@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '9eec96523e02621d88efb877339befba6eec21f5';
-const tree = '46d8f029f108d63171f0683be8b6ab4486f821ac';
+const source = 'f1633a7698e172d828cbb2ac389c4a07802311b0';
+const tree = 'cfd88c793f2c645f837e6d7e2d16c05c1d68f093';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -22,7 +22,8 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33',
     existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
       integrity: 'sha512-uJOnIe/zkiUCLxPXt4R1TUlULp8yUheD1V5jg1XHRYVDzD+xMxxETmwGR0z/8YVndR0sYxSfxt8wZi6jsweGYA=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.196' },
+  { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.29' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.197' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -77,10 +78,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.196';
+  cliManifest.version = '0.2.197';
   assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.196';
+  lock.packages['packages/cli'].version = '0.2.197';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
 }
 
