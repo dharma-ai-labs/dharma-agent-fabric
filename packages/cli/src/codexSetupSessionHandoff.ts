@@ -74,12 +74,15 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
       accepted = observation.state === 'accepted';
       if (Date.now() >= expiresAt) break;
       if (observation.state === 'accepted' && observation.result) return parseLocalCodexSetupSessionResult(observation.result);
-      await input.scope.step(() => new Promise<void>(resolveWait => {
+      // Waiting is not a protected effect. Requalify once on the next vault
+      // observation instead of repeatedly exercising repository, account and
+      // protected-store checks while no state can have changed locally.
+      await new Promise<void>(resolveWait => {
         const finish = () => {clearTimeout(timer); input.scope.signal.removeEventListener('abort', finish); resolveWait();};
-        const timer = setTimeout(finish, Math.min(100, Math.max(1, deadline - Date.now())));
+        const timer = setTimeout(finish, Math.min(1_000, Math.max(1, deadline - Date.now())));
         input.scope.signal.addEventListener('abort', finish, {once: true});
         if (input.scope.signal.aborted) finish();
-      }));
+      });
     } while (Date.now() < deadline);
     throw new Error(accepted ? 'setup_session_accepted_unconfirmed' : 'setup_session_receiver_timeout');
   } finally {
