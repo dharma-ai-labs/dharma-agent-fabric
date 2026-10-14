@@ -9,7 +9,8 @@ import ts from 'typescript';
 
 // Execute the actual post-enrollment caller with synthetic lifecycle boundaries.
 // No fixture starts a daemon, accesses credentials, or contacts the platform.
-async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean; previousVersion?: string} = {}) {
+async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean; previousVersion?: string;
+  supervisorRunning?: boolean; wslHost?: boolean} = {}) {
   const baseline = process.env.DHARMA_BOOTSTRAP_ORDER_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('bootstrap_order_baseline_invalid');
   const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`], {
@@ -23,7 +24,7 @@ async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?
   const end = statements.findIndex(node => node.getText(ast).startsWith('const skill ='));
   assert.ok(start >= 0 && end > start);
   const effects: string[] = [];
-  let enabled = false, withdrawn = false, running = false;
+  let enabled = false, withdrawn = false, running = options.supervisorRunning === true, hostRunning = false;
   const flags = new Map<string, string | boolean>([['complete', true], ['setup-reference', 'public-reference']]);
   if (options.sourceClaim === false) flags.delete('setup-reference');
   if (options.noRelay) flags.set('no-relay-daemon', true);
@@ -51,10 +52,12 @@ async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?
     resolve: (...parts: string[]) => parts.join('/'), assertBootstrapHostSource: async () => {},
     relayProcessState: async () => running ? 'running' : 'stopped',
     relaySupervisorProcessState: async () => running ? 'running' : 'stopped',
-    relayAutostartStatus: async () => ({backend: 'container-entrypoint'}),
+    relayAutostartStatus: async () => options.wslHost
+      ? {state: 'enabled', backend: 'systemd-user', restartCoverage: 'wsl-host-logon', hostLifecycle: hostRunning ? 'running' : 'registered'}
+      : {backend: 'container-entrypoint'},
     startRelayAutostart: async () => {
       if (options.host !== false && !enabled) throw new Error('autostart_conflict: enabled owned startup required');
-      effects.push('start'); running = true;
+      effects.push('start'); running = true; hostRunning = true;
     },
     dharmaHome: () => '/synthetic/device', VERSION: 'test', Number, String,
     readFile: async (path: string) => path.endsWith('supervisor-workspace.json')
@@ -121,6 +124,33 @@ test('fresh native bootstrap registers its owned startup before starting a relay
   const f = await fixture(); await f.run();
   assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable', 'start']);
   assert.equal(f.flags.has('no-relay-daemon'), false, 'internal deferral must not change customer flags');
+});
+
+test('running supervisor still starts its newly registered WSL host owner', async () => {
+  const f = await fixture({supervisorRunning: true, wslHost: true}); await f.run();
+  assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable', 'start']);
+});
+
+test('generic completion rechecks WSL host liveness instead of accepting cached registration', async () => {
+  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'bootstrap');
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration) && declaration.body);
+  const names = new Set(['observedAutostart', 'startupReady']);
+  const selected = declaration.body.statements.filter(node => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some(value => names.has(value.name.getText(ast))));
+  assert.equal(selected.length, 2);
+  const compiled = ts.transpileModule(`async function check(){${selected.map(node => node.getText(ast)).join('\n')};return startupReady;}`,
+    {compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}}).outputText;
+  for (const hostLifecycle of ['registered', 'running']) {
+    let reads = 0;
+    const cached = {state: 'enabled', backend: 'systemd-user', restartCoverage: 'wsl-host-logon', hostLifecycle: 'registered'};
+    const check = compileFunction(compiled + '\nreturn check;', ['autostart', 'step', 'relayAutostartStatus', 'dharmaHome', 'process'])(
+      cached, (run: () => Promise<unknown>) => run(), async () => {reads++; return {...cached, hostLifecycle};},
+      () => '/synthetic/device', {platform: 'linux'});
+    assert.equal(await check(), hostLifecycle === 'running');
+    assert.equal(reads, 1);
+  }
 });
 
 test('interactive source claim without a host scope registers startup before relay admission', async () => {

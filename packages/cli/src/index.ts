@@ -2124,8 +2124,10 @@ async function startRelayDaemon(policyPath: string) {
   const alreadyRunning = await relayProcessState() === 'running';
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
-  if (supervisorState === 'stopped') {
-    const startupBackend = (await relayAutostartStatus({ home: dharmaHome() })).backend;
+  const startup = await step(() => relayAutostartStatus({ home: dharmaHome() }));
+  const hostPending = startup.restartCoverage === 'wsl-host-logon' && startup.hostLifecycle !== 'running';
+  if (supervisorState === 'stopped' || hostPending) {
+    const startupBackend = startup.backend;
     // A setup turn cannot own a supervisor intended to outlive that turn.
     if (hostScope || startupBackend === 'container-entrypoint' || startupBackend === 'systemd-user') {
       await step(() => startRelayAutostart({ home: dharmaHome() }));
@@ -3650,11 +3652,12 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
-  const observedAutostart = autostart.backend === 'container-entrypoint'
+  const observedAutostart = autostart.backend === 'container-entrypoint' || autostart.restartCoverage === 'wsl-host-logon'
     ? await step(() => relayAutostartStatus({ home: dharmaHome() })) : autostart;
   const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform)
     || observedAutostart.state === 'enabled'
-      && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running');
+      && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running')
+      && (observedAutostart.restartCoverage !== 'wsl-host-logon' || observedAutostart.hostLifecycle === 'running');
   const complete = sharedRepositoryReady && namedSessionReady && firstLearningReady
     && roleReady && relayReady && startupReady;
   return {
