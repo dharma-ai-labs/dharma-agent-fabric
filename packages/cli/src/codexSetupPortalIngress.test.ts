@@ -49,6 +49,7 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
   const info = {isFile: () => true, isDirectory: () => true, isSymbolicLink: () => false,
     uid: 1000, mode: 0o700, dev: 1n, ino: 2n, size: 3n, mtimeNs: 4n, ctimeNs: 5n};
   const ingress = await declaration('codexPortalSetup', {
+    currentBootstrapHostScope: () => undefined,
     process: process_, normalizeHqUrl: (value: string) => new URL(value).origin,
     required: (flags: Map<string, any>, key: string) => {if (!flags.get(key)) throw new Error('missing'); return flags.get(key);},
     readCodexSetupPublicStdin: async () => {counts.inputs++; return prepared.initialUserPrompt;},
@@ -70,6 +71,7 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
       const n = value === undefined ? fallback : Number(value); if (!Number.isInteger(n) || n < min || n > max) throw new Error('invalid'); return n;
     }, isAbsolute: posix.isAbsolute, resolve: posix.resolve, homedir: () => '/home/synthetic',
     preflightBootstrapWorkspaceIdentity: async () => ({fingerprint: sourceMatches ? prepared.intent.repositoryFingerprint : 'foreign'}),
+    readBootstrapSourceIdentityForRequalification: async () => ({fingerprint: sourceMatches ? prepared.intent.repositoryFingerprint : 'foreign'}),
     detectBootstrapProvider: async () => harness,
     openCodexSetupOwnedConnection: async () => {counts.accounts++; return {accountEmail: 'provider@example.test', close: async () => {
       counts.accountCloses++; if (changeOnAccountClose) changed = true;
