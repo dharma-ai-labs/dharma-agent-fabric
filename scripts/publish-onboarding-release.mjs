@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '7fa01faf35290f2736c64c3a093b3c802b21670f';
-const tree = 'e2528b6a6210fe383507576573c51a9997fa0738';
+const source = 'f1633a7698e172d828cbb2ac389c4a07802311b0';
+const tree = 'cfd88c793f2c645f837e6d7e2d16c05c1d68f093';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -22,6 +22,7 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33',
     existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
       integrity: 'sha512-uJOnIe/zkiUCLxPXt4R1TUlULp8yUheD1V5jg1XHRYVDzD+xMxxETmwGR0z/8YVndR0sYxSfxt8wZi6jsweGYA=='}) },
+  { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.29' },
   { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.197' },
 ].map(Object.freeze));
 

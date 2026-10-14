@@ -15,9 +15,9 @@ const integrity = item => item.existingArtifact?.integrity || `sha512-${item.ver
 test('frozen customer ingress candidate admits only the bounded CLI197 release delta', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '7fa01faf35290f2736c64c3a093b3c802b21670f';
+  const baseline = 'f1633a7698e172d828cbb2ac389c4a07802311b0';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'e2528b6a6210fe383507576573c51a9997fa0738');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'cfd88c793f2c645f837e6d7e2d16c05c1d68f093');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
   const cliManifest = {...baselineCliManifest, version: '0.2.197'};
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
@@ -94,15 +94,19 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('verifies the immutable dependency closure and publishes only the CLI197 ingress', async () => {
+test('verifies the immutable dependency closure and publishes local-vault before CLI197', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, [
+    '@dharma-ai-labs/agent-fabric-local-vault',
+    '@dharma-ai-labs/agent-fabric',
+  ]);
   assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
     ['@dharma-ai-labs/agent-fabric-contracts', '0.1.16'],
     ['@dharma-ai-labs/agent-fabric-provider-adapters', '0.1.34'],
     ['@dharma-ai-labs/agent-fabric-task-runner', '0.1.36'],
     ['@dharma-ai-labs/agent-fabric-evidence-reduction', '0.2.33'],
+    ['@dharma-ai-labs/agent-fabric-local-vault', '0.1.29'],
     ['@dharma-ai-labs/agent-fabric', '0.2.197'],
   ]);
 });
@@ -150,7 +154,7 @@ for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'm
       'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
       'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
     } };
-    const snapshot = { head, ref: 'refs/heads/main', tree: 'e2528b6a6210fe383507576573c51a9997fa0738',
+    const snapshot = { head, ref: 'refs/heads/main', tree: 'cfd88c793f2c645f837e6d7e2d16c05c1d68f093',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
       changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest,
       baselineCliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.188', dependencies: {}},
@@ -182,17 +186,17 @@ test('last-package preflight failure prevents every earlier dependency publicati
   assert.deepEqual(effects, []);
 });
 
-test('uncertain CLI publication is not retried and never publishes a dependency', async () => {
+test('uncertain CLI publication is not retried after its dependency is verified', async () => {
   const { io, effects } = fixture();
   io.publish = async (item) => {
     effects.push(item.name);
-    throw new Error('uncertain CLI publication');
+    if (item.name === '@dharma-ai-labs/agent-fabric') throw new Error('uncertain CLI publication');
   };
   const lookup = io.lookup;
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
   await assert.rejects(publishBoundedRelease(head, io), /uncertain CLI publication/);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
 });
 
 test('already reconciled contracts require their exact original publication source', async () => {
