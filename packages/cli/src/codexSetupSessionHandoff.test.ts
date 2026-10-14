@@ -9,7 +9,8 @@ import {LocalVault, type LocalCodexSetupSessionRequest, type LocalCodexSetupSess
 import {prepareCodexBootstrapHost, runCodexBootstrapHostScope, type BootstrapHostScope} from './bootstrapHostScope.js';
 import {createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {createNamedSessionChildOwner} from './namedSessionChildOwner.js';
-import {awaitCodexSetupSession, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
+import {assertCodexSetupSessionPostCommitAcknowledged, awaitCodexSetupSession,
+  clearCodexSetupSessionPostCommitAcknowledgment, consumeCodexSetupSessions, currentAcceptedSetupSessionScope,
   originalCodexSetupSessionSender, withCodexSetupSessionSender, type AcceptedSetupSessionScope} from './codexSetupSessionHandoff.js';
 import type {CodexSetupFailureDiagnostic} from './codexSetupDiagnostic.js';
 
@@ -75,7 +76,7 @@ test('accepted wait rejects invalid budgets before staging any authority', async
   });
 });
 
-test('accepted wait avoids protected-scope churn and makes one final observation', async () => {
+test('accepted wait bounds protected-scope churn while retaining final observations', async () => {
   await fixture(async f => {
     let reads = 0, protectedSteps = 0;
     const acceptedAt = new Date().toISOString();
@@ -92,8 +93,8 @@ test('accepted wait avoids protected-scope churn and makes one final observation
     };
     await assert.rejects(awaitCodexSetupSession({vault, scope, request: f.request,
       leaseId: f.leaseId, acceptedWaitMs: 250}), /setup_session_accepted_unconfirmed/);
-    assert.equal(reads, 2);
-    assert.equal(protectedSteps, 3);
+    assert.ok(reads >= 2 && reads <= 8, `unexpected final observation count: ${reads}`);
+    assert.equal(protectedSteps, reads + 1);
   });
 });
 
@@ -143,6 +144,123 @@ test('pending wait observes a timely acceptance and result from its final idle i
       assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
         leaseId: f.leaseId, waitMs: 250}), result);
     } finally {clearTimeout(timer);}
+    assert.equal(reads, 2);
+  });
+});
+
+test('short valid pending budgets retain a bounded final observation', async t => {
+  await fixture(async f => {
+    let now = Date.now(), reads = 0;
+    const acceptedAt = new Date(now + 5).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_short_budget', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+        now += 5;
+        return {request: f.request, state: 'accepted' as const, acceptedAt,
+          result, resultRecordedAt: acceptedAt};
+      },
+    };
+    assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 20}), result);
+    assert.equal(reads, 2);
+  });
+});
+
+test('a frozen final clock tick permits only one zero-delay observation', async t => {
+  await fixture(async f => {
+    const now = Date.now(); let reads = 0;
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+      },
+    };
+    await assert.rejects(awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 1}), /setup_session_receiver_timeout/);
+    assert.equal(reads, 2);
+  });
+});
+
+test('acceptance starts a fresh bounded final-observation phase', async t => {
+  await fixture(async f => {
+    const now = Date.now(); let reads = 0;
+    const acceptedAt = new Date(now).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_cross_phase_final', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+        return {request: f.request, state: 'accepted' as const, acceptedAt,
+          result: reads === 3 ? result : null, resultRecordedAt: reads === 3 ? acceptedAt : null};
+      },
+    };
+    assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 1, acceptedWaitMs: 1}), result);
+    assert.equal(reads, 3);
+  });
+});
+
+test('a timely acceptance timestamp observed only after the pending deadline cannot authorize startup', async t => {
+  await fixture(async f => {
+    let now = Date.now(), reads = 0;
+    const acceptedAt = new Date(now + 50).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_late_acceptance_visibility', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+        now += 251;
+        return {request: f.request, state: 'accepted' as const, acceptedAt,
+          result, resultRecordedAt: acceptedAt};
+      },
+    };
+    await assert.rejects(awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 250}), /setup_session_accepted_unconfirmed/);
+    assert.equal(reads, 2);
+  });
+});
+
+test('a result committed before its deadline but observed after it cannot satisfy setup', async t => {
+  await fixture(async f => {
+    let now = Date.now(), reads = 0;
+    const acceptedAt = new Date(now).toISOString();
+    const resultRecordedAt = new Date(now + 50).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_late_result_visibility', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'accepted' as const,
+          acceptedAt, result: null, resultRecordedAt: null};
+        now += 101;
+        return {request: f.request, state: 'accepted' as const, acceptedAt, result, resultRecordedAt};
+      },
+    };
+    await assert.rejects(awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, acceptedWaitMs: 100}), /setup_session_accepted_unconfirmed/);
     assert.equal(reads, 2);
   });
 });
@@ -440,6 +558,25 @@ test('original sender requires the admitted lease and original context; copied a
           async () => {admitted++;}), /execution_lease_unavailable/);
         await withCodexSetupSessionSender({scope: prepared.scope, vault: sender(f.vault), lease}, async () => {
           assert.equal((await originalCodexSetupSessionSender(prepared.scope)).lease, lease); admitted++;
+          const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(21),
+            sessionId: 'synthetic_acknowledged', sessionPid: 42, supervisorPid: process.pid,
+            sessionStartTicks: '1', supervisorStartTicks: '1'};
+          const acceptedAt = new Date().toISOString(), resultRecordedAt = acceptedAt;
+          const observed = await awaitCodexSetupSession({scope: prepared.scope, request: f.request,
+            leaseId: lease.leaseId, vault: {
+              async stageCodexSetupSession() {return {async withdraw() {}};},
+              async readCodexSetupSession() {return {request: f.request, state: 'accepted' as const,
+                acceptedAt, result, resultRecordedAt};},
+            }});
+          assert.deepEqual(observed, result);
+          assert.doesNotThrow(() => assertCodexSetupSessionPostCommitAcknowledged(prepared.scope,
+            {request: f.request, result, acceptedAt, resultRecordedAt}));
+          assert.throws(() => assertCodexSetupSessionPostCommitAcknowledged(prepared.scope,
+            {request: f.request, result: {...result, sessionPid: 43}, acceptedAt, resultRecordedAt}),
+          /setup_session_post_commit_unconfirmed/);
+          clearCodexSetupSessionPostCommitAcknowledgment(prepared.scope);
+          assert.throws(() => assertCodexSetupSessionPostCommitAcknowledged(prepared.scope,
+            {request: f.request, result, acceptedAt, resultRecordedAt}), /setup_session_post_commit_unconfirmed/);
           await assert.rejects(withCodexSetupSessionSender({scope: prepared.scope, vault: sender(f.vault), lease},
             async () => {admitted++;}), /sender_conflict/);
           late = () => originalCodexSetupSessionSender(prepared.scope);

@@ -188,6 +188,30 @@ test('expired handoff cannot be staged or accepted and is not pending work', asy
   });
 });
 
+test('acceptance time is derived inside the durable transition and cannot survive a delayed expiry', async t => {
+  await fixture(async f => {
+    const request = {...f.request, expiresAt: new Date(Date.now() + 250).toISOString()};
+    f.vault.stageCodexSetupSession(f.leaseId, digest, request);
+    const prepare = DatabaseSync.prototype.prepare;
+    let delayed = false;
+    t.mock.method(DatabaseSync.prototype, 'prepare', function (this: DatabaseSync, sql: string) {
+      const statement = prepare.call(this, sql), get = statement.get.bind(statement);
+      if (/set state = 'accepted'[\s\S]*returning accepted_at/.test(sql)) {
+        statement.get = ((...args: any[]) => {
+          delayed = true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 350);
+          return Reflect.apply(get, statement, args);
+        }) as typeof statement.get;
+      }
+      return statement;
+    });
+    try {assert.equal(f.vault.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(request))), null);}
+    finally {t.mock.restoreAll();}
+    assert.equal(delayed, true);
+    const observation = f.vault.readCodexSetupSession(id(1), digest);
+    assert.equal(observation?.state, 'pending'); assert.equal(observation?.acceptedAt, null);
+  });
+});
+
 test('scoped submission withdraws synchronously on abort without touching an accepted sibling', async () => {
   await fixture(async f => {
     const sibling = f.vault.claimCodexSetupOperation(id(7), digest);
@@ -298,6 +322,21 @@ test('result timing is assigned at the durable transition and cannot survive a d
     try {assert.throws(() => acceptance.record(outcome), /setup_session_scope_unavailable/);}
     finally {t.mock.restoreAll();}
     assert.equal(delayed, true);
+    const observation = f.vault.readCodexSetupSession(id(1), digest);
+    assert.equal(observation?.state, 'accepted'); assert.equal(observation?.result, null);
+    assert.equal(observation?.resultRecordedAt, null);
+  });
+});
+
+test('a backward result clock cannot commit an authenticated but permanently unreadable row', async t => {
+  await fixture(async f => {
+    f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
+    const acceptance = f.vault.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(f.request)));
+    assert.ok(acceptance);
+    const acceptedAt = Date.parse(f.vault.readCodexSetupSession(id(1), digest)!.acceptedAt!);
+    t.mock.method(Date, 'now', () => acceptedAt - 1);
+    try {assert.throws(() => acceptance.record(outcome), /setup_session_scope_unavailable/);}
+    finally {t.mock.restoreAll();}
     const observation = f.vault.readCodexSetupSession(id(1), digest);
     assert.equal(observation?.state, 'accepted'); assert.equal(observation?.result, null);
     assert.equal(observation?.resultRecordedAt, null);
