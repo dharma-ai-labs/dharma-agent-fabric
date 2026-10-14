@@ -57,10 +57,12 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
   }
   const submission = await input.scope.step(() => input.vault.stageCodexSetupSession(input.leaseId, request.intentDigest, request));
   try {
-    const expiresAt = Date.parse(request.expiresAt);
-    let deadline = Math.min(Date.now() + waitMs, expiresAt);
+    const issuedAt = Date.parse(request.issuedAt), expiresAt = Date.parse(request.expiresAt);
+    const pendingDeadline = Math.min(Date.now() + waitMs, expiresAt);
+    let deadline = pendingDeadline;
     let accepted = false;
-    let observedAtDeadline = false;
+    let acceptedAt: string | null = null;
+    let sawAccepted = false;
     const observe = async () => {
       const observation = await input.scope.step(() => input.vault.readCodexSetupSession(request.operationId, request.intentDigest));
       if (!observation || canonicalize(observation.request) !== canonicalize(request) || observation.state === 'withdrawn') {
@@ -69,17 +71,35 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
       if (accepted && observation.state !== 'accepted') throw new Error('setup_session_scope_changed');
       return observation;
     };
-    do {
-      if (Date.now() >= expiresAt) break;
+    while (Date.now() < expiresAt) {
       const observation = await observe(), observedAt = Date.now();
-      if (!accepted && observedAt >= deadline) break;
-      // Acceptance is not readiness. Keep the original caller alive while its
-      // standing owner performs bounded startup, without a second submission.
-      if (!accepted && observation.state === 'accepted') deadline = Math.min(observedAt + acceptedWaitMs, expiresAt);
-      accepted = observation.state === 'accepted';
       if (observedAt >= expiresAt) break;
-      if (observation.state === 'accepted' && observation.result) return parseLocalCodexSetupSessionResult(observation.result);
-      if (observedAt >= deadline) {observedAtDeadline = true; break;}
+      if (observation.state === 'accepted') {
+        sawAccepted = true;
+        if (typeof observation.acceptedAt !== 'string') throw new Error('setup_session_timing_unavailable');
+        const observedAcceptance = Date.parse(observation.acceptedAt);
+        if (!Number.isFinite(observedAcceptance) || new Date(observedAcceptance).toISOString() !== observation.acceptedAt
+          || observedAcceptance < issuedAt || observedAcceptance >= expiresAt
+          || (acceptedAt !== null && acceptedAt !== observation.acceptedAt)) throw new Error('setup_session_scope_changed');
+        acceptedAt = observation.acceptedAt;
+        if (!accepted) {
+          if (observedAcceptance > pendingDeadline) break;
+          // Acceptance is not readiness. Derive the remaining startup budget
+          // from its authenticated vault timestamp, never from a late poll.
+          accepted = true;
+          deadline = Math.min(observedAcceptance + acceptedWaitMs, expiresAt);
+        }
+        if (observation.result) {
+          if (typeof observation.resultRecordedAt !== 'string') throw new Error('setup_session_timing_unavailable');
+          const recordedAt = Date.parse(observation.resultRecordedAt);
+          if (!Number.isFinite(recordedAt) || new Date(recordedAt).toISOString() !== observation.resultRecordedAt
+            || recordedAt < observedAcceptance || recordedAt >= expiresAt) throw new Error('setup_session_scope_changed');
+          if (recordedAt <= deadline) return parseLocalCodexSetupSessionResult(observation.result);
+        } else if (observation.resultRecordedAt !== null) throw new Error('setup_session_scope_changed');
+      } else if (observation.acceptedAt !== null || observation.result !== null || observation.resultRecordedAt !== null) {
+        throw new Error('setup_session_scope_changed');
+      }
+      if (observedAt >= deadline) break;
       // Waiting is not a protected effect. Requalify once on the next vault
       // observation instead of repeatedly exercising repository, account and
       // protected-store checks while no state can have changed locally.
@@ -89,15 +109,8 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
         input.scope.signal.addEventListener('abort', finish, {once: true});
         if (input.scope.signal.aborted) finish();
       });
-    } while (Date.now() < deadline);
-    // The result may have been recorded during the final idle interval. Make
-    // one protected observation before reporting an accepted session as
-    // unconfirmed; the request expiry remains the hard authority boundary.
-    if (accepted && !observedAtDeadline && Date.now() < expiresAt) {
-      const observation = await observe();
-      if (Date.now() < expiresAt && observation.result) return parseLocalCodexSetupSessionResult(observation.result);
     }
-    throw new Error(accepted ? 'setup_session_accepted_unconfirmed' : 'setup_session_receiver_timeout');
+    throw new Error(sawAccepted ? 'setup_session_accepted_unconfirmed' : 'setup_session_receiver_timeout');
   } finally {
     // Exact pending-request cleanup remains available after scope withdrawal.
     // An accepted request is not cancelled or represented as rolled back.
