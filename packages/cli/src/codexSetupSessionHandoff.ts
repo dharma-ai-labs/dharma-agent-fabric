@@ -192,7 +192,15 @@ export async function consumeCodexSetupSessions(input: {vault: ReceiverVault; ow
       // Unconfirmed cleanup must not be masked by a recorded disposition.
       await cleanup.stopFresh();
       assertOwner();
-      acceptance.record({state: 'unconfirmed', code: 'session_start_unconfirmed'});
+      try {acceptance.record({state: 'unconfirmed', code: 'session_start_unconfirmed'});}
+      catch (recordError) {
+        // Expiry can win after acceptance while the owned startup is being
+        // drained. The accepted row is already the durable no-retry fence;
+        // failing to append a late result must not abort unrelated requests.
+        if (!(recordError instanceof Error && recordError.message === 'setup_session_scope_unavailable')) {
+          reportFailure(error); throw recordError;
+        }
+      }
       reportFailure(error);
     } finally {active = false; receiverContext.delete(scope);}
   }

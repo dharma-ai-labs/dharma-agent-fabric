@@ -2719,7 +2719,14 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     if (!intentDigest || !/^sha256:[a-f0-9]{64}$(?![\s\S])/.test(intentDigest)) throw new Error('setup_runtime_session_unconfirmed');
     const handoff = await step(() => vault.readCodexSetupSession(intent.operationId, intentDigest));
     const request = handoff?.request, result = handoff?.result;
+    const acceptedAt = typeof handoff?.acceptedAt === 'string' ? Date.parse(handoff.acceptedAt) : NaN;
+    const resultRecordedAt = typeof handoff?.resultRecordedAt === 'string' ? Date.parse(handoff.resultRecordedAt) : NaN;
     if (handoff?.state !== 'accepted' || !request || result?.state !== 'started'
+      || !Number.isFinite(acceptedAt) || !Number.isFinite(resultRecordedAt)
+      || new Date(acceptedAt).toISOString() !== handoff.acceptedAt
+      || new Date(resultRecordedAt).toISOString() !== handoff.resultRecordedAt
+      || acceptedAt < Date.parse(request.issuedAt) || acceptedAt >= Date.parse(request.expiresAt)
+      || resultRecordedAt < acceptedAt || resultRecordedAt >= Date.parse(request.expiresAt)
       || request.setupReference !== intent.setupReference || request.membershipId !== intent.recipientMembershipId
       || request.organizationId !== intent.organizationId || request.deviceId !== config.deviceId
       || request.workspaceId !== item.workspaceId || request.workspaceRoot !== workspace || request.name !== name

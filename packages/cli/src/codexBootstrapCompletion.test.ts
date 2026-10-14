@@ -239,6 +239,13 @@ test('actual CLI producer joins the IPC-started child to its exact encrypted han
   assert.equal((await f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash)).sessionId, f.binding.sessionId);
 });
 
+test('actual CLI producer refuses an untimed migrated handoff as completion proof', async t => {
+  const f = await fixture(t); f.enableHandoff();
+  Reflect.set(f.handoff, 'acceptedAt', null); Reflect.set(f.handoff, 'resultRecordedAt', null);
+  await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash),
+    {message: 'setup_runtime_session_unconfirmed'});
+});
+
 for (const ipc of [false, true]) {
   test(`actual completion accepts the official same-package bin supervisor with IPC=${ipc}`, async t => {
     const f = await fixture(t);

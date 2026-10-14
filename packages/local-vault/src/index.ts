@@ -1047,31 +1047,52 @@ export class LocalVault {
     return Object.freeze({request: observation.request, record: (value: LocalCodexSetupSessionResult) => {
       const result = parseLocalCodexSetupSessionResult(value);
       this.#assertSetupJournalDurability();
-      const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
-        .get(operationId) as unknown as CodexSetupSessionRow | undefined;
-      if (!row || row.intent_digest !== intentDigest || row.acceptance_hash !== tokenHash || row.state !== 'accepted') {
-        throw new Error('setup_operation_conflict');
-      }
-      const current = this.#decodeSetupSession(row);
-      if (current.result) {
-        if (canonicalize(current.result) !== canonicalize(result)) throw new Error('setup_operation_conflict');
-        return;
-      }
-      const resultRecordedAt = new Date(Date.now()).toISOString();
-      if (row.accepted_at === null || Date.parse(resultRecordedAt) < Date.parse(row.accepted_at)
-        || Date.parse(resultRecordedAt) >= Date.parse(current.request.expiresAt)) throw new Error('setup_session_scope_unavailable');
       const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
       cipher.setAAD(Buffer.from(`setup-session-result:${operationId}:${intentDigest}:${requestHash}`));
       const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(result))), cipher.final()]);
       const tag = cipher.getAuthTag();
-      const committed = this.#database.prepare(`update codex_setup_sessions
-        set result_nonce = ?, result_tag = ?, result_ciphertext = ?, result_recorded_at = ?, state_mac = ?
-        where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted'
-        and result_ciphertext is null and expires_at > ? and state_mac = ?`)
-        .run(nonce, tag, ciphertext, resultRecordedAt, this.#setupSessionStateMac({...row, result_nonce: nonce,
-          result_tag: tag, result_ciphertext: ciphertext, result_recorded_at: resultRecordedAt}),
-          operationId, intentDigest, tokenHash, resultRecordedAt, row.state_mac);
-      if (committed.changes !== 1) throw new Error('setup_operation_conflict');
+      this.#database.exec('begin immediate');
+      try {
+        const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+          .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+        if (!row || row.intent_digest !== intentDigest || row.acceptance_hash !== tokenHash || row.state !== 'accepted') {
+          throw new Error('setup_operation_conflict');
+        }
+        const current = this.#decodeSetupSession(row);
+        if (current.result) {
+          if (canonicalize(current.result) !== canonicalize(result)) throw new Error('setup_operation_conflict');
+          this.#database.exec('commit'); return;
+        }
+        if (row.accepted_at === null) throw new Error('setup_session_scope_unavailable');
+        // Assign the timestamp in the same write transaction that makes the
+        // encrypted result recordable. Encryption and scheduling before this
+        // statement cannot preserve an earlier apparent completion time.
+        const staged = this.#database.prepare(`update codex_setup_sessions
+          set result_nonce = ?, result_tag = ?, result_ciphertext = ?,
+            result_recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted'
+          and result_ciphertext is null and expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') and state_mac = ?
+          returning result_recorded_at`)
+          .get(nonce, tag, ciphertext, operationId, intentDigest, tokenHash, row.state_mac) as
+            {result_recorded_at: string} | undefined;
+        if (!staged) throw new Error('setup_session_scope_unavailable');
+        const committedRow = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+          .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+        if (!committedRow || committedRow.result_recorded_at !== staged.result_recorded_at
+          || !committedRow.result_ciphertext || committedRow.state_mac !== row.state_mac) {
+          throw new Error('setup_operation_conflict');
+        }
+        const finalized = this.#database.prepare(`update codex_setup_sessions set state_mac = ?
+          where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted'
+          and result_recorded_at = ? and expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') and state_mac = ?`)
+          .run(this.#setupSessionStateMac(committedRow), operationId, intentDigest, tokenHash,
+            staged.result_recorded_at, row.state_mac);
+        if (finalized.changes !== 1) throw new Error('setup_session_scope_unavailable');
+        this.#database.exec('commit');
+      } catch (error) {
+        try {this.#database.exec('rollback');} catch {}
+        throw error;
+      }
     }});
   }
 

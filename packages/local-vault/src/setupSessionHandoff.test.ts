@@ -277,6 +277,33 @@ test('accepted and result timing metadata are authenticated with the encrypted h
   });
 });
 
+test('result timing is assigned at the durable transition and cannot survive a delayed expiry', async t => {
+  await fixture(async f => {
+    const request = {...f.request, expiresAt: new Date(Date.now() + 500).toISOString()};
+    f.vault.stageCodexSetupSession(f.leaseId, digest, request);
+    const acceptance = f.vault.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(request)));
+    assert.ok(acceptance);
+    const prepare = DatabaseSync.prototype.prepare;
+    let delayed = false;
+    t.mock.method(DatabaseSync.prototype, 'prepare', function (this: DatabaseSync, sql: string) {
+      const statement = prepare.call(this, sql), get = statement.get.bind(statement);
+      if (/set result_nonce[\s\S]*returning result_recorded_at/.test(sql)) {
+        statement.get = ((...args: any[]) => {
+          delayed = true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+          return Reflect.apply(get, statement, args);
+        }) as typeof statement.get;
+      }
+      return statement;
+    });
+    try {assert.throws(() => acceptance.record(outcome), /setup_session_scope_unavailable/);}
+    finally {t.mock.restoreAll();}
+    assert.equal(delayed, true);
+    const observation = f.vault.readCodexSetupSession(id(1), digest);
+    assert.equal(observation?.state, 'accepted'); assert.equal(observation?.result, null);
+    assert.equal(observation?.resultRecordedAt, null);
+  });
+});
+
 test('ciphertext transplant across original operation identities is refused', async () => {
   await fixture(async f => {
     f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);

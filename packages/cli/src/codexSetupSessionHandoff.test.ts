@@ -270,6 +270,35 @@ test('post-acceptance policy change records bounded unconfirmed disposition and 
   });
 });
 
+test('expiry during accepted startup retains its no-retry fence and does not abort a later request', async () => {
+  await fixture(async f => {
+    const first = {...f.request, expiresAt: new Date(Date.now() + 250).toISOString()};
+    f.vault.stageCodexSetupSession(f.leaseId, digest, first);
+    const sibling = f.vault.claimCodexSetupOperation(uuid(7), digest);
+    if (sibling.state !== 'acquired') throw new Error('fixture_claim_missing');
+    const second = {...f.request, operationId: uuid(7), name: 'implementer'};
+    f.vault.stageCodexSetupSession(sibling.leaseId, digest, second);
+    const owner = createNamedSessionChildOwner(f.signal), failures: Readonly<CodexSetupFailureDiagnostic>[] = [];
+    let starts = 0;
+    await owner.run(async () => {
+      assert.equal(await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal,
+        authorize: async () => true, onFailure: failure => {failures.push(failure);}, start: async scope => {
+          starts++;
+          if (scope.request.operationId === first.operationId) {
+            await new Promise(resolve => setTimeout(resolve, 350));
+            throw new Error('setup_session_scope_unavailable');
+          }
+          return unconfirmed;
+        }}), 2);
+    });
+    const interrupted = f.vault.readCodexSetupSession(first.operationId, digest);
+    assert.equal(interrupted?.state, 'accepted'); assert.equal(interrupted?.result, null);
+    assert.deepEqual(f.vault.readCodexSetupSession(second.operationId, digest)?.result, unconfirmed);
+    assert.equal(starts, 2); assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.category, 'setup_session_scope_unavailable');
+  });
+});
+
 test('claimed process metadata cannot substitute for the standing owner fresh child', async () => {
   await fixture(async f => {
     f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
