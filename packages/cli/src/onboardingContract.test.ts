@@ -82,6 +82,18 @@ test('the installed guide scopes trusted setup approval to one native command', 
   assert.doesNotMatch(contract, /--dangerously-bypass|--yolo|--sandbox danger-full-access/);
 });
 
+test('the installed guide keeps executable setup text out of the child model turn', async () => {
+  const contract = await readFile(contractUrl, 'utf8');
+  assert.match(contract, /From CLI 0\.2\.195/);
+  assert.match(contract, /captures, validates, binds and SHA-256 attributes the exact public portal prompt/);
+  assert.match(contract, /never forwards that raw prompt as executable child-turn content/);
+  assert.match(contract, /host-derived instruction bound to the exact operation ID, setup reference and prompt hash/);
+  assert.match(contract, /prohibits executing, reconstructing, quoting or repeating setup shell commands/);
+  assert.match(contract, /prevents a child turn from recursively launching the outer setup command/);
+  assert.match(contract, /validation input and hash-attribution evidence, not child model content/);
+  assert.doesNotMatch(contract, /supplies either[\s\S]*as its child session's single user message/);
+});
+
 test('the overview separates native command approval from recipient device approval', async () => {
   const contract = await readFile(contractUrl, 'utf8');
   const overview = contract.split(/\r?\n\r?\n/)[1]!;
