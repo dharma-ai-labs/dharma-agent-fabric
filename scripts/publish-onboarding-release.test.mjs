@@ -12,16 +12,16 @@ const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
 const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('frozen customer ingress candidate admits only the bounded CLI197 release delta', () => {
+test('frozen source requalification candidate admits only the bounded CLI198 release delta', () => {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = 'f1633a7698e172d828cbb2ac389c4a07802311b0';
+  const baseline = '31a1ad4ed35e07dd17fa834ea7e2eb8d28f3d489';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'cfd88c793f2c645f837e6d7e2d16c05c1d68f093');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '4e1fa8ac021e26e7a381c245903bcf0845e4e0d5');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
-  const cliManifest = {...baselineCliManifest, version: '0.2.197'};
+  const cliManifest = {...baselineCliManifest, version: '0.2.198'};
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
-  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.197';
+  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.198';
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -94,11 +94,10 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('verifies the immutable dependency closure and publishes local-vault before CLI197', async () => {
+test('verifies the immutable dependency closure and publishes only CLI198', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, [
-    '@dharma-ai-labs/agent-fabric-local-vault',
     '@dharma-ai-labs/agent-fabric',
   ]);
   assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
@@ -107,7 +106,7 @@ test('verifies the immutable dependency closure and publishes local-vault before
     ['@dharma-ai-labs/agent-fabric-task-runner', '0.1.36'],
     ['@dharma-ai-labs/agent-fabric-evidence-reduction', '0.2.33'],
     ['@dharma-ai-labs/agent-fabric-local-vault', '0.1.29'],
-    ['@dharma-ai-labs/agent-fabric', '0.2.197'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.198'],
   ]);
 });
 
@@ -154,13 +153,13 @@ for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'm
       'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
       'publish:onboarding': 'node scripts/publish-onboarding-release.mjs',
     } };
-    const snapshot = { head, ref: 'refs/heads/main', tree: 'cfd88c793f2c645f837e6d7e2d16c05c1d68f093',
+    const snapshot = { head, ref: 'refs/heads/main', tree: '4e1fa8ac021e26e7a381c245903bcf0845e4e0d5',
       dirty: '', lifecycleLauncher: '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
       changed: [], untracked: [], baselineManifest: structuredClone(manifest), manifest,
       baselineCliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.188', dependencies: {}},
-      cliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.197', dependencies: {}},
+      cliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.198', dependencies: {}},
       baselineLock: {packages: {'packages/cli': {version: '0.2.188'}}},
-      lock: {packages: {'packages/cli': {version: '0.2.197'}}} };
+      lock: {packages: {'packages/cli': {version: '0.2.198'}}} };
     assert.doesNotThrow(() => assertSourceSnapshot(head, snapshot));
     snapshot[defect] = ['changed', 'untracked'].includes(defect) ? ['packages/cli/other.js']
       : defect === 'manifest' ? { scripts: {} } : 'wrong';
@@ -196,7 +195,31 @@ test('uncertain CLI publication is not retried after its dependency is verified'
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
   await assert.rejects(publishBoundedRelease(head, io), /uncertain CLI publication/);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
+});
+
+test('published vault requires its original immutable bytes and publisher without republishing', async () => {
+  const vault = approvedPackages.find(item => item.name === '@dharma-ai-labs/agent-fabric-local-vault');
+  assert.equal(vault.existingArtifact.source, 'bbaeecb75a3139c6a5b65b6dc0cd351fb10b872d');
+  assert.equal(vault.existingArtifact.integrity,
+    'sha512-h2Bq42d9cbGFiJzXjffI3fGoGnXEsJvmlyelr8vQHG2Ry1hyG+vTl0a6x9N658WGNpGB+hEgpN1AFunZjr7OHg==');
+  const {io, effects, verified} = fixture();
+  await publishBoundedRelease(head, io);
+  assert.equal(verified.find(item => item.name === vault.name).source, vault.existingArtifact.source);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
+  for (const missing of [true, false]) {
+    const blocked = fixture();
+    if (missing) {
+      const lookup = blocked.io.lookup;
+      blocked.io.lookup = async item => item.name === vault.name ? null : lookup(item);
+    } else {
+      const pack = blocked.io.pack;
+      blocked.io.pack = async item => item.name === vault.name
+        ? {integrity: 'changed-vault', filename: 'changed.tgz'} : pack(item);
+    }
+    await assert.rejects(publishBoundedRelease(head, blocked.io), /reconciled artifact/);
+    assert.deepEqual(blocked.effects, []);
+  }
 });
 
 test('already reconciled contracts require their exact original publication source', async () => {
