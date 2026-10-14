@@ -2255,7 +2255,10 @@ test('Hermes bootstrap trusts the repository and verifies native discovery', asy
   assert.equal(installed.verified, true);
   const installedSkill = await readFile(installed.skillPath, 'utf8');
   assert.match(installedSkill, /source-only setup reference does not authorize a join, source expansion or a writable peer task/);
-  assert.match(installedSkill, /intended recipient approves only the matching browser device request/);
+  assert.match(installedSkill, /intended recipient reviews the matching browser device request/);
+  assert.match(installedSkill, /a shell entry also requires the coding harness's normal command approval/);
+  assert.match(installedSkill, /These are separate boundaries, not extra terminal commands or credential pasting/);
+  assert.doesNotMatch(installedSkill, /intended recipient approves only the matching browser device request/);
   assert.doesNotMatch(installedSkill, /supports connecting a new source repository and joining an existing organization repository agent/);
   assert.doesNotMatch(installedSkill, /Use this skill only inside a repository containing/);
   assert.deepEqual(calls[0], {
