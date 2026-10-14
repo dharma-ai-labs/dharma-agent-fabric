@@ -173,6 +173,24 @@ test('short valid pending budgets retain a bounded final observation', async t =
   });
 });
 
+test('a frozen final clock tick permits only one zero-delay observation', async t => {
+  await fixture(async f => {
+    const now = Date.now(); let reads = 0;
+    t.mock.method(Date, 'now', () => now);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        return {request: f.request, state: 'pending' as const,
+          acceptedAt: null, result: null, resultRecordedAt: null};
+      },
+    };
+    await assert.rejects(awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, waitMs: 1}), /setup_session_receiver_timeout/);
+    assert.equal(reads, 2);
+  });
+});
+
 test('a timely acceptance timestamp observed only after the pending deadline cannot authorize startup', async t => {
   await fixture(async f => {
     let now = Date.now(), reads = 0;

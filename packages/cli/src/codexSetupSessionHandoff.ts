@@ -85,6 +85,7 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
     let accepted = false;
     let acceptedAt: string | null = null;
     let sawAccepted = false;
+    let immediateObservationScheduled = false;
     const observe = async () => {
       const observation = await input.scope.step(() => input.vault.readCodexSetupSession(request.operationId, request.intentDigest));
       if (!observation || canonicalize(observation.request) !== canonicalize(request) || observation.state === 'withdrawn') {
@@ -145,6 +146,9 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
       // Waiting is not a protected effect. Requalify once on the next vault
       // observation instead of repeatedly exercising repository, account and
       // protected-store checks while no state can have changed locally.
+      const delay = remaining > 25 ? Math.min(1_000, remaining - 25) : Math.floor(remaining / 2);
+      if (delay === 0 && immediateObservationScheduled) break;
+      if (delay === 0) immediateObservationScheduled = true;
       await new Promise<void>(resolveWait => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         let immediate: ReturnType<typeof setImmediate> | undefined;
@@ -153,7 +157,6 @@ export async function awaitCodexSetupSession(input: {vault: SenderVault; scope: 
           if (immediate) clearImmediate(immediate);
           input.scope.signal.removeEventListener('abort', finish); resolveWait();
         };
-        const delay = remaining > 25 ? Math.min(1_000, remaining - 25) : Math.floor(remaining / 2);
         if (delay > 0) timer = setTimeout(finish, delay);
         else immediate = setImmediate(finish);
         input.scope.signal.addEventListener('abort', finish, {once: true});
