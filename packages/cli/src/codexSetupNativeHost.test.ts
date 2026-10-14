@@ -129,17 +129,25 @@ function publicPrompt(intent: CodexSetupIntent) {
     + `Recipient: synthetic@example.test. Organization: ${intent.organizationId}.\n`
     + `Selected repository: https://example.test/source.git. Fingerprint: ${intent.repositoryFingerprint}.\n`
     + `Public setup reference: ${intent.setupReference}. Fixed expiry: ${intent.expiresAt}.\n`
-    + 'Use only the matching host-bound dharma_setup_reference tool. Do not run shell authentication checks.';
+    + 'Use only the matching host-bound dharma_setup_reference tool. Do not run shell authentication checks.\n'
+    + `Execute this complete command: npm exec --yes --package=@dharma-ai-labs/agent-fabric@0.2.194 -- dharma setup codex --setup-reference ${intent.setupReference}`;
 }
 
-test('native setup receives the original public user prompt once without a controller-written substitute', async () => {
+test('native setup authenticates the original public prompt without recursively sending its setup command', async () => {
   const f = fixture(), original = publicPrompt(f.input.intent);
   f.input.initialUserPrompt = original;
   const host = await open(f.input);
   try {
     const start = f.calls.find(call => call.method === 'turn/start')!;
-    assert.deepEqual(start.params.input, [{type: 'text', text: original}]);
-    assert.equal(host.initialUserPromptSha256, createHash('sha256').update(original).digest('hex'));
+    const text = (start.params.input as Array<{type: string; text: string}>)[0]!.text;
+    const originalHash = createHash('sha256').update(original).digest('hex');
+    assert.notEqual(text, original);
+    assert.match(text, new RegExp(f.input.intent.operationId));
+    assert.match(text, new RegExp(f.input.intent.setupReference));
+    assert.match(text, new RegExp(originalHash));
+    assert.doesNotMatch(text, /npm exec|dharma setup codex|DHARMA_SETUP_RUNTIME/);
+    assert.match(text, /Do not execute, reconstruct, quote, or repeat any setup shell command/);
+    assert.equal(host.initialUserPromptSha256, originalHash);
     assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
     const thread = f.calls.find(call => call.method === 'thread/start')!;
     const tools = thread.params.dynamicTools as Array<{name: string; description: string}>;
@@ -189,7 +197,9 @@ test('public prompt is captured before asynchronous host qualification without a
   f.input.current = async () => {f.input.initialUserPrompt = 'foreign replacement'; return current();};
   const host = await open(f.input);
   try {
-    assert.deepEqual(f.calls.find(call => call.method === 'turn/start')!.params.input, [{type: 'text', text: original}]);
+    const input = f.calls.find(call => call.method === 'turn/start')!.params.input as Array<{text: string}>;
+    assert.match(input[0]!.text, new RegExp(createHash('sha256').update(original).digest('hex')));
+    assert.doesNotMatch(input[0]!.text, /foreign replacement|npm exec|dharma setup codex/);
     f.complete(); await host.settled;
     assert.equal(f.counts.claims, 0);
   } finally {await host.close();}

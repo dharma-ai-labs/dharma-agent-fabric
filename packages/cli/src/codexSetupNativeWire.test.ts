@@ -39,9 +39,12 @@ lines.on('line', line => {
   else if (value.method === 'thread/archive') respond({});
   else if (['thread/read', 'thread/unarchive', 'thread/resume'].includes(value.method)) respond({thread: {id: 'synthetic_thread', cwd, name, status: {type: 'idle'}}});
   else if (value.method === 'turn/start') {
+    const prompt = value.params.input[0].text;
     send({method: 'fixture/prompt', params: {count: value.params.input.length,
-      hash: require('node:crypto').createHash('sha256').update(value.params.input[0].text).digest('hex'),
-      bound: setupDescription.includes('${id(1)}') && setupDescription.includes('${id(2)}')}});
+      hash: require('node:crypto').createHash('sha256').update(prompt).digest('hex'),
+      bound: setupDescription.includes('${id(1)}') && setupDescription.includes('${id(2)}'),
+      referenceBound: prompt.includes('${id(1)}') && prompt.includes('${id(2)}'),
+      recursiveCommandAbsent: !/npm exec|dharma setup codex|DHARMA_SETUP_RUNTIME/.test(prompt)}});
     send({id: 'fixture_call', method: 'item/tool/call', params: {threadId: 'synthetic_thread', turnId: 'synthetic_turn',
       callId: 'fixture_call', tool: 'dharma_setup_reference', namespace: null,
       arguments: {operationId: '${id(1)}', setupReference: '${id(2)}'}}});
@@ -166,13 +169,14 @@ test('fixture watchdog still rejects an absent native disposition', async () => 
   }, 0, true);
 });
 
-test('original public prompt and host-bound tool compose over actual owned stdio without shell authentication', async () => {
+test('verified public prompt provenance and host-bound tool compose over actual owned stdio without recursion', async () => {
   await fixture(async (input, disposition) => {
     const original = '# Dharma Agent Fabric \u2014 one-prompt source setup\n'
       + `Recipient: synthetic@example.test. Organization: ${input.intent.organizationId}.\n`
       + `Selected repository: https://example.test/source.git. Fingerprint: ${input.intent.repositoryFingerprint}.\n`
       + `Public setup reference: ${input.intent.setupReference}. Fixed expiry: ${input.intent.expiresAt}.\n`
-      + 'Use the host-bound setup tool; account checks belong to the trusted host.';
+      + 'Use the host-bound setup tool; account checks belong to the trusted host.\n'
+      + `Execute: npm exec --yes -- dharma setup codex --setup-reference ${input.intent.setupReference}`;
     input.initialUserPrompt = original;
     input.initialUserPromptBinding = {recipientEmail: 'synthetic@example.test', repositoryRemoteUrl: 'https://example.test/source.git'};
     let observed: unknown;
@@ -185,7 +189,11 @@ test('original public prompt and host-bound tool compose over actual owned stdio
       assert.equal((await disposition as {success: boolean}).success, true);
       await host.settled;
       const hash = createHash('sha256').update(original).digest('hex');
-      assert.deepEqual(observed, {count: 1, hash, bound: true});
+      const observation = observed as {count: number; hash: string; bound: boolean;
+        referenceBound: boolean; recursiveCommandAbsent: boolean};
+      assert.equal(observation.count, 1); assert.notEqual(observation.hash, hash);
+      assert.equal(observation.bound, true); assert.equal(observation.referenceBound, true);
+      assert.equal(observation.recursiveCommandAbsent, true);
       assert.equal(host.initialUserPromptSha256, hash);
     } finally {unsubscribe(); await host.close();}
   });
