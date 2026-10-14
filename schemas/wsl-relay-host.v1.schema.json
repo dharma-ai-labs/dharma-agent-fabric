@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/wsl-relay-host/v1",
+  "title": "Owned WSL Relay Host Registration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "distribution", "linuxUser", "windowsSid", "executable", "taskName", "arguments", "description"],
+  "properties": {
+    "schema": {"const": "dharma.wsl-relay-host/v1"},
+    "distribution": {"type": "string", "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]*[A-Za-z0-9._-]$|^[A-Za-z0-9]$"},
+    "linuxUser": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,31}$"},
+    "windowsSid": {"type": "string", "pattern": "^S-1-5-21-(?:[0-9]{1,10}-){2}[0-9]{1,10}-[0-9]{1,10}$"},
+    "executable": {"type": "string", "maxLength": 260, "pattern": "^[A-Za-z]:\\\\[Ww][Ii][Nn][Dd][Oo][Ww][Ss]\\\\[Ss][Yy][Ss][Tt][Ee][Mm]32\\\\[Ww][Ss][Ll]\\.[Ee][Xx][Ee]$"},
+    "taskName": {"type": "string", "pattern": "^DharmaAgentFabric-WSL-[a-f0-9]{24}$"},
+    "arguments": {"type": "string", "maxLength": 512, "pattern": "^--distribution \"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}\" --user \"[a-z_][a-z0-9_-]{0,31}\" --cd / --exec /usr/bin/systemctl --user start --wait dharma-agent-fabric\\.service$"},
+    "description": {"type": "string", "pattern": "^Dharma Agent Fabric owned WSL host [a-f0-9]{64}$"}
+  }
+}

@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import { assertContainerStartupOwnership, containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
   writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
+import {assertWslHostPreflight, disableWslRelayHost, enableWslRelayHost, startWslRelayHost,
+  wslRelayHostStatus, type WslHostOptions} from './wslRelayHost.js';
 
 const execFileAsync = promisify(execFile);
 const UNIT_NAME = 'dharma-agent-fabric.service';
@@ -15,7 +17,7 @@ const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 
 type Runner = (file: string, args: string[]) => Promise<{ stdout: string }>;
 
-export interface RelayAutostartOptions {
+export interface RelayAutostartOptions extends WslHostOptions {
   home: string;
   userHome?: string;
   platform?: NodeJS.Platform;
@@ -49,7 +51,8 @@ export type RelayAutostartState = {
   version?: string;
   reason?: string;
   lifecycle?: 'configured' | 'unconfigured' | 'paused' | 'blocked' | 'starting' | 'running';
-  restartCoverage?: 'container-entrypoint-only';
+  restartCoverage?: 'container-entrypoint-only' | 'wsl-host-logon';
+  hostLifecycle?: 'registered' | 'running';
 };
 
 const defaultRunner: Runner = async (file, args) => {
@@ -285,6 +288,7 @@ export async function assertRelayStartupOwnership(options: RelayAutostartOptions
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       if (registration) throw new Error('autostart_conflict: the registered user startup entry is missing.');
+      await assertWslHostPreflight(options);
       return;
     }
     throw error;
@@ -296,6 +300,7 @@ export async function assertRelayStartupOwnership(options: RelayAutostartOptions
   if (options.version && registration.policy !== null && registration.version !== options.version) {
     throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
   }
+  await assertWslHostPreflight(options);
 }
 
 function windowsTaskGuard(registration: Registration, home: string) {
@@ -352,6 +357,13 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
       ));
     if (result.stdout.trim() === 'conflict') return { state: 'unavailable', backend: registration.backend,
       version: registration.version, reason: 'autostart_conflict' };
+    if (registration.backend === 'systemd-user' && result.stdout.trim() === 'enabled') {
+      const host = await wslRelayHostStatus(options);
+      if (host) return {state: host.exists && host.enabled ? 'enabled' : 'unavailable',
+        backend: registration.backend, version: registration.version, restartCoverage: 'wsl-host-logon',
+        hostLifecycle: host.running ? 'running' : 'registered',
+        ...(!host.exists || !host.enabled ? {reason: 'wsl_host_startup_unavailable'} : {})};
+    }
     return { state: result.stdout.trim() === 'enabled' ? 'enabled' : 'disabled',
       backend: registration.backend, version: registration.version };
   } catch (error) {
@@ -364,6 +376,7 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
     }
     return { state: 'unavailable', backend: registration.backend, version: registration.version,
       reason: error instanceof Error && error.message.startsWith('autostart_conflict:') ? 'autostart_conflict'
+        : error instanceof Error && error.message === 'wsl_host_startup_unavailable' ? 'wsl_host_startup_unavailable'
         : registration.backend === 'container-entrypoint' ? 'container_startup_unavailable'
         : registration.backend === 'systemd-user' ? 'systemd_user_unavailable'
         : registration.backend === 'launchd-user' ? 'launchd_user_unavailable' : 'task_scheduler_unavailable' };
@@ -459,6 +472,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   if (existingContents !== null && existingContents !== ownedContents && existingContents !== ownedLegacyContents) {
     throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
   }
+  if (backend === 'systemd-user') await assertWslHostPreflight(options);
   if (platform === 'win32' && previous) {
     await run('powershell.exe', encodedPowerShell(windowsTaskLookup(previous)
       + `if ($null -ne $task) { ${windowsTaskGuard(previous, options.home)} }`));
@@ -479,6 +493,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   if (platform === 'linux') {
     await run('systemctl', ['--user', 'daemon-reload']);
     await run('systemctl', ['--user', 'enable', UNIT_NAME]);
+    await enableWslRelayHost(options);
   } else if (platform === 'darwin') {
     await run('/usr/bin/plutil', ['-lint', destination]);
     await run('/bin/launchctl', ['enable', `${macDomain(options)}/${MAC_LABEL}`]);
@@ -517,6 +532,7 @@ export async function disableRelayAutostart(options: RelayAutostartOptions): Pro
     await containerStartupControl(options, registration as ContainerRelayRegistration, false);
     await rm(join(options.home, 'relay', 'container-control.json'), { force: true });
   } else if (registration.backend === 'systemd-user') {
+    await disableWslRelayHost(options);
     await run('systemctl', ['--user', 'disable', UNIT_NAME]);
     await rm(unitPath(options.userHome || homedir()), { force: true });
     await run('systemctl', ['--user', 'daemon-reload']);
@@ -549,6 +565,7 @@ export async function startRelayAutostart(options: RelayAutostartOptions) {
     await step(() => containerStartupControl(options, registration as ContainerRelayRegistration, true));
   } else if (registration.backend === 'systemd-user') {
     await step(() => run('systemctl', ['--user', 'start', UNIT_NAME]));
+    await step(() => startWslRelayHost(options));
   } else if (registration.backend === 'launchd-user') {
     if (!await step(() => macLoaded(options, registration))) {
       await step(() => run('/bin/launchctl', ['bootstrap', macDomain(options), macPath(options)]));

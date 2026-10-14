@@ -382,6 +382,19 @@ for (const change of ['foreign-device', 'foreign-org', 'route', 'inactive', 'unr
   });
 }
 
+test('actual completion requires a running WSL host owner, not registration alone', async t => {
+  const f = await fixture(t);
+  f.startup.backend = 'systemd-user'; f.startupState.backend = 'systemd-user';
+  Reflect.set(f.startupState, 'restartCoverage', 'wsl-host-logon');
+  for (const value of ['registered', undefined]) {
+    Reflect.set(f.startupState, 'hostLifecycle', value);
+    await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history'), /setup_runtime_startup_unconfirmed/);
+  }
+  Reflect.set(f.startupState, 'hostLifecycle', 'running');
+  const observation = await f.observe(f.prepared, f.providerVault, 'no_eligible_history');
+  assert.equal(observation.startupBackend, 'systemd-user');
+});
+
 test('actual CLI producer joins scoped identity, server role, native package and creation-identity observations', async t => {
   const f = await fixture(t);
   const observation = await f.observe(f.prepared, f.providerVault, 'no_eligible_history');

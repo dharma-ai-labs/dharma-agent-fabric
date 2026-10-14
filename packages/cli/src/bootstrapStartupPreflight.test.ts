@@ -113,6 +113,17 @@ test('startup preflight read failure has a sanitized typed blocker rather than c
   assert.equal(JSON.stringify(result).includes('private unreadable path'), false);
 });
 
+test('WSL startup availability is an actionable preclaim failure without consuming authority', async () => {
+  const f = await fixture('reference', new Error('wsl_host_startup_unavailable'));
+  const result = await f.run();
+  assert.equal(result.code, 'wsl_host_startup_unavailable');
+  assert.equal(result.stage, 'startup_preflight');
+  assert.equal(result.grantRedeemed, false);
+  assert.equal(result.enrollmentChanged, false);
+  assert.match(result.message, /WSL.*host/i);
+  assert.deepEqual(f.effects, ['startup_preflight']);
+});
+
 test('startup version mismatch is an actionable preclaim blocker without authority consumption', async () => {
   const f = await fixture('reference', new Error('relay_runtime_upgrade_required: private path'));
   const result = await f.run();
