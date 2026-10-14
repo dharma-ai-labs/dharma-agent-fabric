@@ -59,7 +59,10 @@ test('the installed guide distinguishes canonical portal input from legacy stdin
   assert.match(contract, /Legacy `--stdin` remains supported for an entire original public prompt and cannot combine with either portal pin/i);
   assert.match(contract, /`nativeOriginalUserPromptAttested:false`/);
   assert.match(contract, /legacy input is not a failure fallback/i);
-  assert.match(contract, /both npm prefix and cache beneath the approved checkout/);
+  assert.match(contract, /From CLI 0\.2\.193/);
+  assert.match(contract, /both npm prefix and cache in a fresh private temporary directory outside the source checkout/);
+  assert.match(contract, /trusted runtime files inside a mutable source checkout remain forbidden/);
+  assert.doesNotMatch(contract, /both npm prefix and cache beneath the approved checkout/);
   assert.match(contract, /qualified private `DHARMA_HOME` and existing `CODEX_HOME`/);
   assert.match(contract, /not attachment to an arbitrary existing desktop chat/i);
   assert.match(contract, /never retry a refused, expired or interrupted setup/i);
