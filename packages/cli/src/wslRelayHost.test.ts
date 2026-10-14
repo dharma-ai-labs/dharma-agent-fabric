@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test, {type TestContext} from 'node:test';
@@ -11,7 +11,7 @@ import {validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
 import {prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 
 async function fixture(t: TestContext) {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-wsl-host-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-wsl-host-')));
   t.after(() => rm(root, {recursive: true, force: true}));
   const scripts: string[] = [];
   let exists = false;
