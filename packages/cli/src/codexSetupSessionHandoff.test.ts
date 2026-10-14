@@ -72,7 +72,7 @@ test('accepted wait rejects invalid budgets before staging any authority', async
   });
 });
 
-test('accepted wait polls at most once per second without protected-scope churn', async () => {
+test('accepted wait avoids protected-scope churn and makes one final observation', async () => {
   await fixture(async f => {
     let reads = 0, protectedSteps = 0;
     const scope: BootstrapHostScope = {...f.scope, async step(operation) {
@@ -88,8 +88,30 @@ test('accepted wait polls at most once per second without protected-scope churn'
     };
     await assert.rejects(awaitCodexSetupSession({vault, scope, request: f.request,
       leaseId: f.leaseId, acceptedWaitMs: 250}), /setup_session_accepted_unconfirmed/);
-    assert.equal(reads, 1);
-    assert.equal(protectedSteps, 2);
+    assert.equal(reads, 2);
+    assert.equal(protectedSteps, 3);
+  });
+});
+
+test('accepted wait returns a result recorded during its final idle interval', async () => {
+  await fixture(async f => {
+    let reads = 0, available = false;
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_final_observation', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    const timer = setTimeout(() => {available = true;}, 50);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        return {request: f.request, state: 'accepted' as const, result: available ? result : null};
+      },
+    };
+    try {
+      assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+        leaseId: f.leaseId, acceptedWaitMs: 250}), result);
+    } finally {clearTimeout(timer);}
+    assert.equal(reads, 2);
   });
 });
 
@@ -105,7 +127,8 @@ test('accepted wait cannot extend pending timeout, original expiry, or its own f
           reads++;
           if (mode === 'pending') now += 30_001;
           else if (reads === 2) now = mode === 'expiry' ? Date.parse(f.request.expiresAt) : now + 1000;
-          return {request:f.request,state:'accepted' as const,result:reads === 2 ? unconfirmed : null};
+          return {request:f.request,state:'accepted' as const,
+            result:reads === 2 && mode !== 'accepted-budget' ? unconfirmed : null};
         }};
       await assert.rejects(awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId,
         acceptedWaitMs:mode === 'accepted-budget' ? 1000 : 120_000}),
