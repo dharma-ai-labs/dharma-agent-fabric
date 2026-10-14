@@ -118,16 +118,18 @@ const SETUP_SESSION_SCHEMA = `create table if not exists codex_setup_sessions (
   state text not null check (state in ('pending', 'accepted', 'withdrawn')),
   state_mac text not null,
   acceptance_hash text,
+  accepted_at text,
   request_nonce blob not null, request_tag blob not null, request_ciphertext blob not null,
-  result_nonce blob, result_tag blob, result_ciphertext blob,
+  result_nonce blob, result_tag blob, result_ciphertext blob, result_recorded_at text,
   check ((result_nonce is null and result_tag is null and result_ciphertext is null)
     or (state = 'accepted' and result_nonce is not null and result_tag is not null and result_ciphertext is not null))
 );`;
 interface CodexSetupSessionRow {
   operation_id: string; intent_digest: string; sender_hash: string; request_hash: string; expires_at: string;
-  state: 'pending' | 'accepted' | 'withdrawn'; state_mac: string; acceptance_hash: string | null;
+  state: 'pending' | 'accepted' | 'withdrawn'; state_mac: string; acceptance_hash: string | null; accepted_at: string | null;
   request_nonce: Uint8Array; request_tag: Uint8Array; request_ciphertext: Uint8Array;
   result_nonce: Uint8Array | null; result_tag: Uint8Array | null; result_ciphertext: Uint8Array | null;
+  result_recorded_at: string | null;
 }
 
 export interface ScopedCodexSetupJournal {
@@ -496,6 +498,13 @@ export class LocalVault {
         const columns = database!.prepare('pragma table_info(provider_session_task_exports)').all() as Array<{ name: string }>;
         if (!columns.some(column => column.name === 'receipt_hash')) {
           database!.exec('alter table provider_session_task_exports add column receipt_hash text references blobs(content_id)');
+        }
+        const setupSessionColumns = database!.prepare('pragma table_info(codex_setup_sessions)').all() as Array<{ name: string }>;
+        if (!setupSessionColumns.some(column => column.name === 'accepted_at')) {
+          database!.exec('alter table codex_setup_sessions add column accepted_at text');
+        }
+        if (!setupSessionColumns.some(column => column.name === 'result_recorded_at')) {
+          database!.exec('alter table codex_setup_sessions add column result_recorded_at text');
         }
         database!.exec('commit');
       } catch (error) { database!.exec('rollback'); throw error; }
@@ -924,8 +933,9 @@ export class LocalVault {
     const tag = cipher.getAuthTag();
     const stateMac = this.#setupSessionStateMac({operation_id: request.operationId, intent_digest: intentDigest,
       sender_hash: senderHash, request_hash: requestHash, expires_at: request.expiresAt, state: 'pending', acceptance_hash: null,
+      accepted_at: null,
       request_nonce: nonce, request_tag: tag, request_ciphertext: ciphertext,
-      result_nonce: null, result_tag: null, result_ciphertext: null});
+      result_nonce: null, result_tag: null, result_ciphertext: null, result_recorded_at: null});
     this.#database.prepare(`insert into codex_setup_sessions
       (operation_id, intent_digest, sender_hash, request_hash, expires_at, state, state_mac, request_nonce, request_tag, request_ciphertext)
       values (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?) on conflict(operation_id) do nothing`)
@@ -946,10 +956,14 @@ export class LocalVault {
       row.result_nonce, row.result_tag, row.result_ciphertext]) {
       bytes.update(`${value?.byteLength ?? -1}:`); if (value) bytes.update(value);
     }
-    return createHmac('sha256', this.#masterKey).update(canonicalize({schema: 'dharma.local-setup-session-state/v1',
+    const timed = row.accepted_at !== null || row.result_recorded_at !== null;
+    return createHmac('sha256', this.#masterKey).update(canonicalize({schema: timed
+      ? 'dharma.local-setup-session-state/v2' : 'dharma.local-setup-session-state/v1',
       operationId: row.operation_id, intentDigest: row.intent_digest, senderHash: row.sender_hash,
       requestHash: row.request_hash, expiresAt: row.expires_at, state: row.state,
-      acceptanceHash: row.acceptance_hash, ciphertextHash: bytes.digest('hex')})).digest('hex');
+      acceptanceHash: row.acceptance_hash,
+      ...(timed ? {acceptedAt: row.accepted_at, resultRecordedAt: row.result_recorded_at} : {}),
+      ciphertextHash: bytes.digest('hex')})).digest('hex');
   }
 
   #decodeSetupSession(row: CodexSetupSessionRow): LocalCodexSetupSessionObservation {
@@ -965,6 +979,13 @@ export class LocalVault {
         decipher.update(row.request_ciphertext), decipher.final()]).toString('utf8')));
       if (request.operationId !== row.operation_id || request.intentDigest !== row.intent_digest
         || request.expiresAt !== row.expires_at || sha256(canonicalize(request)) !== row.request_hash) throw new Error();
+      const acceptedAt = row.accepted_at === null ? null : Date.parse(row.accepted_at);
+      const resultRecordedAt = row.result_recorded_at === null ? null : Date.parse(row.result_recorded_at);
+      const legacyTiming = row.accepted_at === null && row.result_recorded_at === null;
+      if (row.state === 'accepted' ? (!legacyTiming && (!Number.isFinite(acceptedAt)
+        || new Date(acceptedAt!).toISOString() !== row.accepted_at
+        || acceptedAt! < Date.parse(request.issuedAt) || acceptedAt! >= Date.parse(request.expiresAt)))
+        : row.accepted_at !== null || row.result_recorded_at !== null) throw new Error();
       let result: Readonly<LocalCodexSetupSessionResult> | null = null;
       if (row.result_ciphertext) {
         if (!row.result_nonce || !row.result_tag || row.state !== 'accepted') throw new Error();
@@ -974,8 +995,12 @@ export class LocalVault {
         result = parseLocalCodexSetupSessionResult(JSON.parse(Buffer.concat([
           outcome.update(row.result_ciphertext), outcome.final()]).toString('utf8')));
       }
+      if (result ? (!legacyTiming && (!Number.isFinite(resultRecordedAt)
+        || new Date(resultRecordedAt!).toISOString() !== row.result_recorded_at
+        || resultRecordedAt! < acceptedAt! || resultRecordedAt! >= Date.parse(request.expiresAt)))
+        : row.result_recorded_at !== null) throw new Error();
       if (!['pending', 'accepted', 'withdrawn'].includes(row.state)) throw new Error();
-      return {state: row.state, request, result};
+      return {state: row.state, request, acceptedAt: row.accepted_at, result, resultRecordedAt: row.result_recorded_at};
     } catch {throw new Error('setup_operation_integrity_failed');}
   }
 
@@ -1011,34 +1036,63 @@ export class LocalVault {
     if (observation.state !== 'pending' || sha256(canonicalize(observation.request)) !== requestHash
       || Date.parse(observation.request.expiresAt) <= Date.now()) return null;
     const token = randomUUID(), tokenHash = sha256(token);
-    const accepted = this.#database.prepare(`update codex_setup_sessions set state = 'accepted', acceptance_hash = ?, state_mac = ?
+    const acceptedAt = new Date(Date.now()).toISOString();
+    const accepted = this.#database.prepare(`update codex_setup_sessions
+      set state = 'accepted', acceptance_hash = ?, accepted_at = ?, state_mac = ?
       where operation_id = ? and intent_digest = ? and request_hash = ? and state = 'pending' and expires_at > ? and state_mac = ?
       and exists (select 1 from codex_setup_operations where operation_id = ? and intent_digest = ? and state = 'running')`)
-      .run(tokenHash, this.#setupSessionStateMac({...row, state: 'accepted', acceptance_hash: tokenHash}),
-        operationId, intentDigest, requestHash, new Date().toISOString(), row.state_mac, operationId, intentDigest);
+      .run(tokenHash, acceptedAt, this.#setupSessionStateMac({...row, state: 'accepted', acceptance_hash: tokenHash,
+        accepted_at: acceptedAt}), operationId, intentDigest, requestHash, acceptedAt, row.state_mac, operationId, intentDigest);
     if (accepted.changes !== 1) return null;
     return Object.freeze({request: observation.request, record: (value: LocalCodexSetupSessionResult) => {
       const result = parseLocalCodexSetupSessionResult(value);
       this.#assertSetupJournalDurability();
-      const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
-        .get(operationId) as unknown as CodexSetupSessionRow | undefined;
-      if (!row || row.intent_digest !== intentDigest || row.acceptance_hash !== tokenHash || row.state !== 'accepted') {
-        throw new Error('setup_operation_conflict');
-      }
-      const current = this.#decodeSetupSession(row);
-      if (current.result) {
-        if (canonicalize(current.result) !== canonicalize(result)) throw new Error('setup_operation_conflict');
-        return;
-      }
       const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#masterKey, nonce);
       cipher.setAAD(Buffer.from(`setup-session-result:${operationId}:${intentDigest}:${requestHash}`));
       const ciphertext = Buffer.concat([cipher.update(Buffer.from(canonicalize(result))), cipher.final()]);
       const tag = cipher.getAuthTag();
-      const committed = this.#database.prepare(`update codex_setup_sessions set result_nonce = ?, result_tag = ?, result_ciphertext = ?, state_mac = ?
-        where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted' and result_ciphertext is null and state_mac = ?`)
-        .run(nonce, tag, ciphertext, this.#setupSessionStateMac({...row, result_nonce: nonce, result_tag: tag, result_ciphertext: ciphertext}),
-          operationId, intentDigest, tokenHash, row.state_mac);
-      if (committed.changes !== 1) throw new Error('setup_operation_conflict');
+      this.#database.exec('begin immediate');
+      try {
+        const row = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+          .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+        if (!row || row.intent_digest !== intentDigest || row.acceptance_hash !== tokenHash || row.state !== 'accepted') {
+          throw new Error('setup_operation_conflict');
+        }
+        const current = this.#decodeSetupSession(row);
+        if (current.result) {
+          if (canonicalize(current.result) !== canonicalize(result)) throw new Error('setup_operation_conflict');
+          this.#database.exec('commit'); return;
+        }
+        if (row.accepted_at === null) throw new Error('setup_session_scope_unavailable');
+        // Assign the timestamp in the same write transaction that makes the
+        // encrypted result recordable. Encryption and scheduling before this
+        // statement cannot preserve an earlier apparent completion time.
+        const staged = this.#database.prepare(`update codex_setup_sessions
+          set result_nonce = ?, result_tag = ?, result_ciphertext = ?,
+            result_recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted'
+          and result_ciphertext is null and expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') and state_mac = ?
+          returning result_recorded_at`)
+          .get(nonce, tag, ciphertext, operationId, intentDigest, tokenHash, row.state_mac) as
+            {result_recorded_at: string} | undefined;
+        if (!staged) throw new Error('setup_session_scope_unavailable');
+        const committedRow = this.#database.prepare('select * from codex_setup_sessions where operation_id = ?')
+          .get(operationId) as unknown as CodexSetupSessionRow | undefined;
+        if (!committedRow || committedRow.result_recorded_at !== staged.result_recorded_at
+          || !committedRow.result_ciphertext || committedRow.state_mac !== row.state_mac) {
+          throw new Error('setup_operation_conflict');
+        }
+        const finalized = this.#database.prepare(`update codex_setup_sessions set state_mac = ?
+          where operation_id = ? and intent_digest = ? and acceptance_hash = ? and state = 'accepted'
+          and result_recorded_at = ? and expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') and state_mac = ?`)
+          .run(this.#setupSessionStateMac(committedRow), operationId, intentDigest, tokenHash,
+            staged.result_recorded_at, row.state_mac);
+        if (finalized.changes !== 1) throw new Error('setup_session_scope_unavailable');
+        this.#database.exec('commit');
+      } catch (error) {
+        try {this.#database.exec('rollback');} catch {}
+        throw error;
+      }
     }});
   }
 

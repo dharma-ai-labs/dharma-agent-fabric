@@ -147,10 +147,12 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     p: typeof prepared, v: {getProviderSessionBinding(): Promise<typeof binding | null>},
     first: LocalCodexSetupReadiness['firstLearning'], intentDigest?: string) => Promise<LocalCodexSetupReadiness>;
   let handoffEnabled = false;
-  const handoff = {state: 'accepted', request: {...identity, setupReference: prepared.intent.setupReference,
+  const handoff = {state: 'accepted', acceptedAt: prepared.intent.issuedAt,
+    request: {...identity, setupReference: prepared.intent.setupReference,
     workspaceRoot: root, name, repositoryFingerprint: hash, policyRevision: policy.revision,
     scopeDigest: hash, contractDigest: hash}, result: {state: 'started', bindingId: binding.bindingId,
-    sessionId: binding.sessionId, sessionPid: 103, supervisorPid: 101, sessionStartTicks: '30', supervisorStartTicks: '10'}};
+    sessionId: binding.sessionId, sessionPid: 103, supervisorPid: 101, sessionStartTicks: '30', supervisorStartTicks: '10'},
+    resultRecordedAt: prepared.intent.issuedAt};
   const providerVault = {getProviderSessionBinding: async () => binding,
     readCodexSetupSession: async (operation: string, digest: string) => {
       assert.equal(operation, prepared.intent.operationId); assert.equal(digest, hash);
@@ -235,6 +237,13 @@ test('actual final startup readback re-verifies a tampered renewable signature',
 test('actual CLI producer joins the IPC-started child to its exact encrypted handoff result', async t => {
   const f = await fixture(t); f.enableHandoff();
   assert.equal((await f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash)).sessionId, f.binding.sessionId);
+});
+
+test('actual CLI producer refuses an untimed migrated handoff as completion proof', async t => {
+  const f = await fixture(t); f.enableHandoff();
+  Reflect.set(f.handoff, 'acceptedAt', null); Reflect.set(f.handoff, 'resultRecordedAt', null);
+  await assert.rejects(f.observe(f.prepared, f.providerVault, 'no_eligible_history', hash),
+    {message: 'setup_runtime_session_unconfirmed'});
 });
 
 for (const ipc of [false, true]) {

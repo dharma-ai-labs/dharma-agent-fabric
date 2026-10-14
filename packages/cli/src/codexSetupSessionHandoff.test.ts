@@ -44,15 +44,18 @@ test('accepted startup can finish after 30 seconds without restaging or extendin
   await fixture(async f => {
     let now = Date.now(), reads = 0, submissions = 0, withdrawals = 0;
     t.mock.method(Date, 'now', () => now);
+    const acceptedAt = new Date(now).toISOString();
     const result: LocalCodexSetupSessionResult = {state:'started',bindingId:uuid(9),sessionId:'synthetic_delayed',
       sessionPid:42,supervisorPid:process.pid,sessionStartTicks:'1',supervisorStartTicks:'1'};
     const vault = {
       async stageCodexSetupSession() {submissions++;return {async withdraw(){withdrawals++;}};},
       async readCodexSetupSession() {
         reads++;
-        if (reads === 1) return {request:f.request,state:'accepted' as const,result:null};
-        if (reads === 2) {now += 31_000;return {request:f.request,state:'accepted' as const,result:null};}
-        return {request:f.request,state:'accepted' as const,result};
+        if (reads === 1) return {request:f.request,state:'accepted' as const,acceptedAt,result:null,resultRecordedAt:null};
+        if (reads === 2) {now += 31_000;return {request:f.request,state:'accepted' as const,
+          acceptedAt,result:null,resultRecordedAt:null};}
+        return {request:f.request,state:'accepted' as const,acceptedAt,result,
+          resultRecordedAt:new Date(now).toISOString()};
       },
     };
     assert.deepEqual(await awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId}),result);
@@ -72,9 +75,10 @@ test('accepted wait rejects invalid budgets before staging any authority', async
   });
 });
 
-test('accepted wait polls at most once per second without protected-scope churn', async () => {
+test('accepted wait avoids protected-scope churn and makes one final observation', async () => {
   await fixture(async f => {
     let reads = 0, protectedSteps = 0;
+    const acceptedAt = new Date().toISOString();
     const scope: BootstrapHostScope = {...f.scope, async step(operation) {
       protectedSteps++;
       return f.scope.step(operation);
@@ -83,13 +87,63 @@ test('accepted wait polls at most once per second without protected-scope churn'
       async stageCodexSetupSession() {return {async withdraw() {}};},
       async readCodexSetupSession() {
         reads++;
-        return {request: f.request, state: 'accepted' as const, result: null};
+        return {request: f.request, state: 'accepted' as const, acceptedAt, result: null, resultRecordedAt: null};
       },
     };
     await assert.rejects(awaitCodexSetupSession({vault, scope, request: f.request,
       leaseId: f.leaseId, acceptedWaitMs: 250}), /setup_session_accepted_unconfirmed/);
-    assert.equal(reads, 1);
-    assert.equal(protectedSteps, 2);
+    assert.equal(reads, 2);
+    assert.equal(protectedSteps, 3);
+  });
+});
+
+test('accepted wait returns a result recorded during its final idle interval', async () => {
+  await fixture(async f => {
+    let reads = 0, available = false, resultRecordedAt: string | null = null;
+    const acceptedAt = new Date().toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_final_observation', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    const timer = setTimeout(() => {available = true; resultRecordedAt = new Date().toISOString();}, 50);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        return {request: f.request, state: 'accepted' as const, acceptedAt,
+          result: available ? result : null, resultRecordedAt};
+      },
+    };
+    try {
+      assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+        leaseId: f.leaseId, acceptedWaitMs: 250}), result);
+    } finally {clearTimeout(timer);}
+    assert.equal(reads, 2);
+  });
+});
+
+test('pending wait observes a timely acceptance and result from its final idle interval', async () => {
+  await fixture(async f => {
+    let reads = 0, acceptedAt: string | null = null, resultRecordedAt: string | null = null;
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_pending_final_observation', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    const timer = setTimeout(() => {
+      acceptedAt = new Date().toISOString(); resultRecordedAt = acceptedAt;
+    }, 50);
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        return acceptedAt === null
+          ? {request: f.request, state: 'pending' as const, acceptedAt: null, result: null, resultRecordedAt: null}
+          : {request: f.request, state: 'accepted' as const, acceptedAt, result, resultRecordedAt};
+      },
+    };
+    try {
+      assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+        leaseId: f.leaseId, waitMs: 250}), result);
+    } finally {clearTimeout(timer);}
+    assert.equal(reads, 2);
   });
 });
 
@@ -99,13 +153,19 @@ test('accepted wait cannot extend pending timeout, original expiry, or its own f
     t.mock.method(Date,'now',() => now);
     for (const mode of ['pending','expiry','accepted-budget'] as const) {
       now = Date.parse(f.request.issuedAt) + 1000;
+      const acceptedAt = new Date(now).toISOString();
       let reads = 0,stages = 0,withdrawals = 0;
       const vault = {async stageCodexSetupSession(){stages++;return {async withdraw(){withdrawals++;}};},
         async readCodexSetupSession(){
           reads++;
-          if (mode === 'pending') now += 30_001;
-          else if (reads === 2) now = mode === 'expiry' ? Date.parse(f.request.expiresAt) : now + 1000;
-          return {request:f.request,state:'accepted' as const,result:reads === 2 ? unconfirmed : null};
+          if (mode === 'pending') {
+            now += 30_001;
+            return {request:f.request,state:'pending' as const,acceptedAt:null,result:null,resultRecordedAt:null};
+          }
+          if (reads === 2) now = mode === 'expiry' ? Date.parse(f.request.expiresAt) : now + 1001;
+          const result = reads === 2 ? unconfirmed : null;
+          return {request:f.request,state:'accepted' as const,acceptedAt,result,
+            resultRecordedAt:result ? new Date(now).toISOString() : null};
         }};
       await assert.rejects(awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId,
         acceptedWaitMs:mode === 'accepted-budget' ? 1000 : 120_000}),
@@ -118,12 +178,15 @@ test('accepted wait cannot extend pending timeout, original expiry, or its own f
 test('cancellation and state regression after acceptance never restage or return a late result', async () => {
   for (const mode of ['cancel','regress'] as const) await fixture(async f => {
     let reads = 0,stages = 0,withdrawals = 0;
+    const acceptedAt = new Date().toISOString();
     const vault = {async stageCodexSetupSession(){stages++;return {async withdraw(){withdrawals++;}};},
       async readCodexSetupSession(){
         reads++;
         if (reads === 2 && mode === 'cancel') f.abort();
-        return {request:f.request,state:reads === 2 && mode === 'regress' ? 'pending' as const : 'accepted' as const,
-          result:reads === 2 ? unconfirmed : null};
+        return reads === 2 && mode === 'regress'
+          ? {request:f.request,state:'pending' as const,acceptedAt:null,result:null,resultRecordedAt:null}
+          : {request:f.request,state:'accepted' as const,acceptedAt,
+            result:reads === 2 ? unconfirmed : null,resultRecordedAt:reads === 2 ? new Date().toISOString() : null};
       }};
     await assert.rejects(awaitCodexSetupSession({vault,scope:f.scope,request:f.request,leaseId:f.leaseId}),
       mode === 'cancel' ? /codex_setup_host_scope_unavailable/ : /setup_session_scope_changed/);
@@ -204,6 +267,35 @@ test('post-acceptance policy change records bounded unconfirmed disposition and 
         start: async () => {starts++; return unconfirmed;}}), 0);
     });
     assert.equal(starts, 0);
+  });
+});
+
+test('expiry during accepted startup retains its no-retry fence and does not abort a later request', async () => {
+  await fixture(async f => {
+    const first = {...f.request, expiresAt: new Date(Date.now() + 250).toISOString()};
+    f.vault.stageCodexSetupSession(f.leaseId, digest, first);
+    const sibling = f.vault.claimCodexSetupOperation(uuid(7), digest);
+    if (sibling.state !== 'acquired') throw new Error('fixture_claim_missing');
+    const second = {...f.request, operationId: uuid(7), name: 'implementer'};
+    f.vault.stageCodexSetupSession(sibling.leaseId, digest, second);
+    const owner = createNamedSessionChildOwner(f.signal), failures: Readonly<CodexSetupFailureDiagnostic>[] = [];
+    let starts = 0;
+    await owner.run(async () => {
+      assert.equal(await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal,
+        authorize: async () => true, onFailure: failure => {failures.push(failure);}, start: async scope => {
+          starts++;
+          if (scope.request.operationId === first.operationId) {
+            await new Promise(resolve => setTimeout(resolve, 350));
+            throw new Error('setup_session_scope_unavailable');
+          }
+          return unconfirmed;
+        }}), 2);
+    });
+    const interrupted = f.vault.readCodexSetupSession(first.operationId, digest);
+    assert.equal(interrupted?.state, 'accepted'); assert.equal(interrupted?.result, null);
+    assert.deepEqual(f.vault.readCodexSetupSession(second.operationId, digest)?.result, unconfirmed);
+    assert.equal(starts, 2); assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.category, 'setup_session_scope_unavailable');
   });
 });
 

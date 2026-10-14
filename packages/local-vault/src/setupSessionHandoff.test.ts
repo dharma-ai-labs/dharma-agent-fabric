@@ -38,11 +38,35 @@ test('setup can durably request a standing session without creating a provider b
     const submission = f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
     assert.equal(Object.isFrozen(submission), true); assert.deepEqual(Object.keys(submission), ['withdraw']);
     assert.deepEqual(f.vault.listPendingCodexSetupSessions(), [{operationId: id(1), intentDigest: digest}]);
-    assert.deepEqual(f.vault.readCodexSetupSession(id(1), digest), {state: 'pending', request: f.request, result: null});
+    assert.deepEqual(f.vault.readCodexSetupSession(id(1), digest), {state: 'pending', request: f.request,
+      acceptedAt: null, result: null, resultRecordedAt: null});
     const database = new DatabaseSync(resolve(f.root, 'vault.sqlite'));
     try {assert.equal(database.prepare('select count(*) as n from provider_session_bindings').get()!.n, 0);}
     finally {database.close();}
     assert.equal((await readFile(resolve(f.root, 'vault.sqlite'))).includes(Buffer.from(f.request.workspaceRoot)), false);
+  });
+});
+
+test('existing setup-session tables gain nullable authenticated timing columns without replacing their disposition', async () => {
+  await fixture(async f => {
+    f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
+    f.vault.close();
+    const legacy = new DatabaseSync(resolve(f.root, 'vault.sqlite'));
+    try {
+      legacy.exec('alter table codex_setup_sessions drop column result_recorded_at');
+      legacy.exec('alter table codex_setup_sessions drop column accepted_at');
+    } finally {legacy.close();}
+    const recovered = await LocalVault.open({root: f.root, masterKey: f.key});
+    try {
+      const columns = new DatabaseSync(resolve(f.root, 'vault.sqlite'));
+      try {
+        const names = (columns.prepare('pragma table_info(codex_setup_sessions)').all() as Array<{name: string}>)
+          .map(column => column.name);
+        assert.ok(names.includes('accepted_at')); assert.ok(names.includes('result_recorded_at'));
+      } finally {columns.close();}
+      assert.deepEqual(recovered.readCodexSetupSession(id(1), digest), {state: 'withdrawn', request: f.request,
+        acceptedAt: null, result: null, resultRecordedAt: null});
+    } finally {recovered.close();}
   });
 });
 
@@ -80,7 +104,12 @@ test('standing acceptance and outcome are durable, bounded and immutable without
     } finally {receiver.close();}
     const recovered = await LocalVault.open({root: f.root, masterKey: f.key});
     try {
-      assert.deepEqual(recovered.readCodexSetupSession(id(1), digest), {state: 'accepted', request: f.request, result: outcome});
+      const observation = recovered.readCodexSetupSession(id(1), digest);
+      assert.equal(observation?.state, 'accepted'); assert.deepEqual(observation?.request, f.request);
+      assert.deepEqual(observation?.result, outcome);
+      assert.match(observation?.acceptedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+      assert.match(observation?.resultRecordedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+      assert.ok(Date.parse(observation!.resultRecordedAt!) >= Date.parse(observation!.acceptedAt!));
       assert.deepEqual(recovered.listPendingCodexSetupSessions(), []);
       assert.equal(recovered.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(f.request))), null);
     } finally {recovered.close();}
@@ -94,7 +123,10 @@ test('an accepted but interrupted start is not replayed or invented as a success
     f.vault.close();
     const recovered = await LocalVault.open({root: f.root, masterKey: f.key});
     try {
-      assert.deepEqual(recovered.readCodexSetupSession(id(1), digest), {state: 'accepted', request: f.request, result: null});
+      const observation = recovered.readCodexSetupSession(id(1), digest);
+      assert.equal(observation?.state, 'accepted'); assert.deepEqual(observation?.request, f.request);
+      assert.match(observation?.acceptedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(observation?.result, null); assert.equal(observation?.resultRecordedAt, null);
       assert.equal(recovered.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(f.request))), null);
     } finally {recovered.close();}
   });
@@ -171,7 +203,11 @@ test('scoped submission withdraws synchronously on abort without touching an acc
       controller.abort();
       assert.equal(f.vault.readCodexSetupSession(id(1), digest)?.state, 'withdrawn');
       assert.equal(f.vault.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(f.request))), null);
-      assert.deepEqual(f.vault.readCodexSetupSession(id(7), digest), {state: 'accepted', request: other, result: outcome});
+      const observation = f.vault.readCodexSetupSession(id(7), digest);
+      assert.equal(observation?.state, 'accepted'); assert.deepEqual(observation?.request, other);
+      assert.deepEqual(observation?.result, outcome);
+      assert.match(observation?.acceptedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+      assert.match(observation?.resultRecordedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
     } finally {await scoped.close();}
   });
 });
@@ -212,6 +248,59 @@ test('accepted state cannot be downgraded to pending to obtain a second dispatch
       // normal owner cleanup need not authenticate unknown tampered state.
       db.prepare("update codex_setup_sessions set state = 'accepted' where operation_id = ?").run(id(1)); db.close();
     }
+  });
+});
+
+test('accepted and result timing metadata are authenticated with the encrypted handoff', async () => {
+  await fixture(async f => {
+    f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
+    const acceptance = f.vault.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(f.request)));
+    assert.ok(acceptance); acceptance.record(outcome);
+    const database = new DatabaseSync(resolve(f.root, 'vault.sqlite'));
+    const original = database.prepare(`select accepted_at, result_recorded_at from codex_setup_sessions
+      where operation_id = ?`).get(id(1)) as {accepted_at: string; result_recorded_at: string};
+    try {
+      database.prepare('update codex_setup_sessions set accepted_at = ? where operation_id = ?')
+        .run(new Date(Date.parse(original.accepted_at) + 1).toISOString(), id(1));
+      assert.throws(() => f.vault.readCodexSetupSession(id(1), digest), /setup_operation_integrity_failed/);
+      database.prepare('update codex_setup_sessions set accepted_at = ? where operation_id = ?')
+        .run(original.accepted_at, id(1));
+      database.prepare('update codex_setup_sessions set result_recorded_at = ? where operation_id = ?')
+        .run(new Date(Date.parse(original.result_recorded_at) + 1).toISOString(), id(1));
+      assert.throws(() => f.vault.readCodexSetupSession(id(1), digest), /setup_operation_integrity_failed/);
+    } finally {
+      database.prepare(`update codex_setup_sessions set accepted_at = ?, result_recorded_at = ?
+        where operation_id = ?`).run(original.accepted_at, original.result_recorded_at, id(1));
+      database.close();
+    }
+    assert.deepEqual(f.vault.readCodexSetupSession(id(1), digest)?.result, outcome);
+  });
+});
+
+test('result timing is assigned at the durable transition and cannot survive a delayed expiry', async t => {
+  await fixture(async f => {
+    const request = {...f.request, expiresAt: new Date(Date.now() + 500).toISOString()};
+    f.vault.stageCodexSetupSession(f.leaseId, digest, request);
+    const acceptance = f.vault.acceptCodexSetupSession(id(1), digest, sha256(canonicalize(request)));
+    assert.ok(acceptance);
+    const prepare = DatabaseSync.prototype.prepare;
+    let delayed = false;
+    t.mock.method(DatabaseSync.prototype, 'prepare', function (this: DatabaseSync, sql: string) {
+      const statement = prepare.call(this, sql), get = statement.get.bind(statement);
+      if (/set result_nonce[\s\S]*returning result_recorded_at/.test(sql)) {
+        statement.get = ((...args: any[]) => {
+          delayed = true; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+          return Reflect.apply(get, statement, args);
+        }) as typeof statement.get;
+      }
+      return statement;
+    });
+    try {assert.throws(() => acceptance.record(outcome), /setup_session_scope_unavailable/);}
+    finally {t.mock.restoreAll();}
+    assert.equal(delayed, true);
+    const observation = f.vault.readCodexSetupSession(id(1), digest);
+    assert.equal(observation?.state, 'accepted'); assert.equal(observation?.result, null);
+    assert.equal(observation?.resultRecordedAt, null);
   });
 });
 

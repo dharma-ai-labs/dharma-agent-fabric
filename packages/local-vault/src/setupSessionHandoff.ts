@@ -18,7 +18,9 @@ export type LocalCodexSetupSessionResult = {state: 'started'; bindingId: string;
 export interface LocalCodexSetupSessionObservation {
   state: 'pending' | 'accepted' | 'withdrawn';
   request: Readonly<LocalCodexSetupSessionRequest>;
+  acceptedAt: string | null;
   result: Readonly<LocalCodexSetupSessionResult> | null;
+  resultRecordedAt: string | null;
 }
 export interface LocalCodexSetupSessionSubmission {withdraw(): void;}
 export interface ScopedCodexSetupSessionSubmission {withdraw(): Promise<void>;}
