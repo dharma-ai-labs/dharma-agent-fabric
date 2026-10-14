@@ -72,6 +72,27 @@ test('accepted wait rejects invalid budgets before staging any authority', async
   });
 });
 
+test('accepted wait polls at most once per second without protected-scope churn', async () => {
+  await fixture(async f => {
+    let reads = 0, protectedSteps = 0;
+    const scope: BootstrapHostScope = {...f.scope, async step(operation) {
+      protectedSteps++;
+      return f.scope.step(operation);
+    }};
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        return {request: f.request, state: 'accepted' as const, result: null};
+      },
+    };
+    await assert.rejects(awaitCodexSetupSession({vault, scope, request: f.request,
+      leaseId: f.leaseId, acceptedWaitMs: 250}), /setup_session_accepted_unconfirmed/);
+    assert.equal(reads, 1);
+    assert.equal(protectedSteps, 2);
+  });
+});
+
 test('accepted wait cannot extend pending timeout, original expiry, or its own finite deadline', async t => {
   await fixture(async f => {
     let now = Date.now();
