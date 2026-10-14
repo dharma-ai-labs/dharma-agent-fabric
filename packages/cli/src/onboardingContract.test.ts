@@ -75,8 +75,17 @@ test('the installed guide scopes trusted setup approval to one native command', 
   assert.match(contract, /normal one-command approval for the exact initial setup command outside the coding sandbox/);
   assert.match(contract, /Execute only after actual approval/);
   assert.match(contract, /never accept session-wide or persistent rules/);
-  assert.match(contract, /denied or unavailable[\s\S]*setup_host_execution_unqualified/);
+  assert.match(contract, /denied or unavailable, stop with `codex_setup_host_execution_unqualified`/);
+  assert.doesNotMatch(contract, /`setup_host_execution_unqualified`/);
   assert.match(contract, /does not authorize new source paths or network destinations/);
   assert.match(contract, /setup approval must never carry into coding or peer turns/);
   assert.doesNotMatch(contract, /--dangerously-bypass|--yolo|--sandbox danger-full-access/);
+});
+
+test('the overview separates native command approval from recipient device approval', async () => {
+  const contract = await readFile(contractUrl, 'utf8');
+  const overview = contract.split(/\r?\n\r?\n/)[1]!;
+  assert.match(overview, /shell entry also requires the coding harness's normal command approval/);
+  assert.match(overview, /configured automatic reviewer/);
+  assert.doesNotMatch(overview, /recipient approves only the matching browser/);
 });
