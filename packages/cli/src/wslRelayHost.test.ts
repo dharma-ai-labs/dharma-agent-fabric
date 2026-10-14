@@ -3,12 +3,37 @@ import {spawnSync} from 'node:child_process';
 import {mkdtemp, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {compileFunction} from 'node:vm';
 import test, {type TestContext} from 'node:test';
+import ts from 'typescript';
 import {enableRelayAutostart, relayAutostartStatus, disableRelayAutostart, startRelayAutostart,
   assertRelayStartupOwnership} from './relayAutostart.js';
 import {resolveWslRelayContext} from './wslRelayHost.js';
 import {validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
 import {prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
+
+test('real WSL Windows launch uses a fixed Windows cwd rather than the Linux caller directory', async () => {
+  const source = await readFile(new URL('../src/wslRelayHost.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('wslRelayHost.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'windows');
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration));
+  const compiled = ts.transpileModule(declaration.getText(ast), {compilerOptions: {
+    target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}}).outputText;
+  let calls = 0;
+  const launch = compileFunction(compiled + '\nreturn windows;',
+    ['currentBootstrapHostScope', 'execFile', 'windowsArgs', 'captureBootstrapHostChild'])(
+    () => undefined,
+    (file: string, args: string[], options: {cwd?: string; timeout?: number; maxBuffer?: number},
+      done: (error: Error | null, stdout: string) => void) => {
+      calls++;
+      assert.equal(file, '/init'); assert.deepEqual(args, ['public-arguments']);
+      assert.equal(options.cwd, '/mnt/c/Windows/System32', 'Linux cwd must not become a Windows UNC current directory');
+      assert.equal(options.timeout, 15000); assert.equal(options.maxBuffer, 16384);
+      done(null, '{"public":true}'); return {};
+    }, () => ['public-arguments'], () => {throw new Error('no setup scope in this fixture');});
+  assert.deepEqual(await launch('public-script'), {stdout: '{"public":true}'});
+  assert.equal(calls, 1);
+});
 
 async function fixture(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-wsl-host-')));

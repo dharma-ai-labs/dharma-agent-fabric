@@ -47,7 +47,8 @@ async function windows(script: string): Promise<{stdout: string}> {
   const scope = currentBootstrapHostScope();
   const operation = () => new Promise<{stdout: string}>((accept, reject) => {
     const child = execFile('/init', windowsArgs(script),
-    {timeout: 15000, maxBuffer: 16384, signal: scope?.signal}, (error, stdout) => error ? reject(error) : accept({stdout}));
+    {cwd: '/mnt/c/Windows/System32', timeout: 15000, maxBuffer: 16384, signal: scope?.signal},
+    (error, stdout) => error ? reject(error) : accept({stdout}));
     if (scope) captureBootstrapHostChild(scope, child);
   });
   return operation();
