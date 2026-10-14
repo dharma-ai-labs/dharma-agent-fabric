@@ -4,32 +4,42 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {canonicalize, validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
 import {captureCodexSetupPromptBinding, captureCodexSetupUserPrompt, capturePublicCodexSetupPrompt} from './codexSetupUserPrompt.js';
 import type {CodexSetupIntent} from './codexSetupAdmission.js';
+import {codexSetupPortalPromptDigest} from './codexSetupPortalPromptDigest.js';
 
 interface Preparation {
-  schema: 'dharma.setup-host-preparation/v1'; ok: true; effects: false; grantRedeemed: false;
+  schema: 'dharma.setup-host-preparation/v1' | 'dharma.setup-host-preparation/v2'; ok: true; effects: false; grantRedeemed: false;
   approvalRequired: true; sourcePolicyRevalidated: true; preparedAt: string; expiresAt: string;
   promptSha256: string; cliVersion: string;
   integrity: {algorithm: 'sha256'; kind: 'portal-context'; authenticity: 'same-origin-https'; contextSha256: string};
   binding: {recipientEmail: string; repositoryRemoteUrl: string};
   context: Pick<CodexSetupIntent, 'origin' | 'organizationId' | 'setupReference' | 'recipientMembershipId'
     | 'repositoryFingerprint' | 'policyRevision' | 'scopeDigest' | 'contractDigest'>;
+  publicPrompt?: string; promptSource?: 'portal_setup_prompt'; portalPromptSha256?: string;
 }
 const fail = (): never => {throw new Error('codex_setup_portal_preparation_unavailable');};
 
 /** A public HTTPS receipt is presentation binding, not a host execution lease. */
 export async function requestCodexSetupHostPreparation(input: {
   origin: string; organizationId: string; setupReference: string; cliVersion: string;
-  initialUserPrompt: unknown; signal: AbortSignal; fetcher?: typeof fetch; now?: () => number;
+  initialUserPrompt?: unknown; portalContextSha256?: string; portalPromptSha256?: string;
+  signal: AbortSignal; fetcher?: typeof fetch; now?: () => number;
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
 }) {
   // Capture before awaiting: no secret-bearing prose may reach the endpoint.
-  const initialUserPrompt = capturePublicCodexSetupPrompt(input.initialUserPrompt);
-  const pins = [...initialUserPrompt.replace(/\r\n/g, '\n').matchAll(/^Preparation context SHA256: ([a-f0-9]{64})\.$/gm)];
-  if (pins.length !== 1) return fail();
-  const originalContextPin = pins[0]![1]!;
+  const portalMode = input.portalContextSha256 !== undefined || input.portalPromptSha256 !== undefined;
+  if (portalMode && (input.initialUserPrompt !== undefined
+    || !/^[a-f0-9]{64}$/.test(input.portalContextSha256 ?? '')
+    || !/^[a-f0-9]{64}$/.test(input.portalPromptSha256 ?? ''))) return fail();
+  let initialUserPrompt = portalMode ? undefined : capturePublicCodexSetupPrompt(input.initialUserPrompt);
+  const pins = initialUserPrompt === undefined ? []
+    : [...initialUserPrompt.replace(/\r\n/g, '\n').matchAll(/^Preparation context SHA256: ([a-f0-9]{64})\.$/gm)];
+  if (!portalMode && pins.length !== 1) return fail();
+  const originalContextPin = portalMode ? input.portalContextSha256! : pins[0]![1]!;
   const {origin, organizationId, setupReference, cliVersion} = input;
-  const initialUserPromptSha256 = createHash('sha256').update(initialUserPrompt, 'utf8').digest('hex');
-  const promptSha256 = createHash('sha256').update(initialUserPrompt.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
+  let initialUserPromptSha256 = initialUserPrompt === undefined ? undefined
+    : createHash('sha256').update(initialUserPrompt, 'utf8').digest('hex');
+  let promptSha256 = initialUserPrompt === undefined ? undefined
+    : createHash('sha256').update(initialUserPrompt.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
   const now = input.now ?? Date.now;
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(15000)]);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -43,7 +53,9 @@ export async function requestCodexSetupHostPreparation(input: {
     const response = await (input.fetcher ?? fetch)(origin + '/api/v1/agent-fabric/bootstrap/setup-claim', {
       method: 'POST', redirect: 'error', credentials: 'omit', signal,
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'prepare_host', organizationId, setupReference, promptSha256}),
+      body: JSON.stringify({action: 'prepare_host', organizationId, setupReference,
+        ...(portalMode ? {promptSource: 'portal_setup_prompt', contextSha256: originalContextPin,
+          portalPromptSha256: input.portalPromptSha256} : {promptSha256})}),
     });
     if (signal.aborted || response.status !== 200 || !response.body
       || !response.headers.get('content-type')?.toLowerCase().startsWith('application/json')
@@ -59,9 +71,22 @@ export async function requestCodexSetupHostPreparation(input: {
     }
     const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     const checked = await validateContract(resolve(import.meta.dirname, 'schemas'),
-      'https://schemas.dharma-ai.io/setup-host-preparation/v1', value);
+      `https://schemas.dharma-ai.io/setup-host-preparation/${portalMode ? 'v2' : 'v1'}`, value);
     if (!checked.ok || signal.aborted) return fail();
     const prepared = value as Preparation, at = now();
+    if (portalMode) {
+      initialUserPrompt = capturePublicCodexSetupPrompt(prepared.publicPrompt);
+      if (prepared.promptSource !== 'portal_setup_prompt'
+        || prepared.portalPromptSha256 !== input.portalPromptSha256
+        || codexSetupPortalPromptDigest(initialUserPrompt) !== input.portalPromptSha256) return fail();
+      const embeddedChecksum = /--portal-prompt-sha256 ([a-f0-9]{64})(?=[ \t\n]|$)/.exec(initialUserPrompt.replace(/\r\n/g, '\n'));
+      if (embeddedChecksum?.[1] !== input.portalPromptSha256) return fail();
+      const returnedPins = [...initialUserPrompt.replace(/\r\n/g, '\n').matchAll(/^Preparation context SHA256: ([a-f0-9]{64})\.$/gm)];
+      if (returnedPins.length !== 1 || returnedPins[0]![1] !== originalContextPin) return fail();
+      initialUserPromptSha256 = createHash('sha256').update(initialUserPrompt, 'utf8').digest('hex');
+      promptSha256 = createHash('sha256').update(initialUserPrompt.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
+    }
+    if (initialUserPrompt === undefined || initialUserPromptSha256 === undefined || promptSha256 === undefined) return fail();
     const contextSha256 = createHash('sha256').update('dharma.setup-host-context/v1\0').update(canonicalize({
       cliVersion: prepared.cliVersion, expiresAt: prepared.expiresAt, binding: prepared.binding, context: prepared.context})).digest('hex');
     if (contextSha256 !== originalContextPin || prepared.integrity.contextSha256 !== originalContextPin) return fail();
@@ -87,6 +112,8 @@ export async function requestCodexSetupHostPreparation(input: {
     // No provider, key store, setup journal or enrollment operation is entered.
     return Object.freeze({effects: false as const, grantRedeemed: false as const,
       initialUserPrompt, initialUserPromptSha256, promptSha256, portalContextSha256: originalContextPin, binding, intent,
+      promptProvenance: portalMode ? 'verified_portal_prompt' as const : 'provided_stdin' as const,
+      nativeOriginalUserPromptAttested: false as const,
       requiresHostExecutionAdmission: true as const, requiresRecipientApproval: true as const});
   } catch {return fail();}
   finally {signal.removeEventListener('abort', cancel); reader?.releaseLock();}

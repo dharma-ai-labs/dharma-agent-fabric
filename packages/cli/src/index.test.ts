@@ -1281,7 +1281,10 @@ test('repository onboarding skill records scoped API metadata without local path
   assert.match(skill, /bounded, task-related question/);
   assert.match(skill, /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   assert.doesNotMatch(skill, /--grant\s+['"]?dhab_|dhab_[A-Za-z0-9_-]+|bootstrapGrant|organizationApiToken/);
-  assert.match(skill, /original public prompt as the single user message/);
+  assert.match(skill, /verified server-canonical public instructions \(CLI192 portal mode\)/);
+  assert.match(skill, /provided original public prompt \(legacy stdin mode\)/);
+  assert.match(skill, /Neither mode attests the enclosing human chat/);
+  assert.match(skill, /`nativeOriginalUserPromptAttested:false`/);
   assert.match(skill, /registers the matching `dharma_setup_reference` tool/);
   assert.match(skill, /Do not run direct-CLI compatibility commands on this route/);
   assert.match(skill, /public setup reference is not a bearer credential/);

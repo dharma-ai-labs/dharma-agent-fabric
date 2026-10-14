@@ -80,6 +80,22 @@ test('root-scoped capture excludes project-native release metadata before traver
   assert.ok(snapshot.manifest.files.every(file => !file.path.includes('.dharma-managed')));
 });
 
+test('root-scoped capture excludes the public setup npm cache before traversal', async t => {
+  const f = await fixture(t);
+  f.input.sourceAuthorization.policy.approvedRepositoryPaths = ['.'];
+  f.input.sourceAuthorization.policyHash = `sha256:${createHash('sha256')
+    .update(canonicalize(f.input.sourceAuthorization.policy)).digest('hex')}`;
+  await f.put('README.md', '# Approved source');
+  for (let index = 0; index < 50; index++) {
+    await f.put(`.dharma/setup-runtime/cache/item-${index}.json`, '{"publicPackageMetadata":true}');
+    await f.put(`.dharma/setup-runtime/prefix/item-${index}.md`, '# Public package file');
+  }
+  assert.equal(repositorySourcePathSafe('.dharma/setup-runtime/cache'), false);
+  const snapshot = await inventoryRepositoryPackage({...f.input, limits: {maximumEntries: 40}});
+  assert.ok(snapshot.manifest.files.some(file => file.path === 'README.md'));
+  assert.ok(snapshot.manifest.files.every(file => !file.path.startsWith('.dharma/')));
+});
+
 test('root-scoped capture prunes generated worktrees and unapproved outputs before entry limits', async t => {
   const f = await fixture(t);
   assert.equal(repositorySourcePathSafe('.worktrees/peer/README.md'), false);
