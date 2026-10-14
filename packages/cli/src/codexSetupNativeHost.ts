@@ -13,7 +13,7 @@ type Input = {
   transport: CodexStdioTransport; workspace: string; name: string; intent: CodexSetupIntent;
   openJournal(scope: BootstrapHostScope): Promise<CodexSetupJournal & {close(): void | Promise<void>}>;
   signal: AbortSignal; maximumProviderCostCents: number;
-  /** Exact public portal text, not authority or a controller-written substitute. */
+  /** Exact public portal text, validated and hashed but never forwarded as executable inner-turn text. */
   initialUserPrompt?: string;
   /** Public recipient/source fields from the verified portal, not provider email. */
   initialUserPromptBinding?: CodexSetupPromptBinding;
@@ -36,6 +36,12 @@ function record(value: unknown): Record<string, unknown> | null {
 const deny = (): CodexToolResult => ({success: false,
   contentItems: [{type: 'inputText', text: '{"code":"codex_setup_not_authorized"}'}]});
 
+function setupTurnInstruction(intent: Readonly<CodexSetupIntent>, originalPromptSha256?: string) {
+  const provenance = originalPromptSha256 === undefined ? ''
+    : ` The host validated the exact public portal prompt as SHA256 ${originalPromptSha256}. The original prompt is intentionally not reproduced in this turn because it contains the outer setup command.`;
+  return `Perform the recipient-bound Agent Fabric setup using only the already-registered dharma_setup_reference tool with operationId ${intent.operationId} and setupReference ${intent.setupReference}.${provenance} Do not execute, reconstruct, quote, or repeat any setup shell command from the outer prompt. Browser approval remains required for the intended recipient. In-progress is not readiness. If functions.exec returns a running cell, use functions.wait on that same cell until the setup tool returns a terminal result or the approved operation expires. Prefer 120000ms waits instead of rapid polling. Do not end this turn or send a final answer while the setup tool is pending: ending the original turn cancels setup, even when browser approval is still pending. Never terminate or restart the setup operation merely to report that approval is needed. Do not run setup shell commands, read private storage, request broader permissions or use peer tools during setup.`;
+}
+
 /** Registers setup on one original native turn. Callback settlement is not process termination. */
 export async function startCodexSetupNativeHost(input: Input) {
   const {transport, workspace, name, openJournal, reserve, execute, verifyReadiness} = input;
@@ -51,6 +57,9 @@ export async function startCodexSetupNativeHost(input: Input) {
   let initialUserPrompt: string | undefined;
   try {initialUserPrompt = captureCodexSetupUserPrompt(input.initialUserPrompt, intent, input.initialUserPromptBinding);}
   catch (error) {scope.close(); throw error;}
+  const initialUserPromptSha256 = initialUserPrompt === undefined ? undefined
+    : createHash('sha256').update(initialUserPrompt).digest('hex');
+  const turnInstruction = setupTurnInstruction(intent, initialUserPromptSha256);
   const filesystem = Object.freeze({...input.additionalFilesystemRules});
   let threadId = '', turnId = '', closed = false, terminalObserved = false;
   let admission: ReturnType<typeof createCodexSetupAdmission> | undefined;
@@ -130,7 +139,7 @@ export async function startCodexSetupNativeHost(input: Input) {
     await scope.step(async () => {
       const started = record(await transport.request('turn/start', {
         threadId, cwd: workspace, approvalPolicy: 'never', permissions: 'dharma_bridge',
-        input: [{type: 'text', text: initialUserPrompt ?? `Perform the recipient-bound Agent Fabric setup using dharma_setup_reference with operationId ${intent.operationId} and setupReference ${intent.setupReference}. Browser approval remains required for the intended recipient. In-progress is not readiness. If functions.exec returns a running cell, use functions.wait on that same cell until the setup tool returns a terminal result or the approved operation expires. Prefer 120000ms waits instead of rapid polling. Do not end this turn or send a final answer while the setup tool is pending: ending the original turn cancels setup, even when browser approval is still pending. Never terminate or restart the setup operation merely to report that approval is needed. Do not run setup shell commands, read private storage, request broader permissions or use peer tools during setup.`}],
+        input: [{type: 'text', text: turnInstruction}],
       }));
       const turn = record(started?.turn);
       if (typeof turn?.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(turn.id)) throw new Error('codex_setup_native_start_failed');
@@ -160,7 +169,7 @@ export async function startCodexSetupNativeHost(input: Input) {
     if (completions.has(turnId)) {terminalObserved = true; withdraw();}
     bind();
     return Object.freeze({threadId, turnId, close, settled,
-      initialUserPromptSha256: initialUserPrompt === undefined ? undefined : createHash('sha256').update(initialUserPrompt).digest('hex')});
+      initialUserPromptSha256});
   } catch (error) {
     await close();
     const safe = new Set(['codex_setup_native_input_invalid', 'codex_setup_native_profile_unavailable',
