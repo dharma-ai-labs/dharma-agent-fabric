@@ -101,6 +101,8 @@ test('WSL startup registers an exact user-logon host action instead of relying o
   const action = scripts.find(script => script.includes('dharma-wsl-host:register'))!;
   assert.match(action, /start --wait dharma-agent-fabric\.service/);
   assert.match(action, /-LogonType Interactive -RunLevel Limited/);
+  assert.match(action, /New-ScheduledTaskTrigger -AtLogOn -User \$current\.Name/);
+  assert.match(action, /New-ScheduledTaskPrincipal -UserId \$current\.Name/);
   assert.doesNotMatch(action, /-Force|ExecutionPolicy|wsl.*--shutdown|sleep infinity/);
   const status = await relayAutostartStatus(options);
   assert.equal(status.state, 'enabled');

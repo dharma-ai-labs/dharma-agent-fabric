@@ -180,8 +180,8 @@ export async function enableWslRelayHost(options: WslHostOptions): Promise<void>
   await invoke(options, taskPreamble(target, 'register')
     + `if ($null -ne $task) { Assert-OwnedTask $task; Enable-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)}|Out-Null } else { `
     + `$action=New-ScheduledTaskAction -Execute ${literal(target.executable)} -Argument ${literal(target.arguments)}; `
-    + `$trigger=New-ScheduledTaskTrigger -AtLogOn -User $current.User.Value; `
-    + `$principal=New-ScheduledTaskPrincipal -UserId $current.User.Value -LogonType Interactive -RunLevel Limited; `
+    + `$trigger=New-ScheduledTaskTrigger -AtLogOn -User $current.Name; `
+    + `$principal=New-ScheduledTaskPrincipal -UserId $current.Name -LogonType Interactive -RunLevel Limited; `
     + `$settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; `
     + `Register-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)} -Description ${literal(target.description)} `
     + `-Action $action -Trigger $trigger -Principal $principal -Settings $settings|Out-Null }; `
