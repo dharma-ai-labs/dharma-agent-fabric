@@ -22,7 +22,7 @@ async function fixture() {
     env: {DHARMA_HOME: resolve('synthetic-device'), CODEX_HOME: resolve('synthetic-provider')}};
   const metadata = {dev: 1n, ino: 2n, size: 3n, mtimeNs: 4n, ctimeNs: 5n,
     isFile: () => true, isSymbolicLink: () => false};
-  let foreignSource = false;
+  let foreignSource = false, closeAfterRoot = false;
   const dependencies: Record<string, unknown> = {
     currentBootstrapHostScope, sourceRepositoryFingerprint, process: process_,
     providerProcessEnvironment: () => ({}),
@@ -30,7 +30,10 @@ async function fixture() {
       assert.equal(command, 'git');
       assert.equal(options.signal?.aborted, false);
       calls.push(argv);
-      if (argv.join('\0') === ['-C', workspace, 'rev-parse', '--show-toplevel'].join('\0')) return {stdout: workspace};
+      if (argv.join('\0') === ['-C', workspace, 'rev-parse', '--show-toplevel'].join('\0')) {
+        if (closeAfterRoot) prepared.scope.close();
+        return {stdout: workspace};
+      }
       assert.deepEqual(argv, ['-C', workspace, 'config', '--get', 'remote.origin.url']);
       return {stdout: foreignSource ? 'https://github.com/foreign/repository.git' : remote};
     },
@@ -67,6 +70,7 @@ async function fixture() {
   const prepared = prepareCodexBootstrapHost({intent, workspace, signal: controller.signal,
     current: async () => ++requalifications <= 8 && await current()});
   return {prepared, calls, controller, current, requalifications: () => requalifications,
+    closeAfterRoot: () => {closeAfterRoot = true;},
     foreignSource: () => {foreignSource = true;}};
 }
 
@@ -78,6 +82,14 @@ test('actual ingress source requalification inside its original scope does not r
     assert.equal(f.requalifications(), 2, 'only the before/after scope fences qualify the source');
     assert.equal(f.calls.length, 6, 'three source observations each use the two fixed metadata commands');
   } finally {f.prepared.scope.close();}
+});
+
+test('scope closure during requalification stops before the second metadata command without aborting the outer controller', async () => {
+  const f = await fixture(); f.closeAfterRoot();
+  await assert.rejects(runCodexBootstrapHostScope(f.prepared.scope, () => f.current()), /codex_setup_host_scope_unavailable/);
+  assert.equal(f.controller.signal.aborted, false);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.prepared.scope.signal.aborted, true);
 });
 
 test('actual ingress source requalification still rejects a changed repository and cancellation', async () => {

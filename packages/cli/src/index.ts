@@ -1543,9 +1543,12 @@ export async function preflightBootstrapWorkspaceIdentity(
 async function readBootstrapSourceIdentityForRequalification(workspace: string, signal: AbortSignal) {
   const options = {timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal,
     env: providerProcessEnvironment(process.env)};
+  signal.throwIfAborted();
   const root = await execFileAsync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], options);
+  signal.throwIfAborted();
   if (!root.stdout.trim()) throw new Error('Bootstrap workspace must be a Git repository.');
   const remote = await execFileAsync('git', ['-C', workspace, 'config', '--get', 'remote.origin.url'], options);
+  signal.throwIfAborted();
   return sourceRepositoryFingerprint(remote.stdout.trim() || null);
 }
 
@@ -3092,7 +3095,8 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
         && (info.mode & (privateMode ? 0o077 : 0o022)) === 0 && await realpath(path) === path;
     };
     const current = async () => {
-      if (controller.signal.aborted || Date.now() >= Date.parse(prepared.intent.expiresAt)
+      const qualificationSignal = currentBootstrapHostScope()?.signal ?? controller.signal;
+      if (qualificationSignal.aborted || Date.now() >= Date.parse(prepared.intent.expiresAt)
         || process.getuid?.() !== uid || process.cwd() !== currentDirectory
         || process.env.DHARMA_HOME !== environment.home || process.env.CODEX_HOME !== environment.provider) return false;
       try {
@@ -3100,7 +3104,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
         return now.isFile() && !now.isSymbolicLink() && now.dev === runtime.dev && now.ino === runtime.ino
           && now.size === runtime.size && now.mtimeNs === runtime.mtimeNs && now.ctimeNs === runtime.ctimeNs
           && await privateDirectory(home, true) && await privateDirectory(providerHome, false)
-          && (await readBootstrapSourceIdentityForRequalification(workspace, controller.signal)).fingerprint === prepared.intent.repositoryFingerprint;
+          && (await readBootstrapSourceIdentityForRequalification(workspace, qualificationSignal)).fingerprint === prepared.intent.repositoryFingerprint;
       } catch {return false;}
     };
     if (!await current() || await detectBootstrapProvider(workspace) !== 'codex') {
