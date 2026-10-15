@@ -5398,8 +5398,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       return inventoryRepositoryPackage({ workspace: item.path, organizationId: item.organizationId,
         workspaceId, repositoryBindingId: item.repositoryBindingId!, repositoryAgentId: item.repositoryAgentId!, sourceAuthorization });
     };
+    const readCurrentRepositoryContext = async () => readNamedSessionRepositoryContext({
+      installation: await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path}),
+      sharedRepositoryReady: await repositorySharedReady(item), scope: repositoryRoleScope(item), workspaceRoot: item.path,
+      loadAuthority: async () => ({policy: await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
+        source: await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item))}) });
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
         localWriteRoots: writeRoots, additionalFilesystemRules: filesystem.additionalFilesystemRules,
+      readPeerRepositoryContext: readCurrentRepositoryContext,
       observeNativeSkill: async () => {
         const installation = await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path});
         const native = await observeNamedCodexSkill(transport!, {workspace: item.path, installation,
@@ -5456,10 +5462,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           }
         }
         try {
-          const context = work ? await readNamedSessionRepositoryContext({ installation: skill,
-            sharedRepositoryReady: sharedReady, scope: repositoryRoleScope(item), workspaceRoot: item.path,
-            loadAuthority: async () => ({ policy: await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
-              source: await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item)) }) }) : undefined;
+          const context = work ? await readCurrentRepositoryContext() : undefined;
           return await operation(context);
         }
         finally { taskState = null; }

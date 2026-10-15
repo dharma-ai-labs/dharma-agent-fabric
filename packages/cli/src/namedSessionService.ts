@@ -110,6 +110,7 @@ export async function runNamedSessionService(input: {
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   authorizeLocalWork(): Promise<boolean>;
   observeNativeSkill?(): Promise<NamedCodexSkillObservation>;
+  readPeerRepositoryContext?(): Promise<string>;
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
   syncTaskExports?(): Promise<import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult>;
@@ -313,7 +314,8 @@ export async function runNamedSessionService(input: {
         await health();
       }
       let result: Awaited<ReturnType<NonNullable<typeof owner>['runNext']>>;
-      try { result = await enqueue(() => input.withActivationBoundary(() => owner!.runNext())); }
+      try { result = await enqueue(() => input.withActivationBoundary(() =>
+        owner!.runNext({loadRepositoryContext: input.readPeerRepositoryContext}))); }
       catch (error) { if (closing || input.signal.aborted) break; throw error; }
       lastObservation = result; await health();
       if (result.state === 'reply_pending') throw new Error('named_session_reply_pending');

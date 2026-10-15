@@ -203,6 +203,66 @@ test('retained provider and owner use the renewed deadline without replacing the
     assert.equal(remote.calls.filter(call => call === 'turn/start').length, 1);
   } finally { await owner.close(); f.vault.close(); }
 });
+for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test('peer context is loaded lazily per offered question before acceptance: '
+  + scenario, async () => {
+  const deniedContext = scenario === 'denied';
+  const f = await fixture(), remote = fakeTransport(f.binding);
+  let offered = false, accepted = false, loads = 0, reserves = 0;
+  let q = signedQuestion(f.binding, f.now), context = 'CURRENT_SIGNED_V8';
+  if (scenario === 'forged') q = {...q, signature: 'invalid-fixture-signature'};
+  if (scenario === 'expired') {
+    const {signature: _signature, ...unsigned} = q;
+    const expired = {...unsigned, expiresAt: new Date(f.now.getTime() - 1).toISOString()};
+    q = {...expired, signature: signCanonicalObject(expired, privateKey)};
+  }
+  const prompts: string[] = [];
+  const request = remote.transport.request.bind(remote.transport);
+  remote.transport.request = async (method, params) => {
+    if (method === 'turn/start') prompts.push(JSON.stringify(params.input));
+    return request(method, params);
+  };
+  const channelTransport = {async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    const envelope = {ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId};
+    if (route.endsWith('provider-sessions')) return {...envelope, registration: {
+      bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+      repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+      deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned', revision: 1, state: 'attached',
+      leaseUntil: new Date(Date.now() + 60000).toISOString(), replay: false}};
+    if (body.action === 'inbox') return {...envelope, result: {offers: offered && !accepted ? [q] : []}};
+    if (body.action === 'accept') accepted = true;
+    return {...envelope, result: {questionId: q.questionId, taskId: q.taskId,
+      targetBindingId: f.binding.bindingId, state: body.action === 'reply' ? 'answered' : 'accepted', replay: false}};
+  }};
+  const inbox = await openCodexInboxSession({...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+    channelTransport, authorizeContent: async () => true,
+    budget: {reserve: async () => {reserves++; return true;}}, openTransport: async () => remote.transport});
+  const options = {loadRepositoryContext: async () => {
+    assert.equal(accepted, false); loads++;
+    if (deniedContext) throw new Error('synthetic_context_denied');
+    return context;
+  }};
+  try {
+    assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'idle');
+    assert.equal(loads, 0); offered = true;
+    if (scenario === 'forged' || scenario === 'expired') {
+      await assert.rejects(Reflect.apply(inbox.runNext, inbox, [options]), /provider_session_channel_response/);
+      assert.equal(loads, 0); assert.equal(reserves, 0); assert.equal(accepted, false); assert.equal(prompts.length, 0);
+    } else if (deniedContext) {
+      await assert.rejects(Reflect.apply(inbox.runNext, inbox, [options]), /synthetic_context_denied/);
+      assert.equal(loads, 1); assert.equal(reserves, 0); assert.equal(accepted, false); assert.equal(prompts.length, 0);
+    } else {
+      assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'answered');
+      assert.equal(loads, 1); assert.match(prompts[0]!, /CURRENT_SIGNED_V8/);
+      context = 'CURRENT_SIGNED_V9'; accepted = false;
+      q = signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020');
+      assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'answered');
+      assert.equal(loads, 2); assert.match(prompts[1]!, /CURRENT_SIGNED_V9/);
+      assert.doesNotMatch(prompts[1]!, /CURRENT_SIGNED_V8/);
+    }
+  } finally {await inbox.close(); f.vault.close();}
+});
+
 test('default inbox startup recovers the server revision with its retained local owner and no provider turn', async () => {
   const f = await fixture(), remote = fakeTransport(f.binding), actions: string[] = [];
   let reserves = 0;

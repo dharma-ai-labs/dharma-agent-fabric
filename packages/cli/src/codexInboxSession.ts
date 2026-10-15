@@ -84,7 +84,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
     },
     ask: channel.ask,
     read: channel.read,
-    async runNext() {
+    async runNext(options: {loadRepositoryContext?: () => Promise<string>} = {}) {
       if (stopped) throw new Error('codex_inbox_session_unavailable');
       if (running) throw new Error('codex_inbox_session_busy');
       running = true;
@@ -100,7 +100,10 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
         if (!offer) return { state: 'idle' as const };
         current = offer;
         let result: Awaited<ReturnType<typeof owner.runQuestion>>;
-        try { result = await owner.runQuestion({ question: offer }); }
+        try {
+          const repositoryContext = await options.loadRepositoryContext?.();
+          result = await owner.runQuestion({ question: offer, repositoryContext });
+        }
         catch (error) {
           if (error instanceof Error && error.message === 'codex_session_turn_timeout') {
             const failureEvidenceHash = await input.vault.putBlob(Buffer.from(canonicalize({

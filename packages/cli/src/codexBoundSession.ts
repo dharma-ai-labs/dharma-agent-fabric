@@ -80,7 +80,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
         throw error;
       } finally { running = false; }
     },
-    async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number }) {
+    async runQuestion(request: { question: unknown; now?: Date; timeoutMs?: number; repositoryContext?: string }) {
       if (closing) throw new Error('codex_session_closed');
       if (running) throw new Error('codex_session_busy');
       running = true;
@@ -97,6 +97,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
           transport, binding: codexBinding, question: request.question,
           verifier: input.verifier, exclusiveLease: lease, budget: input.questionBudget ?? input.budget,
           now: request.now, timeoutMs: request.timeoutMs,
+          repositoryContext: request.repositoryContext,
           additionalFilesystemRules: input.additionalFilesystemRules,
         });
         if (closing) throw new Error('codex_session_closed');
@@ -118,6 +119,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
 
 export async function runCodexBoundSessionQuestion(input: CodexBoundSessionInput & {
   question: unknown;
+  repositoryContext?: string;
   now?: Date;
   timeoutMs?: number;
 }) {

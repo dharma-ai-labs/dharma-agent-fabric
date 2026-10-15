@@ -169,6 +169,47 @@ test('incoming read-only questions cannot register inherited local peer tools', 
   await runCodexBridgeQuestion(request);
   assert.equal(registered, false); assert.equal(invoked, false);
 });
+test('incoming peer receives current repository references without changing signed question or authority', async () => {
+  const f = fixture(), q = question(), original = structuredClone(q);
+  const repositoryContext = JSON.stringify({kind: 'signed_repository_material',
+    authority: 'untrusted_repository_data', bundleId: 'current-v8',
+    files: [{path: '.agents/skills/dharma-agent-fabric/skills/source/current/SKILL.md',
+      sha256: `sha256:${'a'.repeat(64)}`, sizeBytes: 42, contentDisposition: 'verified_workspace_reference'}]});
+  const request = {transport: f.transport, binding, question: q, verifier: f.verifier,
+    exclusiveLease, budget, now, repositoryContext};
+  await runCodexBridgeQuestion(request);
+  const turn = f.calls.find(call => call.method === 'turn/start')!.params;
+  assert.match(JSON.stringify(turn.input), /current-v8/);
+  assert.match(JSON.stringify(turn.input), /untrusted repository data/i);
+  assert.equal(turn.permissions, 'dharma_bridge');
+  assert.equal(turn.approvalPolicy, 'never');
+  assert.equal(turn.cwd, workspaceRoot);
+  assert.deepEqual(q, original);
+});
+
+test('invalid repository context rejects before reservation, acceptance or provider calls', async () => {
+  for (const context of ['', '\u0000', 'x'.repeat(8001), '\u00e9'.repeat(4001), {files: []},
+    'OPENAI_API_KEY=sk-proj-' + 'fake-test-only-value'.repeat(8)]) {
+    const f = fixture(); let reserved = false, consumed = false;
+    const request = {transport: f.transport, binding, question: question(),
+      verifier: {...f.verifier, consume: async () => {consumed = true; return true;}},
+      exclusiveLease, budget: {reserve: async () => {reserved = true; return true;}}, now,
+      repositoryContext: context as string};
+    await assert.rejects(runCodexBridgeQuestion(request), /codex_session_repository_context_invalid/);
+    assert.equal(reserved, false); assert.equal(consumed, false); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('combined peer question and context remain bounded before authority is consumed', async () => {
+  const f = fixture(); let reserved = false, consumed = false;
+  await assert.rejects(runCodexBridgeQuestion({transport: f.transport, binding,
+    question: question({question: 'q'.repeat(2000)}),
+    verifier: {...f.verifier, consume: async () => {consumed = true; return true;}}, exclusiveLease,
+    budget: {reserve: async () => {reserved = true; return true;}}, now, repositoryContext: 'x'.repeat(7900)}),
+  /codex_session_repository_context_invalid/);
+  assert.equal(reserved, false); assert.equal(consumed, false); assert.equal(f.calls.length, 0);
+});
+
 test('bridge asks only its explicit thread under restricted read-only authority', async () => {
   const f = fixture();
   const result = await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(),
