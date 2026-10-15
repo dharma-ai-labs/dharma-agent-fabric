@@ -581,7 +581,9 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient', '
       assert.equal(claims, ['withdrawn-source', 'withdrawn-device-config', 'withdrawn-startup-preflight', 'startup-conflict'].includes(disposition) ? 0 : 1,
         'the actual bootstrap must reach only a still-admitted bound claim');
       if (disposition === 'startup-conflict') {
-        assert.deepEqual(effects, ['source', 'device-config', 'startup-preflight']);
+        // Initial target reconciliation precedes source selection. Re-read the
+        // device afterward so checkout preparation cannot hide context drift.
+        assert.deepEqual(effects, ['device-config', 'source', 'device-config', 'startup-preflight']);
         assert.equal(onboards, 0); assert.equal(starts, 0);
       }
       if (claims) assert.ok(effects.indexOf('startup-preflight') < effects.indexOf('claim'));

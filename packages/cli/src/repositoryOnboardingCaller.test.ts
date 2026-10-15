@@ -205,9 +205,13 @@ test('bootstrap preserves only a verified current-device startup anchor before e
   f.dependencies.relayAutostartStatus = async () => ({ state: 'enabled', backend: 'systemd-user' });
   f.dependencies.inspectOwnedRelayAutostart = async () => ({ workspace: '/first',
     policy: resolve('/first', '.dharma', 'approved-policy.json'), version: '0.2.102' });
-  let reads = 0;
-  f.dependencies.readDeviceConfig = async () => ++reads === 1 ? null
-    : { organizationId: 'org_fixture', deviceId: 'fixture_device' };
+  let enrolled = false;
+  const redeem = f.dependencies.redeemBootstrapGrant as (...args: unknown[]) => Promise<unknown>;
+  f.dependencies.redeemBootstrapGrant = async (...args: unknown[]) => {
+    const result = await redeem(...args); enrolled = true; return result;
+  };
+  f.dependencies.readDeviceConfig = async () => enrolled
+    ? { organizationId: 'org_fixture', hqUrl: 'https://fixture.invalid', deviceId: 'fixture_device' } : null;
   f.dependencies.registry = async () => [{ workspaceId: 'fixture_first', organizationId: 'org_fixture',
     path: '/first', routeHash: 'route', repositoryRemoteHash: 'remote' }];
   f.dependencies.selectDeviceWorkspace = () => ({ workspaceId: 'fixture_first', routeHash: 'route', repositoryRemoteHash: 'remote' });
@@ -501,8 +505,18 @@ test('foreign enrollment and grant-option conflict stop before private entry or 
       f.dependencies.readDeviceConfig = async () => ({ organizationId: 'org_other', hqUrl: 'https://fixture.invalid' });
     }
     f.dependencies.redeemBootstrapGrant = async () => { throw new Error('must not redeem'); };
-    await assert.rejects((await caller('bootstrap', f.dependencies))(flags), conflict
-      ? /bootstrap_grant_options_invalid/ : /another organization or portal/);
+    const bootstrap = await caller('bootstrap', f.dependencies);
+    if (conflict) await assert.rejects(bootstrap(flags), /bootstrap_grant_options_invalid/);
+    else {
+      const result = await bootstrap(flags);
+      assert.equal(result.code, 'connection_context_mismatch');
+      assert.equal(result.effects, false);
+      assert.equal(result.grantRedeemed, false);
+      assert.equal(result.enrollmentChanged, false);
+      assert.equal(f.calls.includes('preflight'), false);
+      assert.equal(f.calls.includes('onboard'), false);
+      assert.equal(f.calls.includes('save_device'), false);
+    }
     assert.equal(f.calls.includes('private_grant'), false);
   }
 });
