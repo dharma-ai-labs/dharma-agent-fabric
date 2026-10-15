@@ -11,7 +11,7 @@ import ts from 'typescript';
 import {currentBootstrapHostScope, prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
-type Phase = 'controller' | 'directory' | 'existing' | 'temporary' | 'commit' | 'registration' | 'status' | 'os';
+type Phase = 'controller' | 'directory' | 'existing' | 'temporary' | 'commit' | 'registration' | 'status' | 'os' | 'host';
 
 // Whole production declarations, real lifetime fencing, synthetic OS/filesystem.
 // No Docker, private store, native client, disk probe or real file mutation.
@@ -52,6 +52,7 @@ async function fixture(phase?: Phase, failure: 'withdraw' | 'identity' | 'expire
     rm: async (path: string) => {removals.push(path); stored.delete(path);},
     readRegistration: async () => {await boundary('registration'); return {...registration, backend: 'systemd-user'};},
     relayAutostartStatus: async () => {await boundary('status'); return {state: 'enabled'};},
+    startWslRelayHost: async () => boundary('host'),
     defaultRunner: async (file: string, args: string[]) => {commands.push([file, args]); await boundary('os'); return {stdout: ''};},
     unavailable: () => new Error('container_startup_unavailable'), UNIT_NAME: 'dharma-agent-fabric.service',
   };
@@ -154,5 +155,10 @@ test('user startup dispatches only the owned fixed service while original author
 
 test('user startup withholds a late OS acknowledgement without claiming reversal', async () => {
   const f = await fixture('os'); await assert.rejects(f.start(), /codex_setup_host_scope_unavailable/);
+  assert.equal(f.commands.length, 1);
+});
+
+test('user startup withholds a late WSL host acknowledgement without replaying the Linux start', async () => {
+  const f = await fixture('host'); await assert.rejects(f.start(), /codex_setup_host_scope_unavailable/);
   assert.equal(f.commands.length, 1);
 });

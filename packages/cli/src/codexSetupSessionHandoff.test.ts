@@ -388,8 +388,10 @@ test('post-acceptance policy change records bounded unconfirmed disposition and 
   });
 });
 
-test('expiry during accepted startup retains its no-retry fence and does not abort a later request', async () => {
+test('expiry during accepted startup retains its no-retry fence and does not abort a later request', async t => {
   await fixture(async f => {
+    // Expire only after acceptance, not during slow fixture/database preparation.
+    t.mock.timers.enable({apis: ['Date'], now: Date.now()});
     const first = {...f.request, expiresAt: new Date(Date.now() + 250).toISOString()};
     f.vault.stageCodexSetupSession(f.leaseId, digest, first);
     const sibling = f.vault.claimCodexSetupOperation(uuid(7), digest);
@@ -403,7 +405,7 @@ test('expiry during accepted startup retains its no-retry fence and does not abo
         authorize: async () => true, onFailure: failure => {failures.push(failure);}, start: async scope => {
           starts++;
           if (scope.request.operationId === first.operationId) {
-            await new Promise(resolve => setTimeout(resolve, 350));
+            t.mock.timers.tick(350);
             throw new Error('setup_session_scope_unavailable');
           }
           return unconfirmed;

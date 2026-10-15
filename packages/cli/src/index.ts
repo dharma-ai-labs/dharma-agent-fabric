@@ -146,7 +146,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.198';
+const VERSION = '0.2.199';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2124,8 +2124,10 @@ async function startRelayDaemon(policyPath: string) {
   const alreadyRunning = await relayProcessState() === 'running';
   const supervisorState = await relaySupervisorProcessState();
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
-  if (supervisorState === 'stopped') {
-    const startupBackend = (await relayAutostartStatus({ home: dharmaHome() })).backend;
+  const startup = await step(() => relayAutostartStatus({ home: dharmaHome() }));
+  const hostPending = startup.restartCoverage === 'wsl-host-logon' && startup.hostLifecycle !== 'running';
+  if (supervisorState === 'stopped' || hostPending) {
+    const startupBackend = startup.backend;
     // A setup turn cannot own a supervisor intended to outlive that turn.
     if (hostScope || startupBackend === 'container-entrypoint' || startupBackend === 'systemd-user') {
       await step(() => startRelayAutostart({ home: dharmaHome() }));
@@ -2686,7 +2688,8 @@ async function observeCodexBootstrapRuntime(prepared: {scope: BootstrapHostScope
     || resolve(startup.workspace) !== startup.workspace
     || startup.policy !== resolve(startup.workspace, '.dharma', 'approved-policy.json')
     || startup.launcher !== resolve(startup.workspace, '.dharma', 'bin', 'dharma')
-    || startup.backend === 'container-entrypoint' && startupState.lifecycle !== 'running') {
+    || startup.backend === 'container-entrypoint' && startupState.lifecycle !== 'running'
+    || startupState.restartCoverage === 'wsl-host-logon' && startupState.hostLifecycle !== 'running') {
     throw new Error('setup_runtime_startup_unconfirmed');
   }
   // A standard relay can retain another repository as its same-device anchor.
@@ -3335,7 +3338,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       const code = error instanceof Error && error.message.startsWith('autostart_conflict:')
         ? 'autostart_conflict' : error instanceof Error && error.message.startsWith('relay_runtime_upgrade_required:')
           ? 'relay_runtime_upgrade_required' : error instanceof Error && error.message.startsWith('relay_workspace_conflict:')
-            ? 'relay_workspace_conflict' : 'startup_preflight_unavailable';
+            ? 'relay_workspace_conflict' : error instanceof Error && error.message === 'wsl_host_startup_unavailable'
+              ? 'wsl_host_startup_unavailable' : 'startup_preflight_unavailable';
       return { ok: false, stage: 'startup_preflight', code, grantRedeemed: false, enrollmentChanged: false,
         message: code === 'relay_runtime_upgrade_required'
           ? 'Upgrade the existing enrolled startup runtime through the supported same-device update flow before retrying; setup has not redeemed authority or changed enrollment.'
@@ -3343,6 +3347,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
           ? 'This Linux user already has a startup entry owned by another installation. Use the existing enrolled installation or an eligible clean client; setup has not redeemed authority or changed enrollment.'
           : code === 'relay_workspace_conflict'
           ? 'The existing startup anchor does not match this device and its approved repository policy. Recover that enrolled repository through the supported same-device flow before retrying; setup has not redeemed authority or changed enrollment.'
+          : code === 'wsl_host_startup_unavailable'
+          ? 'The WSL host startup owner could not be verified. Restore the supported user-logon host binding before retrying; setup has not redeemed authority or changed enrollment.'
           : 'Startup ownership could not be verified. Resolve the supported startup prerequisite before retrying; setup has not redeemed authority or changed enrollment.' };
     }
   }
@@ -3646,11 +3652,12 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   const role = repositoryReceipt.repositoryRole as Record<string, unknown> | undefined;
   const roleReady = Boolean(role);
   const relayReady = relay.state === 'running';
-  const observedAutostart = autostart.backend === 'container-entrypoint'
+  const observedAutostart = autostart.backend === 'container-entrypoint' || autostart.restartCoverage === 'wsl-host-logon'
     ? await step(() => relayAutostartStatus({ home: dharmaHome() })) : autostart;
   const startupReady = !['win32', 'linux', 'darwin'].includes(process.platform)
     || observedAutostart.state === 'enabled'
-      && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running');
+      && (observedAutostart.backend !== 'container-entrypoint' || observedAutostart.lifecycle === 'running')
+      && (observedAutostart.restartCoverage !== 'wsl-host-logon' || observedAutostart.hostLifecycle === 'running');
   const complete = sharedRepositoryReady && namedSessionReady && firstLearningReady
     && roleReady && relayReady && startupReady;
   return {
