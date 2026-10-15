@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '737bd019624590d445282068cff22d01843316ea';
-const tree = 'c3cb962a98ccb4c93d17d023e4a7de9f4ae47776';
+const source = 'cdf11a07bf2f4cc4712e6e817ca95453dd1c0141';
+const tree = 'c7a572124a7785afc8fb37c670443e574413b114';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -28,8 +28,8 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/relay-client', name: '@dharma-ai-labs/agent-fabric-relay-client', version: '0.2.33',
     existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
       integrity: 'sha512-slzUPm+stPzF99vy6D0w2YWzT5wcDDq4zgJxq7JQBc/QB6v2JOPDK4t5NCIAeNW74E6W4J8qmJ6oGAvuKjxr4A=='}) },
-  { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.30' },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.201' },
+  { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.202' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -85,13 +85,13 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.201';
+  cliManifest.version = '0.2.202';
   cliManifest.dependencies['@dharma-ai-labs/agent-fabric-secure-store'] = '0.1.10';
   cliManifest.dependencies['@dharma-ai-labs/agent-fabric-relay-client'] = '0.2.33';
-  cliManifest.dependencies['@dharma-ai-labs/agent-fabric-local-vault'] = '0.1.30';
+  cliManifest.dependencies['@dharma-ai-labs/agent-fabric-local-vault'] = '0.1.31';
   assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
   const runtimePins = [['packages/secure-store', '0.1.10'], ['packages/relay-client', '0.2.33'],
-    ['packages/local-vault', '0.1.30']];
+    ['packages/local-vault', '0.1.31']];
   const runtimePaths = runtimePins.map(([path]) => path).sort();
   assert.deepEqual(Object.keys(snapshot.runtimeManifests).sort(), runtimePaths, 'unreviewed runtime manifest set');
   assert.deepEqual(Object.keys(snapshot.baselineRuntimeManifests).sort(), runtimePaths, 'unreviewed runtime baseline set');
@@ -102,7 +102,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     assert.deepEqual(snapshot.runtimeManifests[path], expected, `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.201';
+  lock.packages['packages/cli'].version = '0.2.202';
   for (const name of ['secure-store', 'relay-client', 'local-vault']) {
     const key = `@dharma-ai-labs/agent-fabric-${name}`;
     lock.packages['packages/cli'].dependencies[key] = cliManifest.dependencies[key];
@@ -113,10 +113,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   }
   delete lock.packages['packages/local-vault/node_modules/@dharma-ai-labs/agent-fabric-secure-store'];
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.200';";
+  const previousVersion = "const VERSION = '0.2.201';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(snapshot.cliSource,
-    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.201';"), 'unreviewed CLI source delta');
+    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.202';"), 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
