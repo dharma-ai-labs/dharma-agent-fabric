@@ -5398,14 +5398,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       return inventoryRepositoryPackage({ workspace: item.path, organizationId: item.organizationId,
         workspaceId, repositoryBindingId: item.repositoryBindingId!, repositoryAgentId: item.repositoryAgentId!, sourceAuthorization });
     };
-    const readCurrentRepositoryContext = async () => readNamedSessionRepositoryContext({
+    const readCurrentRepositoryContext = async (contentMode: 'references' | 'verified_inline' = 'references') => readNamedSessionRepositoryContext({
       installation: await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path}),
-      sharedRepositoryReady: await repositorySharedReady(item), scope: repositoryRoleScope(item), workspaceRoot: item.path,
+      sharedRepositoryReady: await repositorySharedReady(item), scope: repositoryRoleScope(item), workspaceRoot: item.path, contentMode,
       loadAuthority: async () => ({policy: await refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         source: await fetchRepositorySourceAuthorization(fabric, repositoryRoleScope(item))}) });
     return await runNamedSessionService({ home: dharmaHome(), registration, vault, signal: controller.signal,
         localWriteRoots: writeRoots, additionalFilesystemRules: filesystem.additionalFilesystemRules,
-      readPeerRepositoryContext: readCurrentRepositoryContext,
+      readPeerRepositoryContext: () => readCurrentRepositoryContext('verified_inline'),
       observeNativeSkill: async () => {
         const installation = await verifyAgentFabricSkillInstallation({provider: 'codex', workspace: item.path});
         const native = await observeNamedCodexSkill(transport!, {workspace: item.path, installation,

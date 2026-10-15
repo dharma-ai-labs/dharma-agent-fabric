@@ -83,7 +83,10 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
           assert.equal(params.approvalPolicy, 'never');
           const prompt = (params.input as Array<{ text: string }>)[0]!.text;
           assert.equal(prompt.includes('SIGNED_REPOSITORY_CONTEXT_FIXTURE'), params.permissions === 'dharma_work');
-          assert.equal(prompt.includes('PEER_CONTEXT_FIXTURE'), params.permissions === 'dharma_bridge');
+          assert.equal(prompt.includes('PEER_CONTEXT_FIXTURE'), false);
+          assert.deepEqual(params.additionalContext, params.permissions === 'dharma_bridge'
+            ? { dharma_signed_repository: { kind: 'untrusted', value: 'PEER_CONTEXT_FIXTURE' } }
+            : undefined);
           turns.push(String(params.permissions)); active++; maximumActive = Math.max(maximumActive, active);
           const turnId = randomUUID();
           const fail = failWork && turns.length === 2;
