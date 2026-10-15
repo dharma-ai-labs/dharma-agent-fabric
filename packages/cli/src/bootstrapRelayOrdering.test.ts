@@ -10,7 +10,8 @@ import ts from 'typescript';
 // Execute the actual post-enrollment caller with synthetic lifecycle boundaries.
 // No fixture starts a daemon, accesses credentials, or contacts the platform.
 async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?: boolean; withdraw?: boolean; conflict?: boolean; previousVersion?: string;
-  supervisorRunning?: boolean; wslHost?: boolean} = {}) {
+  supervisorRunning?: boolean; wslHost?: boolean; hostRunning?: boolean; partial?: boolean;
+  resume?: boolean; legacyGrant?: boolean; supervisorBinding?: 'foreign' | 'unknown' | 'old'} = {}) {
   const baseline = process.env.DHARMA_BOOTSTRAP_ORDER_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('bootstrap_order_baseline_invalid');
   const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`], {
@@ -24,9 +25,12 @@ async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?
   const end = statements.findIndex(node => node.getText(ast).startsWith('const skill ='));
   assert.ok(start >= 0 && end > start);
   const effects: string[] = [];
-  let enabled = false, withdrawn = false, running = options.supervisorRunning === true, hostRunning = false;
+  let enabled = false, withdrawn = false, running = options.supervisorRunning === true, hostRunning = options.hostRunning === true;
   const flags = new Map<string, string | boolean>([['complete', true], ['setup-reference', 'public-reference']]);
   if (options.sourceClaim === false) flags.delete('setup-reference');
+  if (options.partial) flags.delete('complete');
+  if (options.resume) flags.set('resume', true);
+  if (options.legacyGrant) flags.set('grant-prompt', true);
   if (options.noRelay) flags.set('no-relay-daemon', true);
   const step = async <T>(operation: () => Promise<T>) => {
     if (withdrawn) throw new Error('codex_setup_host_scope_unavailable');
@@ -61,7 +65,9 @@ async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?
     },
     dharmaHome: () => '/synthetic/device', VERSION: 'test', Number, String,
     readFile: async (path: string) => path.endsWith('supervisor-workspace.json')
-      ? JSON.stringify({pid: 101, version: 'test', standardRepositories: true, organizationId: 'org_demo', deviceId: 'device'})
+      ? JSON.stringify({pid: options.supervisorBinding === 'unknown' ? 102 : 101,
+        version: options.supervisorBinding === 'old' ? 'old' : 'test', standardRepositories: true,
+        organizationId: 'org_demo', deviceId: options.supervisorBinding === 'foreign' ? 'foreign' : 'device'})
       : path.endsWith('last-successful-poll.json') ? '{}' : '101',
     repositoryRelayObservationReady: () => true,
     waitForRelayReadiness: async (input: {processState(): Promise<string>}) => ({state: await input.processState()}),
@@ -126,9 +132,33 @@ test('fresh native bootstrap registers its owned startup before starting a relay
   assert.equal(f.flags.has('no-relay-daemon'), false, 'internal deferral must not change customer flags');
 });
 
-test('running supervisor still starts its newly registered WSL host owner', async () => {
-  const f = await fixture({supervisorRunning: true, wslHost: true}); await f.run();
-  assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable', 'start']);
+test('running detached supervisor cannot start a competing newly registered WSL host', async () => {
+  const f = await fixture({supervisorRunning: true, wslHost: true});
+  await assert.rejects(f.run(), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message,/relay_startup_owner_transition_required/);
+    assert.ok(error.cause instanceof Error);
+    assert.equal(error.cause.message,'setup_runtime_startup_unconfirmed');
+    return true;
+  });
+  assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable']);
+});
+
+test('running supervisor with an already running WSL host is preserved', async () => {
+  const f = await fixture({supervisorRunning: true, wslHost: true, hostRunning: true}); await f.run();
+  assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable']);
+});
+
+test('pending WSL host cannot adopt foreign, unconfirmed, or older supervisors', async () => {
+  for (const [supervisorBinding,expected] of [
+    ['foreign', /relay_workspace_conflict/],
+    ['unknown', /relay_supervisor_owner_unconfirmed/],
+    ['old', /relay_runtime_upgrade_required/],
+  ] as const) {
+    const f = await fixture({supervisorRunning:true,wslHost:true,supervisorBinding});
+    await assert.rejects(f.run(),expected);
+    assert.equal(f.effects.includes('start'),false);
+  }
 });
 
 test('generic completion rechecks WSL host liveness instead of accepting cached registration', async () => {
@@ -199,7 +229,39 @@ test('explicit no-relay bootstrap does not try to upgrade or inspect startup', a
   assert.deepEqual(f.effects, ['onboard', 'launcher']);
 });
 
-test('legacy unscoped onboarding retains its original relay-start order', async () => {
+test('hostless grant-free resume starts only after owned startup registration', async () => {
+  const f = await fixture({host:false,sourceClaim:false,resume:true}); await f.run();
+  assert.deepEqual(f.effects,['onboard','launcher','enable','start']);
+  assert.equal(f.flags.has('no-relay-daemon'),false);
+});
+
+test('legacy grant-prompt completion also defers relay until owned startup', async () => {
+  const f = await fixture({host:false,sourceClaim:false,legacyGrant:true}); await f.run();
+  assert.deepEqual(f.effects,['onboard','launcher','enable','start']);
+});
+
+test('legacy partial bootstrap preserves relay startup but only after registration', async () => {
+  const f = await fixture({host:false,sourceClaim:false,partial:true}); await f.run();
+  assert.deepEqual(f.effects,['onboard','launcher','enable','start']);
+});
+
+test('partial source claim preserves its deferred relay until explicit completion', async () => {
+  const f = await fixture({host:false,partial:true}); await f.run();
+  assert.deepEqual(f.effects,['onboard','launcher','enable']);
+});
+
+test('hostless grant-free resume preserves explicit no-relay mode', async () => {
+  const f = await fixture({host:false,sourceClaim:false,resume:true,noRelay:true}); await f.run();
+  assert.deepEqual(f.effects,['onboard','launcher']);
+});
+
+test('hostless completion does not start before detecting a foreign startup', async () => {
+  const f = await fixture({host:false,sourceClaim:false,conflict:true});
+  await assert.rejects(f.run(),/autostart_conflict/);
+  assert.equal(f.effects.includes('start'),false);
+});
+
+test('legacy unscoped completion uses the persistent startup owner', async () => {
   const f = await fixture({host: false, sourceClaim: false}); await f.run();
-  assert.deepEqual(f.effects, ['onboard', 'start', 'launcher', 'enable']);
+  assert.deepEqual(f.effects, ['onboard', 'launcher', 'enable', 'start']);
 });
