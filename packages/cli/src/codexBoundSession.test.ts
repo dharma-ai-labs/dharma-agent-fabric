@@ -3,6 +3,8 @@ import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import test, { describe } from 'node:test';
 import { canonicalize, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
@@ -11,6 +13,7 @@ import { openCodexBoundSession, runCodexBoundSessionQuestion } from './codexBoun
 import { openCodexInboxSession } from './codexInboxSession.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
 import { NamedPeerContentAuthorizationError } from './namedPeerContentAuthorization.js';
+import { NamedSessionBudget } from './namedSessionBudget.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const ids = {
@@ -581,6 +584,149 @@ test('signed inbox budget denial does not accept, execute, or replace the select
     assert.equal(remote.isClosed(), false);
     const retired = await inbox.retire();
     assert.equal(retired.serverDetached, true); assert.equal(retired.providerClosed, true);
+  } finally { await inbox.close(); f.vault.close(); }
+});
+
+test('an unaccepted question recovers its existing reservation only through a fresh acceptance', async () => {
+  const f = await fixture(), question = signedQuestion(f.binding, f.now);
+  const path = join(f.root, 'question-budget.sqlite');
+  let budget = new NamedSessionBudget(path, 'question-recovery', 50);
+  let accepts = 0, accepted = false;
+  const remotes: ReturnType<typeof fakeTransport>[] = [];
+  const channelTransport = { async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    const envelope = { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId };
+    if (route.endsWith('provider-sessions')) return { ...envelope, registration: {
+      bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+      repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+      deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+      revision: Number(body.expectedRevision) + 1, state: 'attached',
+      leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+    if (body.action === 'inbox') return { ...envelope, result: { offers: accepted ? [] : [question] } };
+    if (body.action === 'accept') {
+      accepts++;
+      if (accepts === 1) throw new Error('private-transport-error-must-not-be-exposed');
+      assert.equal(accepted, false); accepted = true;
+    }
+    return { ...envelope, result: { questionId: question.questionId, taskId: question.taskId,
+      targetBindingId: f.binding.bindingId, state: body.action === 'reply' ? 'answered' : 'accepted', replay: false } };
+  } };
+  const open = async () => {
+    const remote = fakeTransport(f.binding); remotes.push(remote);
+    const options = { ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+      budget: { reserve: async (id: string, cents: number) => budget.reserve(id, cents) },
+      questionBudget: { reserve: async (id: string, cents: number) => budget.reserveUnacceptedQuestion(id, cents) },
+      channelTransport, authorizeContent: async () => true, openTransport: async () => remote.transport };
+    return openCodexInboxSession(options);
+  };
+  let inbox = await open();
+  try {
+    await assert.rejects(inbox.runNext(), /provider_session_channel_uncertain/);
+    assert.equal(accepted, false);
+    assert.equal(remotes[0]!.calls.includes('turn/start'), false);
+    assert.equal(budget.status().reservedCents, 25);
+    await inbox.close(); budget.close();
+    budget = new NamedSessionBudget(path, 'question-recovery', 50);
+    inbox = await open();
+    assert.equal((await inbox.runNext()).state, 'answered');
+    assert.equal(accepts, 2);
+    assert.equal(remotes.flatMap(remote => remote.calls).filter(call => call === 'turn/start').length, 1);
+    assert.equal(budget.status().reservedCents, 25);
+    assert.equal(budget.reserve(question.questionId, 25), true, 'a distinct local-work purpose needs its own reservation');
+    assert.equal(budget.reserve(question.questionId, 25), false, 'local-work reservation replay stays forbidden');
+    assert.equal(budget.status().reservedCents, 50);
+  } finally { await inbox.close(); budget.close(); f.vault.close(); }
+});
+
+for (const lostAt of ['before_commit', 'after_commit'] as const) test(`HTTP acceptance loss ${lostAt} preserves cost and never repeats execution`, async () => {
+  const f = await fixture(), question = signedQuestion(f.binding, f.now);
+  const path = join(f.root, 'http-question-budget.sqlite');
+  let budget = new NamedSessionBudget(path, 'http-question-recovery', 50);
+  let accepted = false, accepts = 0;
+  const remotes: ReturnType<typeof fakeTransport>[] = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+    const envelope = { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId };
+    const send = (value: unknown) => {response.setHeader('content-type', 'application/json');response.end(JSON.stringify(value));};
+    assert.equal(body.bindingId, f.binding.bindingId);
+    assert.equal(body.workspaceId, f.binding.workspaceId);
+    if (request.url?.endsWith('provider-sessions')) {
+      send({ ...envelope, registration: {
+        bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+        repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+        deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+        revision: Number(body.expectedRevision) + 1, state: 'attached',
+        leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } }); return;
+    }
+    if (body.action === 'inbox') {send({ ...envelope, result: { offers: accepted ? [] : [question] } });return;}
+    if (body.action === 'accept') {
+      accepts++;
+      if (accepts === 1) {
+        accepted = lostAt === 'after_commit';
+        request.socket.destroy(); return;
+      }
+      assert.equal(accepted, false); accepted = true;
+    }
+    send({ ...envelope, result: { questionId: question.questionId, taskId: question.taskId,
+      targetBindingId: f.binding.bindingId, state: body.action === 'reply' ? 'answered' : 'accepted', replay: false } });
+  });
+  await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const channelTransport = { async signedPost(route: string, body: unknown) {
+    const response = await fetch(origin+route, {method: 'POST', body: JSON.stringify(body),
+      headers: {'content-type': 'application/json'}, signal: AbortSignal.timeout(3000)});
+    assert.equal(response.status, 200);return await response.json() as Record<string, unknown>;
+  } };
+  const open = async () => {
+    const remote = fakeTransport(f.binding); remotes.push(remote);
+    return openCodexInboxSession({...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+      budget: {reserve: async (id, cents) => budget.reserve(id, cents)},
+      questionBudget: {reserve: async (id, cents) => budget.reserveUnacceptedQuestion(id, cents)},
+      channelTransport, authorizeContent: async () => true, openTransport: async () => remote.transport});
+  };
+  let inbox = await open();
+  try {
+    await assert.rejects(inbox.runNext(), /provider_session_channel_uncertain/);
+    assert.equal(remotes[0]!.calls.includes('turn/start'), false);
+    assert.equal(budget.status().reservedCents, 25);
+    await inbox.close();budget.close();
+    budget = new NamedSessionBudget(path, 'http-question-recovery', 50);
+    inbox = await open();
+    assert.equal((await inbox.runNext()).state, lostAt === 'before_commit' ? 'answered' : 'idle');
+    assert.equal(accepts, lostAt === 'before_commit' ? 2 : 1);
+    assert.equal(remotes.flatMap(remote => remote.calls).filter(call => call === 'turn/start').length,
+      lostAt === 'before_commit' ? 1 : 0);
+    assert.equal(budget.status().reservedCents, 25);
+  } finally {
+    await inbox.close();budget.close();f.vault.close();
+    server.closeAllConnections();await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+  }
+});
+
+test('a replayed acceptance never authorizes another provider turn', async () => {
+  const f = await fixture(), question = signedQuestion(f.binding, f.now), remote = fakeTransport(f.binding);
+  let accepts = 0;
+  const channelTransport = { async signedPost(route: string, input: unknown) {
+    const body = input as Record<string, unknown>;
+    const envelope = { ok: true, organizationId: f.binding.organizationId, correlationId: ids.threadId };
+    if (route.endsWith('provider-sessions')) return { ...envelope, registration: {
+      bindingId: f.binding.bindingId, workspaceId: f.binding.workspaceId, endpointId: f.binding.endpointId,
+      repositoryBindingId: f.binding.repositoryBindingId, membershipId: f.binding.membershipId,
+      deviceId: f.binding.deviceId, provider: 'codex', mode: 'bridge_owned',
+      revision: Number(body.expectedRevision) + 1, state: 'attached',
+      leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false } };
+    if (body.action === 'inbox') return { ...envelope, result: { offers: [question] } };
+    if (body.action === 'accept') accepts++;
+    return { ...envelope, result: { questionId: question.questionId, taskId: question.taskId,
+      targetBindingId: f.binding.bindingId, state: body.action === 'reply' ? 'answered' : 'accepted', replay: true } };
+  } };
+  const inbox = await openCodexInboxSession({ ...f, bindingId: f.binding.bindingId, expectedRevision: 0,
+    channelTransport, authorizeContent: async () => true, openTransport: async () => remote.transport });
+  try {
+    await assert.rejects(inbox.runNext(), /replayed/);
+    assert.equal(accepts, 1); assert.equal(remote.calls.includes('turn/start'), false);
   } finally { await inbox.close(); f.vault.close(); }
 });
 

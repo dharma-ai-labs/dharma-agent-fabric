@@ -26,11 +26,24 @@ export class NamedSessionBudget {
   }
   reserve(requestId: string, cents: number) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !Number.isSafeInteger(cents) || cents < 1) return false;
+    return this.#reserve(requestId, cents, false);
+  }
+  // Peer accounting is idempotent, but dispatch still requires a fresh server
+  // acceptance of the signed queued offer. Legacy/untyped reservations are not reused.
+  reserveUnacceptedQuestion(questionId: string, cents: number) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i.test(questionId)
+      || !Number.isSafeInteger(cents) || cents < 1) return false;
+    return this.#reserve(`question:${questionId}`, cents, true);
+  }
+  #reserve(requestId: string, cents: number, allowExisting: boolean) {
     this.#db.exec('begin immediate');
     try {
+      const previous = this.#db.prepare('select cents from reservations where request_id = ?').get(requestId);
+      if (previous) {
+        this.#db.exec('commit'); return allowExisting && Number(previous.cents) === cents;
+      }
       const used = this.status();
-      if (this.#db.prepare('select 1 from reservations where request_id = ?').get(requestId)
-        || used.reservedCents + cents > used.maximumCents) { this.#db.exec('commit'); return false; }
+      if (used.reservedCents + cents > used.maximumCents) { this.#db.exec('commit'); return false; }
       this.#db.prepare('insert into reservations values (?, ?, ?)').run(requestId, cents, new Date().toISOString());
       this.#db.exec('commit'); return true;
     } catch (error) { this.#db.exec('rollback'); throw error; }

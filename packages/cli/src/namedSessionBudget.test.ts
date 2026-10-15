@@ -40,6 +40,32 @@ test('restart records interrupted work without replay or releasing its reserved 
   budget.close();
 });
 
+test('unaccepted peer reservations retain their exact cost and cannot reuse local-work or legacy accounting', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-peer-budget-'));
+  const path = join(root, 'budget.sqlite'), questionId = '40000000-0000-4000-8000-000000000001';
+  let budget = new NamedSessionBudget(path, 'peer-scope', 75);
+  try {
+    assert.equal(budget.reserve(questionId, 25), true);
+    assert.equal(budget.reserveUnacceptedQuestion(questionId, 25), true);
+    assert.equal(budget.status().reservedCents, 50, 'an untyped prior reservation remains exposed');
+    budget.close(); budget = new NamedSessionBudget(path, 'peer-scope', 75);
+    assert.equal(budget.reserveUnacceptedQuestion(questionId, 25), true);
+    assert.equal(budget.status().reservedCents, 50);
+    for (const amount of [0, 24, 26, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.equal(budget.reserveUnacceptedQuestion(questionId, amount), false);
+    }
+    assert.equal(budget.reserveUnacceptedQuestion('../foreign', 25), false);
+    assert.equal(budget.reserveUnacceptedQuestion(questionId+'\n', 25), false);
+    assert.equal(budget.reserve('question:'+questionId, 25), false);
+    assert.equal(budget.reserveUnacceptedQuestion('40000000-0000-4000-8000-000000000002', 25), true);
+    assert.equal(budget.reserveUnacceptedQuestion('40000000-0000-4000-8000-000000000003', 1), false);
+    assert.equal(budget.status().reservedCents, 75);
+    assert.equal(budget.reserveUnacceptedQuestion(questionId, 25), true, 'already-accounted cost does not grow at the cap');
+    assert.equal(budget.reserve(questionId, 25), false);
+    assert.equal(budget.status().reservedCents, 75);
+  } finally {budget.close();}
+});
+
 test('exact-work audit lookup preserves reservations and never falls back to the latest work', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-audit-budget-'));
   const budget = new NamedSessionBudget(join(root, 'budget.sqlite'), 'audit-scope', 50);

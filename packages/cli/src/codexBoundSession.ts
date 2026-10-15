@@ -11,6 +11,7 @@ interface CodexBoundSessionInput {
   openTransport(): Promise<CodexStdioTransport>;
   verifier: SessionQuestionVerifier;
   budget: CodexSessionBudget;
+  questionBudget?: CodexSessionBudget;
   localWriteRoots?: string[];
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   localToolHandler?: CodexToolHandler;
@@ -94,7 +95,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
       try {
         const result = await runCodexBridgeQuestion({
           transport, binding: codexBinding, question: request.question,
-          verifier: input.verifier, exclusiveLease: lease, budget: input.budget,
+          verifier: input.verifier, exclusiveLease: lease, budget: input.questionBudget ?? input.budget,
           now: request.now, timeoutMs: request.timeoutMs,
           additionalFilesystemRules: input.additionalFilesystemRules,
         });

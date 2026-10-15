@@ -5385,7 +5385,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       await trust.refresh();
       return response;
     } };
-    // The durable reservation already suppresses duplicate provider execution.
+    // Fresh server acceptance and this live-owner claim fence peer execution;
+    // durable reservations retain cost even when delivery or execution is uncertain.
     const consumed = new Set<string>();
     let taskState: { workId: string; before: RepositoryPackageSnapshot; bundleId: string; bundleHash: string;
       evidenceRevision: string; consentReceiptId: string | undefined;

@@ -165,6 +165,8 @@ export async function runNamedSessionService(input: {
   try {
     owner = await openCodexInboxSession({ ...input, ...registration,
       authorizeLocalTools: input.authorizeLocalWork,
+      questionBudget: { reserve: async (id, cents) => cents <= registration.maximumTurnCostCents
+        && budget.reserveUnacceptedQuestion(id, cents) },
       budget: { reserve: async (id, cents) => cents <= registration.maximumTurnCostCents && budget.reserve(id, cents) } });
     // The vault lease proves the previous provider owner is gone before stale socket removal.
     const old = await lstat(paths.socket).catch(error => {
