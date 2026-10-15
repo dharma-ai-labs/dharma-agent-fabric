@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { secureStoreInternals } from './index.js';
 
@@ -101,6 +101,7 @@ test('WSL launches Windows Credential Manager through the interop bridge', () =>
   assert.deepEqual(secureStoreInternals.windowsCommandSpec('linux'), {
     command: '/init',
     prefixArgs: ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'],
+    cwd: '/mnt/c/Windows/System32',
     timeoutMs: 15_000,
     retryAttempts: 2,
   });
@@ -110,6 +111,29 @@ test('WSL launches Windows Credential Manager through the interop bridge', () =>
     timeoutMs: 5_000,
     retryAttempts: 3,
   });
+});
+
+test('Windows store uses its fixed bridge cwd for reads, writes, deletes and anchor updates', async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-bridge-cwd-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const calls = join(root, 'calls.jsonl');
+  const bridge = `const fs = require('node:fs');
+    const input = fs.readFileSync(0, 'utf8');
+    fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.cwd()) + '\\n');
+    process.stdout.write(input.startsWith('{') ? 'written' : process.cwd());`;
+  const spec = { command: process.execPath, prefixArgs: ['-e', bridge, '--'],
+    cwd: root, timeoutMs: 2_500, retryAttempts: 1 };
+  const store = secureStoreInternals.windowsStore(undefined, spec);
+  assert.equal(resolve((await store.get('synthetic-cwd-read'))!), resolve(root));
+  await store.put('synthetic-cwd-write', 'synthetic-not-a-real-credential');
+  await store.delete('synthetic-cwd-delete');
+  assert.equal(await store.compareAndPutEnrollmentAnchor!({
+    account: `device-enrollment-${'a'.repeat(32)}`,
+    legacyAccount: `device-enrollment-${'b'.repeat(32)}`,
+    expectedCurrent: null, expectedLegacy: null, secret: 'synthetic-anchor-only',
+  }), true);
+  assert.deepEqual((await readFile(calls, 'utf8')).trim().split('\n').map(line => resolve(JSON.parse(line))),
+    Array(4).fill(resolve(root)));
 });
 
 test('secure-store bounds a stalled subprocess', async () => {
