@@ -173,6 +173,7 @@ function pathKey(value: string) {
   return value;
 }
 function generated(path: string) {
+  if (path.split('/').some(part => ['node_modules', '__pycache__'].includes(part.toLowerCase()))) return true;
   return REPOSITORY_SKILL_ROOTS.some(root => {
     const child = path === root ? '' : path.startsWith(`${root}/`) ? path.slice(root.length + 1).split('/')[0] ?? '' : '';
     return child === 'dharma-agent-fabric' || child === '.dharma-managed'
@@ -202,7 +203,9 @@ function safeContent(bytes: Buffer) {
   while (pending.length) {
     const item = pending.pop();
     if (typeof item === 'string') {
-      if (/(?:^|[\s"'(=])(?:\/(?:home|Users|root|mnt)\/|[A-Za-z]:[\\/]|\\\\)/m.test(item)) return 'local_path_content';
+      // A UNC path has a server and share. Markdown escapes such as "\\|"
+      // and source-language backslash escapes alone are not UNC paths.
+      if (/(?:^|[\s"'(=])(?:\/(?:home|Users|root|mnt)\/|[A-Za-z]:[\\/]|\\{2,}[?.]\\+|\\{2,}[^\\\s"'|[\]]+\\+[^\s"'\\])/m.test(item)) return 'local_path_content';
     } else if (Array.isArray(item)) {
       for (const child of item) pending.push(child);
     } else if (item && typeof item === 'object') {
@@ -367,6 +370,7 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
         for await (const entry of directoryEntries(source)) {
           if (++scanned > limits.maximumScannedSourceEntries) throw new Error('Repository source scan limit exceeded.');
           const child = path === '.' ? entry.name : `${path}/${entry.name}`;
+          if (generated(child)) continue;
           if (broadRoot && child === 'output') continue;
           if (!repositorySourcePathSafe(child)) {
             if (child.split('/').some(part => ['.codex-pr-worktrees', '.worktrees', '.gitnexus', '.context', '.dharma'].includes(part.toLowerCase()))) continue;
@@ -453,7 +457,9 @@ export async function inventoryRepositoryPackage(input: RepositoryPackageInvento
     texts.set(path, content.toString('utf8'));
     // Outputs are opaque approved snapshots; they never trigger more collection.
     if (role === 'approved_output' || role === 'repository_content') continue;
-    for (const reference of dependencies(texts.get(path)!)) {
+    // Markdown references belong to documentation. Source strings that render
+    // a link (for example a Python f-string) are not literal dependencies.
+    for (const reference of /\.(?:md|txt|rst)$/i.test(path) ? dependencies(texts.get(path)!) : []) {
       if (++dependencyCount > limits.maximumDependencies) throw new Error('Repository package dependency limit exceeded.');
       const target = posix.normalize(posix.join(posix.dirname(path), reference));
       try {
