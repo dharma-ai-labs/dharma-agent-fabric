@@ -83,6 +83,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
           assert.equal(params.approvalPolicy, 'never');
           const prompt = (params.input as Array<{ text: string }>)[0]!.text;
           assert.equal(prompt.includes('SIGNED_REPOSITORY_CONTEXT_FIXTURE'), params.permissions === 'dharma_work');
+          assert.equal(prompt.includes('PEER_CONTEXT_FIXTURE'), params.permissions === 'dharma_bridge');
           turns.push(String(params.permissions)); active++; maximumActive = Math.max(maximumActive, active);
           const turnId = randomUUID();
           const fail = failWork && turns.length === 2;
@@ -123,13 +124,17 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       if (result.registration) delete (result.registration as Record<string, unknown>).organizationId;
       return result as Awaited<ReturnType<typeof rawPost>>;
     };
-    let boundaryWorkId: string | null = null;
+    let boundaryWorkId: string | null = null, boundaryActive = false;
     const retainedWorkIds: string[] = [];
-    let exportSyncs = 0, nativeReads = 0, nativeUnavailable = false, auditAuthorizationFailure = false;
+    let exportSyncs = 0, nativeReads = 0, nativeUnavailable = false, auditAuthorizationFailure = false, peerReads = 0;
     const nativeSkill = {schema: 'dharma.named-codex-skill-observation/v1' as const, nativeDiscovered: true as const,
       bundleId: randomUUID(), bundleHash: `sha256:${'a'.repeat(64)}`, catalogHash: `sha256:${'b'.repeat(64)}`,
       manifestHash: `sha256:${'c'.repeat(64)}`, skillsHash: `sha256:${'d'.repeat(64)}`, observedAt: new Date().toISOString()};
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
+      ...{readPeerRepositoryContext: async () => {
+        assert.equal(offered, true); assert.equal(accepted, false); assert.equal(active, 0);
+        assert.equal(boundaryWorkId, null); assert.equal(boundaryActive, true); peerReads++; return 'PEER_CONTEXT_FIXTURE';
+      }},
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
       authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => {
         if (auditAuthorizationFailure) throw new Error('PRIVATE_AUDIT_AUTHORIZATION_DIAGNOSTIC');
@@ -164,9 +169,10 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       },
       withActivationBoundary: async (operation, work) => {
         assert.equal(boundaryWorkId, null);
+        assert.equal(boundaryActive, false); boundaryActive = true;
         boundaryWorkId = work?.workId ?? null;
         try { return await operation(work ? 'SIGNED_REPOSITORY_CONTEXT_FIXTURE' : undefined); }
-        finally { boundaryWorkId = null; }
+        finally { boundaryWorkId = null; boundaryActive = false; }
       } });
     try {
       for (let n = 0; n < 40; n++) {
@@ -189,6 +195,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       }
       assert.ok(idleHealth, 'an idle inbox poll must persist a running, empty-queue health snapshot');
       assert.equal(exportSyncs, 1);
+      assert.equal(peerReads, 0);
       const exports = idleHealth.taskExports as { state: string; pending: number | null; acceptedLearningObservation: boolean };
       assert.equal(exports.state, queueFailure ? 'pending' : 'idle');
       assert.equal(exports.pending, queueFailure ? null : 0);
@@ -309,6 +316,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       offered = true;
       for (let n = 0; n < 150 && !replies.length; n++) await new Promise(resolveWait => setTimeout(resolveWait, 10));
       assert.equal(replies.length, 1);
+      assert.equal(peerReads, 1);
       assert.equal(maximumActive, 1);
       assert.deepEqual(retainedWorkIds, workReceipts.map(receipt => receipt.workId));
       assert.equal(JSON.stringify(workReceipts).includes('RAW_STATE_FAILURE_MUST_NOT_LEAK'), false);
