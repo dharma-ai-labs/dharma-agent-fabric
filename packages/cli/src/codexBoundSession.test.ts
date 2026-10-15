@@ -215,10 +215,13 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
     const expired = {...unsigned, expiresAt: new Date(f.now.getTime() - 1).toISOString()};
     q = {...expired, signature: signCanonicalObject(expired, privateKey)};
   }
-  const prompts: string[] = [];
+  const prompts: string[] = [], contexts: unknown[] = [];
   const request = remote.transport.request.bind(remote.transport);
   remote.transport.request = async (method, params) => {
-    if (method === 'turn/start') prompts.push(JSON.stringify(params.input));
+    if (method === 'turn/start') {
+      prompts.push(JSON.stringify(params.input));
+      contexts.push(params.additionalContext);
+    }
     return request(method, params);
   };
   const channelTransport = {async signedPost(route: string, input: unknown) {
@@ -237,7 +240,8 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
   const inbox = await openCodexInboxSession({...f, bindingId: f.binding.bindingId, expectedRevision: 0,
     channelTransport, authorizeContent: async () => true,
     budget: {reserve: async () => {reserves++; return true;}}, openTransport: async () => remote.transport});
-  const options = {loadRepositoryContext: async () => {
+  const options = {loadRepositoryContext: async (offer: typeof q) => {
+    assert.deepEqual(offer, q);
     assert.equal(accepted, false); loads++;
     if (deniedContext) throw new Error('synthetic_context_denied');
     return context;
@@ -253,11 +257,14 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
       assert.equal(loads, 1); assert.equal(reserves, 0); assert.equal(accepted, false); assert.equal(prompts.length, 0);
     } else {
       assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'answered');
-      assert.equal(loads, 1); assert.match(prompts[0]!, /CURRENT_SIGNED_V8/);
+      assert.equal(loads, 1);
+      assert.deepEqual(contexts[0], { dharma_signed_repository: { kind: 'untrusted', value: 'CURRENT_SIGNED_V8' } });
+      assert.doesNotMatch(prompts[0]!, /CURRENT_SIGNED_V8/);
       context = 'CURRENT_SIGNED_V9'; accepted = false;
       q = signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020');
       assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'answered');
-      assert.equal(loads, 2); assert.match(prompts[1]!, /CURRENT_SIGNED_V9/);
+      assert.equal(loads, 2);
+      assert.deepEqual(contexts[1], { dharma_signed_repository: { kind: 'untrusted', value: 'CURRENT_SIGNED_V9' } });
       assert.doesNotMatch(prompts[1]!, /CURRENT_SIGNED_V8/);
     }
   } finally {await inbox.close(); f.vault.close();}

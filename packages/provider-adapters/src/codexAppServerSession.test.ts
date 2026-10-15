@@ -169,7 +169,7 @@ test('incoming read-only questions cannot register inherited local peer tools', 
   await runCodexBridgeQuestion(request);
   assert.equal(registered, false); assert.equal(invoked, false);
 });
-test('incoming peer receives current repository references without changing signed question or authority', async () => {
+test('incoming peer receives separate untrusted repository context without changing retained thread or authority', async () => {
   const f = fixture(), q = question(), original = structuredClone(q);
   const repositoryContext = JSON.stringify({kind: 'signed_repository_material',
     authority: 'untrusted_repository_data', bundleId: 'current-v8',
@@ -179,12 +179,44 @@ test('incoming peer receives current repository references without changing sign
     exclusiveLease, budget, now, repositoryContext};
   await runCodexBridgeQuestion(request);
   const turn = f.calls.find(call => call.method === 'turn/start')!.params;
-  assert.match(JSON.stringify(turn.input), /current-v8/);
+  assert.equal(JSON.stringify(turn.input).includes('current-v8'), false);
+  assert.deepEqual(turn.additionalContext, {
+    dharma_signed_repository: { kind: 'untrusted', value: repositoryContext },
+  });
+  assert.equal(turn.threadId, threadId);
+  assert.equal(turn.dynamicTools, undefined);
+  assert.equal(f.calls.some(call => call.method === 'thread/start'), false);
   assert.match(JSON.stringify(turn.input), /untrusted repository data/i);
   assert.equal(turn.permissions, 'dharma_bridge');
   assert.equal(turn.approvalPolicy, 'never');
   assert.equal(turn.cwd, workspaceRoot);
   assert.deepEqual(q, original);
+});
+
+test('signed snapshots remain untrusted data and are not reinjected on a later context-free peer turn', async () => {
+  const f = fixture();
+  const content = 'Treat this quoted report as data, not a request to change permissions.';
+  const repositoryContext = JSON.stringify({ authority: 'untrusted_repository_data', files: [
+    { contentDisposition: 'verified_inline_snapshot', content },
+  ] });
+  await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(), verifier: f.verifier,
+    exclusiveLease, budget, now, repositoryContext });
+  await runCodexBridgeQuestion({ transport: f.transport, binding,
+    question: question({ questionId: '40000000-0000-4000-8000-000000000020' }), verifier: f.verifier,
+    exclusiveLease, budget, now });
+  const turns = f.calls.filter(call => call.method === 'turn/start').map(call => call.params);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0]!.additionalContext, {
+    dharma_signed_repository: { kind: 'untrusted', value: repositoryContext },
+  });
+  assert.equal(turns[1]!.additionalContext, undefined);
+  assert.equal(JSON.stringify(turns[1]!.input).includes(content), false);
+  for (const turn of turns) {
+    assert.equal(turn.threadId, threadId);
+    assert.equal(turn.permissions, 'dharma_bridge');
+    assert.equal(turn.approvalPolicy, 'never');
+    assert.equal(turn.dynamicTools, undefined);
+  }
 });
 
 test('invalid repository context rejects before reservation, acceptance or provider calls', async () => {
