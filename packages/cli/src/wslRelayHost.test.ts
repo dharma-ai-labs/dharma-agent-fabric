@@ -65,6 +65,23 @@ async function fixture(t: TestContext) {
   return {options, scripts, foreignTask: () => {exists = true;}, loseResponse: () => {loseRegistrationResponse = true;}};
 }
 
+function registeredTaskAction(scripts: string[]) {
+  const registration = scripts.find(script => script.includes('dharma-wsl-host:register'))!;
+  const match = /New-ScheduledTaskAction -Execute '([^']+)' -Argument '([^']+)'/.exec(registration);
+  assert.ok(match, 'expected one fixed task action');
+  return {execute: match[1]!, arguments: match[2]!};
+}
+
+test('WSL task uses the verified PowerShell host for its fixed native wait action', async t => {
+  const f = await fixture(t); await enableRelayAutostart(f.options);
+  const action = registeredTaskAction(f.scripts);
+  assert.equal(action.execute, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.match(action.arguments, /^-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
+  const script = Buffer.from(action.arguments.split(' ').at(-1)!, 'base64').toString('utf16le');
+  assert.equal(script, "$ErrorActionPreference='Stop'; & 'C:\\Windows\\System32\\wsl.exe' --distribution 'Ubuntu' --user 'maatru' --cd / --exec /usr/bin/systemctl --user start --wait dharma-agent-fabric.service; exit $LASTEXITCODE");
+  assert.doesNotMatch(script, /ExecutionPolicy|credential|password|token|grant|Start-Process|Invoke-Expression/i);
+});
+
 test('optional WSL task lookup distinguishes exact absence from a failed scheduler read', async () => {
   const source = await readFile(new URL('../src/wslRelayHost.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('wslRelayHost.ts', source, ts.ScriptTarget.Latest, true);
@@ -99,7 +116,9 @@ test('WSL startup registers an exact user-logon host action instead of relying o
   const receipt = await readFile(join(options.home, 'relay', 'wsl-host.json'), 'utf8');
   assert.doesNotMatch(receipt, /password|token|grant|credential/i);
   const action = scripts.find(script => script.includes('dharma-wsl-host:register'))!;
-  assert.match(action, /start --wait dharma-agent-fabric\.service/);
+  const nativeAction = registeredTaskAction(scripts);
+  assert.match(Buffer.from(nativeAction.arguments.split(' ').at(-1)!, 'base64').toString('utf16le'),
+    /start --wait dharma-agent-fabric\.service/);
   assert.match(action, /-LogonType Interactive -RunLevel Limited/);
   assert.match(action, /New-ScheduledTaskTrigger -AtLogOn -User \$current\.Name/);
   assert.match(action, /New-ScheduledTaskPrincipal -UserId \$current\.Name/);
@@ -131,18 +150,23 @@ test('the actual WSL guard validates the persisted SID rather than a normalized 
     Triggers:[{CimClass:{CimClassName:'MSFT_TaskLogonTrigger'},Enabled:true,UserId:''}],
     Settings:{MultipleInstances:'IgnoreNew',ExecutionTimeLimit:'PT0S',RestartCount:0,DisallowStartIfOnBatteries:false,StopIfGoingOnBatteries:false}};
   const receipt=JSON.parse(await readFile(join(f.options.home,'relay','wsl-host.json'),'utf8'));
-  task.Description=receipt.description;task.Actions[0]!.Arguments=receipt.arguments;
-  for(const foreign of [false,true]){
+  const action=registeredTaskAction(f.scripts);
+  task.Description=receipt.description;task.Actions[0]!.Execute=action.execute;task.Actions[0]!.Arguments=action.arguments;
+  for(const {foreign,legacyDirectAction} of [{foreign:false,legacyDirectAction:false},
+    {foreign:true,legacyDirectAction:false},{foreign:false,legacyDirectAction:true}]){
+    const rejected=foreign||legacyDirectAction;
+    const taskFixture=structuredClone(task);
+    if(legacyDirectAction){taskFixture.Actions[0]!.Execute=receipt.executable;taskFixture.Actions[0]!.Arguments=receipt.arguments;}
     const script=`$ErrorActionPreference='Stop';$current=[System.Security.Principal.WindowsIdentity]::GetCurrent(); `
       + `$fixturePrincipalSid=${foreign?"'S-1-5-18'":'$current.User.Value'}; `
       + `function Export-ScheduledTask { '<Task><Principals><Principal><UserId>'+$fixturePrincipalSid+'</UserId></Principal></Principals></Task>' }; `
       + `$task=ConvertFrom-Json ([Console]::In.ReadToEnd());$task.Principal.UserId=($current.Name -split '\\\\')[-1]; `
       + `$task.Triggers[0].UserId=$current.Name; ${guard}; `
       + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned')}catch{[Console]::Out.Write('refused');`
-      + `if(!${foreign?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
+      + `if(!${rejected?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
     const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
-      {input:JSON.stringify(task),encoding:'utf8',timeout:15000,windowsHide:true});
-    assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,foreign?'refused':'owned',result.stderr);
+      {input:JSON.stringify(taskFixture),encoding:'utf8',timeout:15000,windowsHide:true});
+    assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,rejected?'refused':'owned',result.stderr);
   }
 });
 

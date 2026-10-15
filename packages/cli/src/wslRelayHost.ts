@@ -130,7 +130,18 @@ function lookup(receipt: Receipt, required = false) {
     + `-or [string]$_.CategoryInfo.Category -ne 'ObjectNotFound') {throw} }; `;
 }
 
+function taskAction(receipt: Receipt) {
+  // Direct WSL scheduled actions can exit before Linux starts. Preserve the
+  // same limited identity while hosting the fixed native command in PowerShell.
+  const script = `$ErrorActionPreference='Stop'; & ${literal(receipt.executable)} `
+    + `--distribution ${literal(receipt.distribution)} --user ${literal(receipt.linuxUser)} `
+    + `--cd / --exec /usr/bin/systemctl --user start --wait dharma-agent-fabric.service; exit $LASTEXITCODE`;
+  return {executable: receipt.executable.replace(/wsl\.exe$/i, 'WindowsPowerShell\\v1.0\\powershell.exe'),
+    arguments: `-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`};
+}
+
 function taskPreamble(receipt: Receipt, operation: string): string {
+  const action = taskAction(receipt);
   return `# dharma-wsl-host:${operation}\n$ErrorActionPreference="Stop"; `
     + `$current=[System.Security.Principal.WindowsIdentity]::GetCurrent(); `
     + `if ($current.User.Value -cne ${literal(receipt.windowsSid)}) {throw 'wsl_host_identity_conflict'}; `
@@ -139,7 +150,7 @@ function taskPreamble(receipt: Receipt, operation: string): string {
     + `$definition=[xml](Export-ScheduledTask -TaskPath '\\' -TaskName ${literal(receipt.taskName)} -ErrorAction Stop); `
     + `$principals=@($definition.Task.Principals.Principal); `
     + `if ($value.Description -cne ${literal(receipt.description)} -or $actions.Count -ne 1 `
-    + `-or $actions[0].Execute -cne ${literal(receipt.executable)} -or $actions[0].Arguments -cne ${literal(receipt.arguments)} `
+    + `-or $actions[0].Execute -cne ${literal(action.executable)} -or $actions[0].Arguments -cne ${literal(action.arguments)} `
     + `-or $principals.Count -ne 1 -or $principals[0].UserId -cne $current.User.Value `
     + `-or [string]$value.Principal.LogonType -ne 'Interactive' -or [string]$value.Principal.RunLevel -ne 'Limited' `
     + `-or $triggers.Count -ne 1 -or $triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or !$triggers[0].Enabled `
@@ -179,9 +190,10 @@ export async function enableWslRelayHost(options: WslHostOptions): Promise<void>
   if (before.exists && before.enabled) return;
   // Preserve ownership before external mutation. Lost responses require readback,
   // not replacement of a possibly foreign task.
+  const action = taskAction(target);
   await invoke(options, taskPreamble(target, 'register')
     + `if ($null -ne $task) { Assert-OwnedTask $task; Enable-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)}|Out-Null } else { `
-    + `$action=New-ScheduledTaskAction -Execute ${literal(target.executable)} -Argument ${literal(target.arguments)}; `
+    + `$action=New-ScheduledTaskAction -Execute ${literal(action.executable)} -Argument ${literal(action.arguments)}; `
     + `$trigger=New-ScheduledTaskTrigger -AtLogOn -User $current.Name; `
     + `$principal=New-ScheduledTaskPrincipal -UserId $current.Name -LogonType Interactive -RunLevel Limited; `
     + `$settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; `
