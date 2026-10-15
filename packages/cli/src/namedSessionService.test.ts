@@ -65,6 +65,12 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 300000).toISOString(),
       nonce: randomUUID(), signerKeyVersion: 'test-v1' };
     const question = { ...unsigned, signature: signCanonicalObject(unsigned, privateKey) };
+    const peerContext = JSON.stringify({ schema: 'dharma.named-session-repository-context/v1', kind: 'signed_repository_material',
+      authority: 'untrusted_repository_data', organizationId: identity.organizationId, workspaceId: identity.workspaceId,
+      repositoryBindingId: identity.repositoryBindingId, repositoryAgentId: binding.bindingId, bundleId: binding.bindingId,
+      bundleHash: `sha256:${'1'.repeat(64)}`, manifestHash: `sha256:${'2'.repeat(64)}`, catalogHash: `sha256:${'3'.repeat(64)}`,
+      sourceReceiptId: `repo_consent_${binding.bindingId}`, sourceRevision: 1,
+      concepts: [{term: 'PEER_CONTEXT_FIXTURE'}], unresolved: [], files: [] });
     const lifetime = new AbortController();
     const transport = {
       signal: lifetime.signal,
@@ -84,9 +90,13 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
           const prompt = (params.input as Array<{ text: string }>)[0]!.text;
           assert.equal(prompt.includes('SIGNED_REPOSITORY_CONTEXT_FIXTURE'), params.permissions === 'dharma_work');
           assert.equal(prompt.includes('PEER_CONTEXT_FIXTURE'), false);
-          assert.deepEqual(params.additionalContext, params.permissions === 'dharma_bridge'
-            ? { dharma_signed_repository: { kind: 'untrusted', value: 'PEER_CONTEXT_FIXTURE' } }
-            : undefined);
+          if (params.permissions === 'dharma_bridge') {
+            const fragments = Object.values(params.additionalContext as Record<string, {kind: string; value: string}>);
+            const text = fragments.map(fragment => {
+              assert.equal(fragment.kind, 'untrusted'); return JSON.parse(fragment.value);
+            }).sort((a,b) => a.index-b.index).map(chunk => chunk.content).join('');
+            assert.equal(text, peerContext);
+          } else assert.equal(params.additionalContext, undefined);
           turns.push(String(params.permissions)); active++; maximumActive = Math.max(maximumActive, active);
           const turnId = randomUUID();
           const fail = failWork && turns.length === 2;
@@ -137,7 +147,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       ...{readPeerRepositoryContext: async offer => {
         assert.deepEqual(offer, question);
         assert.equal(offered, true); assert.equal(accepted, false); assert.equal(active, 0);
-        assert.equal(boundaryWorkId, null); assert.equal(boundaryActive, true); peerReads++; return 'PEER_CONTEXT_FIXTURE';
+        assert.equal(boundaryWorkId, null); assert.equal(boundaryActive, true); peerReads++; return peerContext;
       }},
       openTransport: async () => transport, channelTransport, verifier: { resolvePublicKey: () => publicKey, consume: async () => true },
       authorizeContent: async () => true, localWriteRoots: ['.'], authorizeLocalWork: async () => {

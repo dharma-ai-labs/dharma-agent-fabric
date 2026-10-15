@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/codex-repository-context-fragment/v1",
+  "title": "Indexed untrusted context fragment below the Codex160 per-value limit",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "contextSha256", "index", "total", "content"],
+  "properties": {
+    "schema": { "const": "dharma.codex-repository-context-fragment/v1" },
+    "contextSha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "index": { "type": "integer", "minimum": 0, "maximum": 7 },
+    "total": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "content": { "type": "string", "minLength": 1, "maxLength": 3500 }
+  }
+}

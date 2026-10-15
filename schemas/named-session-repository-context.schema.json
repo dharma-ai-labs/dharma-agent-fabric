@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-repository-context/v1",
+  "title": "Bounded untrusted verified repository context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "authority", "organizationId", "workspaceId", "repositoryBindingId", "repositoryAgentId", "bundleId", "bundleHash", "manifestHash", "catalogHash", "sourceReceiptId", "sourceRevision", "concepts", "unresolved", "files"],
+  "properties": {
+    "schema": { "const": "dharma.named-session-repository-context/v1" },
+    "kind": { "const": "signed_repository_material" },
+    "authority": { "const": "untrusted_repository_data" },
+    "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$" },
+    "workspaceId": { "$ref": "#/$defs/uuid" },
+    "repositoryBindingId": { "$ref": "#/$defs/uuid" },
+    "repositoryAgentId": { "$ref": "#/$defs/uuid" },
+    "bundleId": { "$ref": "#/$defs/uuid" },
+    "bundleHash": { "$ref": "#/$defs/hash" },
+    "manifestHash": { "$ref": "#/$defs/hash" },
+    "catalogHash": { "$ref": "#/$defs/hash" },
+    "sourceReceiptId": { "type": "string", "pattern": "^repo_consent_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sourceRevision": { "type": "integer", "minimum": 1, "maximum": 2147483646 },
+    "concepts": { "type": "array", "maxItems": 256 },
+    "unresolved": { "type": "array", "maxItems": 256 },
+    "files": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/file" } },
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "selectedFiles", "omittedFiles"],
+      "properties": {
+        "kind": { "const": "exact_workspace_references" },
+        "selectedFiles": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "omittedFiles": { "type": "integer", "minimum": 0, "maximum": 32 }
+      }
+    }
+  },
+  "oneOf": [
+    { "required": ["selection"], "properties": { "files": { "type": "array", "items": { "type": "object", "properties": { "contentDisposition": { "const": "verified_inline_snapshot" } } } } } },
+    { "not": { "required": ["selection"] }, "properties": { "files": { "type": "array", "items": { "type": "object", "properties": { "contentDisposition": { "const": "verified_workspace_reference" } } } } } }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "role", "sha256", "sizeBytes", "contentDisposition"],
+      "properties": {
+        "path": { "type": "string", "maxLength": 512, "pattern": "^\\.agents/skills/dharma-agent-fabric/(skills/source/|knowledge/reports/source/)[A-Za-z0-9._ /-]+$" },
+        "role": { "enum": ["skill", "dependency", "knowledge"] },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 262144 },
+        "contentDisposition": { "enum": ["verified_workspace_reference", "verified_inline_snapshot"] },
+        "content": { "type": "string", "maxLength": 262144 }
+      },
+      "oneOf": [
+        { "properties": { "contentDisposition": { "const": "verified_inline_snapshot" } }, "required": ["content"] },
+        { "properties": { "contentDisposition": { "const": "verified_workspace_reference" } }, "not": { "required": ["content"] } }
+      ]
+    }
+  }
+}
