@@ -9,6 +9,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import {commandExitCode, parseCliOptions} from './index.js';
 import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
+import {classifyCodexSetupFailure, type CodexSetupFailureDiagnostic} from './codexSetupDiagnostic.js';
 
 async function declaration(name: string, dependencies: Record<string, unknown>) {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
@@ -43,6 +44,8 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
   let cancelOnConfigRead = false, resumeSignalListeners: number[] | undefined;
   let cancelDuringFinalCurrent = false, finalCurrentArmed = false;
   let reconcile: (() => Promise<unknown>) | undefined;
+  let hostDiagnostics: Readonly<CodexSetupFailureDiagnostic>[] = [];
+  let hostFailure: Error | undefined;
   let completion: any = {operationId: prepared.intent.operationId, setupReference: reference,
     readinessReceiptId: '44444444-4444-4444-8444-444444444444'};
   let result: any = {ok: true, stage: 'complete', sharedRepositoryReady: true}, launched: any, resumed: Map<string, any> | undefined;
@@ -80,7 +83,8 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
       launched = input; counts.hosts++;
       if (!await input.reserve(prepared.intent.operationId, input.maximumProviderCostCents)) throw new Error('budget');
       dispatched++;
-      return {threadId: 'owned_thread', turnId: 'owned_turn', settled: Promise.resolve(), verifiedCompletion: completion,
+      return {threadId: 'owned_thread', turnId: 'owned_turn', settled: hostFailure ? Promise.reject(hostFailure) : Promise.resolve(), verifiedCompletion: completion,
+        get diagnostics() {return [...hostDiagnostics];},
         close: async () => {counts.closes++; if (failClose) throw new Error('PRIVATE_VENDOR_FAILURE');}};
     },
     reserveCodexSetupLaunch: async (input: any) => {counts.reserves++; return !denyBudget && await input.current();},
@@ -91,6 +95,7 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
         setupClaimReference: foreignConfig ? 'foreign' : reference, setupClaimRepositoryFingerprint: prepared.intent.repositoryFingerprint};
     },
     UUID_PATTERN: /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+    classifyCodexSetupFailure,
     canonicalize, parseCliOptions, bootstrap: async (flags: Map<string, any>) => {
       counts.resumes++; resumed = flags;
       resumeSignalListeners = ['SIGINT', 'SIGTERM'].map(signal => process_.listenerCount(signal));
@@ -113,8 +118,60 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
     cancelOnConfigRead: () => {cancelOnConfigRead = true;}, get resumeSignalListeners() {return resumeSignalListeners;},
     cancelDuringFinalCurrent: () => {cancelDuringFinalCurrent = true;},
     setReconcile: (operation: () => Promise<unknown>) => {reconcile = operation;},
+    setHostDiagnostics: (value: Readonly<CodexSetupFailureDiagnostic>[]) => {hostDiagnostics = value;},
+    failHost: (value: Error) => {hostFailure = value;},
     get launched() {return launched;}, get resumed() {return resumed;}};
 }
+
+test('unconfirmed original host retains its fixed failure stage without retrying enrollment', async () => {
+  const f = await fixture('portal');
+  const diagnostic = classifyCodexSetupFailure(new Error('agent_fabric_onboarding_named_session:',
+    {cause: new Error('setup_session_receiver_timeout')}), 'bootstrap');
+  f.setCompletion(undefined); f.setHostDiagnostics([diagnostic]);
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'codex_setup_ingress_readiness_unconfirmed');
+  assert.deepEqual(result.diagnostics, [diagnostic]);
+  assert.equal(f.counts.hosts, 1); assert.equal(f.counts.resumes, 0);
+  assert.equal(f.process.listenerCount('SIGINT'), 0);
+  assert.equal(f.process.listenerCount('SIGTERM'), 0);
+});
+
+test('rejected owned host retains fixed diagnostics but never emits its private exception', async () => {
+  const f = await fixture('portal');
+  const error = new Error('PRIVATE_VENDOR_FAILURE', {cause: new Error('setup_session_accepted_unconfirmed')});
+  const diagnostic = classifyCodexSetupFailure(new Error('agent_fabric_onboarding_named_session:', {cause: error}), 'bootstrap');
+  f.setHostDiagnostics([diagnostic]); f.failHost(error);
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false); assert.equal(result.requiresSupportedRecovery, true);
+  assert.deepEqual(result.diagnostics[0], diagnostic);
+  assert.equal(result.diagnostics[1].category, 'setup_session_accepted_unconfirmed');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_VENDOR_FAILURE/);
+  assert.equal(f.counts.hosts, 1); assert.equal(f.counts.resumes, 0);
+});
+
+test('owned close failure preserves diagnostics without private vendor output or a success result', async () => {
+  const f = await fixture('portal');
+  const diagnostic = classifyCodexSetupFailure(new Error('setup_runtime_session_unconfirmed'), 'completion');
+  f.setHostDiagnostics([diagnostic]); f.failClose();
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false); assert.equal(result.code, 'codex_setup_owned_close_unconfirmed');
+  assert.deepEqual(result.diagnostics[0], diagnostic);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_VENDOR_FAILURE/);
+  assert.equal(f.counts.resumes, 0);
+});
+
+test('failure diagnostics remain bounded and cannot turn an unconfirmed host into success', async () => {
+  const f = await fixture('portal');
+  const diagnostic = classifyCodexSetupFailure(new Error('setup_runtime_session_unconfirmed'), 'bootstrap');
+  f.setHostDiagnostics(Array.from({length: 16}, () => diagnostic));
+  f.failHost(new Error('PRIVATE_VENDOR_FAILURE', {cause: new Error('setup_session_scope_changed')}));
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false); assert.equal(result.diagnostics.length, 16);
+  assert.equal(result.diagnostics.at(-1).category, 'setup_session_scope_changed');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_VENDOR_FAILURE/);
+  assert.equal(f.counts.resumes, 0);
+});
 
 // A disposable Node process exercises real OS signals without native clients,
 // credentials, network, filesystem mutations or an actual bootstrap operation.

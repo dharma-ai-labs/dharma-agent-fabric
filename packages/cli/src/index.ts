@@ -85,7 +85,7 @@ import { registerRepositoryRoleMetadata, discoverRepositoryRoleMetadata, type Re
 import { askRepositoryRoleQuestion, readRepositoryRoleReply } from './repositoryRoleQuestion.js';
 import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
-import {reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
+import {classifyCodexSetupFailure, reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
@@ -3149,7 +3149,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
       if (!completed || completed.operationId !== prepared.intent.operationId
         || completed.setupReference !== setupReference || !UUID_PATTERN.test(completed.readinessReceiptId)) {
         return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_ingress_readiness_unconfirmed',
-          nativeThreadId: host.threadId, nativeTurnId: host.turnId};
+          nativeThreadId: host.threadId, nativeTurnId: host.turnId, diagnostics: host.diagnostics};
       }
     const config = await readDeviceConfig();
     if (!config || config.organizationId !== organizationId || normalizeHqUrl(config.hqUrl) !== origin
@@ -3157,7 +3157,7 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
       || config.setupClaimRepositoryFingerprint !== prepared.intent.repositoryFingerprint) {
       return {ok: false, stage: 'setup_host_unconfirmed', effects: 'unconfirmed',
         code: 'codex_setup_ingress_readiness_unconfirmed', setupReference,
-        nativeThreadId: host.threadId, nativeTurnId: host.turnId};
+        nativeThreadId: host.threadId, nativeTurnId: host.turnId, diagnostics: host.diagnostics};
     }
     // One supported grant-free reconciliation, only for this consumed reference.
     // No replacement identity, grant replay or automatic provider-turn retry.
@@ -3189,12 +3189,14 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
       'codex_setup_owned_close_unconfirmed', 'codex_setup_owned_completion_unconfirmed']);
     return {ok: false, stage: 'setup_host_unconfirmed',
       code: error instanceof Error && known.has(error.message) ? error.message : 'codex_setup_ingress_unconfirmed',
-      requiresSupportedRecovery: true};
+      requiresSupportedRecovery: true,
+      diagnostics: [...(host?.diagnostics ?? []).slice(0, 15), classifyCodexSetupFailure(error, 'bootstrap')]};
   } finally {
     controller.abort();
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.removeListener(signal, stop);
     try {await host?.close();}
-    catch {return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_owned_close_unconfirmed'};}
+    catch (error) {return {ok: false, stage: 'setup_host_unconfirmed', code: 'codex_setup_owned_close_unconfirmed',
+      diagnostics: [...(host?.diagnostics ?? []).slice(0, 15), classifyCodexSetupFailure(error, 'completion')]};}
   }
 }
 
