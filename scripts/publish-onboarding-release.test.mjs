@@ -12,9 +12,93 @@ const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
 const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('CLI201 publishes the patched secure-store before both consumers and the CLI', () => {
+test('partial publication preserves the two cryptographically reconciled artifacts', () => {
+  for (const [name, expected] of [
+    ['agent-fabric-secure-store', 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='],
+    ['agent-fabric-relay-client', 'sha512-slzUPm+stPzF99vy6D0w2YWzT5wcDDq4zgJxq7JQBc/QB6v2JOPDK4t5NCIAeNW74E6W4J8qmJ6oGAvuKjxr4A=='],
+  ]) {
+    assert.deepEqual(approvedPackages.find(item => item.name === `@dharma-ai-labs/${name}`).existingArtifact,
+      {source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61', integrity: expected});
+  }
+});
+
+function provenanceFixture(item, packed, source = head) {
+  const statement = {predicateType: 'https://slsa.dev/provenance/v1',
+    subject: [{name: `pkg:npm/${item.name.replace('@', '%40')}@${item.version}`,
+      digest: {sha512: Buffer.from(packed.integrity.replace(/^sha512-/, ''), 'base64').toString('hex')}}],
+    predicate: {buildDefinition: {
+      externalParameters: {workflow: {ref: 'refs/heads/main',
+        repository: 'https://github.com/dharma-ai-labs/dharma-agent-fabric', path: '.github/workflows/publish.yml'}},
+      resolvedDependencies: [{digest: {gitCommit: source},
+        uri: 'git+https://github.com/dharma-ai-labs/dharma-agent-fabric@refs/heads/main'}],
+    }}};
+  return {attestations: [{bundle: {dsseEnvelope: {payload: Buffer.from(JSON.stringify(statement)).toString('base64')}}}]};
+}
+
+test('delayed provenance is read within the bound without retrying publication', async () => {
+  assert.equal(typeof publisher.verifyPublishedProvenance, 'function');
+  const item = approvedPackages.at(-1), packed = {integrity: 'sha512-YQ=='};
+  let time = 0, reads = 0;
+  await publisher.verifyPublishedProvenance(item, packed, head, async timeout => {
+    assert.ok(timeout > 0 && timeout <= 30000); reads++;
+    return time >= 180000 ? provenanceFixture(item, packed) : null;
+  }, {now: () => time, sleep: async ms => {time += ms;}});
+  assert.equal(reads, 7); assert.equal(time, 180000);
+});
+
+for (const defect of ['malformed', 'wrong-source', 'wrong-subject', 'denied']) {
+  test(`provenance ${defect} fails immediately without retry`, async () => {
+    const item = approvedPackages.at(-1), packed = {integrity: 'sha512-YQ=='};
+    let reads = 0, sleeps = 0;
+    await assert.rejects(publisher.verifyPublishedProvenance(item, packed, head, async () => {
+      reads++;
+      if (defect === 'denied') throw new Error('registry denied');
+      if (defect === 'malformed') return {};
+      return provenanceFixture(defect === 'wrong-subject' ? {...item, version: '9.9.9'} : item,
+        packed, defect === 'wrong-source' ? 'b'.repeat(40) : head);
+    }, {now: () => 0, sleep: async () => {sleeps++;}}));
+    assert.equal(reads, 1); assert.equal(sleeps, 0);
+  });
+}
+
+test('missing provenance exhausts only bounded reads and cannot publish the next package', async () => {
+  const {io, effects} = fixture();
+  const original = io.verifyPublished;
+  let reads = 0, time = 0;
+  io.verifyPublished = async (item, packed, metadata, source) => {
+    if (item.name !== '@dharma-ai-labs/agent-fabric-local-vault') return original(item, packed, metadata, source);
+    await publisher.verifyPublishedProvenance(item, packed, source, async () => {reads++; return null;},
+      {now: () => time, sleep: async ms => {time += ms;}});
+  };
+  await assert.rejects(publishBoundedRelease(head, io), /published provenance not visible/);
+  assert.equal(reads, 12); assert.equal(time, 330000);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault']);
+});
+
+test('provenance arriving beyond the deadline cannot be accepted', async () => {
+  const item = approvedPackages.at(-1), packed = {integrity: 'sha512-YQ=='};
+  let time = 0, reads = 0, sleeps = 0;
+  await assert.rejects(publisher.verifyPublishedProvenance(item, packed, head, async () => {
+    reads++; time = 360001; return provenanceFixture(item, packed);
+  }, {now: () => time, sleep: async () => {sleeps++;}}), /published provenance not visible/);
+  assert.equal(reads, 1); assert.equal(sleeps, 0);
+});
+
+for (const name of ['agent-fabric-secure-store', 'agent-fabric-relay-client']) {
+  for (const defect of ['missing', 'changed']) {
+    test(`reconciled ${name} ${defect} blocks every write and cannot be republished`, async () => {
+      const {io, effects} = fixture();
+      const lookup = io.lookup, pack = io.pack;
+      if (defect === 'missing') io.lookup = async item => item.name === `@dharma-ai-labs/${name}` ? null : lookup(item);
+      else io.pack = async item => item.name === `@dharma-ai-labs/${name}` ? {integrity: 'changed', filename: 'changed.tgz'} : pack(item);
+      await assert.rejects(publishBoundedRelease(head, io), /reconciled artifact/);
+      assert.deepEqual(effects, []);
+    });
+  }
+}
+
+test('CLI201 publishes only the remaining vault and CLI after partial-publication reconciliation', () => {
   assert.deepEqual(approvedPackages.filter(item => !item.existingArtifact).map(item => [item.workspace, item.version]), [
-    ['packages/secure-store', '0.1.10'], ['packages/relay-client', '0.2.33'],
     ['packages/local-vault', '0.1.30'], ['packages/cli', '0.2.201'],
   ]);
 });
@@ -151,8 +235,6 @@ test('verifies immutable dependencies before publishing the exact CLI201 depende
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, [
-    '@dharma-ai-labs/agent-fabric-secure-store',
-    '@dharma-ai-labs/agent-fabric-relay-client',
     '@dharma-ai-labs/agent-fabric-local-vault',
     '@dharma-ai-labs/agent-fabric',
   ]);
@@ -243,8 +325,7 @@ test('uncertain CLI publication is not retried after its dependency is verified'
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
   await assert.rejects(publishBoundedRelease(head, io), /uncertain CLI publication/);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-secure-store', '@dharma-ai-labs/agent-fabric-relay-client',
-    '@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
 });
 
 test('published provider requires its original immutable bytes and publisher without republishing', async () => {
@@ -255,8 +336,7 @@ test('published provider requires its original immutable bytes and publisher wit
   const {io, effects, verified} = fixture();
   await publishBoundedRelease(head, io);
   assert.equal(verified.find(item => item.name === vault.name).source, vault.existingArtifact.source);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-secure-store', '@dharma-ai-labs/agent-fabric-relay-client',
-    '@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
   for (const missing of [true, false]) {
     const blocked = fixture();
     if (missing) {
