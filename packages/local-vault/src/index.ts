@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -72,6 +72,14 @@ export type LocalProviderSessionIdentity = Pick<SessionBindingScope,
 export interface LocalProviderSessionLease {
   assertHeld(): Promise<boolean>;
   release(): void;
+}
+export interface OriginalProviderSessionOwner {
+  hostName: string; ownerPid: number; acquiredAt: string;
+}
+export interface ExistingProviderSessionRecovery {
+  readonly binding: Readonly<LocalProviderSessionBinding>;
+  tryAcquire(): LocalProviderSessionLease | null;
+  close(): void;
 }
 export interface ScopedLocalProviderSessionLease extends Omit<LocalProviderSessionLease, 'release'> {
   release(): Promise<void>;
@@ -153,6 +161,11 @@ function parseCodexSetupResult(value: unknown): LocalCodexSetupResult {
     return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
   }
   throw new Error('setup_operation_invalid');
+}
+
+function originalProviderOwnerPidAbsent(pid: number): boolean {
+  try {process.kill(pid, 0); return false;}
+  catch (error) {return (error as NodeJS.ErrnoException).code === 'ESRCH';}
 }
 
 function processIsAlive(pid: number): boolean {
@@ -386,6 +399,65 @@ export class LocalVault {
         close,
       });
     } catch (error) {close(); throw error;}
+  }
+
+  /** Maintenance-free, single-binding recovery in the actual original Linux host. */
+  static async openExistingProviderSessionRecovery(input: Pick<VaultOptions, 'root' | 'masterKey'> & {
+    bindingId: string; identity: LocalProviderSessionIdentity; prior: OriginalProviderSessionOwner;
+  }): Promise<ExistingProviderSessionRecovery> {
+    if (process.platform !== 'linux' || !process.getuid?.() || !Buffer.isBuffer(input.masterKey)
+      || input.masterKey.length !== 32) throw new Error('provider_session_recovery_context_unqualified');
+    const root = input.root, bindingId = input.bindingId, identity = structuredClone(input.identity);
+    const prior = Object.freeze({...input.prior}), key = Buffer.from(input.masterKey);
+    let database: DatabaseSync | undefined, vault: LocalVault | undefined;
+    const matches = (value: unknown) => {
+      const row = value as {host_name?: unknown; owner_pid?: unknown; acquired_at?: unknown} | undefined;
+      return row?.host_name === prior.hostName && row.owner_pid === prior.ownerPid && row.acquired_at === prior.acquiredAt;
+    };
+    try {
+      if (prior.hostName !== hostname() || !Number.isSafeInteger(prior.ownerPid) || prior.ownerPid < 1
+        || !Number.isFinite(Date.parse(prior.acquiredAt))) throw new Error('provider_session_recovery_owner_unqualified');
+      const privatePath = async (path: string, directory: boolean) => {
+        const metadata = await lstat(path, {bigint: true});
+        if (metadata.isSymbolicLink() || (directory ? !metadata.isDirectory() : !metadata.isFile() || metadata.nlink !== 1n)
+          || metadata.uid !== BigInt(process.getuid!()) || (metadata.mode & 0o077n) !== 0n
+          || await realpath(path) !== path) throw new Error('provider_session_recovery_storage_unqualified');
+        return metadata;
+      };
+      await privatePath(root, true);
+      const path = resolve(root, 'vault.sqlite'), before = await privatePath(path, false);
+      try {await lstat(path + '-journal'); throw new Error('provider_session_recovery_journal_unresolved');}
+      catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
+      for (const suffix of ['-wal', '-shm']) {
+        try {await privatePath(path + suffix, false);}
+        catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
+      }
+      // Deliberately no open(), schema initialization, migration, backfill or retention.
+      database = new DatabaseSync(path);
+      const after = await privatePath(path, false);
+      if (before.dev !== after.dev || before.ino !== after.ino) throw new Error('provider_session_recovery_storage_changed');
+      vault = new LocalVault({root, masterKey: key}, database);
+      const binding = vault.getProviderSessionBinding(bindingId, identity);
+      if (!binding || binding.owner !== 'dharma_bridge' || Date.parse(binding.expiresAt) <= Date.now()) {
+        throw new Error('provider_session_recovery_binding_unavailable');
+      }
+      if (!matches(database.prepare('select host_name, owner_pid, acquired_at from provider_session_leases where binding_id = ?').get(bindingId))
+        || !originalProviderOwnerPidAbsent(prior.ownerPid)) throw new Error('provider_session_recovery_owner_unqualified');
+      const opened = vault;
+      let attempted = false;
+      return Object.freeze({binding: Object.freeze({...binding}),
+        tryAcquire() {
+          if (attempted) throw new Error('provider_session_recovery_already_attempted');
+          attempted = true;
+          return opened.#tryAcquireProviderSessionLease(bindingId, identity, prior);
+        },
+        close() {opened.close();},
+      });
+    } catch (error) {
+      try {if (vault) vault.close(); else database?.close();}
+      finally {key.fill(0);}
+      throw error;
+    }
   }
 
   static open(options: VaultOptions): Promise<LocalVault>;
@@ -1294,6 +1366,11 @@ export class LocalVault {
   tryAcquireProviderSessionLease(
     bindingId: string, expected: LocalProviderSessionIdentity,
   ): LocalProviderSessionLease | null {
+    return this.#tryAcquireProviderSessionLease(bindingId, expected);
+  }
+
+  #tryAcquireProviderSessionLease(bindingId: string, expected: LocalProviderSessionIdentity,
+    original?: OriginalProviderSessionOwner): LocalProviderSessionLease | null {
     const record = this.getProviderSessionBinding(bindingId, expected);
     if (!record || Date.now() >= Date.parse(record.expiresAt)) return null;
     const holderId = randomUUID();
@@ -1307,9 +1384,16 @@ export class LocalVault {
         this.#database.exec('commit');
         return null;
       }
-      const prior = this.#database.prepare(`
-        select host_name, owner_pid from provider_session_leases where binding_id = ?
-      `).get(bindingId) as { host_name: string; owner_pid: number } | undefined;
+      const prior = this.#database.prepare(original
+        ? 'select host_name, owner_pid, acquired_at from provider_session_leases where binding_id = ?'
+        : 'select host_name, owner_pid from provider_session_leases where binding_id = ?')
+        .get(bindingId) as { host_name: string; owner_pid: number; acquired_at?: string } | undefined;
+      if (original && (currentHost !== original.hostName || prior?.host_name !== original.hostName
+        || prior.owner_pid !== original.ownerPid || prior.acquired_at !== original.acquiredAt
+        || !originalProviderOwnerPidAbsent(original.ownerPid))) {
+        this.#database.exec('commit');
+        return null;
+      }
       if (prior && (prior.host_name !== currentHost || this.#processIsAlive(prior.owner_pid))) {
         this.#database.exec('commit');
         return null;
