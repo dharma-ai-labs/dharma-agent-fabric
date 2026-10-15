@@ -2126,6 +2126,28 @@ async function startRelayDaemon(policyPath: string) {
   if (supervisorState === 'unknown') throw new Error('Relay supervisor process state is unknown.');
   const startup = await step(() => relayAutostartStatus({ home: dharmaHome() }));
   const hostPending = startup.restartCoverage === 'wsl-host-logon' && startup.hostLifecycle !== 'running';
+  const ownedSupervisorReady = async () => {
+    if (await relaySupervisorProcessState() !== 'running') return false;
+    const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
+      .catch(() => '0')).trim());
+    const binding = await readFile(resolve(dharmaHome(), 'relay', 'supervisor-workspace.json'), 'utf8')
+      .then(value => JSON.parse(value) as { pid: number; policyPath: string; version?: string;
+        organizationId?: string; deviceId?: string; standardRepositories?: boolean }).catch(() => null);
+    if (!Number.isSafeInteger(pid) || pid < 1 || binding?.pid !== pid) return false;
+    if (binding.version !== VERSION || !binding.standardRepositories) {
+      throw new Error('relay_runtime_upgrade_required: safely stop and upgrade the existing startup-anchor relay; do not retarget a working receiver.');
+    }
+    if (binding.organizationId !== config.organizationId || binding.deviceId !== config.deviceId) {
+      throw new Error('relay_workspace_conflict: the active supervisor belongs to another enrollment.');
+    }
+    return true;
+  };
+  if (supervisorState === 'running' && hostPending) {
+    if (!await ownedSupervisorReady()) throw new Error('relay_supervisor_owner_unconfirmed',
+      {cause: new Error('setup_runtime_process_unconfirmed')});
+    throw new Error('relay_startup_owner_transition_required: stop this verified device relay with dharma relay stop before resuming bootstrap; do not start a second supervisor.',
+      {cause: new Error('setup_runtime_startup_unconfirmed')});
+  }
   if (supervisorState === 'stopped' || hostPending) {
     const startupBackend = startup.backend;
     // A setup turn cannot own a supervisor intended to outlive that turn.
@@ -2144,22 +2166,9 @@ async function startRelayDaemon(policyPath: string) {
   let supervisorReady = false;
   for (let attempt = 0; attempt < 80; attempt += 1) {
     await hostScope?.assert();
-    if (await relaySupervisorProcessState() === 'running') {
-      const pid = Number((await readFile(resolve(dharmaHome(), 'relay', 'supervisor.pid'), 'utf8')
-        .catch(() => '0')).trim());
-      const binding = await readFile(resolve(dharmaHome(), 'relay', 'supervisor-workspace.json'), 'utf8')
-        .then(value => JSON.parse(value) as { pid: number; policyPath: string; version?: string;
-          organizationId?: string; deviceId?: string; standardRepositories?: boolean }).catch(() => null);
-      if (binding?.pid === pid) {
-        if (binding.version !== VERSION || !binding.standardRepositories) {
-          throw new Error('relay_runtime_upgrade_required: safely stop and upgrade the existing startup-anchor relay; do not retarget a working receiver.');
-        }
-        if (binding.organizationId !== config.organizationId || binding.deviceId !== config.deviceId) {
-          throw new Error('relay_workspace_conflict: the active supervisor belongs to another enrollment.');
-        }
-        supervisorReady = true;
-        break;
-      }
+    if (await ownedSupervisorReady()) {
+      supervisorReady = true;
+      break;
     }
     if (attempt < 79) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
@@ -3513,9 +3522,9 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   onboardFlags.set('workspace', workspace);
   onboardFlags.set('policy-revision', policyRevision);
   onboardFlags.set('provider', provider);
-  // Interactive source claims also need the standing lifecycle owner first;
-  // native per-command approval does not necessarily establish a host scope.
-  const deferSetupRelay = Boolean(hostScope) || flags.has('setup-reference');
+  // Bootstrap installs the standing lifecycle owner before any relay, including
+  // hostless resume and legacy input paths. Never create a competing detached owner.
+  const deferSetupRelay = Boolean(hostScope) || flags.has('setup-reference') || !flags.has('no-relay-daemon');
   if (deferSetupRelay) onboardFlags.set('no-relay-daemon', true);
   const onboarded = await step(() => retryBootstrapOnboarding(async () => joinedBindingId
     ? await step(() => joinExistingRepository(onboardFlags, joinedBindingId, joinedFingerprint!)) as Record<string, unknown>
@@ -3559,6 +3568,10 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       })));
   let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;
   const completionRequested = flags.has('complete');
+  const setupRelay = deferSetupRelay && !flags.has('no-relay-daemon')
+    && (completionRequested || !hostScope && !flags.has('setup-reference'))
+    ? await step(() => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')))
+    : null;
   if (!completionRequested) {
     return {
       ok: true,
@@ -3581,9 +3594,6 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     };
   }
 
-  const setupRelay = deferSetupRelay && !flags.has('no-relay-daemon')
-    ? await step(() => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')))
-    : null;
   const skill = await step(() => verifyAgentFabricSkillInstallation({ provider, workspace }));
   if (!skill.ready) throw new Error(`Provider skill did not become ready: ${JSON.stringify(skill)}`);
   const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
