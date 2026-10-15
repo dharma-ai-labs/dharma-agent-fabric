@@ -336,6 +336,14 @@ they do not establish full context, the executed model, or actual skill use, and
 local coding work. Queue failures preserve the actual coding result; a failed or
 interrupted provider turn retains its reservation and is not replayed on restart.
 
+For named-session peer questions, a transport failure before server acceptance
+does not require clearing the reserved cost. The same exact-cost peer reservation
+can be reused only while its signed offer remains queued and the server confirms
+a fresh acceptance. A replayed acceptance cannot authorize another provider turn.
+Peer reservations have a separate internal namespace; local-work and legacy
+reservations remain distinct liabilities and retain their replay guards. An
+expired question or an uncertain already-accepted turn is not automatically rerun.
+
 ## Manual enrollment
 
 Manual browser-confirmed enrollment remains available when no one-time grant is

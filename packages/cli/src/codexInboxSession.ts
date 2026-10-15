@@ -34,7 +34,9 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
     resolvePublicKey: keyVersion => input.verifier.resolvePublicKey(keyVersion),
     consume: async questionId => {
       if (!current || current.questionId !== questionId) return false;
-      await channel.accept(questionId, current.taskId);
+      const accepted = await channel.accept(questionId, current.taskId);
+      // A recovered acknowledgement is not proof that no provider turn ran.
+      if (accepted.replay) return false;
       return input.verifier.consume(questionId);
     },
   } });
