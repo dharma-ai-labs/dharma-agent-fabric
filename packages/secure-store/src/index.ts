@@ -74,9 +74,10 @@ let systemStore: SecureSecretStore | null = null;
 
 interface ProcessResult { code: number | null; stdout: string; stderr: string; timedOut?: boolean }
 
-function run(command: string, argv: string[], input?: string, timeoutMs = 10_000): Promise<ProcessResult> {
+function run(command: string, argv: string[], input?: string, timeoutMs = 10_000, cwd?: string): Promise<ProcessResult> {
   return new Promise((accept, reject) => {
-    const child = spawn(command, argv, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, argv, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      ...(cwd === undefined ? {} : {cwd}) });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;
@@ -145,6 +146,7 @@ const windowsDelete = `${windowsPreamble}try {$credential=$vault.Retrieve("Dharm
 interface WindowsCommandSpec {
   command: string;
   prefixArgs: string[];
+  cwd?: string;
   timeoutMs: number;
   retryAttempts: number;
   freshReadBroker?: boolean;
@@ -162,6 +164,8 @@ function windowsCommandSpec(platform = process.platform): WindowsCommandSpec {
   return {
     command: '/init',
     prefixArgs: ['/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'],
+    // A Linux-only caller cwd is not a valid Windows CreateProcess directory.
+    cwd: '/mnt/c/Windows/System32',
     // WSL cold-start and WinRT activation routinely exceed five seconds.
     // Keep the bridge bounded while allowing one transient retry.
     timeoutMs: 15_000,
@@ -184,7 +188,7 @@ function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec
       '-Command',
       `& { ${script} }`,
       account,
-    ], secret, commandSpec.timeoutMs),
+    ], secret, commandSpec.timeoutMs, commandSpec.cwd),
     { attempts: commandSpec.retryAttempts },
   );
   return {
@@ -210,7 +214,7 @@ function windowsStore(command?: string, commandSpecOverride?: WindowsCommandSpec
       if (Buffer.byteLength(request, 'utf8') > 1_048_576) throw new Error('Invalid enrollment anchor operation.');
       // Never retry an uncertain mutation, including an interop timeout.
       const result = await run(commandSpec.command, [...commandSpec.prefixArgs, '-NoProfile', '-NonInteractive',
-        '-Command', `& { ${windowsEnrollmentAnchorWrite} }`], request, Math.max(commandSpec.timeoutMs, 15_000));
+        '-Command', `& { ${windowsEnrollmentAnchorWrite} }`], request, Math.max(commandSpec.timeoutMs, 15_000), commandSpec.cwd);
       if (result.code !== 0 || !['written', 'conflict'].includes(result.stdout)) {
         throw new Error('Windows enrollment anchor operation unavailable or unconfirmed.');
       }
