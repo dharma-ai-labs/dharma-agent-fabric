@@ -3254,6 +3254,15 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     throw new Error('repository_join_selection_invalid: joining requires an exact existing binding and fingerprint, without a source selection.');
   }
   if (!joinedBindingId && joinedFingerprint) throw new Error('repository_join_selection_invalid');
+  // Qualify the original host/plan above before reading enrollment metadata.
+  // Refuse foreign context before checkout creation or private authority input.
+  const targetConfig = await step(() => readDeviceConfig());
+  if (targetConfig && !flags.has('replace-existing-enrollment')
+    && (targetConfig.organizationId !== organizationId || normalizeHqUrl(targetConfig.hqUrl) !== hqUrl)) {
+    return {ok: false, stage: 'connection_context', code: 'connection_context_mismatch',
+      effects: false, grantRedeemed: false, enrollmentChanged: false,
+      message: 'The existing local connection does not match the requested organization and portal. Select the intended installation; no repository selection or setup authority was used.'};
+  }
   let repositorySelection: { workspace: string; selection: string };
   try {
     if (flags.has('repository-url-base64url') && typeof selectedRemote !== 'string') {
