@@ -6,22 +6,16 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '7f8f5006207cf77ca448b50d2a662fdbd168a50d';
-const tree = '83808a17a1092c94a6e1abbcd82af86a694182ae';
+const source = '3d48b1a3d867ff0080276a115433eb87726877f0';
+const tree = '0f38f2a2e2ee96aeee8ba9bc1f33d56fe1baec75';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
     existingArtifact: Object.freeze({source: '6c7d48916de11ccc837933a7ef7e8d2600184b54',
       integrity: 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ=='}) },
-  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.34',
-    existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
-      integrity: 'sha512-J7YNsv+3iBbRTNL/6m4aBVPv2NTFzR/u3svpruDU1tA/wXePxynPHm6yevocqfTBnDcjeJ6VyZRj0+bvJ1k+0Q=='}) },
-  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.36',
-    existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
-      integrity: 'sha512-OA5j8f/gxaXDn4cWiUwgoW+hCK+5DBPI8jtptPjiZBtT1VfSWjnkIh6Iitb4bvcPUYsCdLiCAjecB26ebcHexA=='}) },
-  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33',
-    existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
-      integrity: 'sha512-uJOnIe/zkiUCLxPXt4R1TUlULp8yUheD1V5jg1XHRYVDzD+xMxxETmwGR0z/8YVndR0sYxSfxt8wZi6jsweGYA=='}) },
+  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.35' },
+  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.37' },
+  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.34' },
   { workspace: 'packages/secure-store', name: '@dharma-ai-labs/agent-fabric-secure-store', version: '0.1.10',
     existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
       integrity: 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='}) },
@@ -31,7 +25,7 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
     existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
       integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.203' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.204' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -81,29 +75,52 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts']);
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts',
+    'packages/provider-adapters/package.json', 'packages/task-runner/package.json',
+    'packages/evidence-reduction/package.json', 'packages/lifecycle-adapter/package.json']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.203';
+  cliManifest.version = '0.2.204';
+  for (const [name, version] of [['provider-adapters', '0.1.35'], ['task-runner', '0.1.37'], ['evidence-reduction', '0.2.34']]) {
+    cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
+  }
   assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
   const runtimePins = [['packages/secure-store', '0.1.10'], ['packages/relay-client', '0.2.33'],
-    ['packages/local-vault', '0.1.31']];
+    ['packages/local-vault', '0.1.31'], ['packages/provider-adapters', '0.1.35'],
+    ['packages/task-runner', '0.1.37'], ['packages/evidence-reduction', '0.2.34'],
+    ['packages/lifecycle-adapter', '0.1.0']];
   const runtimePaths = runtimePins.map(([path]) => path).sort();
   assert.deepEqual(Object.keys(snapshot.runtimeManifests).sort(), runtimePaths, 'unreviewed runtime manifest set');
   assert.deepEqual(Object.keys(snapshot.baselineRuntimeManifests).sort(), runtimePaths, 'unreviewed runtime baseline set');
-  for (const [path] of runtimePins) {
-    assert.deepEqual(snapshot.runtimeManifests[path], snapshot.baselineRuntimeManifests[path],
+  for (const [path, version] of runtimePins) {
+    const expected = structuredClone(snapshot.baselineRuntimeManifests[path]);
+    expected.version = version;
+    if (['packages/task-runner', 'packages/evidence-reduction'].includes(path)) {
+      expected.dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.35';
+    }
+    if (path === 'packages/lifecycle-adapter') {
+      expected.dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.34';
+    }
+    assert.deepEqual(snapshot.runtimeManifests[path], expected,
       `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.203';
+  lock.packages['packages/cli'].version = '0.2.204';
+  for (const [name, version] of [['provider-adapters', '0.1.35'], ['task-runner', '0.1.37'], ['evidence-reduction', '0.2.34']]) {
+    lock.packages[`packages/${name}`].version = version;
+    lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
+  }
+  for (const name of ['task-runner', 'evidence-reduction']) {
+    lock.packages[`packages/${name}`].dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.35';
+  }
+  lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.34';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.202';";
+  const previousVersion = "const VERSION = '0.2.203';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(snapshot.cliSource,
-    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.203';"), 'unreviewed CLI source delta');
+    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.204';"), 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
@@ -176,9 +193,11 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
         manifest: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')),
         baselineCliManifest: JSON.parse(git('show', `${source}:packages/cli/package.json`)),
         cliManifest: JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')),
-        baselineRuntimeManifests: Object.fromEntries(['secure-store', 'relay-client', 'local-vault'].map(name =>
+        baselineRuntimeManifests: Object.fromEntries(['secure-store', 'relay-client', 'local-vault', 'provider-adapters',
+          'task-runner', 'evidence-reduction', 'lifecycle-adapter'].map(name =>
           [`packages/${name}`, JSON.parse(git('show', `${source}:packages/${name}/package.json`))])),
-        runtimeManifests: Object.fromEntries(['secure-store', 'relay-client', 'local-vault'].map(name =>
+        runtimeManifests: Object.fromEntries(['secure-store', 'relay-client', 'local-vault', 'provider-adapters',
+          'task-runner', 'evidence-reduction', 'lifecycle-adapter'].map(name =>
           [`packages/${name}`, JSON.parse(readFileSync(join(root, 'packages', name, 'package.json'), 'utf8'))])),
         baselineLock: JSON.parse(git('show', `${source}:package-lock.json`)),
         lock: JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')),
