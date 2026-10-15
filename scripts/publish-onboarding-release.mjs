@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = 'cdf11a07bf2f4cc4712e6e817ca95453dd1c0141';
-const tree = 'c7a572124a7785afc8fb37c670443e574413b114';
+const source = '7f8f5006207cf77ca448b50d2a662fdbd168a50d';
+const tree = '83808a17a1092c94a6e1abbcd82af86a694182ae';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -28,8 +28,10 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/relay-client', name: '@dharma-ai-labs/agent-fabric-relay-client', version: '0.2.33',
     existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
       integrity: 'sha512-slzUPm+stPzF99vy6D0w2YWzT5wcDDq4zgJxq7JQBc/QB6v2JOPDK4t5NCIAeNW74E6W4J8qmJ6oGAvuKjxr4A=='}) },
-  { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31' },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.202' },
+  { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
+    existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
+      integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.203' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -79,44 +81,29 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts',
-    'packages/secure-store/package.json', 'packages/relay-client/package.json', 'packages/local-vault/package.json']);
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.202';
-  cliManifest.dependencies['@dharma-ai-labs/agent-fabric-secure-store'] = '0.1.10';
-  cliManifest.dependencies['@dharma-ai-labs/agent-fabric-relay-client'] = '0.2.33';
-  cliManifest.dependencies['@dharma-ai-labs/agent-fabric-local-vault'] = '0.1.31';
+  cliManifest.version = '0.2.203';
   assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
   const runtimePins = [['packages/secure-store', '0.1.10'], ['packages/relay-client', '0.2.33'],
     ['packages/local-vault', '0.1.31']];
   const runtimePaths = runtimePins.map(([path]) => path).sort();
   assert.deepEqual(Object.keys(snapshot.runtimeManifests).sort(), runtimePaths, 'unreviewed runtime manifest set');
   assert.deepEqual(Object.keys(snapshot.baselineRuntimeManifests).sort(), runtimePaths, 'unreviewed runtime baseline set');
-  for (const [path, version] of runtimePins) {
-    const expected = structuredClone(snapshot.baselineRuntimeManifests[path]);
-    expected.version = version;
-    if (path !== 'packages/secure-store') expected.dependencies['@dharma-ai-labs/agent-fabric-secure-store'] = '0.1.10';
-    assert.deepEqual(snapshot.runtimeManifests[path], expected, `unreviewed runtime manifest delta:${path}`);
+  for (const [path] of runtimePins) {
+    assert.deepEqual(snapshot.runtimeManifests[path], snapshot.baselineRuntimeManifests[path],
+      `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.202';
-  for (const name of ['secure-store', 'relay-client', 'local-vault']) {
-    const key = `@dharma-ai-labs/agent-fabric-${name}`;
-    lock.packages['packages/cli'].dependencies[key] = cliManifest.dependencies[key];
-  }
-  for (const [path, version] of runtimePins) {
-    lock.packages[path].version = version;
-    if (path !== 'packages/secure-store') lock.packages[path].dependencies['@dharma-ai-labs/agent-fabric-secure-store'] = '0.1.10';
-  }
-  delete lock.packages['packages/local-vault/node_modules/@dharma-ai-labs/agent-fabric-secure-store'];
+  lock.packages['packages/cli'].version = '0.2.203';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.201';";
+  const previousVersion = "const VERSION = '0.2.202';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(snapshot.cliSource,
-    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.202';"), 'unreviewed CLI source delta');
+    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.203';"), 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),

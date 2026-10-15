@@ -12,13 +12,14 @@ const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
 const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('partial publication preserves the two cryptographically reconciled artifacts', () => {
-  for (const [name, expected] of [
-    ['agent-fabric-secure-store', 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='],
-    ['agent-fabric-relay-client', 'sha512-slzUPm+stPzF99vy6D0w2YWzT5wcDDq4zgJxq7JQBc/QB6v2JOPDK4t5NCIAeNW74E6W4J8qmJ6oGAvuKjxr4A=='],
+test('release preserves the three cryptographically reconciled runtime artifacts', () => {
+  for (const [name, source, expected] of [
+    ['agent-fabric-secure-store', '1b8483f59dc1ba9f7aa0aef78ca984f309714e61', 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='],
+    ['agent-fabric-relay-client', '1b8483f59dc1ba9f7aa0aef78ca984f309714e61', 'sha512-slzUPm+stPzF99vy6D0w2YWzT5wcDDq4zgJxq7JQBc/QB6v2JOPDK4t5NCIAeNW74E6W4J8qmJ6oGAvuKjxr4A=='],
+    ['agent-fabric-local-vault', '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824', 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='],
   ]) {
     assert.deepEqual(approvedPackages.find(item => item.name === `@dharma-ai-labs/${name}`).existingArtifact,
-      {source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61', integrity: expected});
+      {source, integrity: expected});
   }
 });
 
@@ -66,13 +67,13 @@ test('missing provenance exhausts only bounded reads and cannot publish the next
   const original = io.verifyPublished;
   let reads = 0, time = 0;
   io.verifyPublished = async (item, packed, metadata, source) => {
-    if (item.name !== '@dharma-ai-labs/agent-fabric-local-vault') return original(item, packed, metadata, source);
+    if (item.name !== '@dharma-ai-labs/agent-fabric') return original(item, packed, metadata, source);
     await publisher.verifyPublishedProvenance(item, packed, source, async () => {reads++; return null;},
       {now: () => time, sleep: async ms => {time += ms;}});
   };
   await assert.rejects(publishBoundedRelease(head, io), /published provenance not visible/);
   assert.equal(reads, 12); assert.equal(time, 330000);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
 });
 
 test('provenance arriving beyond the deadline cannot be accepted', async () => {
@@ -84,7 +85,7 @@ test('provenance arriving beyond the deadline cannot be accepted', async () => {
   assert.equal(reads, 1); assert.equal(sleeps, 0);
 });
 
-for (const name of ['agent-fabric-secure-store', 'agent-fabric-relay-client']) {
+for (const name of ['agent-fabric-secure-store', 'agent-fabric-relay-client', 'agent-fabric-local-vault']) {
   for (const defect of ['missing', 'changed']) {
     test(`reconciled ${name} ${defect} blocks every write and cannot be republished`, async () => {
       const {io, effects} = fixture();
@@ -97,41 +98,28 @@ for (const name of ['agent-fabric-secure-store', 'agent-fabric-relay-client']) {
   }
 }
 
-test('CLI202 publishes only the remaining vault and CLI after partial-publication reconciliation', () => {
+test('CLI203 publishes only the CLI after immutable dependency reconciliation', () => {
   assert.deepEqual(approvedPackages.filter(item => !item.existingArtifact).map(item => [item.workspace, item.version]), [
-    ['packages/local-vault', '0.1.31'], ['packages/cli', '0.2.202'],
+    ['packages/cli', '0.2.203'],
   ]);
 });
 
 function releaseSnapshot() {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = 'cdf11a07bf2f4cc4712e6e817ca95453dd1c0141';
+  const baseline = '7f8f5006207cf77ca448b50d2a662fdbd168a50d';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'c7a572124a7785afc8fb37c670443e574413b114');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '83808a17a1092c94a6e1abbcd82af86a694182ae');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
-  const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.202';
-  for (const [name, version] of [['secure-store', '0.1.10'], ['relay-client', '0.2.33'], ['local-vault', '0.1.31']]) {
-    cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
-  }
+  const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.203';
   const baselineRuntimeManifests = Object.fromEntries(['secure-store', 'relay-client', 'local-vault'].map(name =>
     [`packages/${name}`, JSON.parse(git('show', `${baseline}:packages/${name}/package.json`))]));
   const runtimeManifests = structuredClone(baselineRuntimeManifests);
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
-  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.202';
-  for (const [name, version] of [['secure-store', '0.1.10'], ['relay-client', '0.2.33'], ['local-vault', '0.1.31']]) {
-    const path = `packages/${name}`;
-    runtimeManifests[path].version = version; lock.packages[path].version = version;
-    lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
-    if (name !== 'secure-store') {
-      runtimeManifests[path].dependencies['@dharma-ai-labs/agent-fabric-secure-store'] = '0.1.10';
-      lock.packages[path].dependencies['@dharma-ai-labs/agent-fabric-secure-store'] = '0.1.10';
-    }
-  }
-  delete lock.packages['packages/local-vault/node_modules/@dharma-ai-labs/agent-fabric-secure-store'];
+  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.203';
   const baselineCliSource = execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`],
     {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
-  const cliSource = baselineCliSource.replace("const VERSION = '0.2.201';", "const VERSION = '0.2.202';");
+  const cliSource = baselineCliSource.replace("const VERSION = '0.2.202';", "const VERSION = '0.2.203';");
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -142,16 +130,16 @@ function releaseSnapshot() {
   return snapshot;
 }
 
-test('frozen source admits only exact CLI202 dependency pins after the reviewed WSL fix', () => {
+test('frozen source admits only the exact CLI203 pin after the reviewed peer recovery fix', () => {
   const snapshot = releaseSnapshot(), reviewed = snapshot.head, baselineCliSource = snapshot.baselineCliSource;
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts',
-    'packages/secure-store/package.json', 'packages/relay-client/package.json', 'packages/local-vault/package.json'] }));
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts'] }));
   for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml',
     'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md',
-    'packages/contracts/package.json', 'apps/relay-gateway/src/protocol.ts']) {
+    'packages/contracts/package.json', 'apps/relay-gateway/src/protocol.ts',
+    'packages/secure-store/package.json', 'packages/relay-client/package.json', 'packages/local-vault/package.json']) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, changed: [...snapshot.changed, forbidden]}),
       /unreviewed product source delta/);
   }
@@ -160,7 +148,7 @@ test('frozen source admits only exact CLI202 dependency pins after the reviewed 
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, lock: foreignLock}), /lockfile delta/);
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: baselineCliSource}), /CLI source delta/);
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: snapshot.cliSource + '\n// unrelated\n'}), /CLI source delta/);
-  for (const baselineCliSource of ['', "const VERSION = '0.2.201';\nconst VERSION = '0.2.201';\n"]) {
+  for (const baselineCliSource of ['', "const VERSION = '0.2.202';\nconst VERSION = '0.2.202';\n"]) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, baselineCliSource}), /CLI version anchor required/);
   }
 });
@@ -231,11 +219,10 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('verifies immutable dependencies before publishing the exact CLI202 dependency chain', async () => {
+test('verifies immutable dependencies before publishing only CLI203', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, [
-    '@dharma-ai-labs/agent-fabric-local-vault',
     '@dharma-ai-labs/agent-fabric',
   ]);
   assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
@@ -246,7 +233,7 @@ test('verifies immutable dependencies before publishing the exact CLI202 depende
     ['@dharma-ai-labs/agent-fabric-secure-store', '0.1.10'],
     ['@dharma-ai-labs/agent-fabric-relay-client', '0.2.33'],
     ['@dharma-ai-labs/agent-fabric-local-vault', '0.1.31'],
-    ['@dharma-ai-labs/agent-fabric', '0.2.202'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.203'],
   ]);
 });
 
@@ -325,7 +312,7 @@ test('uncertain CLI publication is not retried after its dependency is verified'
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
   await assert.rejects(publishBoundedRelease(head, io), /uncertain CLI publication/);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
 });
 
 test('published provider requires its original immutable bytes and publisher without republishing', async () => {
@@ -336,7 +323,7 @@ test('published provider requires its original immutable bytes and publisher wit
   const {io, effects, verified} = fixture();
   await publishBoundedRelease(head, io);
   assert.equal(verified.find(item => item.name === vault.name).source, vault.existingArtifact.source);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-local-vault', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
   for (const missing of [true, false]) {
     const blocked = fixture();
     if (missing) {
