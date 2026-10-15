@@ -22,8 +22,12 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.33',
     existingArtifact: Object.freeze({source: 'd67f9218e9073875cbbff262174b62e3d629902c',
       integrity: 'sha512-uJOnIe/zkiUCLxPXt4R1TUlULp8yUheD1V5jg1XHRYVDzD+xMxxETmwGR0z/8YVndR0sYxSfxt8wZi6jsweGYA=='}) },
-  { workspace: 'packages/secure-store', name: '@dharma-ai-labs/agent-fabric-secure-store', version: '0.1.10' },
-  { workspace: 'packages/relay-client', name: '@dharma-ai-labs/agent-fabric-relay-client', version: '0.2.33' },
+  { workspace: 'packages/secure-store', name: '@dharma-ai-labs/agent-fabric-secure-store', version: '0.1.10',
+    existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
+      integrity: 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='}) },
+  { workspace: 'packages/relay-client', name: '@dharma-ai-labs/agent-fabric-relay-client', version: '0.2.33',
+    existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
+      integrity: 'sha512-slzUPm+stPzF99vy6D0w2YWzT5wcDDq4zgJxq7JQBc/QB6v2JOPDK4t5NCIAeNW74E6W4J8qmJ6oGAvuKjxr4A=='}) },
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.30' },
   { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.201' },
 ].map(Object.freeze));
@@ -141,6 +145,7 @@ async function publicGet(url, json = true, timeoutMs = 30_000) {
 }
 
 export function assertProvenance(item, packed, attestations, expectedHead) {
+  assert.ok(Array.isArray(attestations?.attestations), 'published provenance missing');
   const statements = attestations.attestations.map((entry) =>
     JSON.parse(Buffer.from(entry.bundle.dsseEnvelope.payload, 'base64').toString('utf8')));
   const statement = statements.find((entry) => entry.predicateType === 'https://slsa.dev/provenance/v1');
@@ -154,6 +159,12 @@ export function assertProvenance(item, packed, attestations, expectedHead) {
   const digest = Buffer.from(packed.integrity.replace(/^sha512-/, ''), 'base64').toString('hex');
   assert.ok(statement.subject.some((entry) => entry.name === `pkg:npm/${item.name.replace('@', '%40')}@${item.version}`
     && entry.digest.sha512 === digest), 'provenance subject mismatch');
+}
+
+export async function verifyPublishedProvenance(item, packed, expectedHead, read, clock) {
+  const attestations = await lookupPublishedArtifact(read, clock);
+  assert.ok(attestations, 'published provenance not visible; reconcile before another attempt');
+  assertProvenance(item, packed, attestations, expectedHead);
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
@@ -203,7 +214,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
       const bytes = await publicGet(metadata.dist.tarball, false);
       assert.ok(bytes, 'published tarball missing');
       assert.equal(`sha512-${createHash('sha512').update(bytes).digest('base64')}`, packed.integrity, 'tarball integrity mismatch');
-      assertProvenance(item, packed, await publicGet(metadata.dist.attestations.url), expected);
+      await verifyPublishedProvenance(item, packed, expected,
+        timeout => publicGet(metadata.dist.attestations.url, true, timeout));
       console.log(`Verified ${item.name}@${item.version} integrity and publisher source ${expected}`);
     },
   });
