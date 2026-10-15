@@ -134,7 +134,8 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       bundleId: randomUUID(), bundleHash: `sha256:${'a'.repeat(64)}`, catalogHash: `sha256:${'b'.repeat(64)}`,
       manifestHash: `sha256:${'c'.repeat(64)}`, skillsHash: `sha256:${'d'.repeat(64)}`, observedAt: new Date().toISOString()};
     const service = runNamedSessionService({ home, registration, vault, signal: controller.signal,
-      ...{readPeerRepositoryContext: async () => {
+      ...{readPeerRepositoryContext: async offer => {
+        assert.deepEqual(offer, question);
         assert.equal(offered, true); assert.equal(accepted, false); assert.equal(active, 0);
         assert.equal(boundaryWorkId, null); assert.equal(boundaryActive, true); peerReads++; return 'PEER_CONTEXT_FIXTURE';
       }},

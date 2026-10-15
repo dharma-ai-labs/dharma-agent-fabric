@@ -240,7 +240,8 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
   const inbox = await openCodexInboxSession({...f, bindingId: f.binding.bindingId, expectedRevision: 0,
     channelTransport, authorizeContent: async () => true,
     budget: {reserve: async () => {reserves++; return true;}}, openTransport: async () => remote.transport});
-  const options = {loadRepositoryContext: async () => {
+  const options = {loadRepositoryContext: async (offer: typeof q) => {
+    assert.deepEqual(offer, q);
     assert.equal(accepted, false); loads++;
     if (deniedContext) throw new Error('synthetic_context_denied');
     return context;

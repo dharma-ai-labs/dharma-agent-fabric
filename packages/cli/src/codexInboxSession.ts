@@ -84,7 +84,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
     },
     ask: channel.ask,
     read: channel.read,
-    async runNext(options: {loadRepositoryContext?: () => Promise<string>} = {}) {
+    async runNext(options: {loadRepositoryContext?: (question: SessionQuestion) => Promise<string>} = {}) {
       if (stopped) throw new Error('codex_inbox_session_unavailable');
       if (running) throw new Error('codex_inbox_session_busy');
       running = true;
@@ -101,7 +101,7 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
         current = offer;
         let result: Awaited<ReturnType<typeof owner.runQuestion>>;
         try {
-          const repositoryContext = await options.loadRepositoryContext?.();
+          const repositoryContext = await options.loadRepositoryContext?.(offer);
           result = await owner.runQuestion({ question: offer, repositoryContext });
         }
         catch (error) {

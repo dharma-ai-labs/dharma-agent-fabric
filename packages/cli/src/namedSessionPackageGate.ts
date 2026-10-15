@@ -14,6 +14,15 @@ const BUNDLE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 const MAX_SKILL_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_BYTES = 262_144;
 
+function mentionsWorkspaceReference(text: string, path: string): boolean {
+  const pathCharacter = /[A-Za-z0-9_./\\%:-]/;
+  for (let offset = text.indexOf(path); offset >= 0; offset = text.indexOf(path, offset + path.length)) {
+    const before = text[offset - 1], after = text[offset + path.length];
+    if ((!before || !pathCharacter.test(before)) && (!after || !pathCharacter.test(after))) return true;
+  }
+  return false;
+}
+
 export function composeNamedSessionRepositoryPrompt(prompt: string, context?: string): string {
   assertCodexWorkPrompt(prompt);
   if (context === undefined) return prompt;
@@ -175,6 +184,7 @@ export async function readNamedSessionRepositoryContext(input: {
   workspaceRoot: string;
   loadAuthority(): Promise<{ policy: OrganizationPolicy; source: unknown }>;
   contentMode?: 'references' | 'verified_inline';
+  referenceText?: string;
   now?: () => Date;
 }): Promise<string> {
   try { return await readRepositoryContext(input); }
@@ -189,6 +199,14 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
   if (input.contentMode !== undefined && !['references', 'verified_inline'].includes(input.contentMode)) {
     throw new Error('named_session_repository_context_invalid');
   }
+  if (input.contentMode === 'verified_inline') {
+    if (typeof input.referenceText !== 'string' || !input.referenceText.trim() || input.referenceText.length > 2000
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.referenceText)) {
+      throw new Error('named_session_repository_context_invalid');
+    }
+    try { assertCodexWorkPrompt(input.referenceText); }
+    catch { throw new Error('named_session_repository_context_invalid'); }
+  } else if (input.referenceText !== undefined) throw new Error('named_session_repository_context_invalid');
   if (!input.scope.repositoryBindingId || !input.scope.repositoryAgentId
     || input.installation.workspaceId !== input.scope.workspaceId) {
     throw new Error('named_session_repository_context_scope_mismatch');
@@ -285,13 +303,15 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
     if (!prefix) continue;
     const sourcePath = row.path.slice(prefix.length);
     const report = prefix.includes('/reports/');
-    if (seen.has(row.path.toLowerCase()) || files.length >= 32
+    if (seen.has(row.path.toLowerCase()) || seen.size >= 32
       || !(report ? row.role === 'knowledge' : ['skill', 'dependency'].includes(row.role))
       || !repositorySourcePathAllowed(initial.source, sourcePath, report ? 'approved_outputs' : 'repository_skills')
       || referencesExcludedPath(sourcePath, initial.policy.evidence.excludePaths, 'content')) {
       throw new Error('named_session_repository_context_not_authorized');
     }
     seen.add(row.path.toLowerCase());
+    // The signed question selects from the verified inventory; it never supplies a filesystem path.
+    if (input.contentMode === 'verified_inline' && !mentionsWorkspaceReference(input.referenceText!, row.path)) continue;
     const maximumBytes = Math.min(MAX_FILE_BYTES, initial.source.policy.maximumFileBytes);
     const bytes = await readStableFile(resolve(activeRoot, row.path.slice(root.length)), maximumBytes);
     if (bytes.length !== row.sizeBytes || digest(bytes) !== row.sha256) {
@@ -319,7 +339,9 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
     repositoryBindingId: input.scope.repositoryBindingId, repositoryAgentId: input.scope.repositoryAgentId,
     bundleId: content.bundleId, bundleHash: content.bundleHash, manifestHash: content.manifestHash,
     catalogHash: content.catalogHash, sourceReceiptId: initial.source.receiptId, sourceRevision: initial.source.revision,
-    concepts: catalog.concepts, unresolved: catalog.unresolved, files });
+    concepts: catalog.concepts, unresolved: catalog.unresolved, files,
+    ...(input.contentMode === 'verified_inline' ? { selection: { kind: 'exact_workspace_references',
+      selectedFiles: files.length, omittedFiles: seen.size - files.length } } : {}) });
   composeNamedSessionRepositoryPrompt('Consult applicable repository material.', context);
   if (containsDisallowedLocalPath(context)
     || referencesExcludedPath(context, initial.policy.evidence.excludePaths, 'content')

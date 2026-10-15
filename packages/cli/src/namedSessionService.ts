@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:f
 import { createConnection, createServer, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { validateContract, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
+import { validateContract, type SessionQuestion, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexInboxSession } from './codexInboxSession.js';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -110,7 +110,7 @@ export async function runNamedSessionService(input: {
   additionalFilesystemRules?: Readonly<Record<string, 'read' | 'deny'>>;
   authorizeLocalWork(): Promise<boolean>;
   observeNativeSkill?(): Promise<NamedCodexSkillObservation>;
-  readPeerRepositoryContext?(): Promise<string>;
+  readPeerRepositoryContext?(question: SessionQuestion): Promise<string>;
   queueEvidence?(capture: CodexLocalWorkCapture): Promise<NamedSessionEvidenceReceipt>;
   retainRepositoryState?(capture: CodexLocalWorkCapture): Promise<import('./namedSessionRepositoryState.js').NamedSessionRepositoryStateDisposition>;
   syncTaskExports?(): Promise<import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult>;
