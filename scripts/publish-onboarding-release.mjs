@@ -75,7 +75,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json']);
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
@@ -85,6 +85,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   const lock = structuredClone(snapshot.baselineLock);
   lock.packages['packages/cli'].version = '0.2.200';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
+  const previousVersion = "const VERSION = '0.2.199';";
+  assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
+  assert.equal(snapshot.cliSource,
+    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.200';"), 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
@@ -152,6 +156,9 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
         cliManifest: JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')),
         baselineLock: JSON.parse(git('show', `${source}:package-lock.json`)),
         lock: JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')),
+        baselineCliSource: execFileSync('git', ['show', `${source}:packages/cli/src/index.ts`],
+          {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024}),
+        cliSource: readFileSync(join(root, 'packages/cli/src/index.ts'), 'utf8'),
       });
     },
     manifest: async (item) => JSON.parse(readFileSync(join(root, item.workspace, 'package.json'), 'utf8')),

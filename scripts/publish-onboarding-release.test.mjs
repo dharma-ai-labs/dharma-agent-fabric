@@ -22,16 +22,20 @@ test('frozen source requalification candidate admits only the bounded CLI200 rel
   const cliManifest = {...baselineCliManifest, version: '0.2.200'};
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
   const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.200';
+  const baselineCliSource = execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`],
+    {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
+  const cliSource = baselineCliSource.replace("const VERSION = '0.2.199';", "const VERSION = '0.2.200';");
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
     changed: git('diff', '--name-only', baseline, reviewed).split('\n').filter(Boolean), untracked: [],
     baselineManifest: JSON.parse(git('show', `${baseline}:package.json`)),
-    manifest: JSON.parse(git('show', `${reviewed}:package.json`)), baselineCliManifest, cliManifest, baselineLock, lock};
+    manifest: JSON.parse(git('show', `${reviewed}:package.json`)), baselineCliManifest, cliManifest, baselineLock, lock,
+    baselineCliSource, cliSource};
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json'] }));
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts'] }));
   for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml',
     'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md',
     'packages/contracts/package.json', 'apps/relay-gateway/src/protocol.ts']) {
@@ -41,6 +45,11 @@ test('frozen source requalification candidate admits only the bounded CLI200 rel
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliManifest: {...cliManifest, dependencies: {}}}), /CLI manifest delta/);
   const foreignLock = structuredClone(lock); foreignLock.packages['packages/cli'].dependencies = {};
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, lock: foreignLock}), /lockfile delta/);
+  assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: baselineCliSource}), /CLI source delta/);
+  assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: cliSource + '\n// unrelated\n'}), /CLI source delta/);
+  for (const baselineCliSource of ['', "const VERSION = '0.2.199';\nconst VERSION = '0.2.199';\n"]) {
+    assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, baselineCliSource}), /CLI version anchor required/);
+  }
 });
 
 test('npm bin linking leaves a tracked executable launcher clean on Linux', { skip: process.platform !== 'linux' }, () => {
@@ -147,7 +156,7 @@ test('publication failure is not replayed and later packages remain unpublished'
   assert.equal(effects.length, 1);
 });
 
-for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher', 'cliManifest', 'lock']) {
+for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'manifest', 'lifecycleLauncher', 'cliManifest', 'lock', 'cliSource']) {
   test(`source admission rejects changed ${defect}`, () => {
     const manifest = { scripts: {
       'pack:verify': 'node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs && node scripts/verify-package.mjs',
@@ -159,7 +168,9 @@ for (const defect of ['head', 'ref', 'tree', 'dirty', 'changed', 'untracked', 'm
       baselineCliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.188', dependencies: {}},
       cliManifest: {name: '@dharma-ai-labs/agent-fabric', version: '0.2.200', dependencies: {}},
       baselineLock: {packages: {'packages/cli': {version: '0.2.188'}}},
-      lock: {packages: {'packages/cli': {version: '0.2.200'}}} };
+      lock: {packages: {'packages/cli': {version: '0.2.200'}}},
+      baselineCliSource: "const VERSION = '0.2.199';\n",
+      cliSource: "const VERSION = '0.2.200';\n" };
     assert.doesNotThrow(() => assertSourceSnapshot(head, snapshot));
     snapshot[defect] = ['changed', 'untracked'].includes(defect) ? ['packages/cli/other.js']
       : defect === 'manifest' ? { scripts: {} } : 'wrong';
