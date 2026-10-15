@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -114,7 +114,7 @@ test('WSL launches Windows Credential Manager through the interop bridge', () =>
 });
 
 test('Windows store uses its fixed bridge cwd for reads, writes, deletes and anchor updates', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-bridge-cwd-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-bridge-cwd-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = join(root, 'calls.jsonl');
   const bridge = `const fs = require('node:fs');
