@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '6a3843f374d126fab5621303921f40be5122d86d';
-const tree = 'f624f1efae2f686c6d99e28d44a46f519e299148';
+const source = 'cc470925d23f925cf5df3ef70f77b633e1cff7d9';
+const tree = '199d9e1d2409d2e15951d2b0c9b7859cbdca1894';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -31,19 +31,13 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
     existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
       integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.208' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.209' },
 ].map(Object.freeze));
 
 export const approvedProductSourceHashes = Object.freeze({
-  "packages/cli/src/bootstrapProcessCaller.test.ts": "932da4d624c3e35546ce98c46e9765b0a789a1073d000e53e83abc678ab9e1fe",
-  "packages/cli/src/codexSetupSessionCaller.test.ts": "ab767b3d90f21491b3afea2ccd4536138e1cc7c81f27e36f43102b849fa01ee0",
-  "packages/cli/src/index.ts": "a64e17b1345eb7bfdfdb79a3b5cfb703deb8ea7eccb87e43187c9e833c7cfa30",
-  "packages/cli/src/namedSessionService.ts": "8a67fd1833a628022d82606b7158f6737de500ff090eef6e7f307442fdd36511",
-  "packages/cli/src/namedSessionTransportDiagnostic.ts": "e79125eacdb858c3acf01cfc462729b23d0efd6aaa4574c5023488b4e9dfcaf8",
-  "packages/cli/src/namedSessionTransportDiagnostic.test.ts": "3d43b44a78a96936d5ba0b556135b3e9b7577c19d7be0f27caba46af9d9f98d0",
-  "packages/cli/src/usage.ts": "6197e396fddcb8473718c5346c10cdcef8af9591beb4cdb4f9be2eb8456c0cd1",
-  "packages/cli/README.md": "7c851e781f5f10e8e0ae7c3dcdb3db68cbcfd2d840cba309973f970b402ed90c",
-  "schemas/named-session-readiness-diagnostic.schema.json": "c77348ea4ebe675a3534411746bdfdb6c932fa23931e4fb5dfcf9ba238dd83a9"
+  "packages/cli/src/index.ts": "7f7e65d3ea46aa89d67ad80e4caf33ba4c0eeeefd6007a5d77e7f1ec4b42c06e",
+  "packages/cli/src/repositoryRelaySupervisor.ts": "eb60554d0bdb4958ecbc1ef36a231d71e58d920b0f68ed1e749e37da5b3042b1",
+  "packages/cli/src/repositoryRelayPreludeDiagnostic.test.ts": "da28a6d4cb01eb798c17f0e15d9b8c07c42ecd80e8da3b9d4e50c6c80c00d08e"
 });
 export function sourceTextSha256(text) {
   return createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex');
@@ -102,7 +96,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.deepEqual(snapshot.productSourceHashes, approvedProductSourceHashes, 'unreviewed product source bytes');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.208';
+  cliManifest.version = '0.2.209';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
@@ -127,7 +121,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
       `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.208';
+  lock.packages['packages/cli'].version = '0.2.209';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
@@ -137,7 +131,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   }
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.207';";
+  const previousVersion = "const VERSION = '0.2.208';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(sourceTextSha256(snapshot.cliSource),
     approvedProductSourceHashes['packages/cli/src/index.ts'], 'unreviewed CLI source delta');
