@@ -21,6 +21,10 @@ test('durable named registration excludes credentials, grants and foreign shape'
   await saveNamedSession(home,paused);
   await assert.rejects(saveNamedSession(home,{...paused,enabled:true}),/registration_invalid/);
   assert.deepEqual(await readNamedSession(home,'reviewer'),paused);
+  const permitted={...paused,maintenanceFence:{...paused.maintenanceFence,restartPermitted:true as const}};
+  await saveNamedSession(home,permitted);
+  assert.deepEqual(await readNamedSession(home,'reviewer'),permitted);
+  await assert.rejects(saveNamedSession(home,{...permitted,enabled:true}),/registration_invalid/);
   await saveNamedSession(home,good);
   for (const invalid of [{ ...good, grant: 'private-fixture' }, { ...good, maximumTurnCostCents: 101 },
     { ...good, identity: { ...identity, credential: 'private-fixture' } },

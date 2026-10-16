@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import test from 'node:test';
-import {maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
+import {activateMaintenanceRestart, maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
+import {assertNamedSessionStartupRegistration} from './namedSessionAdmission.js';
 import type {NamedSessionRegistration} from './namedSessionService.js';
 import type {LocalProviderSessionBinding} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
@@ -94,8 +95,9 @@ test('explicit stopped-owner recovery preserves binding and budgets and does not
   assert.equal(receipt.mode,'stopped_recovery');assert.equal(receipt.state,'restart_permitted');
   assert.equal(receipt.interruptedWorkDisposition,'preserved_for_verified_start');
   assert.equal(receipt.sessionId,f.binding.sessionId);assert.equal(f.writes(),1);assert.equal(f.stateReads(),2);
-  const {maintenanceFence:_fence,...base}=f.registration;
-  assert.deepEqual(f.current(),{...base,enabled:true});
+  assert.equal(f.current()?.enabled,false);assert.equal(receipt.automaticRestartEnabled,false);
+  assert.equal(f.current()?.maintenanceFence?.restartPermitted,true);
+  assert.throws(()=>assertNamedSessionStartupRegistration(f.registration,f.current()),/named_session_quiesced/);
   assert.equal((await validateContract(join(import.meta.dirname,'schemas'),
     'https://schemas.dharma-ai.io/named-session-maintenance/v1',receipt)).ok,true);
 });
@@ -118,4 +120,17 @@ test('stopped recovery rejects wrong fence, foreign binding, changed disk scope 
       ...(kind==='expired'?{readBinding:async()=>({...f.binding,expiresAt:new Date(0).toISOString()})}:{})};
     await assert.rejects(recoverStoppedNamedSession(input),/named_session_maintenance_/);assert.equal(f.writes(),0);
   }
+});
+
+test('restart-permitted registration remains supervisor-disabled until a matching explicit start', async () => {
+  const f=recoveryFixture();await recoverStoppedNamedSession(f.input);
+  const permitted=f.current()!;assert.equal(permitted.enabled,false);
+  await assert.rejects(activateMaintenanceRestart({...f.input,registration:permitted,fenceId:randomUUID()}),/named_session_maintenance_start_unavailable/);
+  assert.equal(f.current()?.enabled,false);
+  await assert.rejects(activateMaintenanceRestart({...f.input,registration:permitted,processState:async()=> 'running'}),/named_session_owner_not_stopped/);
+  assert.equal(f.current()?.enabled,false);
+  await activateMaintenanceRestart({...f.input,registration:permitted});
+  const {maintenanceFence:_fence,...base}=f.registration;
+  assert.deepEqual(f.current(),{...base,enabled:true});
+  assert.equal(f.writes(),2);
 });

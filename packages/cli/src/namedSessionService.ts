@@ -21,7 +21,7 @@ export interface NamedSessionRegistration {
   maximumCostCents: number;
   maximumTurnCostCents: number;
   enabled: boolean;
-  maintenanceFence?: {fenceId:string; generation:string};
+  maintenanceFence?: {fenceId:string; generation:string; restartPermitted?:true};
 }
 
 function validateRegistration(value: unknown, name: string): asserts value is NamedSessionRegistration {
@@ -44,7 +44,8 @@ function validateRegistration(value: unknown, name: string): asserts value is Na
     || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(identity.organizationId)
     || ids.some(key => typeof identity[key] !== 'string' || !uuid.test(identity[key] as string))
     || fence !== undefined && (!fence || typeof fence !== 'object' || Array.isArray(fence)
-      || Object.keys(fence).sort().join(',') !== 'fenceId,generation' || record.enabled !== false
+      || !['fenceId,generation','fenceId,generation,restartPermitted'].includes(Object.keys(fence).sort().join(',')) || record.enabled !== false
+      || fence.restartPermitted !== undefined && fence.restartPermitted !== true
       || typeof fence.fenceId !== 'string' || !uuid.test(fence.fenceId)
       || typeof fence.generation !== 'string' || !uuid.test(fence.generation))) {
     throw new Error('named_session_registration_invalid');

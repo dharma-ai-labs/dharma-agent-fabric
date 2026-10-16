@@ -33,6 +33,6 @@
     {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"mode": {"const": "live"}, "state": {"const": "quiesced"}, "automaticRestartEnabled": {"const": false}}}},
     {"if": {"properties": {"action": {"const": "resume"}, "mode": {"const": "live"}}}, "then": {"properties": {"state": {"const": "open"}, "automaticRestartEnabled": {"const": true}}}},
     {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"mode": {"const": "live"}, "state": {"const": "stop_requested"}, "automaticRestartEnabled": {"const": false}}}},
-    {"if": {"properties": {"mode": {"const": "stopped_recovery"}}}, "then": {"required": ["interruptedWorkDisposition"], "properties": {"action": {"const": "resume"}, "state": {"const": "restart_permitted"}, "automaticRestartEnabled": {"const": true}}}}
+    {"if": {"properties": {"mode": {"const": "stopped_recovery"}}}, "then": {"required": ["interruptedWorkDisposition"], "properties": {"action": {"const": "resume"}, "state": {"const": "restart_permitted"}, "automaticRestartEnabled": {"const": false}}}}
   ]
 }

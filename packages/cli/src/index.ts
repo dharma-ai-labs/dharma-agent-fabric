@@ -49,7 +49,7 @@ import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
-import {maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
+import {activateMaintenanceRestart, maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
 import {assertNamedSessionStartupRegistration} from './namedSessionAdmission.js';
 import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
@@ -5192,11 +5192,11 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
   if (['quiesce', 'resume'].includes(action) || action === 'stop' && flags.has('drained')) {
-    const allowed = ['name', 'workspace-id', 'fence-id', 'apply', 'dry-run',
+    const allowed = ['name', 'workspace-id', 'fence-id', 'apply', 'dry-run', 'json',
       ...(action === 'stop' ? ['drained'] : action === 'resume' ? ['recover-stopped'] : [])];
     if (hostScope || supervisorOwner || setupSessionScope || !existing
       || [...flags.keys()].some(key => !allowed.includes(key))
-      || ['apply', 'dry-run', 'drained', 'recover-stopped'].some(key => flags.has(key) && flags.get(key) !== true)
+      || ['apply', 'dry-run', 'drained', 'recover-stopped', 'json'].some(key => flags.has(key) && flags.get(key) !== true)
       || flags.has('apply') && flags.has('dry-run')) throw new Error('named_session_maintenance_unavailable');
     const fenceId = required(flags, 'fence-id');
     if (!UUID_PATTERN.test(fenceId)) throw new Error('named_session_fence_invalid');
@@ -5257,13 +5257,22 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await repositorySharedReady(item)));
   if (action === 'start') {
     if (existing && !existing.enabled) {
-      if (existing.maintenanceFence) throw new Error('named_session_quiesced');
-      if (supervisorOwner) throw new Error('named_session_disabled');
-      const live = await step(() => namedSessionRequest(dharmaHome(), name, {action:'status'})).catch(() => null);
-      if (live?.admission && (live.admission as Record<string, unknown>).state !== 'open') {
-        throw new Error('named_session_quiesced');
+      if (existing.maintenanceFence) {
+        if (hostScope || supervisorOwner || setupSessionScope || !flags.has('fence-id') || flags.get('apply')!==true
+          || [...flags.keys()].some(key=>!['name','workspace-id','fence-id','apply','json'].includes(key))) {
+          throw new Error('named_session_quiesced');
+        }
+        await withRelayStartupMutation(() => activateMaintenanceRestart({registration:existing, fenceId:required(flags,'fence-id'),
+          processState:() => pidProcessState(resolve(paths.root,'service.lock')),
+          readRegistration:() => readNamedSession(dharmaHome(),name), saveRegistration:value=>saveNamedSession(dharmaHome(),value)}));
+      } else {
+        if (supervisorOwner) throw new Error('named_session_disabled');
+        const live = await step(() => namedSessionRequest(dharmaHome(), name, {action:'status'})).catch(() => null);
+        if (live?.admission && (live.admission as Record<string, unknown>).state !== 'open') {
+          throw new Error('named_session_quiesced');
+        }
+        await step(() => saveNamedSession(dharmaHome(), { ...existing, enabled: true }));
       }
-      await step(() => saveNamedSession(dharmaHome(), { ...existing, enabled: true }));
     }
     try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Start an owned worker below. */ }
     const args = [fileURLToPath(import.meta.url), 'sessions', 'serve', '--name', name,

@@ -59,13 +59,33 @@ export async function recoverStoppedNamedSession(input: {
   if (!Number.isFinite(commitTime.getTime()) || Date.parse(binding.expiresAt) <= commitTime.getTime()) {
     throw new Error('named_session_maintenance_binding_unavailable');
   }
-  const {maintenanceFence:_fence, ...base} = registration, next = {...base, enabled:true};
+  const next = {...registration, enabled:false, maintenanceFence:{...fence,restartPermitted:true as const}};
   await input.saveRegistration(next);
   const readback = await input.readRegistration();
   if (!readback || canonicalize(readback) !== canonicalize(next)) throw new Error('named_session_maintenance_persistence_unconfirmed');
   return {ok:true, schema:'dharma.named-session-maintenance/v1', receiptId:randomUUID(), name:registration.name,
     bindingId:registration.bindingId, sessionId:binding.sessionId, ...registration.identity,
     action:'resume', fenceId:input.fenceId, generation:fence.generation, mode:'stopped_recovery',
-    state:'restart_permitted', pending:0, automaticRestartEnabled:true,
+    state:'restart_permitted', pending:0, automaticRestartEnabled:false,
     interruptedWorkDisposition:'preserved_for_verified_start', observedAt:commitTime.toISOString()};
+}
+
+export async function activateMaintenanceRestart(input: {
+  registration:NamedSessionRegistration; fenceId:string;
+  processState():Promise<'running'|'stopped'|'unknown'>;
+  readRegistration():Promise<NamedSessionRegistration|null>;
+  saveRegistration(value:NamedSessionRegistration):Promise<void>;
+}) {
+  const registration=input.registration, fence=registration.maintenanceFence;
+  if (!fence?.restartPermitted || registration.enabled || !uuid.test(input.fenceId) || input.fenceId!==fence.fenceId) {
+    throw new Error('named_session_maintenance_start_unavailable');
+  }
+  if (await input.processState()!=='stopped') throw new Error('named_session_owner_not_stopped');
+  const current=await input.readRegistration();
+  if (!current || canonicalize(current)!==canonicalize(registration)) throw new Error('named_session_maintenance_scope_mismatch');
+  if (await input.processState()!=='stopped') throw new Error('named_session_owner_not_stopped');
+  const {maintenanceFence:_fence,...base}=registration, next={...base,enabled:true};
+  await input.saveRegistration(next);
+  const observed=await input.readRegistration();
+  if (!observed || canonicalize(observed)!==canonicalize(next)) throw new Error('named_session_maintenance_persistence_unconfirmed');
 }
