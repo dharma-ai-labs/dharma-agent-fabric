@@ -41,10 +41,36 @@ test('actual CLI full-vault callsites all use the single scoped owner', async ()
     ts.forEachChild(node, child => visit(child, owner));
   }
   visit(ast); assert.deepEqual(unscoped, []);
-  assert.deepEqual(owned, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'evidenceSync',
+  // Keep both callsites explicit; neither may bypass openBootstrapVault or its key wipe/scope checks.
+  assert.deepEqual(owned, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'namedSessionCommand', 'evidenceSync',
     'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);
+});
+
+test('stopped maintenance recovery accessor reads only the exact existing provider binding', async () => {
+  const source=await readFile(new URL('../src/index.ts',import.meta.url),'utf8');
+  const ast=ts.createSourceFile('index.ts',source,ts.ScriptTarget.Latest,true);
+  const callbacks:ts.ArrowFunction[]=[];
+  const visit=(node:ts.Node)=>{
+    if(ts.isPropertyAssignment(node)&&node.name.getText(ast)==='readBinding'&&ts.isArrowFunction(node.initializer))callbacks.push(node.initializer);
+    ts.forEachChild(node,visit);
+  };
+  visit(ast);assert.equal(callbacks.length,1);
+  const callback=callbacks[0]!, calls:ts.CallExpression[]=[];
+  const scan=(node:ts.Node)=>{if(ts.isCallExpression(node))calls.push(node);ts.forEachChild(node,scan);};
+  scan(callback);
+  assert.deepEqual(calls.map(call=>call.expression.getText(ast)),
+    ['openBootstrapVault','resolve','dharmaHome','vault.getProviderSessionBinding']);
+  assert.deepEqual(calls.at(-1)!.arguments.map(value=>value.getText(ast)),['existing.bindingId','existing.identity']);
+  const code=ts.transpileModule(callback.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2023,module:ts.ModuleKind.None}});
+  const expected={bindingId:'existing-public-binding',identity:{organizationId:'org_test'}};
+  let opened=0,read=0;
+  const invoke=runInNewContext(code.outputText,{existing:expected,vault:undefined,dharmaHome:()=>'/fixture',resolve:join,
+    openBootstrapVault:async(options:unknown)=>{opened++;assert.deepEqual(JSON.parse(JSON.stringify(options)),{root:join('/fixture','vault')});
+      return{getProviderSessionBinding:(id:unknown,identity:unknown)=>{read++;assert.equal(id,expected.bindingId);assert.equal(identity,expected.identity);return{id};}};}},
+    {timeout:1000,contextCodeGeneration:{strings:false,wasm:false}}) as ()=>Promise<unknown>;
+  assert.deepEqual(await invoke(),{id:expected.bindingId});assert.equal(opened,1);assert.equal(read,1);
 });
 test('actual CLI full-vault owner refuses closed scope before module or key access', async () => {
   let effects = 0;
