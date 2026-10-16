@@ -6,16 +6,22 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '53c7e023c9b9337de7ba4e8600f31224a441416e';
-const tree = '493c353de854d0854eccb264f9cb8fe6862a4784';
+const source = '9094de897d6ef1cb6fcb19a51a0d7cbd4bf19355';
+const tree = '0a8d29f94297576dc354e6ed0aacdbf4dc9bd19a';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
     existingArtifact: Object.freeze({source: '6c7d48916de11ccc837933a7ef7e8d2600184b54',
       integrity: 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ=='}) },
-  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.36' },
-  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.38' },
-  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.35' },
+  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.36',
+    existingArtifact: Object.freeze({source: '3038b4f53afcfa2825025e51f09d834c937115d4',
+      integrity: 'sha512-NdKtgL7IWIMtkN+pm0xRX4lP3zspwz4+c4N7IY/kNpqmcu32snIp3Z1oP5nYjIAyRcCxWPz6LEoEzU3CQ1WUaw=='}) },
+  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.38',
+    existingArtifact: Object.freeze({source: '3038b4f53afcfa2825025e51f09d834c937115d4',
+      integrity: 'sha512-8wwADswTKRNidXWP2kGcCBsctY/wEJ43m5etVqyeBKxaUqca7GarhkrYoe/WseOYJFDGt1XfWxDDuXz2SPMXIg=='}) },
+  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.35',
+    existingArtifact: Object.freeze({source: '3038b4f53afcfa2825025e51f09d834c937115d4',
+      integrity: 'sha512-Sr3Rv1kLvZ3GE8vrrmYZDoFp41ypdAhinR3kZKS2jtsMmNBUIQpA+Q2OV1OtmtsrDs1yEo/rvMqYEIYUUAb5Aw=='}) },
   { workspace: 'packages/secure-store', name: '@dharma-ai-labs/agent-fabric-secure-store', version: '0.1.10',
     existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
       integrity: 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='}) },
@@ -25,7 +31,7 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
     existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
       integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.205' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.206' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -75,14 +81,12 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts',
-    'packages/provider-adapters/package.json', 'packages/task-runner/package.json',
-    'packages/evidence-reduction/package.json', 'packages/lifecycle-adapter/package.json']);
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts']);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.205';
+  cliManifest.version = '0.2.206';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
@@ -107,7 +111,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
       `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.205';
+  lock.packages['packages/cli'].version = '0.2.206';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
@@ -117,10 +121,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   }
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.204';";
+  const previousVersion = "const VERSION = '0.2.205';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(snapshot.cliSource,
-    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.205';"), 'unreviewed CLI source delta');
+    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.206';"), 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
