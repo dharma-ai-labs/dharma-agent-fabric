@@ -12,9 +12,9 @@ const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
 const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('CLI206 publishes only the managed-runtime permission correction', () => {
+test('CLI207 publishes only the reviewed named-session maintenance correction', () => {
   assert.deepEqual(approvedPackages.filter(item => !item.existingArtifact).map(item => [item.workspace, item.version]), [
-    ['packages/cli', '0.2.206'],
+    ['packages/cli', '0.2.207'],
   ]);
 });
 
@@ -105,7 +105,7 @@ for (const name of ['agent-fabric-contracts', 'agent-fabric-secure-store', 'agen
   }
 }
 
-test('CLI206 keeps all seven dependency packages immutable', () => {
+test('CLI207 keeps all seven dependency packages immutable', () => {
   assert.deepEqual(approvedPackages.filter(item => item.existingArtifact).map(item => [item.workspace, item.version]), [
     ['packages/contracts', '0.1.16'], ['packages/provider-adapters', '0.1.36'],
     ['packages/task-runner', '0.1.38'], ['packages/evidence-reduction', '0.2.35'], ['packages/secure-store', '0.1.10'],
@@ -116,11 +116,11 @@ test('CLI206 keeps all seven dependency packages immutable', () => {
 function releaseSnapshot() {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '9094de897d6ef1cb6fcb19a51a0d7cbd4bf19355';
+  const baseline = '42f257a73c2b1c5c420c7d85a81ab7b9cf3fb801';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '0a8d29f94297576dc354e6ed0aacdbf4dc9bd19a');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '2ff390d8ddf2b561b24fa3d928725ff9de99e157');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
-  const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.206';
+  const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.207';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
@@ -135,7 +135,7 @@ function releaseSnapshot() {
   }
   runtimeManifests['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
-  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.206';
+  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.207';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
@@ -146,7 +146,7 @@ function releaseSnapshot() {
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   const baselineCliSource = execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`],
     {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
-  const cliSource = baselineCliSource.replace("const VERSION = '0.2.205';", "const VERSION = '0.2.206';");
+  const cliSource = baselineCliSource.replace("const VERSION = '0.2.206';", "const VERSION = '0.2.207';");
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -157,7 +157,7 @@ function releaseSnapshot() {
   return snapshot;
 }
 
-test('frozen source admits only exact CLI206 pins after the reviewed peer-context fix', () => {
+test('frozen source admits only exact CLI207 pins after the reviewed maintenance fix', () => {
   const snapshot = releaseSnapshot(), reviewed = snapshot.head, baselineCliSource = snapshot.baselineCliSource;
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [
@@ -177,7 +177,7 @@ test('frozen source admits only exact CLI206 pins after the reviewed peer-contex
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, lock: foreignLock}), /lockfile delta/);
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: baselineCliSource}), /CLI source delta/);
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: snapshot.cliSource + '\n// unrelated\n'}), /CLI source delta/);
-  for (const baselineCliSource of ['', "const VERSION = '0.2.205';\nconst VERSION = '0.2.205';\n"]) {
+  for (const baselineCliSource of ['', "const VERSION = '0.2.206';\nconst VERSION = '0.2.206';\n"]) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, baselineCliSource}), /CLI version anchor required/);
   }
 });
@@ -255,7 +255,7 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('verifies immutable dependencies before publishing only the CLI206 artifact', async () => {
+test('verifies immutable dependencies before publishing only the CLI207 artifact', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, [
@@ -269,7 +269,7 @@ test('verifies immutable dependencies before publishing only the CLI206 artifact
     ['@dharma-ai-labs/agent-fabric-secure-store', '0.1.10'],
     ['@dharma-ai-labs/agent-fabric-relay-client', '0.2.33'],
     ['@dharma-ai-labs/agent-fabric-local-vault', '0.1.31'],
-    ['@dharma-ai-labs/agent-fabric', '0.2.206'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.207'],
   ]);
 });
 
