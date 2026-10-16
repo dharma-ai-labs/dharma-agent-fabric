@@ -21,12 +21,12 @@ test('quiesce fences new local and peer work synchronously and drains admitted w
   await assert.rejects(admission.enqueue(async () => {lateRuns++;}), /named_session_quiesced/);
   await assert.rejects(admission.enqueue(async () => {lateRuns++;}), /named_session_quiesced/);
   assert.equal(drained, false); assert.equal(completed, false); assert.equal(lateRuns, 0);
-  assert.throws(() => admission.stopDrained(fenceId, generation), /named_session_not_drained/);
-  assert.throws(() => admission.resume(fenceId, generation), /named_session_not_drained/);
+  await assert.rejects(admission.stopDrained(fenceId, generation), /named_session_not_drained/);
+  await assert.rejects(admission.resume(fenceId, generation), /named_session_not_drained/);
   finish.resolve(); await work;
   assert.deepEqual(await quiesce, {generation, fenceId, state:'quiesced', pending:0});
   assert.equal(completed, true); assert.equal(lateRuns, 0);
-  admission.stopDrained(fenceId, generation);
+  await admission.stopDrained(fenceId, generation);
   await assert.rejects(admission.enqueue(async () => {lateRuns++;}), /named_session_stopped/);
   assert.equal(lateRuns, 0);
 });
@@ -44,7 +44,7 @@ test('quiesce drains queued admitted work and preserves a failed operation witho
   first.resolve(); await Promise.all([work, failure, final, quiesce]);
   assert.deepEqual(runs, ['first', 'failed', 'final']);
   assert.equal(admission.snapshot().pending, 0);
-  admission.resume(fenceId, generation);
+  await admission.resume(fenceId, generation);
   await admission.enqueue(async () => {runs.push('resumed');});
   assert.deepEqual(runs, ['first', 'failed', 'final', 'resumed']);
 });
@@ -55,16 +55,16 @@ test('fences are generation-bound, idempotent and cannot be displaced or silentl
   assert.deepEqual(await admission.quiesce(fenceId, generation), first);
   await assert.rejects(admission.quiesce(randomUUID(), generation), /named_session_fence_conflict/);
   await assert.rejects(admission.quiesce(fenceId, randomUUID()), /named_session_generation_changed/);
-  assert.throws(() => admission.resume(randomUUID(), generation), /named_session_fence_conflict/);
-  assert.throws(() => admission.stopDrained(fenceId, randomUUID()), /named_session_generation_changed/);
+  await assert.rejects(admission.resume(randomUUID(), generation), /named_session_fence_conflict/);
+  await assert.rejects(admission.stopDrained(fenceId, randomUUID()), /named_session_generation_changed/);
   assert.throws(() => admission.stop(), /named_session_fence_required/);
   assert.equal(admission.snapshot().state, 'quiesced');
-  admission.resume(fenceId, generation);
+  await admission.resume(fenceId, generation);
   assert.equal(admission.snapshot().state, 'open');
-  assert.throws(() => admission.stopDrained(fenceId, generation), /named_session_fence_conflict/);
+  await assert.rejects(admission.stopDrained(fenceId, generation), /named_session_fence_conflict/);
   const replacement = new NamedSessionAdmission();
   assert.notEqual(replacement.snapshot().generation, generation);
-  assert.throws(() => replacement.stopDrained(fenceId, generation), /named_session_generation_changed/);
+  await assert.rejects(replacement.stopDrained(fenceId, generation), /named_session_generation_changed/);
 });
 
 test('invalid fence input and queue overflow have no admission effect', async () => {
@@ -89,7 +89,34 @@ test('the drained receipt waits for final evidence/health settlement, not merely
   let drained = false;
   const quiesce = admission.quiesce(fenceId, generation).then(value => {drained = true; return value;});
   await Promise.resolve(); assert.equal(drained, false);
-  assert.throws(() => admission.stopDrained(fenceId, generation), /named_session_not_drained/);
+  await assert.rejects(admission.stopDrained(fenceId, generation), /named_session_not_drained/);
   settlement.resolve(); assert.equal(await work, 'completed'); await quiesce;
-  admission.stopDrained(fenceId, generation);
+  await admission.stopDrained(fenceId, generation);
+});
+
+test('failed durable stop leaves the drained owner recoverable instead of permanently stopped', async () => {
+  const admission = new NamedSessionAdmission(), fenceId = randomUUID(), generation = admission.snapshot().generation;
+  await admission.quiesce(fenceId, generation);
+  let writes = 0;
+  await assert.rejects(admission.stopDrained(fenceId, generation, async () => {
+    writes++; throw Error('durable-disable-failed');
+  }), /durable-disable-failed/);
+  assert.equal(writes, 1); assert.equal(admission.snapshot().state, 'quiesced');
+  await assert.rejects(admission.enqueue(async () => {}), /named_session_quiesced/);
+  await admission.resume(fenceId, generation, async () => {writes++;});
+  await admission.enqueue(async () => {writes++;});
+  assert.equal(writes, 3);
+});
+
+test('durable maintenance transitions reject concurrent resume or stop until readback completes', async () => {
+  const admission = new NamedSessionAdmission(), fenceId = randomUUID(), generation = admission.snapshot().generation;
+  await admission.quiesce(fenceId, generation);
+  const persist = deferred(), started = deferred();
+  const stop = admission.stopDrained(fenceId, generation, async () => {started.resolve(); await persist.promise;});
+  await started.promise;
+  await assert.rejects(admission.resume(fenceId, generation), /named_session_maintenance_busy/);
+  await assert.rejects(admission.stopDrained(fenceId, generation), /named_session_maintenance_busy/);
+  await assert.rejects(admission.enqueue(async () => {}), /named_session_quiesced/);
+  persist.resolve(); await stop;
+  await assert.rejects(admission.enqueue(async () => {}), /named_session_stopped/);
 });

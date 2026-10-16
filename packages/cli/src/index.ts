@@ -5192,7 +5192,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
   if (['quiesce', 'resume'].includes(action) || action === 'stop' && flags.has('drained')) {
     const allowed = ['name', 'workspace-id', 'fence-id', 'apply', 'dry-run', ...(action === 'stop' ? ['drained'] : [])];
-    if (hostScope || supervisorOwner || setupSessionScope || !existing?.enabled
+    if (hostScope || supervisorOwner || setupSessionScope || !existing
       || [...flags.keys()].some(key => !allowed.includes(key))
       || ['apply', 'dry-run', 'drained'].some(key => flags.has(key) && flags.get(key) !== true)
       || flags.has('apply') && flags.has('dry-run')) throw new Error('named_session_maintenance_unavailable');
@@ -5240,7 +5240,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path }),
     await repositorySharedReady(item)));
   if (action === 'start') {
-    if (existing && !existing.enabled) await step(() => saveNamedSession(dharmaHome(), { ...existing, enabled: true }));
+    if (existing && !existing.enabled) {
+      if (supervisorOwner) throw new Error('named_session_disabled');
+      const live = await step(() => namedSessionRequest(dharmaHome(), name, {action:'status'})).catch(() => null);
+      if (live?.admission && (live.admission as Record<string, unknown>).state !== 'open') {
+        throw new Error('named_session_quiesced');
+      }
+      await step(() => saveNamedSession(dharmaHome(), { ...existing, enabled: true }));
+    }
     try { return await step(() => namedSessionRequest(dharmaHome(), name, { action: 'status' })); } catch { /* Start an owned worker below. */ }
     const args = [fileURLToPath(import.meta.url), 'sessions', 'serve', '--name', name,
       '--workspace-id', workspaceId, '--apply'];

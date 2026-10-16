@@ -9,11 +9,12 @@ export class NamedSessionAdmission {
   #fenceId: string | null = null;
   #drained = false;
   #stopped = false;
+  #transition: 'quiescing' | 'resuming' | 'stopping' | null = null;
   #pending = 0;
   #serial: Promise<void> = Promise.resolve();
 
   snapshot() {
-    const state = this.#fenceId ? this.#drained ? 'quiesced' as const : 'draining' as const : 'open' as const;
+    const state = this.#transition ?? (this.#fenceId ? this.#drained ? 'quiesced' as const : 'draining' as const : 'open' as const);
     return {generation:this.#generation, fenceId:this.#fenceId, state, pending:this.#pending};
   }
 
@@ -39,9 +40,10 @@ export class NamedSessionAdmission {
     if (!uuid.test(fenceId)) throw new Error('named_session_fence_invalid');
     if (generation !== this.#generation) throw new Error('named_session_generation_changed');
     if (this.#stopped) throw new Error('named_session_stopped');
+    if (this.#transition) throw new Error('named_session_maintenance_busy');
   }
 
-  async quiesce(fenceId: string, generation: string) {
+  async quiesce(fenceId: string, generation: string, persist: () => Promise<void> = async () => {}) {
     this.#check(fenceId, generation);
     if (this.#fenceId && this.#fenceId !== fenceId) throw new Error('named_session_fence_conflict');
     this.#fenceId = fenceId;
@@ -50,7 +52,11 @@ export class NamedSessionAdmission {
     if (this.#fenceId !== fenceId) throw new Error('named_session_fence_conflict');
     if (this.#pending !== 0) throw new Error('named_session_not_drained');
     this.#drained = true;
-    return {generation:this.#generation, fenceId, state:'quiesced' as const, pending:0};
+    this.#transition = 'quiescing';
+    try {
+      await persist();
+      return {generation:this.#generation, fenceId, state:'quiesced' as const, pending:0};
+    } finally { this.#transition = null; }
   }
 
   #checkDrained(fenceId: string, generation: string) {
@@ -59,15 +65,23 @@ export class NamedSessionAdmission {
     if (!this.#drained || this.#pending !== 0) throw new Error('named_session_not_drained');
   }
 
-  resume(fenceId: string, generation: string) {
+  async resume(fenceId: string, generation: string, persist: () => Promise<void> = async () => {}) {
     this.#checkDrained(fenceId, generation);
-    this.#fenceId = null;
-    this.#drained = false;
+    this.#transition = 'resuming';
+    try {
+      await persist();
+      this.#fenceId = null;
+      this.#drained = false;
+    } finally { this.#transition = null; }
   }
 
-  stopDrained(fenceId: string, generation: string) {
+  async stopDrained(fenceId: string, generation: string, verifyDurablePause: () => Promise<void> = async () => {}) {
     this.#checkDrained(fenceId, generation);
-    this.#stopped = true;
+    this.#transition = 'stopping';
+    try {
+      await verifyDurablePause();
+      this.#stopped = true;
+    } finally { this.#transition = null; }
   }
 
   stop() {

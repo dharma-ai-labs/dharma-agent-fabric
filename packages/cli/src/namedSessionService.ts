@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:f
 import { createConnection, createServer, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
-import { validateContract, type SessionQuestion, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, validateContract, type SessionQuestion, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { openCodexInboxSession } from './codexInboxSession.js';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { assertCodexWorkPrompt, codexWorkCaptureSchemaId } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
@@ -159,6 +159,14 @@ export async function runNamedSessionService(input: {
       return operation();
     }, health);
   }
+  async function maintenanceRegistration(enabled: boolean, write: boolean) {
+    try {
+      const expected = {...registration, enabled};
+      if (write) await saveNamedSession(input.home, expected);
+      const observed = await readNamedSession(input.home, registration.name);
+      if (!observed || canonicalize(observed) !== canonicalize(expected)) throw new Error('unconfirmed');
+    } catch { throw new Error('named_session_maintenance_persistence_unconfirmed'); }
+  }
   try {
     owner = await openCodexInboxSession({ ...input, ...registration,
       authorizeLocalTools: input.authorizeLocalWork,
@@ -200,23 +208,26 @@ export async function runNamedSessionService(input: {
               || !await owner!.assertActive()) throw new Error('named_session_maintenance_unavailable');
             let state: 'quiesced' | 'open' | 'stop_requested';
             if (request.action === 'quiesce') {
-              await admission.quiesce(request.fenceId, request.generation);
+              await admission.quiesce(request.fenceId, request.generation,
+                () => maintenanceRegistration(false, true));
               if (!await owner!.assertActive()) throw new Error('named_session_maintenance_unavailable');
               state = 'quiesced';
             } else if (request.action === 'resume') {
-              admission.resume(request.fenceId, request.generation);
+              await admission.resume(request.fenceId, request.generation,
+                () => maintenanceRegistration(true, true));
               state = 'open';
             } else {
-              admission.stopDrained(request.fenceId, request.generation);
-              // Prevent the supervisor from replacing the drained owner before the upgrade.
-              await saveNamedSession(input.home, {...registration, enabled:false});
+              // Quiescence already disabled automatic restart; verify it before irreversible shutdown.
+              await admission.stopDrained(request.fenceId, request.generation,
+                () => maintenanceRegistration(false, false));
               closing = true;
               state = 'stop_requested';
             }
             const result = {ok:true, schema:'dharma.named-session-maintenance/v1', receiptId:randomUUID(),
               name:registration.name, bindingId:binding.bindingId, sessionId:binding.sessionId,
               ...registration.identity, action:request.action, fenceId:request.fenceId,
-              generation:request.generation, state, pending:0, observedAt:new Date().toISOString()};
+              generation:request.generation, state, pending:0, automaticRestartEnabled:state === 'open',
+              observedAt:new Date().toISOString()};
             await health();
             return result;
           }

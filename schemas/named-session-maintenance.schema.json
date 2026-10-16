@@ -4,7 +4,7 @@
   "title": "Local named-session maintenance receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["ok", "schema", "receiptId", "name", "bindingId", "sessionId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "action", "fenceId", "generation", "state", "pending", "observedAt"],
+  "required": ["ok", "schema", "receiptId", "name", "bindingId", "sessionId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "action", "fenceId", "generation", "state", "pending", "automaticRestartEnabled", "observedAt"],
   "properties": {
     "ok": {"const": true},
     "schema": {"const": "dharma.named-session-maintenance/v1"},
@@ -24,11 +24,12 @@
     "generation": {"type": "string", "format": "uuid"},
     "state": {"enum": ["quiesced", "open", "stop_requested"]},
     "pending": {"const": 0},
+    "automaticRestartEnabled": {"type": "boolean"},
     "observedAt": {"type": "string", "format": "date-time"}
   },
   "allOf": [
-    {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"state": {"const": "quiesced"}}}},
-    {"if": {"properties": {"action": {"const": "resume"}}}, "then": {"properties": {"state": {"const": "open"}}}},
-    {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"state": {"const": "stop_requested"}}}}
+    {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"state": {"const": "quiesced"}, "automaticRestartEnabled": {"const": false}}}},
+    {"if": {"properties": {"action": {"const": "resume"}}}, "then": {"properties": {"state": {"const": "open"}, "automaticRestartEnabled": {"const": true}}}},
+    {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"state": {"const": "stop_requested"}, "automaticRestartEnabled": {"const": false}}}}
   ]
 }

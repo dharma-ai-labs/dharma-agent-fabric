@@ -39,7 +39,11 @@ polls while already admitted operations and their evidence finish. A successful
 receipt binds zero pending work to the exact session and process generation.
 Only the matching fence can resume or stop that drained owner. Fences do not
 expire automatically; a service restart invalidates an old generation's receipt.
-Drained stop disables automatic session registration before acknowledging exit.
+Quiescence durably disables automatic session registration and verifies readback
+before acknowledging its fence. Drained stop verifies that pause before shutdown.
+Failed persistence leaves a recoverable quiesced service; matching resume verifies
+the enabled registration before reopening admission. Automatic supervisors cannot
+reenable a disabled registration, including after a crash or a stale startup poll.
 An unsupported service is rejected before a control request. Legacy `stop`
 can interrupt work and is not proof of a drained boundary. These commands neither
 change enrollment nor authorize an upgrade or additional provider work.

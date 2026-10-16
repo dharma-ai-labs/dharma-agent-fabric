@@ -14,7 +14,7 @@ function fixture() {
     ...registration.identity, sessionId, admission:{generation, fenceId:null, pending:0, state:'open'}};
   const receipt: Record<string, unknown> = {ok:true, schema:'dharma.named-session-maintenance/v1', receiptId:randomUUID(),
     ...registration.identity, name:registration.name, bindingId:registration.bindingId, sessionId,
-    action:'quiesce', fenceId, generation, state:'quiesced', pending:0, observedAt:new Date().toISOString()};
+    action:'quiesce', fenceId, generation, state:'quiesced', pending:0, automaticRestartEnabled:false, observedAt:new Date().toISOString()};
   return {registration, fenceId, generation, status, receipt};
 }
 
@@ -22,6 +22,7 @@ for (const action of ['quiesce', 'resume', 'stop-drained'] as const) test(`maint
   const value = fixture(), requests: Record<string, unknown>[] = [];
   value.receipt.action = action;
   value.receipt.state = action === 'quiesce' ? 'quiesced' : action === 'resume' ? 'open' : 'stop_requested';
+  value.receipt.automaticRestartEnabled = action === 'resume';
   const result = await maintainNamedSession({...value, action, request:async body => {
     requests.push(body); return requests.length === 1 ? value.status : value.receipt;
   }});
@@ -53,7 +54,7 @@ test('invalid, stale, foreign or secret-bearing receipts never establish a drain
   for (const change of [
     {generation:randomUUID()}, {fenceId:randomUUID()}, {pending:1}, {state:'open'}, {action:'resume'},
     {deviceId:randomUUID()}, {sessionId:randomUUID()}, {membershipId:randomUUID()},
-    {grant:'dhab_PRIVATE_TEST_GRANT'}, {observedAt:'invalid'}, {ok:false},
+    {grant:'dhab_PRIVATE_TEST_GRANT'}, {observedAt:'invalid'}, {ok:false}, {automaticRestartEnabled:true},
   ]) {
     const value = fixture();let requests = 0;
     await assert.rejects(maintainNamedSession({...value, action:'quiesce', request:async () =>
