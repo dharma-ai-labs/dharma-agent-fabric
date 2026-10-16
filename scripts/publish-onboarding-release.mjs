@@ -6,16 +6,16 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '3d48b1a3d867ff0080276a115433eb87726877f0';
-const tree = '0f38f2a2e2ee96aeee8ba9bc1f33d56fe1baec75';
+const source = '53c7e023c9b9337de7ba4e8600f31224a441416e';
+const tree = '493c353de854d0854eccb264f9cb8fe6862a4784';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
     existingArtifact: Object.freeze({source: '6c7d48916de11ccc837933a7ef7e8d2600184b54',
       integrity: 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ=='}) },
-  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.35' },
-  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.37' },
-  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.34' },
+  { workspace: 'packages/provider-adapters', name: '@dharma-ai-labs/agent-fabric-provider-adapters', version: '0.1.36' },
+  { workspace: 'packages/task-runner', name: '@dharma-ai-labs/agent-fabric-task-runner', version: '0.1.38' },
+  { workspace: 'packages/evidence-reduction', name: '@dharma-ai-labs/agent-fabric-evidence-reduction', version: '0.2.35' },
   { workspace: 'packages/secure-store', name: '@dharma-ai-labs/agent-fabric-secure-store', version: '0.1.10',
     existingArtifact: Object.freeze({source: '1b8483f59dc1ba9f7aa0aef78ca984f309714e61',
       integrity: 'sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw=='}) },
@@ -25,7 +25,7 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
     existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
       integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.204' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.205' },
 ].map(Object.freeze));
 
 function assertArtifact(item, packed, metadata) {
@@ -82,14 +82,14 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.204';
-  for (const [name, version] of [['provider-adapters', '0.1.35'], ['task-runner', '0.1.37'], ['evidence-reduction', '0.2.34']]) {
+  cliManifest.version = '0.2.205';
+  for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
   assert.deepEqual(snapshot.cliManifest, cliManifest, 'unreviewed CLI manifest delta');
   const runtimePins = [['packages/secure-store', '0.1.10'], ['packages/relay-client', '0.2.33'],
-    ['packages/local-vault', '0.1.31'], ['packages/provider-adapters', '0.1.35'],
-    ['packages/task-runner', '0.1.37'], ['packages/evidence-reduction', '0.2.34'],
+    ['packages/local-vault', '0.1.31'], ['packages/provider-adapters', '0.1.36'],
+    ['packages/task-runner', '0.1.38'], ['packages/evidence-reduction', '0.2.35'],
     ['packages/lifecycle-adapter', '0.1.0']];
   const runtimePaths = runtimePins.map(([path]) => path).sort();
   assert.deepEqual(Object.keys(snapshot.runtimeManifests).sort(), runtimePaths, 'unreviewed runtime manifest set');
@@ -98,29 +98,29 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     const expected = structuredClone(snapshot.baselineRuntimeManifests[path]);
     expected.version = version;
     if (['packages/task-runner', 'packages/evidence-reduction'].includes(path)) {
-      expected.dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.35';
+      expected.dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.36';
     }
     if (path === 'packages/lifecycle-adapter') {
-      expected.dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.34';
+      expected.dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
     }
     assert.deepEqual(snapshot.runtimeManifests[path], expected,
       `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.204';
-  for (const [name, version] of [['provider-adapters', '0.1.35'], ['task-runner', '0.1.37'], ['evidence-reduction', '0.2.34']]) {
+  lock.packages['packages/cli'].version = '0.2.205';
+  for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
   for (const name of ['task-runner', 'evidence-reduction']) {
-    lock.packages[`packages/${name}`].dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.35';
+    lock.packages[`packages/${name}`].dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.36';
   }
-  lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.34';
+  lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.203';";
+  const previousVersion = "const VERSION = '0.2.204';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(snapshot.cliSource,
-    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.204';"), 'unreviewed CLI source delta');
+    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.205';"), 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
