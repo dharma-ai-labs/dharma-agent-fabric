@@ -403,8 +403,11 @@ test('scoped Windows absence observation stops on withdrawal without removing fo
   const scope = scopedFixture(f.root, async () => allowed);
   try {
     await fs.mkdir(f.recovery); await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
-    let denied = false, probes = 0;
+    let denied = false, probes = 0, clock = 0;
     const lock = await acquire({currentBootstrapHostScope: () => scope,
+      // Exercise withdrawal before the deadline independently of Windows filesystem latency.
+      Date: {now: () => clock},
+      setTimeout: (done: () => void, milliseconds: number) => setImmediate(() => {clock += milliseconds; done();}),
       process: {platform: 'win32', pid: process.pid, kill: process.kill.bind(process)},
       rename: windowsRename(f.recovery),
       readFile: async (path: string, encoding: 'utf8') => {
@@ -417,6 +420,7 @@ test('scoped Windows absence observation stops on withdrawal without removing fo
       }});
     await assert.rejects(lock(f.lock, 500, 'private-timeout-canary'), {message:'codex_setup_host_scope_unavailable'});
     assert.equal(probes, 2);
+    assert.equal(clock, 25);
     assert.equal(await fs.readFile(f.lock, 'utf8'), `${process.pid}\n`);
     assert.equal(await fs.readFile(resolve(f.recovery, 'owner'), 'utf8'), `${process.pid}\n`);
     assert.deepEqual((await fs.readdir(f.root)).sort(), ['startup.lock','startup.lock.recovery']);

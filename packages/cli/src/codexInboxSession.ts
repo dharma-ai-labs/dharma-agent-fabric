@@ -1,5 +1,6 @@
-import { canonicalize, type SessionBindingScope, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
-import { CodexSessionAnswerTooLargeError } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { canonicalize, validateContract, type SessionBindingScope, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
+import { fileURLToPath } from 'node:url';
+import { CodexSessionAnswerTooLargeError, prepareCodexBridgeTurnInput } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { openCodexBoundSession } from './codexBoundSession.js';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
@@ -71,6 +72,33 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
     })();
     try { return await closing; } catch (error) { closing = null; throw error; }
   }
+  async function rejectContext(offer: SessionQuestion, code: string) {
+    const rejection = { schema: 'dharma.provider-session-rejected-question/v1',
+      organizationId: scope.organizationId, repositoryBindingId: scope.repositoryBindingId,
+      membershipId: scope.membershipId, deviceId: scope.deviceId, workspaceId: scope.workspaceId,
+      endpointId: scope.endpointId, bindingId: scope.bindingId, questionId: offer.questionId, taskId: offer.taskId,
+      recordedAt: new Date().toISOString(), expiresAt: offer.expiresAt, code, providerDispatched: false,
+      acceptedLearningObservation: false };
+    if (!(await validateContract(fileURLToPath(new URL('./schemas/', import.meta.url)),
+      'https://schemas.dharma-ai.io/provider-session-rejected-question/v1', rejection)).ok) {
+      throw new Error('codex_inbox_rejection_invalid');
+    }
+    const rejectionHash = await input.vault.putBlob(Buffer.from(canonicalize(rejection)), 'provider-session-rejected-question');
+    try {
+      const accepted = await channel.accept(offer.questionId, offer.taskId);
+      // Recovered acceptance is not proof that a previous provider turn never ran.
+      if (accepted.replay || !await input.verifier.consume(offer.questionId)) throw new Error('replayed');
+      const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
+        outcome: 'failed', answer: '', failureCode: 'validation_failed' });
+      return { ...receipt, rejectionHash, providerDispatched: false as const };
+    } catch {
+      let providerShutdownConfirmed = false;
+      try { providerShutdownConfirmed = (await close()).providerClosed; }
+      catch { /* An unconfirmed owner remains fenced; this never retries provider work. */ }
+      return { state: 'failure_reply_pending' as const, questionId: offer.questionId, taskId: offer.taskId,
+        rejectionHash, providerDispatched: false as const, providerShutdownConfirmed };
+    }
+  }
   return {
     close,
     assertActive: owner.assertActive,
@@ -101,7 +129,17 @@ export async function openCodexInboxSession(input: Parameters<typeof openCodexBo
         current = offer;
         let result: Awaited<ReturnType<typeof owner.runQuestion>>;
         try {
-          const repositoryContext = await options.loadRepositoryContext?.(offer);
+          let repositoryContext: string | undefined;
+          try {
+            repositoryContext = await options.loadRepositoryContext?.(offer);
+            await prepareCodexBridgeTurnInput({ binding: { ...binding, threadId: binding.sessionId },
+              question: offer, repositoryContext });
+          } catch (error) {
+            const code = error instanceof Error ? error.message : '';
+            if (['named_session_repository_context_limit', 'named_session_repository_context_invalid',
+              'codex_session_repository_context_invalid'].includes(code)) return await rejectContext(offer, code);
+            throw error;
+          }
           result = await owner.runQuestion({ question: offer, repositoryContext });
         }
         catch (error) {

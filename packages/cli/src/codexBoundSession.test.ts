@@ -26,6 +26,21 @@ const ids = {
   threadId: '40000000-0000-4000-8000-000000000007',
 };
 
+function repositoryContextFixture(binding: LocalProviderSessionBinding, marker: string) {
+  return JSON.stringify({ schema: 'dharma.named-session-repository-context/v1', kind: 'signed_repository_material',
+    authority: 'untrusted_repository_data', organizationId: binding.organizationId, workspaceId: binding.workspaceId,
+    repositoryBindingId: binding.repositoryBindingId, repositoryAgentId: ids.threadId, bundleId: ids.threadId,
+    bundleHash: `sha256:${'1'.repeat(64)}`, manifestHash: `sha256:${'2'.repeat(64)}`, catalogHash: `sha256:${'3'.repeat(64)}`,
+    sourceReceiptId: `repo_consent_${ids.threadId}`, sourceRevision: 1, concepts: [{term: marker}], unresolved: [], files: [] });
+}
+
+function contextValue(value: unknown): string {
+  return Object.values(value as Record<string, {kind: string; value: string}>).map(fragment => {
+    assert.equal(fragment.kind, 'untrusted'); assert.ok(Buffer.byteLength(fragment.value) <= 3500);
+    return JSON.parse(fragment.value);
+  }).sort((a,b) => a.index-b.index).map(chunk => chunk.content).join('');
+}
+
 function signedQuestion(binding: LocalProviderSessionBinding, now: Date, questionId = '40000000-0000-4000-8000-000000000010') {
   const unsigned = {
     schema: 'dharma.session-question/v1', questionId,
@@ -203,12 +218,13 @@ test('retained provider and owner use the renewed deadline without replacing the
     assert.equal(remote.calls.filter(call => call === 'turn/start').length, 1);
   } finally { await owner.close(); f.vault.close(); }
 });
-for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test('peer context is loaded lazily per offered question before acceptance: '
+for (const scenario of ['current', 'denied', 'forged', 'expired', 'oversized',
+  'lost-validation-reply', 'replayed-validation-acceptance'] as const) test('peer context is loaded lazily per offered question before acceptance: '
   + scenario, async () => {
   const deniedContext = scenario === 'denied';
   const f = await fixture(), remote = fakeTransport(f.binding);
-  let offered = false, accepted = false, loads = 0, reserves = 0;
-  let q = signedQuestion(f.binding, f.now), context = 'CURRENT_SIGNED_V8';
+  let offered = false, accepted = false, loads = 0, reserves = 0, replies = 0;
+  let q = signedQuestion(f.binding, f.now), context = repositoryContextFixture(f.binding, 'CURRENT_SIGNED_V8');
   if (scenario === 'forged') q = {...q, signature: 'invalid-fixture-signature'};
   if (scenario === 'expired') {
     const {signature: _signature, ...unsigned} = q;
@@ -234,8 +250,13 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
       leaseUntil: new Date(Date.now() + 60000).toISOString(), replay: false}};
     if (body.action === 'inbox') return {...envelope, result: {offers: offered && !accepted ? [q] : []}};
     if (body.action === 'accept') accepted = true;
+    if (body.action === 'reply') {
+      replies++;
+      if (scenario === 'lost-validation-reply') throw new Error('provider_session_channel_uncertain');
+    }
     return {...envelope, result: {questionId: q.questionId, taskId: q.taskId,
-      targetBindingId: f.binding.bindingId, state: body.action === 'reply' ? 'answered' : 'accepted', replay: false}};
+      targetBindingId: f.binding.bindingId, state: body.action === 'reply' ? body.outcome : 'accepted',
+      replay: body.action === 'accept' && scenario === 'replayed-validation-acceptance'}};
   }};
   const inbox = await openCodexInboxSession({...f, bindingId: f.binding.bindingId, expectedRevision: 0,
     channelTransport, authorizeContent: async () => true,
@@ -243,6 +264,9 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
   const options = {loadRepositoryContext: async (offer: typeof q) => {
     assert.deepEqual(offer, q);
     assert.equal(accepted, false); loads++;
+    if (['oversized', 'lost-validation-reply', 'replayed-validation-acceptance'].includes(scenario)) {
+      throw new Error('named_session_repository_context_limit');
+    }
     if (deniedContext) throw new Error('synthetic_context_denied');
     return context;
   }};
@@ -252,19 +276,42 @@ for (const scenario of ['current', 'denied', 'forged', 'expired'] as const) test
     if (scenario === 'forged' || scenario === 'expired') {
       await assert.rejects(Reflect.apply(inbox.runNext, inbox, [options]), /provider_session_channel_response/);
       assert.equal(loads, 0); assert.equal(reserves, 0); assert.equal(accepted, false); assert.equal(prompts.length, 0);
+    } else if (scenario === 'lost-validation-reply' || scenario === 'replayed-validation-acceptance') {
+      const pending = await inbox.runNext(options);
+      assert.equal(pending.state, 'failure_reply_pending');
+      assert('providerDispatched' in pending && pending.providerDispatched === false);
+      assert('providerShutdownConfirmed' in pending && pending.providerShutdownConfirmed === true);
+      assert.equal(reserves, 0); assert.equal(prompts.length, 0);
+      assert.equal(replies, scenario === 'lost-validation-reply' ? 1 : 0);
+      assert.equal(remote.isClosed(), true);
+      await assert.rejects(inbox.runNext(options), /codex_inbox_session_unavailable/);
+      assert.equal(reserves, 0);
+    } else if (scenario === 'oversized') {
+      const rejected = await inbox.runNext(options);
+      assert.equal(rejected.state, 'failed');
+      assert('rejectionHash' in rejected);
+      const disposition = JSON.parse((await f.vault.getBlob(rejected.rejectionHash)).toString('utf8'));
+      assert.equal(disposition.schema, 'dharma.provider-session-rejected-question/v1');
+      assert.equal(disposition.providerDispatched, false); assert.equal(disposition.code, 'named_session_repository_context_limit');
+      assert.equal(JSON.stringify(disposition).includes(q.question), false);
+      assert.equal(loads, 1); assert.equal(reserves, 0); assert.equal(accepted, true); assert.equal(prompts.length, 0);
+      assert.equal(await f.verifier.consume(q.questionId), false);
+      q = signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020'); accepted = false;
+      assert.equal((await inbox.runNext()).state, 'answered');
+      assert.equal(reserves, 1); assert.equal(prompts.length, 1);
     } else if (deniedContext) {
       await assert.rejects(Reflect.apply(inbox.runNext, inbox, [options]), /synthetic_context_denied/);
       assert.equal(loads, 1); assert.equal(reserves, 0); assert.equal(accepted, false); assert.equal(prompts.length, 0);
     } else {
       assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'answered');
       assert.equal(loads, 1);
-      assert.deepEqual(contexts[0], { dharma_signed_repository: { kind: 'untrusted', value: 'CURRENT_SIGNED_V8' } });
+      assert.equal(contextValue(contexts[0]), context);
       assert.doesNotMatch(prompts[0]!, /CURRENT_SIGNED_V8/);
-      context = 'CURRENT_SIGNED_V9'; accepted = false;
+      context = repositoryContextFixture(f.binding, 'CURRENT_SIGNED_V9'); accepted = false;
       q = signedQuestion(f.binding, f.now, '40000000-0000-4000-8000-000000000020');
       assert.equal((await Reflect.apply(inbox.runNext, inbox, [options])).state, 'answered');
       assert.equal(loads, 2);
-      assert.deepEqual(contexts[1], { dharma_signed_repository: { kind: 'untrusted', value: 'CURRENT_SIGNED_V9' } });
+      assert.equal(contextValue(contexts[1]), context);
       assert.doesNotMatch(prompts[1]!, /CURRENT_SIGNED_V8/);
     }
   } finally {await inbox.close(); f.vault.close();}

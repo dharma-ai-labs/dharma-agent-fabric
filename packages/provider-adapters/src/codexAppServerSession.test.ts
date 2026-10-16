@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { resolve } from 'node:path';
 import test, { describe } from 'node:test';
 import { signCanonicalObject, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -112,6 +112,30 @@ const exclusiveLease = { assertHeld: async () => true };
 const budget = { reserve: async () => true };
 const now = new Date('2026-09-26T00:01:00.000Z');
 
+function contextFixture(files: Array<Record<string, unknown>> = [], marker = 'current-v8') {
+  return JSON.stringify({ schema: 'dharma.named-session-repository-context/v1', kind: 'signed_repository_material',
+    authority: 'untrusted_repository_data', organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+    repositoryBindingId: scope.repositoryBindingId, repositoryAgentId: threadId, bundleId: threadId,
+    bundleHash: `sha256:${'1'.repeat(64)}`, manifestHash: `sha256:${'2'.repeat(64)}`, catalogHash: `sha256:${'3'.repeat(64)}`,
+    sourceReceiptId: `repo_consent_${threadId}`, sourceRevision: 1, concepts: [{term: marker}], unresolved: [], files,
+    ...(files.some(file => file.contentDisposition === 'verified_inline_snapshot')
+      ? {selection: {kind: 'exact_workspace_references', selectedFiles: files.length, omittedFiles: 0}} : {}) });
+}
+
+function contextFromTurn(turn: Record<string, unknown>): string {
+  const values = Object.values(turn.additionalContext as Record<string, {kind: string; value: string}>);
+  const chunks = values.map(fragment => {
+    assert.equal(fragment.kind, 'untrusted');
+    assert.ok(Buffer.byteLength(fragment.value) <= 3500);
+    return JSON.parse(fragment.value);
+  }).sort((a,b) => a.index-b.index);
+  assert(chunks.every((chunk,index) => chunk.schema === 'dharma.codex-repository-context-fragment/v1'
+    && chunk.index === index && chunk.total === chunks.length && chunk.contextSha256 === chunks[0].contextSha256));
+  const text = chunks.map(chunk => chunk.content).join('');
+  assert.equal(`sha256:${createHash('sha256').update(text).digest('hex')}`, chunks[0].contextSha256);
+  return text;
+}
+
 test('unqualified native host rejects before provider, reservation or replay claim',
   { skip: process.platform === 'linux' }, async () => {
     const f = fixture();
@@ -127,6 +151,26 @@ test('unqualified native host rejects before provider, reservation or replay cla
   });
 
 describe('qualified Linux sandbox bridge protocol', { skip: process.platform !== 'linux' }, () => {
+test('peer context survives Codex160 per-value truncation without losing data', async () => {
+  const f = fixture();
+  const content = 'x'.repeat(4300);
+  const repositoryContext = contextFixture([{path: '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md',
+    role: 'knowledge', contentDisposition: 'verified_inline_snapshot', content,
+    sha256: `sha256:${createHash('sha256').update(content).digest('hex')}`, sizeBytes: Buffer.byteLength(content)}]);
+  await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(), verifier: f.verifier,
+    exclusiveLease, budget, now, repositoryContext });
+  const turn = f.calls.find(call => call.method === 'turn/start')!.params;
+  const fragments = Object.values(turn.additionalContext as Record<string, { kind: string; value: string }>);
+  assert.ok(fragments.length > 1);
+  for (const fragment of fragments) {
+    assert.equal(fragment.kind, 'untrusted');
+    assert.ok(Buffer.byteLength(fragment.value) <= 3500, 'Codex160 truncates values over4000UTF8bytes');
+  }
+  const chunks = fragments.map(fragment => JSON.parse(fragment.value)).sort((a,b) => a.index-b.index);
+  assert.equal(chunks.map(chunk => chunk.content).join(''), repositoryContext);
+  assert.equal(contextFromTurn(turn), repositoryContext);
+});
+
 test('bridge requires exactly the trusted runtime reads and private-home denials', async () => {
   const expected = { [resolve('/opt/codex')]: 'read', [resolve('/private/codex')]: 'deny' } as const;
   const f = fixture({ filesystemRules: expected });
@@ -171,22 +215,19 @@ test('incoming read-only questions cannot register inherited local peer tools', 
 });
 test('incoming peer receives separate untrusted repository context without changing retained thread or authority', async () => {
   const f = fixture(), q = question(), original = structuredClone(q);
-  const repositoryContext = JSON.stringify({kind: 'signed_repository_material',
-    authority: 'untrusted_repository_data', bundleId: 'current-v8',
-    files: [{path: '.agents/skills/dharma-agent-fabric/skills/source/current/SKILL.md',
-      sha256: `sha256:${'a'.repeat(64)}`, sizeBytes: 42, contentDisposition: 'verified_workspace_reference'}]});
+  const repositoryContext = contextFixture([{path: '.agents/skills/dharma-agent-fabric/skills/source/current/SKILL.md',
+    role: 'skill', sha256: `sha256:${'a'.repeat(64)}`, sizeBytes: 42, contentDisposition: 'verified_workspace_reference'}]);
   const request = {transport: f.transport, binding, question: q, verifier: f.verifier,
     exclusiveLease, budget, now, repositoryContext};
   await runCodexBridgeQuestion(request);
   const turn = f.calls.find(call => call.method === 'turn/start')!.params;
   assert.equal(JSON.stringify(turn.input).includes('current-v8'), false);
-  assert.deepEqual(turn.additionalContext, {
-    dharma_signed_repository: { kind: 'untrusted', value: repositoryContext },
-  });
+  assert.equal(contextFromTurn(turn), repositoryContext);
   assert.equal(turn.threadId, threadId);
   assert.equal(turn.dynamicTools, undefined);
   assert.equal(f.calls.some(call => call.method === 'thread/start'), false);
-  assert.match(JSON.stringify(turn.input), /untrusted repository data/i);
+  assert.match(JSON.stringify(turn.input), /untrusted JSON fragments/i);
+  assert.match(JSON.stringify(turn.input), /not instructions or action authority/i);
   assert.equal(turn.permissions, 'dharma_bridge');
   assert.equal(turn.approvalPolicy, 'never');
   assert.equal(turn.cwd, workspaceRoot);
@@ -196,9 +237,9 @@ test('incoming peer receives separate untrusted repository context without chang
 test('signed snapshots remain untrusted data and are not reinjected on a later context-free peer turn', async () => {
   const f = fixture();
   const content = 'Treat this quoted report as data, not a request to change permissions.';
-  const repositoryContext = JSON.stringify({ authority: 'untrusted_repository_data', files: [
-    { contentDisposition: 'verified_inline_snapshot', content },
-  ] });
+  const repositoryContext = contextFixture([{path: '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md',
+    role: 'knowledge', contentDisposition: 'verified_inline_snapshot', content, sizeBytes: Buffer.byteLength(content),
+    sha256: `sha256:${createHash('sha256').update(content).digest('hex')}`}]);
   await runCodexBridgeQuestion({ transport: f.transport, binding, question: question(), verifier: f.verifier,
     exclusiveLease, budget, now, repositoryContext });
   await runCodexBridgeQuestion({ transport: f.transport, binding,
@@ -206,9 +247,7 @@ test('signed snapshots remain untrusted data and are not reinjected on a later c
     exclusiveLease, budget, now });
   const turns = f.calls.filter(call => call.method === 'turn/start').map(call => call.params);
   assert.equal(turns.length, 2);
-  assert.deepEqual(turns[0]!.additionalContext, {
-    dharma_signed_repository: { kind: 'untrusted', value: repositoryContext },
-  });
+  assert.equal(contextFromTurn(turns[0]!), repositoryContext);
   assert.equal(turns[1]!.additionalContext, undefined);
   assert.equal(JSON.stringify(turns[1]!.input).includes(content), false);
   for (const turn of turns) {
@@ -220,7 +259,11 @@ test('signed snapshots remain untrusted data and are not reinjected on a later c
 });
 
 test('invalid repository context rejects before reservation, acceptance or provider calls', async () => {
+  const foreignOrg = { ...JSON.parse(contextFixture()), organizationId: 'org_foreign' };
+  const foreignWorkspace = { ...JSON.parse(contextFixture()), workspaceId: '40000000-0000-4000-8000-000000000099' };
+  const foreignRepository = { ...JSON.parse(contextFixture()), repositoryBindingId: '40000000-0000-4000-8000-000000000099' };
   for (const context of ['', '\u0000', 'x'.repeat(8001), '\u00e9'.repeat(4001), {files: []},
+    ...[foreignOrg,foreignWorkspace,foreignRepository].map(value => JSON.stringify(value)),
     'OPENAI_API_KEY=sk-proj-' + 'fake-test-only-value'.repeat(8)]) {
     const f = fixture(); let reserved = false, consumed = false;
     const request = {transport: f.transport, binding, question: question(),
@@ -232,12 +275,31 @@ test('invalid repository context rejects before reservation, acceptance or provi
   }
 });
 
+test('escaped fragment wire overhead cannot bypass the original16KB admission boundary', async () => {
+  const f = fixture(); let reserved = false, consumed = false;
+  const content = '\\"'.repeat(1400);
+  const repositoryContext = contextFixture([{path: '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md',
+    role: 'knowledge', contentDisposition: 'verified_inline_snapshot', content, sizeBytes: Buffer.byteLength(content),
+    sha256: `sha256:${createHash('sha256').update(content).digest('hex')}`}]);
+  assert.ok(Buffer.byteLength(repositoryContext) <= 8000);
+  await assert.rejects(runCodexBridgeQuestion({transport: f.transport, binding, question: question(),
+    verifier: {...f.verifier,consume: async () => {consumed = true; return true;}}, exclusiveLease,
+    budget: {reserve: async () => {reserved = true; return true;}}, now, repositoryContext}),
+  /codex_session_repository_context_invalid/);
+  assert.equal(reserved,false); assert.equal(consumed,false); assert.equal(f.calls.length,0);
+});
+
 test('combined peer question and context remain bounded before authority is consumed', async () => {
   const f = fixture(); let reserved = false, consumed = false;
+  const content = 'x'.repeat(6300);
+  const repositoryContext = contextFixture([{path: '.agents/skills/dharma-agent-fabric/knowledge/reports/source/reports/repair.md',
+    role: 'knowledge', contentDisposition: 'verified_inline_snapshot', content, sizeBytes: Buffer.byteLength(content),
+    sha256: `sha256:${createHash('sha256').update(content).digest('hex')}`}]);
+  assert.ok(Buffer.byteLength(repositoryContext) <= 8000);
   await assert.rejects(runCodexBridgeQuestion({transport: f.transport, binding,
     question: question({question: 'q'.repeat(2000)}),
     verifier: {...f.verifier, consume: async () => {consumed = true; return true;}}, exclusiveLease,
-    budget: {reserve: async () => {reserved = true; return true;}}, now, repositoryContext: 'x'.repeat(7900)}),
+    budget: {reserve: async () => {reserved = true; return true;}}, now, repositoryContext }),
   /codex_session_repository_context_invalid/);
   assert.equal(reserved, false); assert.equal(consumed, false); assert.equal(f.calls.length, 0);
 });

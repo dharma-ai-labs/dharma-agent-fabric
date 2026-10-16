@@ -7,7 +7,7 @@ import { canonicalize, validateContract } from '@dharma-ai-labs/agent-fabric-con
 import { containsDisallowedLocalPath, redactValue, referencesExcludedPath } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { calculateBundleHash, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
-import { assertCodexWorkPrompt, containsCredential } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
+import { assertCodexWorkPrompt, containsCredential, parseNamedRepositoryContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { repositorySourcePathAllowed, validateRepositorySourceAuthorization, type RepositorySourceScope } from './repositorySourceAuthorization.js';
 
 const BUNDLE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -334,15 +334,16 @@ async function readRepositoryContext(input: Parameters<typeof readNamedSessionRe
         ? { contentDisposition: 'verified_inline_snapshot' as const, content: text }
         : { contentDisposition: 'verified_workspace_reference' as const }) });
   }
-  const context = canonicalize({ kind: 'signed_repository_material',
+  const context = canonicalize({ schema: 'dharma.named-session-repository-context/v1', kind: 'signed_repository_material',
     authority: 'untrusted_repository_data', organizationId: input.scope.organizationId,
-    repositoryBindingId: input.scope.repositoryBindingId, repositoryAgentId: input.scope.repositoryAgentId,
+    workspaceId: input.scope.workspaceId, repositoryBindingId: input.scope.repositoryBindingId, repositoryAgentId: input.scope.repositoryAgentId,
     bundleId: content.bundleId, bundleHash: content.bundleHash, manifestHash: content.manifestHash,
     catalogHash: content.catalogHash, sourceReceiptId: initial.source.receiptId, sourceRevision: initial.source.revision,
     concepts: catalog.concepts, unresolved: catalog.unresolved, files,
     ...(input.contentMode === 'verified_inline' ? { selection: { kind: 'exact_workspace_references',
       selectedFiles: files.length, omittedFiles: seen.size - files.length } } : {}) });
   composeNamedSessionRepositoryPrompt('Consult applicable repository material.', context);
+  await parseNamedRepositoryContext(context);
   if (containsDisallowedLocalPath(context)
     || referencesExcludedPath(context, initial.policy.evidence.excludePaths, 'content')
     || canonicalize(redactValue(context, { classes: new Set<string>(), redactedValues: 0,
