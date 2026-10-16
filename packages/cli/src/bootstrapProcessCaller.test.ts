@@ -14,6 +14,8 @@ import {createNamedSessionChildOwner, currentNamedSessionChildOwner} from './nam
 import {currentAcceptedSetupSessionScope, originalCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
+import {NamedSessionTransportFailure, namedSessionReadinessDiagnostic,
+  namedSessionReadinessDiagnosticRequested} from './namedSessionTransportDiagnostic.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 // Actual caller declarations, with synthetic registry/OS readiness boundaries.
@@ -40,6 +42,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     await rm(workspace, {recursive: true, force: true});
   });
   const dependencies: Record<string, unknown> = {
+    NamedSessionTransportFailure, namedSessionReadinessDiagnostic, namedSessionReadinessDiagnosticRequested,
     currentBootstrapHostScope, captureBootstrapHostChild, assertBootstrapHostSource, currentNamedSessionChildOwner, currentAcceptedSetupSessionScope,
     requestBootstrapNamedSession: async (scope: typeof prepared.scope) => originalCodexSetupSessionSender(scope),
     resolve, dirname, Error, Promise, Number, String, Date, VERSION: '0.2.153',

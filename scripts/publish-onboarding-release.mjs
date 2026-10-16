@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '42f257a73c2b1c5c420c7d85a81ab7b9cf3fb801';
-const tree = '2ff390d8ddf2b561b24fa3d928725ff9de99e157';
+const source = '6a3843f374d126fab5621303921f40be5122d86d';
+const tree = 'f624f1efae2f686c6d99e28d44a46f519e299148';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -31,8 +31,23 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
     existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
       integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.207' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.208' },
 ].map(Object.freeze));
+
+export const approvedProductSourceHashes = Object.freeze({
+  "packages/cli/src/bootstrapProcessCaller.test.ts": "932da4d624c3e35546ce98c46e9765b0a789a1073d000e53e83abc678ab9e1fe",
+  "packages/cli/src/codexSetupSessionCaller.test.ts": "ab767b3d90f21491b3afea2ccd4536138e1cc7c81f27e36f43102b849fa01ee0",
+  "packages/cli/src/index.ts": "a64e17b1345eb7bfdfdb79a3b5cfb703deb8ea7eccb87e43187c9e833c7cfa30",
+  "packages/cli/src/namedSessionService.ts": "8a67fd1833a628022d82606b7158f6737de500ff090eef6e7f307442fdd36511",
+  "packages/cli/src/namedSessionTransportDiagnostic.ts": "e79125eacdb858c3acf01cfc462729b23d0efd6aaa4574c5023488b4e9dfcaf8",
+  "packages/cli/src/namedSessionTransportDiagnostic.test.ts": "3d43b44a78a96936d5ba0b556135b3e9b7577c19d7be0f27caba46af9d9f98d0",
+  "packages/cli/src/usage.ts": "6197e396fddcb8473718c5346c10cdcef8af9591beb4cdb4f9be2eb8456c0cd1",
+  "packages/cli/README.md": "7c851e781f5f10e8e0ae7c3dcdb3db68cbcfd2d840cba309973f970b402ed90c",
+  "schemas/named-session-readiness-diagnostic.schema.json": "c77348ea4ebe675a3534411746bdfdb6c932fa23931e4fb5dfcf9ba238dd83a9"
+});
+export function sourceTextSha256(text) {
+  return createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex');
+}
 
 function assertArtifact(item, packed, metadata) {
   assert.equal(metadata.name, item.name, 'registry name mismatch');
@@ -81,12 +96,13 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
     '100755 blob c7a500e580923098dff6121e1bf13a01f19b9b9d\tpackages/lifecycle-adapter/bin/run.mjs',
     'reviewed launcher bytes and executable mode required');
   const allowed = new Set(['scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts']);
+    'packages/cli/package.json', 'package-lock.json', ...Object.keys(approvedProductSourceHashes)]);
   assert.ok(snapshot.changed.every((file) => allowed.has(file)), 'unreviewed product source delta');
   assert.ok(snapshot.untracked.every((file) => file.startsWith('release/')), 'unexpected untracked source');
+  assert.deepEqual(snapshot.productSourceHashes, approvedProductSourceHashes, 'unreviewed product source bytes');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.207';
+  cliManifest.version = '0.2.208';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
@@ -111,7 +127,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
       `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.207';
+  lock.packages['packages/cli'].version = '0.2.208';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
@@ -121,10 +137,10 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   }
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.206';";
+  const previousVersion = "const VERSION = '0.2.207';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
-  assert.equal(snapshot.cliSource,
-    snapshot.baselineCliSource.replace(previousVersion, "const VERSION = '0.2.207';"), 'unreviewed CLI source delta');
+  assert.equal(sourceTextSha256(snapshot.cliSource),
+    approvedProductSourceHashes['packages/cli/src/index.ts'], 'unreviewed CLI source delta');
 }
 
 export async function lookupPublishedArtifact(read, {now = () => performance.now(),
@@ -208,6 +224,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
         baselineCliSource: execFileSync('git', ['show', `${source}:packages/cli/src/index.ts`],
           {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024}),
         cliSource: readFileSync(join(root, 'packages/cli/src/index.ts'), 'utf8'),
+        productSourceHashes: Object.fromEntries(Object.keys(approvedProductSourceHashes).map(path =>
+          [path, sourceTextSha256(readFileSync(join(root,path),'utf8'))])),
       });
     },
     manifest: async (item) => JSON.parse(readFileSync(join(root, item.workspace, 'package.json'), 'utf8')),
