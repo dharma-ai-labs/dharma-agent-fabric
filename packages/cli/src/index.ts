@@ -8688,7 +8688,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let policy = await withRepositoryRelayStage('policy_verification',
     () => loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
-  const fabric = await client();
+  const fabric = await withRepositoryRelayStage('session_open', () => client());
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
   let stopping = signal.aborted;
@@ -8752,10 +8752,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let sourceScanFlight: Promise<void> | null = null;
   let sourceScanReady: { cycle: Awaited<ReturnType<typeof scanRepositorySourceChanges>> }
     | { state: 'awaiting_signed_baseline' } | { error: unknown } | null = null;
-  const vault = await openBootstrapVault({
+  const vault = await withRepositoryRelayStage('vault_open', () => openBootstrapVault({
     root: resolve(dharmaHome(), 'vault'),
     rawLocalDays: rawLocalRetentionDays(policy),
-  });
+  }));
   if (signal.aborted) await vault.close();
   signal.throwIfAborted();
   signal.addEventListener('abort', stop, { once: true });
