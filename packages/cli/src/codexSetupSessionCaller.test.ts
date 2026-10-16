@@ -19,6 +19,8 @@ import {watchOwnedChild} from './ownedChildLifecycle.js';
 import {sendCodexSetupChildStart} from './codexSetupChildStartup.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
+import {NamedSessionTransportFailure, namedSessionReadinessDiagnostic,
+  namedSessionReadinessDiagnosticRequested} from './namedSessionTransportDiagnostic.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -56,6 +58,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, managedCleanup
   request.policyHash = codexSetupSessionPolicyHash(policy as Parameters<typeof codexSetupSessionPolicyHash>[0]);
   const sender = {uid: 1000, startTicks: '10'};
   const dependencies: Record<string, unknown> = {process: {platform: 'linux', getuid: () => 1000},
+    NamedSessionTransportFailure, namedSessionReadinessDiagnostic, namedSessionReadinessDiagnosticRequested,
     Date, resolve, canonicalize, sha256, codexSetupSessionPolicyHash, currentNamedSessionChildOwner,
     readDeviceConfig: async () => config, normalizeHqUrl: (value: string) => value,
     readContainerProcessIdentity: async (pid: number) => {assert.equal(pid, process.pid); return sender;},

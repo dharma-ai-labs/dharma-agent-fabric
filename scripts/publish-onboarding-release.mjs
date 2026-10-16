@@ -35,6 +35,8 @@ export const approvedPackages = Object.freeze([
 ].map(Object.freeze));
 
 export const approvedProductSourceHashes = Object.freeze({
+  "packages/cli/src/bootstrapProcessCaller.test.ts": "932da4d624c3e35546ce98c46e9765b0a789a1073d000e53e83abc678ab9e1fe",
+  "packages/cli/src/codexSetupSessionCaller.test.ts": "ab767b3d90f21491b3afea2ccd4536138e1cc7c81f27e36f43102b849fa01ee0",
   "packages/cli/src/index.ts": "a64e17b1345eb7bfdfdb79a3b5cfb703deb8ea7eccb87e43187c9e833c7cfa30",
   "packages/cli/src/namedSessionService.ts": "8a67fd1833a628022d82606b7158f6737de500ff090eef6e7f307442fdd36511",
   "packages/cli/src/namedSessionTransportDiagnostic.ts": "e79125eacdb858c3acf01cfc462729b23d0efd6aaa4574c5023488b4e9dfcaf8",
