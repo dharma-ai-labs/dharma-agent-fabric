@@ -18,6 +18,9 @@ function codexDirectoryPath(value: string) {
 export function stableRepositoryLauncherContents(version: string,
   runtime?: LauncherRuntime): Launchers {
   if (!VERSION.test(version)) throw new Error('Managed launcher version is invalid.');
+  // Preserve journal/rollback bytes; newly extracted packages must not inherit group-writable modes.
+  const [major, minor, patch] = version.split('-')[0]!.split('.').map(Number);
+  const privatePackageFiles = major! > 0 || minor! > 2 || minor === 2 && patch! >= 206;
   let shellEnvironment = '', windowsEnvironment = '';
   if (runtime) {
     const directory = runtime.nodeDirectory;
@@ -31,7 +34,8 @@ export function stableRepositoryLauncherContents(version: string,
     } else shellEnvironment = `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
   }
   const invocation = `npm exec --yes -- @dharma-ai-labs/agent-fabric@${version}`;
-  let shellInvocation = invocation;
+  const npmArguments = `exec --yes ${privatePackageFiles ? '--umask=077 ' : ''}-- @dharma-ai-labs/agent-fabric@${version}`;
+  let shellInvocation = `npm ${npmArguments}`;
   if (runtime?.npmCliPath !== undefined) {
     const entry = runtime.npmCliPath;
     if (runtime.platform !== 'linux' || !posix.isAbsolute(entry) || posix.basename(entry) !== 'npm-cli.js'
@@ -39,7 +43,7 @@ export function stableRepositoryLauncherContents(version: string,
       throw new Error('Managed launcher npm path is invalid.');
     }
     const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
-    shellInvocation = `${quote(posix.join(runtime.nodeDirectory, 'node'))} ${quote(entry)} exec --yes -- @dharma-ai-labs/agent-fabric@${version}`;
+    shellInvocation = `${quote(posix.join(runtime.nodeDirectory, 'node'))} ${quote(entry)} ${npmArguments}`;
   }
   if (runtime?.codexDirectory !== undefined) {
     if (runtime.platform !== 'linux') throw new Error('relay_startup_codex_path_invalid');
@@ -47,7 +51,7 @@ export function stableRepositoryLauncherContents(version: string,
     // Preserve only the qualified provider bin directory, not the login environment.
     shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
   }
-  return { shell: `#!/bin/sh\n${shellEnvironment}exec ${shellInvocation} "$@"\n`,
+  return { shell: `#!/bin/sh\n${shellEnvironment}${privatePackageFiles ? 'umask 077\n' : ''}exec ${shellInvocation} "$@"\n`,
     windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n` };
 }
 
@@ -55,7 +59,9 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
   try {
     if (typeof launchers.shell !== 'string' || typeof launchers.windows !== 'string'
       || launchers.shell.length > 16384 || launchers.windows.length > 16384) return undefined;
-    let shell = launchers.shell;
+    // Normalize only for parsing. Exact regeneration below still requires both protection clauses.
+    let shell = launchers.shell.replace('\numask 077\nexec ', '\nexec ')
+      .replace(' exec --yes --umask=077 -- ', ' exec --yes -- ');
     const providerPrefix = platform === 'linux'
       ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\nexport PATH='([^\n]*)':"\$PATH"\n/) : undefined;
     const codexDirectory = providerPrefix ? codexDirectoryPath(providerPrefix[2]!.replace(/'\\''/g, "'")) : undefined;

@@ -66,7 +66,8 @@ test('runtime rollback restores the exact legacy Linux unit and receipt after ad
   const f = await fixture('0.2.175', '0.2.176');
   const options = {home: f.input.home, userHome: f.input.home, workspace: f.input.workspace,
     launcher: join(f.input.workspace, '.dharma', 'bin', 'dharma'), policy: join(f.input.workspace, '.dharma', 'approved-policy.json'),
-    version: '0.2.175', platform: 'linux' as const, run: async () => ({stdout: 'enabled\n'})};
+    version: '0.2.175', platform: 'linux' as const, wslHost: {context: async () => null},
+    run: async () => ({stdout: 'enabled\n'})};
   await enableRelayAutostart(options);
   const receiptPath = join(f.input.home, 'relay', 'autostart.json');
   const unitPath = join(f.input.home, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
