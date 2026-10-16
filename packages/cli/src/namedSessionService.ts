@@ -11,6 +11,7 @@ import type { NamedSessionEvidenceReceipt } from './namedSessionEvidence.js';
 import {readNamedSessionNativeAudit} from './namedSessionNativeAudit.js';
 import { composeNamedSessionRepositoryPrompt } from './namedSessionPackageGate.js';
 import {parseNamedCodexSkillObservation, type NamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
+import {NamedSessionAdmission} from './namedSessionAdmission.js';
 
 export interface NamedSessionRegistration {
   schema: 'dharma.named-session/v1';
@@ -80,7 +81,7 @@ export async function namedSessionRequest(home: string, name: string, request: R
   return new Promise<Record<string, unknown>>((resolveReply, reject) => {
     const socket = createConnection(paths.socket);
     let bytes = Buffer.alloc(0), complete = false;
-    socket.setTimeout(request.action === 'work' ? 310_000 : 30_000);
+    socket.setTimeout(request.action === 'work' || request.action === 'quiesce' ? 310_000 : 30_000);
     const fail = () => { if (!complete) { complete = true; reject(new Error('named_session_unavailable')); } socket.destroy(); };
     socket.on('connect', () => socket.write(serialized));
     socket.on('error', fail); socket.on('timeout', fail);
@@ -130,13 +131,16 @@ export async function runNamedSessionService(input: {
   let server: ReturnType<typeof createServer> | undefined;
   const connections = new Set<Socket>();
   const responses = new Set<Promise<void>>();
-  let closing = false, pending = 0, serial = Promise.resolve();
+  let closing = false;
+  const admission = new NamedSessionAdmission();
   let lastObservation: unknown = { state: 'starting' };
   let taskExports: import('./namedSessionTaskExportSync.js').NamedSessionTaskExportSyncResult | undefined;
   const status = () => ({ ok: true, schema: 'dharma.named-session-status/v1', name: registration.name,
     bindingId: binding.bindingId, sessionId: binding.sessionId, ...registration.identity,
-    state: closing ? 'stopping' : pending ? 'executing' : 'running', budget: budget.status(),
-    queued: pending, lastObservation, lastWork: budget.lastWork(), ...(taskExports ? { taskExports } : {}) });
+    state: closing ? 'stopping' : admission.snapshot().state !== 'open' ? admission.snapshot().state
+      : admission.snapshot().pending ? 'executing' : 'running', budget: budget.status(),
+    queued: admission.snapshot().pending, admission: admission.snapshot(),
+    lastObservation, lastWork: budget.lastWork(), ...(taskExports ? { taskExports } : {}) });
   let healthWrites = Promise.resolve();
   const health = () => {
     const snapshot = JSON.stringify({ ...status(), pid: process.pid, observedAt: new Date().toISOString() });
@@ -149,19 +153,11 @@ export async function runNamedSessionService(input: {
     return write;
   };
   function enqueue<T>(operation: () => Promise<T>) {
-    if (closing || pending >= 8) return Promise.reject(new Error('named_session_busy'));
-    pending++;
-    const result = serial.then(async () => {
-      try {
-        if (closing) throw new Error('named_session_stopped');
-        return await operation();
-      } finally {
-        pending--;
-        await health();
-      }
-    });
-    serial = result.then(() => undefined, () => undefined);
-    return result;
+    if (closing) return Promise.reject(new Error('named_session_busy'));
+    return admission.enqueue(async () => {
+      if (closing) throw new Error('named_session_stopped');
+      return operation();
+    }, health);
   }
   try {
     owner = await openCodexInboxSession({ ...input, ...registration,
@@ -198,7 +194,37 @@ export async function runNamedSessionService(input: {
         const response = (async () => {
           const request = JSON.parse(bytes.subarray(0, end).toString('utf8')) as Record<string, unknown>;
           if (request.action === 'status') return status();
-          if (request.action === 'stop') { closing = true; return { ok: true, state: 'stop_requested' }; }
+          if (['quiesce', 'resume', 'stop-drained'].includes(String(request.action))) {
+            if (Object.keys(request).sort().join(',') !== 'action,fenceId,generation'
+              || typeof request.fenceId !== 'string' || typeof request.generation !== 'string'
+              || !await owner!.assertActive()) throw new Error('named_session_maintenance_unavailable');
+            let state: 'quiesced' | 'open' | 'stop_requested';
+            if (request.action === 'quiesce') {
+              await admission.quiesce(request.fenceId, request.generation);
+              if (!await owner!.assertActive()) throw new Error('named_session_maintenance_unavailable');
+              state = 'quiesced';
+            } else if (request.action === 'resume') {
+              admission.resume(request.fenceId, request.generation);
+              state = 'open';
+            } else {
+              admission.stopDrained(request.fenceId, request.generation);
+              // Prevent the supervisor from replacing the drained owner before the upgrade.
+              await saveNamedSession(input.home, {...registration, enabled:false});
+              closing = true;
+              state = 'stop_requested';
+            }
+            const result = {ok:true, schema:'dharma.named-session-maintenance/v1', receiptId:randomUUID(),
+              name:registration.name, bindingId:binding.bindingId, sessionId:binding.sessionId,
+              ...registration.identity, action:request.action, fenceId:request.fenceId,
+              generation:request.generation, state, pending:0, observedAt:new Date().toISOString()};
+            await health();
+            return result;
+          }
+          if (request.action === 'stop') {
+            admission.stop();
+            await saveNamedSession(input.home, {...registration, enabled:false});
+            closing = true; return { ok: true, state: 'stop_requested' };
+          }
           return enqueue(async () => {
             if (request.action === 'audit') {
               try {
@@ -304,19 +330,34 @@ export async function runNamedSessionService(input: {
     await chmod(paths.socket, 0o600); await health();
     let nextExportSyncAt = 0;
     while (!closing && !input.signal.aborted) {
+      if (admission.snapshot().state !== 'open') {
+        await new Promise<void>(resolveWait => {
+          const done = () => {clearTimeout(timer); input.signal.removeEventListener('abort', done); resolveWait();};
+          const timer = setTimeout(done, 1000); input.signal.addEventListener('abort', done, {once:true});
+          if (input.signal.aborted) done();
+        });
+        continue;
+      }
       if (input.syncTaskExports && Date.now() >= nextExportSyncAt) {
-        await enqueue(async () => {
+        try { await enqueue(async () => {
           try { taskExports = await input.syncTaskExports!(); }
           catch { taskExports = { state: 'pending', pending: null, delivered: 0,
             code: 'task_export_sync_unavailable', acceptedLearningObservation: false }; }
-        });
+        }); } catch (error) {
+          if (error instanceof Error && error.message === 'named_session_quiesced') continue;
+          throw error;
+        }
         nextExportSyncAt = Date.now() + 30000;
         await health();
       }
       let result: Awaited<ReturnType<NonNullable<typeof owner>['runNext']>>;
       try { result = await enqueue(() => input.withActivationBoundary(() =>
         owner!.runNext({loadRepositoryContext: input.readPeerRepositoryContext}))); }
-      catch (error) { if (closing || input.signal.aborted) break; throw error; }
+      catch (error) {
+        if (closing || input.signal.aborted) break;
+        if (error instanceof Error && error.message === 'named_session_quiesced') continue;
+        throw error;
+      }
       lastObservation = result; await health();
       if (result.state === 'reply_pending') throw new Error('named_session_reply_pending');
       await new Promise<void>(resolveWait => {
@@ -334,7 +375,7 @@ export async function runNamedSessionService(input: {
       try {
         const serverClosed = server?.listening
           ? new Promise<void>(resolveClose => server!.close(() => resolveClose())) : null;
-        await serial;
+        await admission.settled();
         // An accepted work failure must reach its caller before shutdown tears down the socket.
         await Promise.allSettled([...responses]);
         if (server) {

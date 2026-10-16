@@ -49,6 +49,7 @@ import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
+import {maintainNamedSession} from './namedSessionMaintenance.js';
 import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
@@ -5189,6 +5190,19 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   }
   if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
+  if (['quiesce', 'resume'].includes(action) || action === 'stop' && flags.has('drained')) {
+    const allowed = ['name', 'workspace-id', 'fence-id', 'apply', 'dry-run', ...(action === 'stop' ? ['drained'] : [])];
+    if (hostScope || supervisorOwner || setupSessionScope || !existing?.enabled
+      || [...flags.keys()].some(key => !allowed.includes(key))
+      || ['apply', 'dry-run', 'drained'].some(key => flags.has(key) && flags.get(key) !== true)
+      || flags.has('apply') && flags.has('dry-run')) throw new Error('named_session_maintenance_unavailable');
+    const fenceId = required(flags, 'fence-id');
+    if (!UUID_PATTERN.test(fenceId)) throw new Error('named_session_fence_invalid');
+    const requestAction = action === 'stop' ? 'stop-drained' : action;
+    if (!flags.has('apply')) return {ok:true, planned:true, name, workspaceId, action:requestAction, fenceId};
+    return maintainNamedSession({action:requestAction as 'quiesce' | 'resume' | 'stop-drained', fenceId,
+      registration:existing, request:body => namedSessionRequest(dharmaHome(), name, body)});
+  }
   if (action === 'audit') {
     if (!existing?.enabled || [...flags.keys()].some(key => !['name', 'workspace-id', 'work-id'].includes(key))) {
       throw new Error('named_session_audit_unavailable');
@@ -5206,6 +5220,15 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   }
   if (action === 'stop') {
     if (!flags.has('apply')) return { ok: true, planned: true, name, action: 'stop' };
+    const current = await namedSessionRequest(dharmaHome(), name, {action:'status'}).catch(() => null);
+    if (current?.admission) {
+      if (!existing || current.bindingId !== existing.bindingId
+        || Object.entries(existing.identity).some(([key,value]) => current[key] !== value)) {
+        throw new Error('named_session_scope_mismatch');
+      }
+      // The capable service rejects an unfenced stop without changing its registration.
+      return namedSessionRequest(dharmaHome(), name, {action:'stop'});
+    }
     if (existing) await saveNamedSession(dharmaHome(), { ...existing, enabled: false });
     try { return await namedSessionRequest(dharmaHome(), name, { action: 'stop' }); }
     catch { return { ok: true, name, state: 'stopped', enabled: false }; }

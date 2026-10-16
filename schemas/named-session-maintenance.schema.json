@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-maintenance/v1",
+  "title": "Local named-session maintenance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema", "receiptId", "name", "bindingId", "sessionId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "action", "fenceId", "generation", "state", "pending", "observedAt"],
+  "properties": {
+    "ok": {"const": true},
+    "schema": {"const": "dharma.named-session-maintenance/v1"},
+    "receiptId": {"type": "string", "format": "uuid"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}$"},
+    "bindingId": {"type": "string", "format": "uuid"},
+    "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"},
+    "repositoryBindingId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "endpointId": {"type": "string", "format": "uuid"},
+    "membershipId": {"type": "string", "format": "uuid"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "provider": {"const": "codex"},
+    "action": {"enum": ["quiesce", "resume", "stop-drained"]},
+    "fenceId": {"type": "string", "format": "uuid"},
+    "generation": {"type": "string", "format": "uuid"},
+    "state": {"enum": ["quiesced", "open", "stop_requested"]},
+    "pending": {"const": 0},
+    "observedAt": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"state": {"const": "quiesced"}}}},
+    {"if": {"properties": {"action": {"const": "resume"}}}, "then": {"properties": {"state": {"const": "open"}}}},
+    {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"state": {"const": "stop_requested"}}}}
+  ]
+}
