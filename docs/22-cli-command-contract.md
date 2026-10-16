@@ -19,8 +19,30 @@ dharma messages <subcommand>
 dharma skills <subcommand>
 dharma policy <subcommand>
 dharma relay <subcommand>
+dharma sessions <subcommand>
 dharma diagnostics <subcommand>
 ```
+
+## Named Session Maintenance
+
+Source-candidate commands require a capable client and running service; they are
+not present in published CLI206:
+
+```text
+dharma sessions quiesce --name <name> --workspace-id <id> --fence-id <uuid> --apply
+dharma sessions resume --name <name> --workspace-id <id> --fence-id <uuid> --apply
+dharma sessions stop --name <name> --workspace-id <id> --fence-id <uuid> --drained --apply
+```
+
+Without `--apply`, these commands plan only. Quiescence rejects new work and inbox
+polls while already admitted operations and their evidence finish. A successful
+receipt binds zero pending work to the exact session and process generation.
+Only the matching fence can resume or stop that drained owner. Fences do not
+expire automatically; a service restart invalidates an old generation's receipt.
+Drained stop disables automatic session registration before acknowledging exit.
+An unsupported service is rejected before a control request. Legacy `stop`
+can interrupt work and is not proof of a drained boundary. These commands neither
+change enrollment nor authorize an upgrade or additional provider work.
 
 ## Device
 
