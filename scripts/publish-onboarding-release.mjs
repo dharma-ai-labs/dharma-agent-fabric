@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = '0835aa4e784eca58cde45779ea7ebe1c2b8b9410';
-const tree = 'ca0c23a0c776bb4c1a9316e0693e955b1c7cae22';
+const source = '53c7e023c9b9337de7ba4e8600f31224a441416e';
+const tree = '493c353de854d0854eccb264f9cb8fe6862a4784';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',

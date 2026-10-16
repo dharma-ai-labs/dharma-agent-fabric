@@ -118,9 +118,9 @@ test('CLI205 keeps contracts and protected-storage packages immutable', () => {
 function releaseSnapshot() {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '0835aa4e784eca58cde45779ea7ebe1c2b8b9410';
+  const baseline = '53c7e023c9b9337de7ba4e8600f31224a441416e';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), 'ca0c23a0c776bb4c1a9316e0693e955b1c7cae22');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '493c353de854d0854eccb264f9cb8fe6862a4784');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
   const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.205';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
