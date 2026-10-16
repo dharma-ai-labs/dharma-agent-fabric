@@ -31,6 +31,7 @@ not present in published CLI206:
 ```text
 dharma sessions quiesce --name <name> --workspace-id <id> --fence-id <uuid> --apply
 dharma sessions resume --name <name> --workspace-id <id> --fence-id <uuid> --apply
+dharma sessions resume --name <name> --workspace-id <id> --fence-id <uuid> --recover-stopped --apply
 dharma sessions stop --name <name> --workspace-id <id> --fence-id <uuid> --drained --apply
 ```
 
@@ -44,6 +45,11 @@ before acknowledging its fence. Drained stop verifies that pause before shutdown
 Failed persistence leaves a recoverable quiesced service; matching resume verifies
 the enabled registration before reopening admission. Automatic supervisors cannot
 reenable a disabled registration, including after a crash or a stale startup poll.
+The persisted maintenance marker also blocks ordinary `start` when live status
+is unavailable. Explicit `resume --recover-stopped` requires the matching fence,
+a confirmed stopped owner, unchanged registration, and the same unexpired
+protected provider binding. It only permits a subsequent explicit start; its
+receipt is not runtime readiness, and interrupted work remains retained.
 An unsupported service is rejected before a control request. Legacy `stop`
 can interrupt work and is not proof of a drained boundary. These commands neither
 change enrollment nor authorize an upgrade or additional provider work.

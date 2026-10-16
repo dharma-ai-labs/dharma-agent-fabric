@@ -49,7 +49,7 @@ import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
-import {maintainNamedSession} from './namedSessionMaintenance.js';
+import {maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
 import {assertNamedSessionStartupRegistration} from './namedSessionAdmission.js';
 import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
@@ -5192,15 +5192,30 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   if (action === 'work') return namedSessionRequest(dharmaHome(), name, { action: 'work',
     workId: String(flags.get('work-id') || randomUUID()), prompt: required(flags, 'prompt') });
   if (['quiesce', 'resume'].includes(action) || action === 'stop' && flags.has('drained')) {
-    const allowed = ['name', 'workspace-id', 'fence-id', 'apply', 'dry-run', ...(action === 'stop' ? ['drained'] : [])];
+    const allowed = ['name', 'workspace-id', 'fence-id', 'apply', 'dry-run',
+      ...(action === 'stop' ? ['drained'] : action === 'resume' ? ['recover-stopped'] : [])];
     if (hostScope || supervisorOwner || setupSessionScope || !existing
       || [...flags.keys()].some(key => !allowed.includes(key))
-      || ['apply', 'dry-run', 'drained'].some(key => flags.has(key) && flags.get(key) !== true)
+      || ['apply', 'dry-run', 'drained', 'recover-stopped'].some(key => flags.has(key) && flags.get(key) !== true)
       || flags.has('apply') && flags.has('dry-run')) throw new Error('named_session_maintenance_unavailable');
     const fenceId = required(flags, 'fence-id');
     if (!UUID_PATTERN.test(fenceId)) throw new Error('named_session_fence_invalid');
     const requestAction = action === 'stop' ? 'stop-drained' : action;
-    if (!flags.has('apply')) return {ok:true, planned:true, name, workspaceId, action:requestAction, fenceId};
+    if (!flags.has('apply')) return {ok:true, planned:true, name, workspaceId, action:requestAction, fenceId,
+      mode:flags.has('recover-stopped')?'stopped_recovery':'live'};
+    if (action === 'resume' && flags.has('recover-stopped')) return withRelayStartupMutation(async () => {
+      let vault: LocalVault | ScopedLocalVault | undefined;
+      try {
+        return await recoverStoppedNamedSession({registration:existing, fenceId, workspace:item.path,
+          processState:() => pidProcessState(resolve(paths.root, 'service.lock')),
+          readRegistration:() => readNamedSession(dharmaHome(), name),
+          readBinding:async () => {
+            vault = await openBootstrapVault({root:resolve(dharmaHome(), 'vault')});
+            return vault.getProviderSessionBinding(existing.bindingId, existing.identity);
+          },
+          saveRegistration:value => saveNamedSession(dharmaHome(), value)});
+      } finally {await vault?.close();}
+    });
     return maintainNamedSession({action:requestAction as 'quiesce' | 'resume' | 'stop-drained', fenceId,
       registration:existing, request:body => namedSessionRequest(dharmaHome(), name, body)});
   }
@@ -5242,6 +5257,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await repositorySharedReady(item)));
   if (action === 'start') {
     if (existing && !existing.enabled) {
+      if (existing.maintenanceFence) throw new Error('named_session_quiesced');
       if (supervisorOwner) throw new Error('named_session_disabled');
       const live = await step(() => namedSessionRequest(dharmaHome(), name, {action:'status'})).catch(() => null);
       if (live?.admission && (live.admission as Record<string, unknown>).state !== 'open') {

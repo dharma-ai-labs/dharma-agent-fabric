@@ -5,6 +5,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 
 export function assertNamedSessionStartupRegistration(expected: NamedSessionRegistration | null,
   current: NamedSessionRegistration | null) {
+  if (current?.maintenanceFence) throw new Error('named_session_quiesced');
   if (current && !current.enabled) throw new Error('named_session_disabled');
   if (!expected && !current) return;
   const keys = ['schema', 'name', 'bindingId', 'maximumCostCents', 'maximumTurnCostCents', 'enabled'] as const;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rename, rmdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -17,6 +17,11 @@ test('durable named registration excludes credentials, grants and foreign shape'
   const good: NamedSessionRegistration = { schema: 'dharma.named-session/v1', name: 'reviewer', bindingId: randomUUID(),
     identity, maximumCostCents: 100, maximumTurnCostCents: 25, enabled: true };
   await saveNamedSession(home, good);
+  const paused={...good,enabled:false,maintenanceFence:{fenceId:randomUUID(),generation:randomUUID()}};
+  await saveNamedSession(home,paused);
+  await assert.rejects(saveNamedSession(home,{...paused,enabled:true}),/registration_invalid/);
+  assert.deepEqual(await readNamedSession(home,'reviewer'),paused);
+  await saveNamedSession(home,good);
   for (const invalid of [{ ...good, grant: 'private-fixture' }, { ...good, maximumTurnCostCents: 101 },
     { ...good, identity: { ...identity, credential: 'private-fixture' } },
     { ...good, identity: { ...identity, membershipId: 'unbound-email' } }]) {
@@ -348,16 +353,15 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       assert.equal((await namedSessionRequest(home, 'implementer', { action: 'status' })).sessionId, binding.sessionId);
       const current = await namedSessionRequest(home, 'implementer', {action:'status'});
       const generation = (current.admission as {generation:string}).generation, fenceId = randomUUID();
-      const failedFence = randomUUID(), registrationPath = namedSessionPaths(home, 'implementer').registration;
-      const backupPath = registrationPath + '.failure-fixture';
-      await rename(registrationPath, backupPath); await mkdir(registrationPath);
+      const failedFence = randomUUID(), registrationRoot = namedSessionPaths(home, 'implementer').root;
+      await chmod(registrationRoot,0o500);
       try {
         await assert.rejects(namedSessionRequest(home, 'implementer', {action:'quiesce', fenceId:failedFence, generation}),
           {message:'named_session_maintenance_persistence_unconfirmed'});
         assert.equal(((await namedSessionRequest(home, 'implementer', {action:'status'})).admission as {state:string}).state, 'quiesced');
         await assert.rejects(namedSessionRequest(home, 'implementer', {action:'work', workId:randomUUID(), prompt:'Do not admit'}),
           /named_session_quiesced/);
-      } finally {await rmdir(registrationPath); await rename(backupPath, registrationPath);}
+      } finally {await chmod(registrationRoot,0o700);}
       await namedSessionRequest(home, 'implementer', {action:'resume', fenceId:failedFence, generation});
       assert.equal((await readNamedSession(home, 'implementer'))?.enabled, true);
       await assert.rejects(namedSessionRequest(home, 'implementer', {action:'quiesce', fenceId, generation:randomUUID()}),
@@ -366,6 +370,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       assert.equal(quiesced.state, 'quiesced'); assert.equal(quiesced.pending, 0);
       assert.equal(quiesced.automaticRestartEnabled, false);
       assert.equal((await readNamedSession(home, 'implementer'))?.enabled, false);
+      assert.deepEqual((await readNamedSession(home,'implementer'))?.maintenanceFence,{fenceId,generation});
       assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
         'https://schemas.dharma-ai.io/named-session-maintenance/v1', quiesced)).ok, true);
       const pollsAtFence = inboxPolls, budgetAtFence = (await namedSessionRequest(home, 'implementer', {action:'status'})).budget;
@@ -379,6 +384,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       assert.deepEqual((await namedSessionRequest(home, 'implementer', {action:'status'})).budget, budgetAtFence);
       assert.equal((await namedSessionRequest(home, 'implementer', {action:'resume', fenceId, generation})).state, 'open');
       assert.equal((await readNamedSession(home, 'implementer'))?.enabled, true);
+      assert.equal((await readNamedSession(home,'implementer'))?.maintenanceFence,undefined);
       const retention = await vault.enforceRawEvidenceRetention({ retentionDays: 30,
         now: new Date(Date.now() + 31 * 86400000) });
       assert.equal(retention.deleted, 2);

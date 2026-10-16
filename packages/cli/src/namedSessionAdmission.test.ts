@@ -135,6 +135,11 @@ test('a stale enabled startup snapshot cannot reopen a durably paused generation
     providerOpens++;
   }, /named_session_disabled/);
   assert.equal(providerOpens, 0);
+  for(const ownerStatus of ['unavailable','crashed']){
+    const paused={...registration,enabled:false,maintenanceFence:{fenceId:randomUUID(),generation:randomUUID()}};
+    assert.throws(()=>assertNamedSessionStartupRegistration(registration,paused),
+      {message:'named_session_quiesced'},ownerStatus);
+  }
   for (const current of [null, {...registration,bindingId:randomUUID()},
     {...registration,identity:{...registration.identity,deviceId:randomUUID()}},
     {...registration,maximumCostCents:200}]) {

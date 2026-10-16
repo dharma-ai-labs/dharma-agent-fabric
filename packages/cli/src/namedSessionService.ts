@@ -21,15 +21,17 @@ export interface NamedSessionRegistration {
   maximumCostCents: number;
   maximumTurnCostCents: number;
   enabled: boolean;
+  maintenanceFence?: {fenceId:string; generation:string};
 }
 
 function validateRegistration(value: unknown, name: string): asserts value is NamedSessionRegistration {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('named_session_registration_invalid');
   const record = value as Record<string, unknown>;
-  const keys = ['schema', 'name', 'bindingId', 'identity', 'maximumCostCents', 'maximumTurnCostCents', 'enabled'];
+  const keys = ['schema', 'name', 'bindingId', 'identity', 'maximumCostCents', 'maximumTurnCostCents', 'enabled', 'maintenanceFence'];
   const ids = ['repositoryBindingId', 'workspaceId', 'endpointId', 'membershipId', 'deviceId'];
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const identity = record.identity as Record<string, unknown> | undefined;
+  const fence = record.maintenanceFence as Record<string, unknown> | undefined;
   if (Object.keys(record).some(key => !keys.includes(key)) || record.schema !== 'dharma.named-session/v1'
     || record.name !== name || typeof record.enabled !== 'boolean'
     || !Number.isSafeInteger(record.maximumCostCents) || Number(record.maximumCostCents) < 1 || Number(record.maximumCostCents) > 10000
@@ -40,7 +42,11 @@ function validateRegistration(value: unknown, name: string): asserts value is Na
     || Object.keys(identity).some(key => ![...ids, 'organizationId', 'provider'].includes(key))
     || identity.provider !== 'codex' || typeof identity.organizationId !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(identity.organizationId)
-    || ids.some(key => typeof identity[key] !== 'string' || !uuid.test(identity[key] as string))) {
+    || ids.some(key => typeof identity[key] !== 'string' || !uuid.test(identity[key] as string))
+    || fence !== undefined && (!fence || typeof fence !== 'object' || Array.isArray(fence)
+      || Object.keys(fence).sort().join(',') !== 'fenceId,generation' || record.enabled !== false
+      || typeof fence.fenceId !== 'string' || !uuid.test(fence.fenceId)
+      || typeof fence.generation !== 'string' || !uuid.test(fence.generation))) {
     throw new Error('named_session_registration_invalid');
   }
 }
@@ -159,9 +165,16 @@ export async function runNamedSessionService(input: {
       return operation();
     }, health);
   }
-  async function maintenanceRegistration(enabled: boolean, write: boolean) {
+  async function maintenanceRegistration(enabled: boolean, write: boolean, fenceId: string, generation: string) {
     try {
-      const expected = {...registration, enabled};
+      const {maintenanceFence: _oldFence, ...base} = registration;
+      const fence = {fenceId, generation};
+      const current = await readNamedSession(input.home, registration.name);
+      if (!current) throw new Error('unconfirmed');
+      const {maintenanceFence: currentFence, ...currentBase} = current;
+      if (canonicalize({...currentBase, enabled:base.enabled}) !== canonicalize(base)
+        || currentFence && canonicalize(currentFence) !== canonicalize(fence)) throw new Error('unconfirmed');
+      const expected = enabled ? {...base, enabled:true} : {...base, enabled:false, maintenanceFence:fence};
       if (write) await saveNamedSession(input.home, expected);
       const observed = await readNamedSession(input.home, registration.name);
       if (!observed || canonicalize(observed) !== canonicalize(expected)) throw new Error('unconfirmed');
@@ -209,24 +222,24 @@ export async function runNamedSessionService(input: {
             let state: 'quiesced' | 'open' | 'stop_requested';
             if (request.action === 'quiesce') {
               await admission.quiesce(request.fenceId, request.generation,
-                () => maintenanceRegistration(false, true));
+                () => maintenanceRegistration(false, true, request.fenceId as string, request.generation as string));
               if (!await owner!.assertActive()) throw new Error('named_session_maintenance_unavailable');
               state = 'quiesced';
             } else if (request.action === 'resume') {
               await admission.resume(request.fenceId, request.generation,
-                () => maintenanceRegistration(true, true));
+                () => maintenanceRegistration(true, true, request.fenceId as string, request.generation as string));
               state = 'open';
             } else {
               // Quiescence already disabled automatic restart; verify it before irreversible shutdown.
               await admission.stopDrained(request.fenceId, request.generation,
-                () => maintenanceRegistration(false, false));
+                () => maintenanceRegistration(false, false, request.fenceId as string, request.generation as string));
               closing = true;
               state = 'stop_requested';
             }
             const result = {ok:true, schema:'dharma.named-session-maintenance/v1', receiptId:randomUUID(),
               name:registration.name, bindingId:binding.bindingId, sessionId:binding.sessionId,
               ...registration.identity, action:request.action, fenceId:request.fenceId,
-              generation:request.generation, state, pending:0, automaticRestartEnabled:state === 'open',
+              generation:request.generation, mode:'live', state, pending:0, automaticRestartEnabled:state === 'open',
               observedAt:new Date().toISOString()};
             await health();
             return result;

@@ -4,7 +4,7 @@
   "title": "Local named-session maintenance receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["ok", "schema", "receiptId", "name", "bindingId", "sessionId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "action", "fenceId", "generation", "state", "pending", "automaticRestartEnabled", "observedAt"],
+  "required": ["ok", "schema", "receiptId", "name", "bindingId", "sessionId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "action", "fenceId", "generation", "mode", "state", "pending", "automaticRestartEnabled", "observedAt"],
   "properties": {
     "ok": {"const": true},
     "schema": {"const": "dharma.named-session-maintenance/v1"},
@@ -22,14 +22,17 @@
     "action": {"enum": ["quiesce", "resume", "stop-drained"]},
     "fenceId": {"type": "string", "format": "uuid"},
     "generation": {"type": "string", "format": "uuid"},
-    "state": {"enum": ["quiesced", "open", "stop_requested"]},
+    "mode": {"enum": ["live", "stopped_recovery"]},
+    "state": {"enum": ["quiesced", "open", "stop_requested", "restart_permitted"]},
+    "interruptedWorkDisposition": {"const": "preserved_for_verified_start"},
     "pending": {"const": 0},
     "automaticRestartEnabled": {"type": "boolean"},
     "observedAt": {"type": "string", "format": "date-time"}
   },
   "allOf": [
-    {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"state": {"const": "quiesced"}, "automaticRestartEnabled": {"const": false}}}},
-    {"if": {"properties": {"action": {"const": "resume"}}}, "then": {"properties": {"state": {"const": "open"}, "automaticRestartEnabled": {"const": true}}}},
-    {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"state": {"const": "stop_requested"}, "automaticRestartEnabled": {"const": false}}}}
+    {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"mode": {"const": "live"}, "state": {"const": "quiesced"}, "automaticRestartEnabled": {"const": false}}}},
+    {"if": {"properties": {"action": {"const": "resume"}, "mode": {"const": "live"}}}, "then": {"properties": {"state": {"const": "open"}, "automaticRestartEnabled": {"const": true}}}},
+    {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"mode": {"const": "live"}, "state": {"const": "stop_requested"}, "automaticRestartEnabled": {"const": false}}}},
+    {"if": {"properties": {"mode": {"const": "stopped_recovery"}}}, "then": {"required": ["interruptedWorkDisposition"], "properties": {"action": {"const": "resume"}, "state": {"const": "restart_permitted"}, "automaticRestartEnabled": {"const": true}}}}
   ]
 }
