@@ -12,12 +12,9 @@ const existingContractsSource = '6c7d48916de11ccc837933a7ef7e8d2600184b54';
 const existingContractsIntegrity = 'sha512-ccumvrKW2MRxVobFxpmEYXzOdY7syggdPswC8BBuuLnnjSvOUz0tYtwZEaF7n1A4RK6yNuttmavZ/rCV5smtMQ==';
 const integrity = item => item.existingArtifact?.integrity || `sha512-${item.version}`;
 
-test('CLI205 publishes the peer-context adapter before exact-pin consumers and CLI', () => {
+test('CLI206 publishes only the managed-runtime permission correction', () => {
   assert.deepEqual(approvedPackages.filter(item => !item.existingArtifact).map(item => [item.workspace, item.version]), [
-    ['packages/provider-adapters', '0.1.36'],
-    ['packages/task-runner', '0.1.38'],
-    ['packages/evidence-reduction', '0.2.35'],
-    ['packages/cli', '0.2.205'],
+    ['packages/cli', '0.2.206'],
   ]);
 });
 
@@ -82,8 +79,7 @@ test('missing provenance exhausts only bounded reads and cannot publish the next
   };
   await assert.rejects(publishBoundedRelease(head, io), /published provenance not visible/);
   assert.equal(reads, 12); assert.equal(time, 330000);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-provider-adapters', '@dharma-ai-labs/agent-fabric-task-runner',
-    '@dharma-ai-labs/agent-fabric-evidence-reduction', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
 });
 
 test('provenance arriving beyond the deadline cannot be accepted', async () => {
@@ -95,7 +91,8 @@ test('provenance arriving beyond the deadline cannot be accepted', async () => {
   assert.equal(reads, 1); assert.equal(sleeps, 0);
 });
 
-for (const name of ['agent-fabric-secure-store', 'agent-fabric-relay-client', 'agent-fabric-local-vault']) {
+for (const name of ['agent-fabric-contracts', 'agent-fabric-secure-store', 'agent-fabric-relay-client', 'agent-fabric-local-vault',
+  'agent-fabric-provider-adapters', 'agent-fabric-task-runner', 'agent-fabric-evidence-reduction']) {
   for (const defect of ['missing', 'changed']) {
     test(`reconciled ${name} ${defect} blocks every write and cannot be republished`, async () => {
       const {io, effects} = fixture();
@@ -108,9 +105,10 @@ for (const name of ['agent-fabric-secure-store', 'agent-fabric-relay-client', 'a
   }
 }
 
-test('CLI205 keeps contracts and protected-storage packages immutable', () => {
+test('CLI206 keeps all seven dependency packages immutable', () => {
   assert.deepEqual(approvedPackages.filter(item => item.existingArtifact).map(item => [item.workspace, item.version]), [
-    ['packages/contracts', '0.1.16'], ['packages/secure-store', '0.1.10'],
+    ['packages/contracts', '0.1.16'], ['packages/provider-adapters', '0.1.36'],
+    ['packages/task-runner', '0.1.38'], ['packages/evidence-reduction', '0.2.35'], ['packages/secure-store', '0.1.10'],
     ['packages/relay-client', '0.2.33'], ['packages/local-vault', '0.1.31'],
   ]);
 });
@@ -118,11 +116,11 @@ test('CLI205 keeps contracts and protected-storage packages immutable', () => {
 function releaseSnapshot() {
   const root = join(import.meta.dirname, '..');
   const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
-  const baseline = '53c7e023c9b9337de7ba4e8600f31224a441416e';
+  const baseline = '9094de897d6ef1cb6fcb19a51a0d7cbd4bf19355';
   const reviewed = baseline;
-  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '493c353de854d0854eccb264f9cb8fe6862a4784');
+  assert.equal(git('rev-parse', `${reviewed}^{tree}`), '0a8d29f94297576dc354e6ed0aacdbf4dc9bd19a');
   const baselineCliManifest = JSON.parse(git('show', `${baseline}:packages/cli/package.json`));
-  const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.205';
+  const cliManifest = structuredClone(baselineCliManifest); cliManifest.version = '0.2.206';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
@@ -137,7 +135,7 @@ function releaseSnapshot() {
   }
   runtimeManifests['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   const baselineLock = JSON.parse(git('show', `${baseline}:package-lock.json`));
-  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.205';
+  const lock = structuredClone(baselineLock); lock.packages['packages/cli'].version = '0.2.206';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
@@ -148,7 +146,7 @@ function releaseSnapshot() {
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   const baselineCliSource = execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`],
     {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
-  const cliSource = baselineCliSource.replace("const VERSION = '0.2.204';", "const VERSION = '0.2.205';");
+  const cliSource = baselineCliSource.replace("const VERSION = '0.2.205';", "const VERSION = '0.2.206';");
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -159,18 +157,18 @@ function releaseSnapshot() {
   return snapshot;
 }
 
-test('frozen source admits only exact CLI205 pins after the reviewed peer-context fix', () => {
+test('frozen source admits only exact CLI206 pins after the reviewed peer-context fix', () => {
   const snapshot = releaseSnapshot(), reviewed = snapshot.head, baselineCliSource = snapshot.baselineCliSource;
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, snapshot));
   assert.doesNotThrow(() => assertSourceSnapshot(reviewed, { ...snapshot, changed: [
     'scripts/publish-onboarding-release.mjs', 'scripts/publish-onboarding-release.test.mjs',
-    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts',
-    'packages/provider-adapters/package.json', 'packages/task-runner/package.json',
-    'packages/evidence-reduction/package.json', 'packages/lifecycle-adapter/package.json'] }));
+    'packages/cli/package.json', 'package-lock.json', 'packages/cli/src/index.ts'] }));
   for (const forbidden of ['packages/cli/src/unreviewed.ts', 'packages/secure-store/src/index.ts', '.github/workflows/publish.yml',
     'packages/task-runner/src/index.ts', 'packages/task-runner/src/index.test.ts', 'packages/task-runner/README.md',
     'packages/contracts/package.json', 'apps/relay-gateway/src/protocol.ts',
-    'packages/secure-store/package.json', 'packages/relay-client/package.json', 'packages/local-vault/package.json']) {
+    'packages/secure-store/package.json', 'packages/relay-client/package.json', 'packages/local-vault/package.json',
+    'packages/provider-adapters/package.json', 'packages/task-runner/package.json',
+    'packages/evidence-reduction/package.json', 'packages/lifecycle-adapter/package.json']) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, changed: [...snapshot.changed, forbidden]}),
       /unreviewed product source delta/);
   }
@@ -179,7 +177,7 @@ test('frozen source admits only exact CLI205 pins after the reviewed peer-contex
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, lock: foreignLock}), /lockfile delta/);
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: baselineCliSource}), /CLI source delta/);
   assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, cliSource: snapshot.cliSource + '\n// unrelated\n'}), /CLI source delta/);
-  for (const baselineCliSource of ['', "const VERSION = '0.2.204';\nconst VERSION = '0.2.204';\n"]) {
+  for (const baselineCliSource of ['', "const VERSION = '0.2.205';\nconst VERSION = '0.2.205';\n"]) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, baselineCliSource}), /CLI version anchor required/);
   }
 });
@@ -257,13 +255,10 @@ function fixture() {
   return { io, effects, verified };
 }
 
-test('verifies immutable dependencies before publishing the four CLI205 artifacts in order', async () => {
+test('verifies immutable dependencies before publishing only the CLI206 artifact', async () => {
   const { io, effects } = fixture();
   await publishBoundedRelease(head, io);
   assert.deepEqual(effects, [
-    '@dharma-ai-labs/agent-fabric-provider-adapters',
-    '@dharma-ai-labs/agent-fabric-task-runner',
-    '@dharma-ai-labs/agent-fabric-evidence-reduction',
     '@dharma-ai-labs/agent-fabric',
   ]);
   assert.deepEqual(approvedPackages.map((item) => [item.name, item.version]), [
@@ -274,7 +269,7 @@ test('verifies immutable dependencies before publishing the four CLI205 artifact
     ['@dharma-ai-labs/agent-fabric-secure-store', '0.1.10'],
     ['@dharma-ai-labs/agent-fabric-relay-client', '0.2.33'],
     ['@dharma-ai-labs/agent-fabric-local-vault', '0.1.31'],
-    ['@dharma-ai-labs/agent-fabric', '0.2.205'],
+    ['@dharma-ai-labs/agent-fabric', '0.2.206'],
   ]);
 });
 
@@ -353,21 +348,19 @@ test('uncertain CLI publication is not retried after its dependency is verified'
   io.lookup = async (item, justPublished) => justPublished ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}} : lookup(item);
   await assert.rejects(publishBoundedRelease(head, io), /uncertain CLI publication/);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-provider-adapters', '@dharma-ai-labs/agent-fabric-task-runner',
-    '@dharma-ai-labs/agent-fabric-evidence-reduction', '@dharma-ai-labs/agent-fabric']);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
 });
 
 test('an already published exact provider is verified without republishing', async () => {
   const vault = approvedPackages.find(item => item.name === '@dharma-ai-labs/agent-fabric-provider-adapters');
-  assert.equal(vault.existingArtifact, undefined);
+  assert.equal(vault.existingArtifact.source, '3038b4f53afcfa2825025e51f09d834c937115d4');
   const {io, effects, verified} = fixture();
   const lookup = io.lookup;
   io.lookup = async item => item.name === vault.name ? {name: item.name, version: item.version,
     dist: {integrity: integrity(item), attestations: {url: 'https://registry.npmjs.org/-/npm/v1/attestations/existing'}}} : lookup(item);
   await publishBoundedRelease(head, io);
-  assert.equal(verified.find(item => item.name === vault.name).source, head);
-  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric-task-runner',
-    '@dharma-ai-labs/agent-fabric-evidence-reduction', '@dharma-ai-labs/agent-fabric']);
+  assert.equal(verified.find(item => item.name === vault.name).source, vault.existingArtifact.source);
+  assert.deepEqual(effects, ['@dharma-ai-labs/agent-fabric']);
   for (const defect of ['integrity', 'provenance']) {
     const blocked = fixture();
     const lookup = blocked.io.lookup;
