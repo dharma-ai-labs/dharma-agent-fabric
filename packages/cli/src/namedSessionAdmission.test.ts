@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import test from 'node:test';
-import {NamedSessionAdmission} from './namedSessionAdmission.js';
+import {assertNamedSessionStartupRegistration, NamedSessionAdmission} from './namedSessionAdmission.js';
+import type {NamedSessionRegistration} from './namedSessionService.js';
 
 function deferred() {
   let resolve!: () => void;
@@ -119,4 +120,25 @@ test('durable maintenance transitions reject concurrent resume or stop until rea
   await assert.rejects(admission.enqueue(async () => {}), /named_session_quiesced/);
   persist.resolve(); await stop;
   await assert.rejects(admission.enqueue(async () => {}), /named_session_stopped/);
+});
+
+test('a stale enabled startup snapshot cannot reopen a durably paused generation', () => {
+  const registration: NamedSessionRegistration = {schema:'dharma.named-session/v1', name:'reviewer',
+    bindingId:randomUUID(), enabled:true, maximumCostCents:100, maximumTurnCostCents:25,
+    identity:{organizationId:'org_test', repositoryBindingId:randomUUID(), workspaceId:randomUUID(),
+      endpointId:randomUUID(), membershipId:randomUUID(), deviceId:randomUUID(), provider:'codex'}};
+  assertNamedSessionStartupRegistration(registration, {...registration});
+  assertNamedSessionStartupRegistration(null, null);
+  let providerOpens = 0;
+  assert.throws(() => {
+    assertNamedSessionStartupRegistration(registration, {...registration, enabled:false});
+    providerOpens++;
+  }, /named_session_disabled/);
+  assert.equal(providerOpens, 0);
+  for (const current of [null, {...registration,bindingId:randomUUID()},
+    {...registration,identity:{...registration.identity,deviceId:randomUUID()}},
+    {...registration,maximumCostCents:200}]) {
+    assert.throws(() => assertNamedSessionStartupRegistration(registration, current), /named_session_startup_scope_changed/);
+  }
+  assert.throws(() => assertNamedSessionStartupRegistration(null, registration), /named_session_startup_scope_changed/);
 });

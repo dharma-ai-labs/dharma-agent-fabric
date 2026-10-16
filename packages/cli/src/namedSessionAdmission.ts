@@ -1,6 +1,18 @@
 import {randomUUID} from 'node:crypto';
+import type {NamedSessionRegistration} from './namedSessionService.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
+
+export function assertNamedSessionStartupRegistration(expected: NamedSessionRegistration | null,
+  current: NamedSessionRegistration | null) {
+  if (current && !current.enabled) throw new Error('named_session_disabled');
+  if (!expected && !current) return;
+  const keys = ['schema', 'name', 'bindingId', 'maximumCostCents', 'maximumTurnCostCents', 'enabled'] as const;
+  if (!expected || !current || keys.some(key => current[key] !== expected[key])
+    || Object.entries(expected.identity).some(([key,value]) => current.identity[key as keyof typeof current.identity] !== value)) {
+    throw new Error('named_session_startup_scope_changed');
+  }
+}
 
 // The fence is checked in the same event-loop turn that admits local work or an inbox poll.
 // It never expires automatically: only its owner can resume it, or stop the drained service.

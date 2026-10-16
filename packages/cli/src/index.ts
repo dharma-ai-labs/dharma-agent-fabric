@@ -50,6 +50,7 @@ import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRec
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
 import {maintainNamedSession} from './namedSessionMaintenance.js';
+import {assertNamedSessionStartupRegistration} from './namedSessionAdmission.js';
 import { recoverableContainerJournal } from './containerRelayRecovery.js';
 import { assertStudyExactPoll, studyTaskIdFromFlags } from './studyExactTaskSelector.js';
 import { initializeRepositoryKnowledge, readRepositoryKnowledgeSource } from './repositoryKnowledge.js';
@@ -5292,6 +5293,8 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   try {
     releaseLock = await acquirePidLock(resolve(paths.root, 'service.lock'), 250, 'named_session_already_running')
       .catch(error => {throw namedSessionStartupPhaseError('lock', error);});
+    // A startup poll may predate quiescence. Recheck durable admission after winning the owner lock.
+    assertNamedSessionStartupRegistration(existing, await step(() => readNamedSession(dharmaHome(), name)));
     const startProvider = async (childScope?: CodexSetupChildScope) => {
     let startupPhase: NamedSessionStartupPhase = 'client';
     try {
