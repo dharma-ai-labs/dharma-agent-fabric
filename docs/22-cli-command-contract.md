@@ -19,8 +19,43 @@ dharma messages <subcommand>
 dharma skills <subcommand>
 dharma policy <subcommand>
 dharma relay <subcommand>
+dharma sessions <subcommand>
 dharma diagnostics <subcommand>
 ```
+
+## Named Session Maintenance
+
+Source-candidate commands require a capable client and running service; they are
+not present in published CLI206:
+
+```text
+dharma sessions quiesce --name <name> --workspace-id <id> --fence-id <uuid> --apply
+dharma sessions resume --name <name> --workspace-id <id> --fence-id <uuid> --apply
+dharma sessions resume --name <name> --workspace-id <id> --fence-id <uuid> --recover-stopped --apply
+dharma sessions start --name <name> --workspace-id <id> --fence-id <uuid> --apply
+dharma sessions stop --name <name> --workspace-id <id> --fence-id <uuid> --drained --apply
+```
+
+Without `--apply`, these commands plan only. Quiescence rejects new work and inbox
+polls while already admitted operations and their evidence finish. A successful
+receipt binds zero pending work to the exact session and process generation.
+Only the matching fence can resume or stop that drained owner. Fences do not
+expire automatically; a service restart invalidates an old generation's receipt.
+Quiescence durably disables automatic session registration and verifies readback
+before acknowledging its fence. Drained stop verifies that pause before shutdown.
+Failed persistence leaves a recoverable quiesced service; matching resume verifies
+the enabled registration before reopening admission. Automatic supervisors cannot
+reenable a disabled registration, including after a crash or a stale startup poll.
+The persisted maintenance marker also blocks ordinary `start` when live status
+is unavailable. Explicit `resume --recover-stopped` requires the matching fence,
+a confirmed stopped owner, unchanged registration, and the same unexpired
+protected provider binding. It leaves automatic registration disabled, marking
+only restart permission. A subsequent explicit `start` must supply the matching
+fence and confirm the old owner is still stopped before enabling startup. Its
+receipt is not runtime readiness, and interrupted work remains retained.
+An unsupported service is rejected before a control request. Legacy `stop`
+can interrupt work and is not proof of a drained boundary. These commands neither
+change enrollment nor authorize an upgrade or additional provider work.
 
 ## Device
 

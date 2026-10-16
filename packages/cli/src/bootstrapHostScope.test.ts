@@ -108,7 +108,8 @@ test('every CLI vault-key caller explicitly forwards the owning host scope', asy
     ts.forEachChild(node, child => visit(child, owner));
   };
   visit(source); assert.equal(callers, 1); assert.equal(captures, 1);
-  assert.deepEqual(opened, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'evidenceSync',
+  // Named-session serving and the explicitly gated stopped-owner binding read share this owner.
+  assert.deepEqual(opened, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'namedSessionCommand', 'evidenceSync',
     'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);

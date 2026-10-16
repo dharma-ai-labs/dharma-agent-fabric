@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-maintenance/v1",
+  "title": "Local named-session maintenance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema", "receiptId", "name", "bindingId", "sessionId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "action", "fenceId", "generation", "mode", "state", "pending", "automaticRestartEnabled", "observedAt"],
+  "properties": {
+    "ok": {"const": true},
+    "schema": {"const": "dharma.named-session-maintenance/v1"},
+    "receiptId": {"type": "string", "format": "uuid"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}$"},
+    "bindingId": {"type": "string", "format": "uuid"},
+    "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"},
+    "repositoryBindingId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "endpointId": {"type": "string", "format": "uuid"},
+    "membershipId": {"type": "string", "format": "uuid"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "provider": {"const": "codex"},
+    "action": {"enum": ["quiesce", "resume", "stop-drained"]},
+    "fenceId": {"type": "string", "format": "uuid"},
+    "generation": {"type": "string", "format": "uuid"},
+    "mode": {"enum": ["live", "stopped_recovery"]},
+    "state": {"enum": ["quiesced", "open", "stop_requested", "restart_permitted"]},
+    "interruptedWorkDisposition": {"const": "preserved_for_verified_start"},
+    "pending": {"const": 0},
+    "automaticRestartEnabled": {"type": "boolean"},
+    "observedAt": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {"if": {"properties": {"action": {"const": "quiesce"}}}, "then": {"properties": {"mode": {"const": "live"}, "state": {"const": "quiesced"}, "automaticRestartEnabled": {"const": false}}}},
+    {"if": {"properties": {"action": {"const": "resume"}, "mode": {"const": "live"}}}, "then": {"properties": {"state": {"const": "open"}, "automaticRestartEnabled": {"const": true}}}},
+    {"if": {"properties": {"action": {"const": "stop-drained"}}}, "then": {"properties": {"mode": {"const": "live"}, "state": {"const": "stop_requested"}, "automaticRestartEnabled": {"const": false}}}},
+    {"if": {"properties": {"mode": {"const": "stopped_recovery"}}}, "then": {"required": ["interruptedWorkDisposition"], "properties": {"action": {"const": "resume"}, "state": {"const": "restart_permitted"}, "automaticRestartEnabled": {"const": false}}}}
+  ]
+}

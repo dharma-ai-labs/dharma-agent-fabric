@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -17,6 +17,15 @@ test('durable named registration excludes credentials, grants and foreign shape'
   const good: NamedSessionRegistration = { schema: 'dharma.named-session/v1', name: 'reviewer', bindingId: randomUUID(),
     identity, maximumCostCents: 100, maximumTurnCostCents: 25, enabled: true };
   await saveNamedSession(home, good);
+  const paused={...good,enabled:false,maintenanceFence:{fenceId:randomUUID(),generation:randomUUID()}};
+  await saveNamedSession(home,paused);
+  await assert.rejects(saveNamedSession(home,{...paused,enabled:true}),/registration_invalid/);
+  assert.deepEqual(await readNamedSession(home,'reviewer'),paused);
+  const permitted={...paused,maintenanceFence:{...paused.maintenanceFence,restartPermitted:true as const}};
+  await saveNamedSession(home,permitted);
+  assert.deepEqual(await readNamedSession(home,'reviewer'),permitted);
+  await assert.rejects(saveNamedSession(home,{...permitted,enabled:true}),/registration_invalid/);
+  await saveNamedSession(home,good);
   for (const invalid of [{ ...good, grant: 'private-fixture' }, { ...good, maximumTurnCostCents: 101 },
     { ...good, identity: { ...identity, credential: 'private-fixture' } },
     { ...good, identity: { ...identity, membershipId: 'unbound-email' } }]) {
@@ -53,7 +62,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
     vault.saveProviderSessionBinding(binding);
     const controller = new AbortController(), turns: string[] = [], replies: string[] = [];
     const listeners = new Set<(value: unknown) => void>();
-    let offered = false, accepted = false, active = 0, maximumActive = 0, closed = false, revision = 0;
+    let offered = false, accepted = false, active = 0, maximumActive = 0, closed = false, revision = 0, inboxPolls = 0;
     const questionId = randomUUID(), taskId = randomUUID(), now = new Date();
     const unsigned = { schema: 'dharma.session-question/v1', questionId, taskId,
       organizationId: identity.organizationId, repositoryBindingId: identity.repositoryBindingId,
@@ -124,7 +133,7 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
           organizationId: undefined, mode: 'bridge_owned', revision: ++revision, state: 'attached',
           leaseUntil: new Date(Date.now() + 60000).toISOString(), replay: false } };
       }
-      if (value.action === 'inbox') return { ...base, result: { offers: offered && !accepted ? [question] : [] } };
+      if (value.action === 'inbox') {inboxPolls++; return { ...base, result: { offers: offered && !accepted ? [question] : [] } };}
       if (value.action === 'accept') accepted = true;
       if (value.action === 'reply') replies.push(String(value.answer));
       return { ...base, result: { questionId, taskId, targetBindingId: binding.bindingId,
@@ -346,6 +355,40 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
       assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
         'https://schemas.dharma-ai.io/provider-session-completion/v1', completion)).ok, true);
       assert.equal((await namedSessionRequest(home, 'implementer', { action: 'status' })).sessionId, binding.sessionId);
+      const current = await namedSessionRequest(home, 'implementer', {action:'status'});
+      const generation = (current.admission as {generation:string}).generation, fenceId = randomUUID();
+      const failedFence = randomUUID(), registrationRoot = namedSessionPaths(home, 'implementer').root;
+      await chmod(registrationRoot,0o500);
+      try {
+        await assert.rejects(namedSessionRequest(home, 'implementer', {action:'quiesce', fenceId:failedFence, generation}),
+          {message:'named_session_maintenance_persistence_unconfirmed'});
+        assert.equal(((await namedSessionRequest(home, 'implementer', {action:'status'})).admission as {state:string}).state, 'quiesced');
+        await assert.rejects(namedSessionRequest(home, 'implementer', {action:'work', workId:randomUUID(), prompt:'Do not admit'}),
+          /named_session_quiesced/);
+      } finally {await chmod(registrationRoot,0o700);}
+      await namedSessionRequest(home, 'implementer', {action:'resume', fenceId:failedFence, generation});
+      assert.equal((await readNamedSession(home, 'implementer'))?.enabled, true);
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action:'quiesce', fenceId, generation:randomUUID()}),
+        /named_session_generation_changed/);
+      const quiesced = await namedSessionRequest(home, 'implementer', {action:'quiesce', fenceId, generation});
+      assert.equal(quiesced.state, 'quiesced'); assert.equal(quiesced.pending, 0);
+      assert.equal(quiesced.automaticRestartEnabled, false);
+      assert.equal((await readNamedSession(home, 'implementer'))?.enabled, false);
+      assert.deepEqual((await readNamedSession(home,'implementer'))?.maintenanceFence,{fenceId,generation});
+      assert.equal((await validateContract(join(import.meta.dirname, 'schemas'),
+        'https://schemas.dharma-ai.io/named-session-maintenance/v1', quiesced)).ok, true);
+      const pollsAtFence = inboxPolls, budgetAtFence = (await namedSessionRequest(home, 'implementer', {action:'status'})).budget;
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action:'work', workId:randomUUID(), prompt:'Do not admit'}),
+        /named_session_quiesced/);
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action:'resume', fenceId:randomUUID(), generation}),
+        /named_session_fence_conflict/);
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action:'stop'}), /named_session_fence_required/);
+      await new Promise(resolveWait => setTimeout(resolveWait, 1100));
+      assert.equal(inboxPolls, pollsAtFence); assert.equal(turns.length, 3); assert.equal(active, 0);
+      assert.deepEqual((await namedSessionRequest(home, 'implementer', {action:'status'})).budget, budgetAtFence);
+      assert.equal((await namedSessionRequest(home, 'implementer', {action:'resume', fenceId, generation})).state, 'open');
+      assert.equal((await readNamedSession(home, 'implementer'))?.enabled, true);
+      assert.equal((await readNamedSession(home,'implementer'))?.maintenanceFence,undefined);
       const retention = await vault.enforceRawEvidenceRetention({ retentionDays: 30,
         now: new Date(Date.now() + 31 * 86400000) });
       assert.equal(retention.deleted, 2);
@@ -353,6 +396,15 @@ for (const queueFailure of [false, true]) for (const failWork of [false, true]) 
         await assert.rejects(vault.getBlob(String((receipt.nativeEvidence as Record<string, unknown>).contentHash)));
         assert.ok(await vault.getBlob(String(receipt.completionHash)));
       }
+      const stopFence = randomUUID();
+      await namedSessionRequest(home, 'implementer', {action:'quiesce', fenceId:stopFence, generation});
+      await assert.rejects(namedSessionRequest(home, 'implementer', {action:'stop-drained', fenceId:randomUUID(), generation}),
+        /named_session_fence_conflict/);
+      assert.equal((await readNamedSession(home, 'implementer'))?.enabled, false);
+      const stopped = await namedSessionRequest(home, 'implementer', {action:'stop-drained', fenceId:stopFence, generation});
+      assert.equal(stopped.state, 'stop_requested'); await service;
+      assert.equal((await readNamedSession(home, 'implementer'))?.enabled, false);
+      assert.equal(active, 0); assert.equal(turns.length, 3);
     } finally { controller.abort(); await service; vault.close(); }
     assert.equal(closed, true);
   });
