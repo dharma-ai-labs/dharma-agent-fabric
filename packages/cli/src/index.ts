@@ -104,6 +104,8 @@ import { demoWatchStatus, disableDemoWatch, enableDemoWatch, inspectDemoWatchSup
   type DemoWatchControlDependencies } from './demoWatchControl.js';
 import { namedSessionPaths, namedSessionRequest, readNamedSession, saveNamedSession,
   runNamedSessionService, type NamedSessionRegistration } from './namedSessionService.js';
+import {NamedSessionTransportFailure, namedSessionReadinessDiagnostic,
+  namedSessionReadinessDiagnosticRequested} from './namedSessionTransportDiagnostic.js';
 import { queueNamedSessionEvidence } from './namedSessionEvidence.js';
 import {waitForNamedSessionStartup} from './namedSessionStartup.js';
 import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
@@ -148,7 +150,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 
-const VERSION = '0.2.207';
+const VERSION = '0.2.208';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -248,6 +250,11 @@ function print(value: Output): void {
 
 export function commandExitCode(argv: string[], value: Output): number {
   const { positional, flags } = parseCliOptions(argv);
+  if (positional[0] === 'sessions' && positional[1] === 'readiness' && flags.get('diagnostic') === true) {
+    const diagnosticResult = value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string,unknown> : null;
+    return diagnosticResult?.ok === true && diagnosticResult.schema === 'dharma.named-session-readiness/v1' ? 0 : 2;
+  }
   const setupIngress = positional[0] === 'setup' && positional[1] === 'codex';
   if ((!setupIngress && positional[0] !== 'bootstrap') || flags.has('help') || flags.has('version')) return 0;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 1;
@@ -5137,6 +5144,7 @@ async function requestBootstrapNamedSession(hostScope: BootstrapHostScope,
 }
 
 async function namedSessionCommand(action: string, flags: Map<string, string | boolean>): Promise<Output> {
+  const diagnostic = namedSessionReadinessDiagnosticRequested(action,flags);
   const hostScope = currentBootstrapHostScope();
   const setupSessionScope = currentAcceptedSetupSessionScope();
   const supervisorOwner = currentNamedSessionChildOwner();
@@ -5180,7 +5188,12 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   }
   if (action === 'readiness') {
     if (!existing?.enabled) throw new Error('named_session_readiness_unavailable');
-    const result = await namedSessionRequest(dharmaHome(), name, {action: 'readiness'});
+    let result: Record<string,unknown>;
+    try {result = await namedSessionRequest(dharmaHome(), name, {action:'readiness'}, {diagnostic});}
+    catch (error) {
+      if (diagnostic && error instanceof NamedSessionTransportFailure) return namedSessionReadinessDiagnostic(existing,error);
+      throw error;
+    }
     if (Object.keys(result).sort().join(',') !== 'bindingId,deviceId,endpointId,membershipId,name,nativeSkill,ok,organizationId,provider,repositoryBindingId,schema,sessionId,workspaceId'
       || result.schema !== 'dharma.named-session-readiness/v1' || result.name !== name || result.bindingId !== existing.bindingId
       || typeof result.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/.test(result.sessionId)

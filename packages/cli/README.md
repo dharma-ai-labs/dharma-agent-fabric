@@ -17,6 +17,28 @@ Missing prerequisites must stop with a typed result rather than weaken storage,
 copy authentication or switch to a legacy grant. See
 `AGENT_FABRIC_ONBOARDING.md` for readiness, scoped recovery and team operation.
 
+## Read-only named-session diagnosis
+
+For an already enrolled workspace, the agent can diagnose an unavailable named
+owner through the normal CLI:
+
+```bash
+dharma sessions readiness --name <registered-name> --workspace-id <workspace-id> --diagnostic
+```
+
+This is an agent operation, not an additional human-terminal setup step. It
+uses the unchanged readiness request and starts no session or model turn.
+Connection failure returns a scoped local receipt with `nativeReady: false`
+and exit status `2`, distinguishing missing/refused/denied connections,
+timeouts, malformed responses and allowlisted remote rejections. It excludes
+paths, credentials and arbitrary error text. Successful readiness keeps its
+existing response contract. Legacy callers are unchanged.
+
+A diagnostic is not authority to retry, restart, change permissions or replace
+credentials. Reconcile the existing owner's identity and work before using its
+supported recovery process. Socket or health-file presence alone is not proof
+of a working session.
+
 ## Legacy private user entry for a setup grant
 
 Use `dharma bootstrap --grant-prompt` with the portal's exact grant-free setup

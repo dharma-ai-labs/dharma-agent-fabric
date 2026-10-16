@@ -12,6 +12,7 @@ import {readNamedSessionNativeAudit} from './namedSessionNativeAudit.js';
 import { composeNamedSessionRepositoryPrompt } from './namedSessionPackageGate.js';
 import {parseNamedCodexSkillObservation, type NamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
 import {NamedSessionAdmission} from './namedSessionAdmission.js';
+import {NamedSessionTransportFailure} from './namedSessionTransportDiagnostic.js';
 
 export interface NamedSessionRegistration {
   schema: 'dharma.named-session/v1';
@@ -81,29 +82,42 @@ export async function saveNamedSession(home: string, value: NamedSessionRegistra
   await rename(temporary, paths.registration);
 }
 
-export async function namedSessionRequest(home: string, name: string, request: Record<string, unknown>) {
+export async function namedSessionRequest(home: string, name: string, request: Record<string, unknown>,
+  options?: {readonly diagnostic?: boolean}) {
   const paths = namedSessionPaths(home, name);
   const serialized = `${JSON.stringify(request)}\n`;
   if (Buffer.byteLength(serialized) > 20000) throw new Error('named_session_request_too_large');
   return new Promise<Record<string, unknown>>((resolveReply, reject) => {
     const socket = createConnection(paths.socket);
-    let bytes = Buffer.alloc(0), complete = false;
+    let bytes = Buffer.alloc(0), complete = false, connected = false;
     socket.setTimeout(request.action === 'work' || request.action === 'quiesce' ? 310_000 : 30_000);
-    const fail = () => { if (!complete) { complete = true; reject(new Error('named_session_unavailable')); } socket.destroy(); };
-    socket.on('connect', () => socket.write(serialized));
-    socket.on('error', fail); socket.on('timeout', fail);
-    socket.on('close', () => { if (!complete) fail(); });
+    const fail = (failure: NamedSessionTransportFailure) => {
+      if (!complete) {complete = true; reject(options?.diagnostic === true ? failure : new Error('named_session_unavailable'));}
+      socket.destroy();
+    };
+    const phase = () => connected ? 'response' as const : 'connect' as const;
+    socket.on('connect', () => {
+      if (complete) return;
+      connected = true;
+      try {socket.write(serialized);} catch (error) {fail(NamedSessionTransportFailure.fromSocket('write',error));}
+    });
+    socket.on('error', error => fail(NamedSessionTransportFailure.fromSocket(phase(),error)));
+    socket.on('timeout', () => fail(new NamedSessionTransportFailure(phase(),'timeout')));
+    socket.on('close', () => {if (!complete) fail(new NamedSessionTransportFailure(phase(),'connection_closed'));});
     socket.on('data', chunk => {
+      if (complete) return;
       bytes = Buffer.concat([bytes, chunk]);
-      if (bytes.length > 50000) { fail(); return; }
+      if (bytes.length > 50000) {fail(new NamedSessionTransportFailure('response','response_too_large')); return;}
       const end = bytes.indexOf(10); if (end < 0) return;
       try {
         const value = JSON.parse(bytes.subarray(0, end).toString('utf8'));
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid');
         complete = true; socket.end();
-        if (value.ok !== true) reject(new Error(String(value.code || 'named_session_failed')));
+        if (value.ok !== true) reject(options?.diagnostic === true
+          ? new NamedSessionTransportFailure('remote','remote_rejected',null,value.code)
+          : new Error(String(value.code || 'named_session_failed')));
         else resolveReply(value);
-      } catch { fail(); }
+      } catch {fail(new NamedSessionTransportFailure('decode','malformed_response'));}
     });
   });
 }

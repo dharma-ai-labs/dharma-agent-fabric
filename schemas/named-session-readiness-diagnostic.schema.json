@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/named-session-readiness-diagnostic/v1",
+  "title": "Local named-session transport failure observation; not readiness or an authority envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema", "localOnly", "nativeReady", "receiptId", "observedAt", "name", "bindingId", "organizationId", "repositoryBindingId", "workspaceId", "endpointId", "membershipId", "deviceId", "provider", "code", "diagnostic"],
+  "properties": {
+    "ok": {"const": false},
+    "schema": {"const": "dharma.named-session-readiness-diagnostic/v1"},
+    "localOnly": {"const": true},
+    "nativeReady": {"const": false},
+    "receiptId": {"type": "string", "format": "uuid"},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}$(?![\\s\\S])"},
+    "bindingId": {"type": "string", "format": "uuid"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$(?![\\s\\S])"},
+    "repositoryBindingId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "endpointId": {"type": "string", "format": "uuid"},
+    "membershipId": {"type": "string", "format": "uuid"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "provider": {"const": "codex"},
+    "code": {"const": "named_session_unavailable"},
+    "diagnostic": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "phase", "reason", "osCode", "remoteCode"],
+      "properties": {
+        "schema": {"const": "dharma.named-session-transport-diagnostic/v1"},
+        "phase": {"enum": ["connect", "write", "response", "decode", "remote"]},
+        "reason": {"enum": ["socket_missing", "connection_refused", "permission_denied", "connection_reset", "timeout", "transport_error", "connection_closed", "response_too_large", "malformed_response", "remote_rejected"]},
+        "osCode": {"enum": [null, "ENOENT", "ECONNREFUSED", "EACCES", "EPERM", "ECONNRESET", "ETIMEDOUT", "EPIPE"]},
+        "remoteCode": {"enum": [null, "named_session_unavailable", "named_session_failed", "named_session_stopped", "named_session_busy", "named_session_quiesced", "named_session_readiness_unavailable", "named_session_readiness_scope_mismatch", "named_session_native_skill_unavailable", "named_session_scope_mismatch", "named_session_registration_invalid", "setup_session_invalid", "setup_session_scope_changed", "setup_readiness_stale", "vault_api_unavailable"]}
+      }
+    }
+  }
+}
