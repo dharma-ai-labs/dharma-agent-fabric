@@ -6,6 +6,60 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import test from 'node:test';
 
+test('new Linux launchers privately create package files without changing historical rollback bytes', async () => {
+  const {stableRepositoryLauncherContents, recordedRepositoryNodeDirectory} = await import('./repositoryLaunchers.js');
+  const runtime = {platform: 'linux' as const, nodeDirectory: '/approved/node/bin',
+    npmCliPath: '/approved/npm/bin/npm-cli.js', codexDirectory: '/approved/codex/bin'};
+  for (const version of ['0.2.206', '0.2.206-canary.1', '0.3.0', '1.0.0']) {
+    const contents = stableRepositoryLauncherContents(version, runtime);
+    assert.ok(contents.shell.includes('\numask 077\nexec '));
+    assert.ok(contents.shell.includes(` exec --yes --umask=077 -- @dharma-ai-labs/agent-fabric@${version} `));
+    assert.equal(recordedRepositoryNodeDirectory(version, contents, 'linux'), runtime.nodeDirectory);
+    for (const shell of [contents.shell.replace('umask 077\n', ''),
+      contents.shell.replace('umask 077\n', 'umask 002\n'), contents.shell.replace('--umask=077 ', ''),
+      contents.shell.replace('--umask=077 ', '--umask=002 '), contents.shell + 'echo foreign\n']) {
+      assert.equal(recordedRepositoryNodeDirectory(version, {...contents, shell}, 'linux'), undefined);
+    }
+  }
+  for (const version of ['0.2.138', '0.2.180', '0.2.204', '0.2.205']) {
+    const contents = stableRepositoryLauncherContents(version, runtime);
+    assert.deepEqual(contents, {
+      shell: `#!/bin/sh\nexport PATH='/approved/node/bin':"$PATH"\nexport PATH='/approved/codex/bin':"$PATH"\nexec '/approved/node/bin/node' '/approved/npm/bin/npm-cli.js' exec --yes -- @dharma-ai-labs/agent-fabric@${version} "$@"\n`,
+      windows: `@echo off\r\nnpm exec --yes -- @dharma-ai-labs/agent-fabric@${version} %*\r\n`,
+    });
+    assert.equal(recordedRepositoryNodeDirectory(version, contents, 'linux'), runtime.nodeDirectory);
+  }
+  const unpinned = stableRepositoryLauncherContents('0.2.206');
+  assert.ok(unpinned.shell.includes('\numask 077\nexec npm exec --yes --umask=077 -- '));
+  const windows = stableRepositoryLauncherContents('0.2.206', {platform: 'win32', nodeDirectory: 'C:\\approved\\node'});
+  assert.ok(!windows.windows.includes('umask'));
+  assert.ok(windows.windows.endsWith('npm exec --yes -- @dharma-ai-labs/agent-fabric@0.2.206 %*\r\n'));
+});
+
+test('new Linux launcher overrides a permissive parent umask before invoking npm', {skip: process.platform !== 'linux'}, async () => {
+  const {stableRepositoryLauncherContents, verifyRollbackRepositoryLaunchers} = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-private-launcher ' ")));
+  const nodeDirectory = join(root, 'node'), npmDirectory = join(root, 'npm');
+  await mkdir(nodeDirectory, {mode: 0o700});
+  await mkdir(join(npmDirectory, 'bin'), {recursive: true, mode: 0o700});
+  await copyFile(process.execPath, join(nodeDirectory, 'node')); await chmod(join(nodeDirectory, 'node'), 0o700);
+  const npmCliPath = join(npmDirectory, 'bin', 'npm-cli.js');
+  await writeFile(join(npmDirectory, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+  await writeFile(npmCliPath, "const fs=require('node:fs');fs.mkdirSync('fresh-package',{mode:0o777});fs.writeFileSync('fresh-package/index.js','public fixture',{mode:0o666});process.stdout.write(JSON.stringify({umask:process.umask(),argv:process.argv.slice(2),mode:fs.statSync('fresh-package/index.js').mode&0o777,directoryMode:fs.statSync('fresh-package').mode&0o777}));", {mode: 0o600});
+  const contents = stableRepositoryLauncherContents('0.2.206', {platform: 'linux', nodeDirectory, npmCliPath});
+  const launcher = join(root, 'launcher.sh'); await writeFile(launcher, contents.shell, {mode: 0o700});
+  try {
+    const run = promisify(execFile);
+    const output = JSON.parse((await run('/bin/sh', ['-c', 'umask 002; exec /bin/sh "$1" status "$2"',
+      'fixture', launcher, 'space and ; $argument'], {cwd: root, env: {PATH: '/usr/bin:/bin', HOME: root, npm_config_umask: '002'}})).stdout);
+    assert.equal(output.umask, 0o077);
+    assert.equal(output.mode, 0o600);
+    assert.equal(output.directoryMode, 0o700);
+    assert.deepEqual(output.argv, ['exec', '--yes', '--umask=077', '--', '@dharma-ai-labs/agent-fabric@0.2.206', 'status', 'space and ; $argument']);
+    assert.equal(await verifyRollbackRepositoryLaunchers('0.2.206', contents), true);
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
 test('Linux launcher retains the selected Codex directory without copying the ambient environment', async () => {
   const {stableRepositoryLauncherContents, recordedRepositoryNodeDirectory} = await import('./repositoryLaunchers.js');
   const runtime = {platform: 'linux' as const, nodeDirectory: '/approved/node/bin',
