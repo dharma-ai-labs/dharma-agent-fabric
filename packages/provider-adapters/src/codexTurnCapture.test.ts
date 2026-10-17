@@ -3,7 +3,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { validateContract, verifyCodexTaskCaptureBytes, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
-import { createCodexTurnCapture } from './codexTurnCapture.js';
+import { createCodexTurnCapture, containsCredential } from './codexTurnCapture.js';
+
+test('client secret keys are excluded in direct, nested and JSON-encoded metadata', () => {
+  for (const value of [{ clientSecret: 'synthetic-not-real' }, { client_secret: 'synthetic-not-real' },
+    { nested: [{ 'client-secret': 'synthetic-not-real' }] },
+    JSON.stringify({ clientSecret: 'synthetic-not-real' }), JSON.stringify({ nested: { CLIENT_SECRET: 'synthetic-not-real' } })]) {
+    assert.equal(containsCredential(value), true);
+  }
+});
 
 function fixture() {
   const binding = { owner: 'dharma_bridge', provider: 'codex' as const, threadId: 'thread-1',

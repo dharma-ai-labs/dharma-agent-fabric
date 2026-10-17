@@ -12,7 +12,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./experimental/codex-session": "./dist/codexAppServerSession.js",
-    "./experimental/codex-transport": "./dist/codexAppServerTransport.js"
+    "./experimental/codex-transport": "./dist/codexAppServerTransport.js",
+    "./experimental/codex-native-factory": "./dist/codexNativeFactory.js"
   },
   "files": ["dist", "README.md"],
   "publishConfig": { "access": "public", "provenance": true },
