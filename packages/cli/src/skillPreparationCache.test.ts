@@ -310,6 +310,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   for (let index = 1; index < cycles; index++) roots.push(await mkdtemp(join(f.scopeRoot, 'attempt-')));
   let preparedCount = 0; let flight: Promise<void> | undefined; let stopped = false;
   let vaultCloses = 0; let transportCalls = 0; let sourceScans = 0; let candidatePolls = 0;
+  let clientOpens = 0; let sessionOpens = 0;
   let releaseSourceScan: (() => void) | undefined;
   let elapsedMs = 0; let activations = 0;
   const events: string[] = [];
@@ -343,7 +344,23 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       serverAuthorization: { workspaceId: workspace.workspaceId },
     }),
     loadVerifiedWorkspacePolicy: async () => policy,
-    client: async () => Object.freeze({ fixture: true }), dharmaHome: () => f.home,
+    AgentFabricClient: { open: async (options: {
+      configPath: string; statePath: string; hostScope: unknown; isolatedSession: boolean;
+    }) => {
+      clientOpens++;
+      assert.equal(options.configPath, join(f.home, 'fixture-device.json'));
+      assert.equal(options.statePath, join(f.home, 'fixture-protocol.json'));
+      assert.equal(options.hostScope, undefined, 'staging fixture has no setup authority');
+      assert.equal(options.isolatedSession, false);
+      return Object.freeze({ fixture: true, openSession: async (version: string) => {
+        assert.equal(version, '0.2.102'); sessionOpens++;
+      } });
+    } },
+    configPath: () => join(f.home, 'fixture-device.json'),
+    protocolStatePath: () => join(f.home, 'fixture-protocol.json'),
+    isIsolatedDeviceSession: () => false,
+    client: () => { throw new Error('unexpected legacy combined-session fixture'); },
+    dharmaHome: () => f.home,
     acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },
@@ -400,6 +417,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     },
     writeJsonAtomic: async () => {},
   }) as Record<string, unknown>;
+  assert.equal(clientOpens, 1); assert.equal(sessionOpens, 1);
   assert.equal(vaultCloses, 1); assert.equal(transportCalls, holdSourceScan ? 2 : 1);
   assert.equal(sourceScans, 1, 'source scan must remain single-flight');
   assert.equal(candidatePolls, 1, 'candidate polling must wait until the in-flight scan is applied');

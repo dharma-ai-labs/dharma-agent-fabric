@@ -37,7 +37,8 @@ export const approvedPackages = Object.freeze([
 export const approvedProductSourceHashes = Object.freeze({
   "packages/cli/src/index.ts": "67c833b38b0c87d4d47a4bfbccea552cc93d1fa81ef9fef80995c817d3237a61",
   "packages/cli/src/repositoryRelaySupervisor.ts": "f19a9a5a2a4340d85a4dda717840994e1db465072e0e980acc38ccc9968275ca",
-  "packages/cli/src/repositoryRelaySessionFailure.test.ts": "57129abe2af0a181a6063593b2be139bc7ca014979250999aeaa465e79fe8e77"
+  "packages/cli/src/repositoryRelaySessionFailure.test.ts": "57129abe2af0a181a6063593b2be139bc7ca014979250999aeaa465e79fe8e77",
+  "packages/cli/src/skillPreparationCache.test.ts": "291bff4fe225905a41cf08ac8a2cd0b163e3d1152596f08d66153ea73e89dd1a"
 });
 export function sourceTextSha256(text) {
   return createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex');
