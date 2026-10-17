@@ -88,18 +88,27 @@ export async function retrieveSigningRecoveryDelivery(input:RecoverExpiredDevice
     // One official existing-key read, forced fresh even on cached adapters.
     const identity=await loadDeviceIdentity({config,hostScope:input.hostScope,store:{...store,
       get:account=>(store.getFresh??store.get).call(store,account)}});
-    let signature:string;
+    let signature:string,deviceKey:KeyObject;
     try{
-      const key=createPrivateKey({format:'jwk',key:identity.privateJwk});
-      if(createPublicKey(key).export({format:'jwk'}).x!==challenge.publicKeyEd25519)return fail();
-      signature=sign(null,deviceSigningRecoverySigningPayload(challenge),key).toString('base64url');
+      deviceKey=createPrivateKey({format:'jwk',key:identity.privateJwk});
+      if(createPublicKey(deviceKey).export({format:'jwk'}).x!==challenge.publicKeyEd25519)return fail();
+      signature=sign(null,deviceSigningRecoverySigningPayload(challenge),deviceKey).toString('base64url');
     }finally{delete identity.privateJwk.d;}
     const url=initial.origin+PATH,remaining=Date.parse(challenge.expiresAt)-clock();if(remaining<=0)return fail();
     const signal=AbortSignal.any([fence.signal,AbortSignal.timeout(Math.max(1,Math.min(30000,remaining)))]);
+    const body=JSON.stringify({schema:'dharma.device-signing-recovery-delivery-request/v1',action:'delivery',
+      organizationId:challenge.organizationId,recoveryId:challenge.recoveryId,approvalId:challenge.approvalId,signature});
+    const timestamp=new Date(clock()).toISOString();
+    // Recovery transport IDs are not a connected relay or Codex session.
+    // The persisted challenge fixes the body/message/nonce identity.
+    const transport=Buffer.from(JSON.stringify({bodyHash:hash(body),deviceId:challenge.deviceId,messageId:challenge.approvalId,method:'POST',
+      nonce:challenge.nonce,organizationId:challenge.organizationId,pathname:PATH,sequence:1,sessionId:challenge.recoveryId,timestamp}));
+    const transportSignature=sign(null,transport,deviceKey).toString('base64url');
     phase='request';await fence.assert();
     response=await (input.fetcher??fetch)(url,{method:'POST',redirect:'error',credentials:'omit',
-      headers:{'content-type':'application/json','cache-control':'no-store'},signal,body:JSON.stringify({schema:'dharma.device-signing-recovery-delivery-request/v1',
-        action:'delivery',organizationId:challenge.organizationId,recoveryId:challenge.recoveryId,approvalId:challenge.approvalId,signature})});
+      headers:{'content-type':'application/json','cache-control':'no-store','x-dharma-device-id':challenge.deviceId,
+        'x-dharma-session-id':challenge.recoveryId,'x-dharma-message-id':challenge.approvalId,'x-dharma-timestamp':timestamp,
+        'x-dharma-sequence':'1','x-dharma-nonce':challenge.nonce,'x-dharma-signature':transportSignature},signal,body});
     httpStatus=response.status;await fence.assert();
     if(response.status!==200||response.redirected||(response.url&&response.url!==url)){
       void response.body?.cancel().catch(()=>{});return fail();

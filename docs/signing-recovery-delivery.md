@@ -34,8 +34,11 @@ and in-memory X25519 private key from the same handshake. The challenge cannot
 choose local device, installation, source or native-session expectations.
 
 The client reads the existing device key once through the official protected
-store, signs only the purpose-bound challenge and sends one bounded POST to the
-fixed same-origin recovery path, with no cookies, bearer token or redirects.
+store, signs the purpose-bound challenge and exact request transport with that
+same in-memory key, and sends one bounded POST to the fixed same-origin recovery
+path, with no cookies, bearer token or redirects. The transport recovery and
+approval IDs are not a connected relay or Codex session; this readback neither
+creates a protocol session/cursor nor consumes new authority.
 It validates the bounded response and decrypts the matching candidate, then
 replans and rechecks the exact local context. Only the relay's private callback
 can enter the existing enrollment lock and journal commit. No callback,
@@ -45,8 +48,10 @@ uncertain network/write outcomes are sanitized and never retried automatically.
 The narrow completion receipt explicitly says `ready:false` and
 `signing_trust_installed_not_onboarding_ready`. It does not restore old-root
 startup opt-in or establish actual native continuity. The server's supported
-device-authenticated caller and handshake are still unconnected: tests use
-synthetic stores and bounded mock HTTP, not a live endpoint or user key.
+device-authenticated readback route is a separate source candidate. Initial
+issuance/browser publication handshake and second-device adoption are still
+unconnected: tests use synthetic stores and bounded mock HTTP, not a live
+endpoint or user key.
 
 ## Protected Journal
 
