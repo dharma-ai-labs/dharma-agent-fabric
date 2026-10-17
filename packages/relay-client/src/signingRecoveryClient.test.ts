@@ -75,7 +75,16 @@ async function fixture(){
     assert.deepEqual(Object.keys(value).sort(),['action','approvalId','organizationId','recoveryId','schema','signature']);
     assert.equal(value.action,'delivery');assert.equal(value.recoveryId,challenge.recoveryId);assert.equal(value.approvalId,challenge.approvalId);
     assert.equal(verify(null,deviceSigningRecoverySigningPayload(challenge),device.publicKey,Buffer.from(value.signature,'base64url')),true);
-    assert.equal(new Headers(request.headers).has('authorization'),false);assert.equal(request.redirect,'error');
+    const headers=new Headers(request.headers);
+    assert.equal(headers.has('authorization'),false);assert.equal(request.redirect,'error');
+    const transport=Buffer.from(JSON.stringify({bodyHash:hash(String(request.body)),deviceId:config.deviceId,messageId:challenge.approvalId,method:'POST',
+      nonce:challenge.nonce,organizationId:config.organizationId,pathname:'/api/v1/agent-fabric/signing-recovery',sequence:1,
+      sessionId:challenge.recoveryId,timestamp:new Date(now).toISOString()}));
+    assert.equal(headers.get('x-dharma-device-id'),config.deviceId);assert.equal(headers.get('x-dharma-message-id'),challenge.approvalId);
+    assert.equal(headers.get('x-dharma-session-id'),challenge.recoveryId);assert.equal(headers.get('x-dharma-nonce'),challenge.nonce);
+    assert.equal(headers.get('x-dharma-sequence'),'1');assert.equal(headers.get('x-dharma-timestamp'),new Date(now).toISOString());
+    assert.equal(headers.has('cookie'),false);
+    assert.equal(verify(null,transport,device.publicKey,Buffer.from(headers.get('x-dharma-signature')!,'base64url')),true);
     assert.equal(request.credentials,'omit');return Response.json(body);
   };
   return {root,configPath,config,account,identityAccount,privateIdentity,values,reads,writes,requests,source,session,challenge,candidate,body,
