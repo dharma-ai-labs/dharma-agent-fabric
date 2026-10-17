@@ -5,6 +5,29 @@ envelopes, provider capabilities, evidence requests, signed tasks, and receipts.
 Schema validity establishes structure and integrity; it does not prove factual
 grounding or reasoning validity.
 
+## Signing-expiry recovery possession protocol
+
+`parseDeviceSigningRecoveryChallenge()`,
+`deviceSigningRecoverySigningPayload()` and
+`verifyDeviceSigningRecoveryProof()` validate the purpose-separated
+`dharma.device-signing-recovery-challenge/v1` public possession protocol. The
+challenge binds the existing device and installation, intended recipient,
+organization, workspace, source selection and policy, protected configuration,
+native-session binding digest, browser approval intent, exact issuer/audience,
+previous protected anchor and trust, proposed monotonic trust artifact,
+encrypted-delivery public key and a maximum 15-minute window. Session bindings
+are digests, never browser cookies, session tokens or native transcript content.
+
+A valid proof establishes device-key possession only. It is not recipient or
+owner approval, candidate provenance, server-authenticator verification, a
+one-use consumption record or permission to modify protected trust. Callers
+must obtain the expected context from authoritative records, not echo it from
+the request. The schema checks structure; the parser also checks canonical
+encodings, timestamps, context equality, increasing generation and changed
+artifact. Ordinary signing-update verification and historical key windows are
+unchanged. The server, browser and protected-store recovery flow is not yet
+connected; these functions alone do not enable production recovery.
+
 ## Action-decision receipts
 
 `dharma.action-decision-receipt/v1` is a short-lived receipt signed by a named
