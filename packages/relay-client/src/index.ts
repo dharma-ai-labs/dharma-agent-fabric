@@ -22,6 +22,8 @@ export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
   type SetupClaimFailurePhase, type SetupClaimFailureDiagnostic } from './setupClaim.js';
+export {planDeviceSigningRecovery, type DeviceSigningRecoveryPlanInput, type DeviceSigningRecoverySourceSelection,
+  type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding} from './signingRecoveryPlan.js';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
