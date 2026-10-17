@@ -18,7 +18,10 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
-import {resumeSigningRecoveryJournal} from './signingRecoveryJournal.js';
+import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
+import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
+import {planDeviceSigningRecovery} from './signingRecoveryPlan.js';
+export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
@@ -351,6 +354,41 @@ async function writeEnrollmentAnchor(store: SecureSecretStore, config: DeviceCon
       legacyAccount: legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)});
     if (!written) throw Error('connection_existing_anchor_requires_recovery');
   } else {await store.put(account, secret);}
+}
+
+// Both callers already hold the OS-user enrollment lock. Windows additionally
+// performs current+legacy comparison in the existing shared vault helper.
+function signingRecoveryJournalIO(input:{configPath:string;config:DeviceConfig;store:SecureSecretStore;
+  fence:HostOperationFence;clock:()=>number}):SigningRecoveryJournalIO{
+  const {configPath,config,store,fence,clock}=input;
+  const account=enrollmentAnchorAccountFor(config.hqUrl,config.organizationId,config.deviceId);
+  const legacy=legacyEnrollmentAnchorAccountFor(config.hqUrl,config.organizationId);
+  return {fence,now:clock,readConfig:()=>loadDeviceConfig(configPath),
+    readAnchors:async()=>({current:await freshAnchorValue(store,account),legacy:await freshAnchorValue(store,legacy)}),
+    compareAndPutAnchor:async({expectedCurrent,expectedLegacy,secret})=>{
+      if(store.backend!=='windows-credential-manager'
+        &&(await freshAnchorValue(store,account)!==expectedCurrent||await freshAnchorValue(store,legacy)!==expectedLegacy))return false;
+      await writeEnrollmentAnchor(store,config,secret,expectedCurrent,expectedLegacy);return true;
+    },writeConfig:next=>atomicJson(configPath,next,fence)};
+}
+
+/** Typed owning-host phase completion only, not a CLI/MCP command. The matching
+ * approval handshake and ephemeral key stay in that host's native memory.
+ * This never creates/replaces a device, grants access or retries a failed run. */
+export async function recoverExpiredDeviceSigningTrust(input:RecoverExpiredDeviceSigningTrustInput){
+  return retrieveSigningRecoveryDelivery(input,async accepted=>{
+    const fence=new HostOperationFence(input.hostScope),clock=input.now??Date.now;
+    const raw=await fence.step(async()=>input.store??await createSystemSecureStore()),store=fence.store(raw);
+    const config=await fence.step(()=>loadDeviceConfig(input.configPath));
+    return withEnrollmentAnchorLock(config,fence,async()=>{
+      // Waiting for another writer never preserves a stale source/session plan.
+      const plan=await planDeviceSigningRecovery({...input,store});
+      const current=checkedRecoveryHostContext({...input,challenge:accepted.challenge},plan,clock());
+      if(canonicalize(current.expected)!==canonicalize(accepted.expected))throw Error('signing_recovery_local_context_changed');
+      return commitSigningRecoveryJournal({io:signingRecoveryJournalIO({configPath:input.configPath,config,store,fence,clock}),
+        challenge:current.challenge,expected:current.expected,candidate:accepted.candidate});
+    });
+  });
 }
 
 /** Missing-anchor recovery must prove both current and historical slots absent. */
@@ -949,18 +987,8 @@ async function recoverEnrollmentLocked(input: {
   if ((JSON.parse(serialized) as {schema?:unknown})?.schema === 'dharma.device-enrollment-recovery-journal/v1') {
     const fence = input.hostFence;
     if (!fence) throw Error('signing_recovery_host_scope_required');
-    return resumeSigningRecoveryJournal({fence, now: () => (input.now ?? new Date()).getTime(),
-      readConfig: () => loadDeviceConfig(input.configPath),
-      readAnchors: async () => ({current: await freshAnchorValue(store, account),
-        legacy: await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId))}),
-      compareAndPutAnchor: async ({expectedCurrent, expectedLegacy, secret}) => {
-        if (store.backend !== 'windows-credential-manager'
-          && (await freshAnchorValue(store, account) !== expectedCurrent
-            || await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)) !== expectedLegacy)) return false;
-        await writeEnrollmentAnchor(store, config, secret, expectedCurrent, expectedLegacy);
-        return true;
-      },
-      writeConfig: next => atomicJson(input.configPath, next, fence)});
+    return resumeSigningRecoveryJournal(signingRecoveryJournalIO({configPath:input.configPath,config,store,fence,
+      clock:()=>(input.now??new Date()).getTime()}));
   }
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
   if (!enrollmentAnchorHasBaseIdentity(anchor, config)) {

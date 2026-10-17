@@ -77,7 +77,10 @@ function verifyPrevious(config:DeviceConfig,previousAnchor:string,challenge:Devi
   if(!verifyInitialServerSigningKeyset(keyset,root,config.organizationId,new Date(expiry-1)).ok)return fail();
 }
 function nextConfig(previous:DeviceConfig,candidate:DeviceSigningRecoveryCandidate):DeviceConfig {
-  return checkedConfig({...previous,serverPublicKeyEd25519:candidate.rootPublicKey,serverSigningKeyset:JSON.parse(candidate.keysetCanonical)});
+  // Trust replacement is not startup consent. Also clear legacy inline opt-in
+  // when there is no separate root-bound preference file to reject it.
+  return checkedConfig({...previous,connectionMode:'manual',serverPublicKeyEd25519:candidate.rootPublicKey,
+    serverSigningKeyset:JSON.parse(candidate.keysetCanonical)});
 }
 function parseJournal(serialized:string,current:DeviceConfig,now:number) {
   const value=json(serialized);

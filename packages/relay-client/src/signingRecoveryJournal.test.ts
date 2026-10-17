@@ -82,6 +82,26 @@ function fixture(expired = true, connectionMode: 'manual'|'resume' = 'manual') {
 }
 const denied = /^Error: signing_recovery_installation_unavailable$/;
 
+test('legacy inline resume without a preference file cannot authorize new-root automatic startup',async()=>{
+  for(const phase of ['', 'after-journal', 'after-config']){
+    const f=fixture(true,'resume');
+    if(phase){
+      f.change({failure:phase});
+      await assert.rejects(commitSigningRecoveryJournal({io:f.io,challenge:f.challenge,candidate:f.candidate,expected:f.challenge}),denied);
+      f.change({failure:''});await resumeSigningRecoveryJournal(f.io);
+    }else await commitSigningRecoveryJournal({io:f.io,challenge:f.challenge,candidate:f.candidate,expected:f.challenge});
+    assert.equal(f.state().config.connectionMode,'manual','trust repair is not new-root startup consent');
+    assert.equal(f.state().config.deviceId,f.config.deviceId);
+  }
+});
+
+test('missing legacy connection mode is explicitly manual after trust replacement',async()=>{
+  const f=fixture(),{connectionMode:_mode,...legacy}=f.config;void _mode;
+  f.change({config:legacy});f.challenge.protectedConfigDigest=objectHash(legacy);
+  await commitSigningRecoveryJournal({io:f.io,challenge:f.challenge,candidate:f.candidate,expected:f.challenge});
+  assert.equal(f.state().config.connectionMode,'manual');
+});
+
 test('protected journal commits only trust fields and preserves identity, enrollment, policy and credential slots',async()=>{
   const f=fixture();await commitSigningRecoveryJournal({io:f.io,challenge:f.challenge,candidate:f.candidate,expected:f.challenge});
   const state=f.state(),next=JSON.parse(f.candidate.keysetCanonical);
@@ -168,7 +188,7 @@ test('staging rejects forged context, expired approval, unexpired historical tru
 
 for(const backend of ['linux-secret-service','windows-credential-manager'] as const)
 test(`normal startup completes an existing protected journal using ${backend} and the genuine host fence`,async t=>{
-  const f=fixture();f.change({failure:'before-config'});
+  const f=fixture(true,'resume');f.change({failure:'before-config'});
   await assert.rejects(commitSigningRecoveryJournal({io:f.io,challenge:f.challenge,candidate:f.candidate,expected:f.challenge}),denied);
   const root=await mkdtemp(resolve(tmpdir(),'fabric-journal-startup-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const configPath=resolve(root,'device.json'),account='device-enrollment-'+createHash('sha256')
@@ -193,6 +213,7 @@ test(`normal startup completes an existing protected journal using ${backend} an
     store.compareAndPutEnrollmentAnchor=method;
   }
   const restored=await recoverDeviceEnrollmentConsistency(input);
+  assert.equal(restored.connectionMode,'manual','legacy inline opt-in is not new-root startup approval');
   assert.equal(restored.deviceId,f.config.deviceId);assert.equal(restored.installationId,f.config.installationId);
   assert.equal(restored.serverPublicKeyEd25519,f.candidate.rootPublicKey);
   assert.deepEqual(JSON.parse(await readFile(configPath,'utf8')),restored);
@@ -219,5 +240,5 @@ test('startup preserves the preference file and never carries old-root automatic
   assert.equal(result.serverPublicKeyEd25519,f.candidate.rootPublicKey);
   assert.equal(result.connectionMode,'manual');
   assert.equal(await readFile(configPath+'.connection.json','utf8'),preference);
-  assert.equal(JSON.parse(await readFile(configPath,'utf8')).connectionMode,'resume','historical inline value is preserved, never acted on over a mismatched preference');
+  assert.equal(JSON.parse(await readFile(configPath,'utf8')).connectionMode,'manual','old inline startup opt-in cannot survive root replacement');
 });
