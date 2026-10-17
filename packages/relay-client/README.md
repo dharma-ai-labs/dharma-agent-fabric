@@ -39,7 +39,9 @@ Canonical bindings use the existing `canonicalize()` UTF-8 JSON representation:
   turn. Private local paths, cookies, transcripts and credentials are excluded.
 - `previousAnchorHash`, `protectedConfigDigest` and `previousKeysetHash`:
   SHA-256 of canonical JSON of the exact corresponding public snapshots.
-  The configuration hash includes local connection preference but changes none.
+  The configuration hash includes the merged on-disk connection preference but
+  changes none. It is not protected-store attestation; only the anchor snapshot
+  comes from the protected store.
 - `previousRootFingerprint`: SHA-256 of the canonical decoded 32-byte Ed25519
   public root. Digests use the `sha256:` lowercase-hex prefix.
 

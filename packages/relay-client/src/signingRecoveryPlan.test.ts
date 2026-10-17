@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash, generateKeyPairSync} from 'node:crypto';
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
-import {resolve} from 'node:path';
+import {dirname, isAbsolute, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import test from 'node:test';
 import {canonicalize, signCanonicalObject, validateContract, type TrustedServerSigningKeyset} from '@dharma-ai-labs/agent-fabric-contracts';
@@ -36,7 +36,8 @@ function api() {
 }
 async function fixture(platform: DeviceConfig['platform'] = 'linux') {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-recovery-plan-'));
-  assert.match(root, /^C:[\\/]/i);
+  assert.equal(isAbsolute(root), true);
+  assert.equal(dirname(root), resolve(tmpdir()));
   const configPath = resolve(root, 'device.json');
   const config: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl: 'https://www.dharma-ai.io', organizationId: source.organizationId,
     installationId: id(1), deviceId: id(2), deviceName: 'Synthetic', platform, publicKeyEd25519: pub(device),
