@@ -201,3 +201,18 @@ test('recovery structural schema rejects invalid origins, noncanonical bytes and
     {candidateGeneration: Number.MAX_SAFE_INTEGER + 1}, {previousGeneration: 0},
   ]) assert.equal((await contracts.validateContract(directory, schema, {...challenge, ...change})).ok, false);
 });
+
+test('recovery rejects trailing-newline identifiers and digests in both runtime and structural schema', async () => {
+  const directory = resolve(import.meta.dirname, '../../../schemas');
+  const schema = 'https://schemas.dharma-ai.io/device-signing-recovery-challenge/v1';
+  const fields = ['recoveryId', 'organizationId', 'recipientMembershipId', 'deviceId', 'installationId', 'workspaceId',
+    'approvalId', 'repositoryFingerprint', 'policyRevision', 'scopeDigest', 'contractDigest', 'sourceSelectionDigest',
+    'nativeSessionBindingDigest', 'previousAnchorHash', 'protectedConfigDigest', 'previousKeysetHash',
+    'previousRootFingerprint', 'candidateKeysetHash', 'candidateRootFingerprint', 'candidateKeyVersionFingerprint'] as const;
+  for (const field of fields) for (const suffix of ['\n', '\r\n']) {
+    const change = {[field]: expected[field] + suffix};
+    assert.throws(() => protocol().parseDeviceSigningRecoveryChallenge({...challenge, ...change}, {...expected, ...change}, now),
+      /^Error: device_signing_recovery_challenge_invalid$/, field);
+    assert.equal((await contracts.validateContract(directory, schema, {...challenge, ...change})).ok, false, field);
+  }
+});
