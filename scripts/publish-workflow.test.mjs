@@ -23,7 +23,7 @@ test('bounded mode invokes the reviewed exact-package allowlist rather than the 
 
 test('bounded manual publication cannot invoke Python publication', () => {
   assert.equal(workflow.jobs['publish-python'].if,
-    "vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.onboarding_only)");
+    "vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only))");
 });
 
 test('manual main publication does not try to publish a main GitHub release tag', () => {
