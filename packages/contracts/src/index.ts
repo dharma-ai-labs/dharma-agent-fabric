@@ -17,6 +17,7 @@ import deviceConnectionPreferenceSchema from './device-connection-preference.sch
 export * from './codex-task-observation.js';
 export * from './setupClaim.js';
 export * from './signingRecovery.js';
+export * from './signingRecoveryPreparation.js';
 export * from './signingRecoveryDelivery.js';
 export * from './setupClaimCredential.js';
 
