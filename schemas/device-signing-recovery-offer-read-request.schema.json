@@ -1,0 +1,16 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.dharma-ai.io/device-signing-recovery-offer-read-request/v1",
+  "title":"Exact signed-device pending offer read; not connected relay or browser authority",
+  "$comment":"Runtime also enforces canonical timestamps, a live maximum 60-second request window, exact expected selection and canonical base64. The server verifies device transport separately.",
+  "type":"object","additionalProperties":false,
+  "required":["schema","purpose","method","path","organizationId","deviceId","preparationId","requestId","nonce","issuedAt","expiresAt"],
+  "properties":{
+    "schema":{"const":"dharma.device-signing-recovery-offer-read-request/v1"},"purpose":{"const":"read_prepared_recovery_offer"},
+    "method":{"const":"POST"},"path":{"const":"/api/v1/agent-fabric/signing-recovery/offers/read"},
+    "organizationId":{"type":"string","maxLength":128,"pattern":"^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+    "deviceId":{"type":"string","format":"uuid"},"preparationId":{"type":"string","format":"uuid"},"requestId":{"type":"string","format":"uuid"},
+    "nonce":{"type":"string","pattern":"^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"},
+    "issuedAt":{"type":"string","format":"date-time","maxLength":40},"expiresAt":{"type":"string","format":"date-time","maxLength":40}
+  }
+}

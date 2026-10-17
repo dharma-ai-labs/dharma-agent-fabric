@@ -1,0 +1,16 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.dharma-ai.io/device-signing-recovery-offer-registration-receipt/v1",
+  "title":"Idempotent pending device proof receipt; no consent, publication or credentials",
+  "$comment":"Runtime binds all identifiers to the exact request and expiry to the already validated challenge, checks current time, and retains explicit not-ready state.",
+  "type":"object","additionalProperties":false,
+  "required":["schema","organizationId","deviceId","preparationId","recoveryId","approvalId","state","expiresAt","deviceProofRegistered","clientTrustInstalled","ready"],
+  "properties":{
+    "schema":{"const":"dharma.device-signing-recovery-offer-registration-receipt/v1"},
+    "organizationId":{"type":"string","maxLength":128,"pattern":"^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+    "deviceId":{"type":"string","format":"uuid"},"preparationId":{"type":"string","format":"uuid"},
+    "recoveryId":{"type":"string","format":"uuid"},"approvalId":{"type":"string","format":"uuid"},
+    "state":{"const":"pending_approval"},"expiresAt":{"type":"string","format":"date-time","maxLength":40},
+    "deviceProofRegistered":{"const":true},"clientTrustInstalled":{"const":false},"ready":{"const":false}
+  }
+}

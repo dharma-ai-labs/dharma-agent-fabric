@@ -1,0 +1,18 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.dharma-ai.io/device-signing-recovery-offer-registration-request/v1",
+  "title":"Exact retained-offer device proof registration; not consent or trust installation",
+  "$comment":"The request carries only identifiers and the dedicated device purpose proof. Server-owned intent, current authority, device transport and purpose proof are independently verified before an idempotent registration.",
+  "type":"object","additionalProperties":false,
+  "required":["schema","purpose","method","path","organizationId","deviceId","preparationId","requestId","nonce","issuedAt","expiresAt","recoveryId","approvalId","signature"],
+  "properties":{
+    "schema":{"const":"dharma.device-signing-recovery-offer-registration-request/v1"},"purpose":{"const":"register_prepared_recovery_proof"},
+    "method":{"const":"POST"},"path":{"const":"/api/v1/agent-fabric/signing-recovery/offers/register"},
+    "organizationId":{"type":"string","maxLength":128,"pattern":"^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+    "deviceId":{"type":"string","format":"uuid"},"preparationId":{"type":"string","format":"uuid"},"requestId":{"type":"string","format":"uuid"},
+    "nonce":{"type":"string","pattern":"^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"},
+    "issuedAt":{"type":"string","format":"date-time","maxLength":40},"expiresAt":{"type":"string","format":"date-time","maxLength":40},
+    "recoveryId":{"type":"string","format":"uuid"},"approvalId":{"type":"string","format":"uuid"},
+    "signature":{"type":"string","pattern":"^[A-Za-z0-9_-]{85}[AQgw]$(?![\\s\\S])"}
+  }
+}

@@ -18,6 +18,7 @@ export * from './codex-task-observation.js';
 export * from './setupClaim.js';
 export * from './signingRecovery.js';
 export * from './signingRecoveryPreparation.js';
+export * from './signingRecoveryOffer.js';
 export * from './signingRecoveryDelivery.js';
 export * from './setupClaimCredential.js';
 
