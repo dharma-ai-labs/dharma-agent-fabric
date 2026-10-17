@@ -74,6 +74,16 @@ export async function publishRecoveryContract(expectedHead,io,{dryRun=true}={}) 
   assertArtifact(packed,published); await io.verifyPublished(item,packed,published,expectedHead);
   return {state:'published_verified',package:item.name,version:item.version,integrity:packed.integrity};
 }
+export async function runRecoveryContractCommand(args,io) {
+  assert.ok(args[0]==='--expected-head' && (args.length===2 || (args.length===3
+    && ['--publish','--admission-only'].includes(args[2]))),'fixed release options only');
+  assert.match(args[1] || '',/^[a-f0-9]{40}$/,'explicit reviewed main required');
+  if(args[2]==='--admission-only') {
+    await io.verifySource(args[1]);
+    return {state:'source_admitted',head:args[1]};
+  }
+  return publishRecoveryContract(args[1],io,{dryRun:args[2]!=='--publish'});
+}
 async function publicBytes(url,{allowMissing=false,limit=8*1024*1024,timeout=30000}={}) {
   const parsed=new URL(url); assert.equal(parsed.origin,'https://registry.npmjs.org','registry origin required');
   assert.equal(parsed.username+parsed.password,'','URL credentials forbidden');
@@ -93,17 +103,17 @@ async function publicJson(url,timeout=30000) {
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.meta.url) {
   try {
-    const args=process.argv.slice(2), index=args.indexOf('--expected-head');
-    assert.ok(index===0 && args.length===(args.includes('--publish')?3:2)
-      && (args.length===2 || args[2]==='--publish'),'fixed release options only');
-    assert.ok(process.env.npm_execpath,'use npm run publish:recovery-contracts');
     const root=resolve(import.meta.dirname,'..');
     const git=(...values)=>execFileSync('git',values,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024}).trim();
     const blob=path=>execFileSync('git',['show',`${baseline}:${path}`],{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024});
-    const npm=(...values)=>execFileSync(process.execPath,[process.env.npm_execpath,...values],{
-      cwd:root,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe'],maxBuffer:4*1024*1024});
-    const directory=mkdtempSync(join(tmpdir(),'dharma-recovery-contracts-'));
-    const outcome=await publishRecoveryContract(args[1],{
+    const npm=(...values)=>{
+      assert.ok(process.env.npm_execpath,'use npm run publish:recovery-contracts');
+      return execFileSync(process.execPath,[process.env.npm_execpath,...values],{
+        cwd:root,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe'],maxBuffer:4*1024*1024});
+    };
+    let directory;
+    const packageDirectory=()=>directory ??= mkdtempSync(join(tmpdir(),'dharma-recovery-contracts-'));
+    const outcome=await runRecoveryContractCommand(process.argv.slice(2),{
       verifySource: async expectedHead=>{
         git('merge-base','--is-ancestor',baseline,'HEAD');
         const original=Object.fromEntries(dataPaths.map(path=>[path,path.endsWith('.json')?JSON.parse(blob(path)):blob(path)]));
@@ -114,14 +124,14 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.met
           untracked:git('ls-files','--others','--exclude-standard').split('\n').filter(Boolean),baseline:original,current});
       },
       manifest: async item=>JSON.parse(readFileSync(join(root,item.workspace,'package.json'),'utf8')),
-      pack: async item=>JSON.parse(npm('pack','--workspace',item.workspace,'--json','--pack-destination',directory))[0],
+      pack: async item=>JSON.parse(npm('pack','--workspace',item.workspace,'--json','--pack-destination',packageDirectory()))[0],
       lookup: async (item,afterWrite=false)=>{
         const read=timeout=>publicJson(`https://registry.npmjs.org/${encodeURIComponent(item.name)}/${item.version}`,timeout);
         return afterWrite?lookupPublishedArtifact(read):read(30000);
       },
       publish: async (item,packed)=>{
         assert.equal(process.env.GITHUB_ACTIONS,'true','official workflow required');
-        npm('publish',join(directory,packed.filename),'--access','public','--tag','latest','--provenance');
+        npm('publish',join(packageDirectory(),packed.filename),'--access','public','--tag','latest','--provenance');
       },
       verifyPublished: async (item,packed,metadata,source)=>{
         assert.equal(metadata.dist?.tarball,'https://registry.npmjs.org/@dharma-ai-labs/agent-fabric-contracts/-/agent-fabric-contracts-0.1.17.tgz','exact tarball required');
@@ -132,7 +142,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.met
         assert.ok(url.pathname.startsWith('/-/npm/v1/attestations/'),'attestation path mismatch');
         await verifyPublishedProvenance(item,packed,source,timeout=>publicJson(url.href,timeout));
       },
-    },{dryRun:!args.includes('--publish')});
+    });
     console.log(JSON.stringify(outcome));
   } catch {console.error('recovery_contract_release_failed; reconcile source/artifact state before another attempt');process.exitCode=1;}
 }

@@ -39,9 +39,23 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm install --global npm@11.5.1
+      - name: Validate publication scope
+        env:
+          ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
+          CONTRACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.contracts_only || false }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+        run: |
+          if [ "$ONBOARDING_ONLY" = "true" ] && [ "$CONTRACTS_ONLY" = "true" ]; then
+            echo "Choose exactly one bounded release scope." >&2
+            exit 1
+          fi
+          if [ "$CONTRACTS_ONLY" = "true" ]; then
+            node scripts/publish-recovery-contracts.mjs --expected-head "$EXPECTED_HEAD" --admission-only
+          fi
       - run: npm ci
       - run: npm run check
       - name: Build release artifacts
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.contracts_only)"
         run: |
           mkdir -p release
           npm pack --workspace packages/cli --pack-destination release
@@ -50,6 +64,7 @@ jobs:
           cp openapi/agent-fabric.openapi.json release/
           sha256sum release/* > release/SHA256SUMS
       - name: Attest release artifacts
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.contracts_only)"
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: release/*

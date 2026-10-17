@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
-import { approvedRecoveryContract, assertRecoverySource, publishRecoveryContract } from './publish-recovery-contracts.mjs';
+import { approvedRecoveryContract, assertRecoverySource, publishRecoveryContract, runRecoveryContractCommand } from './publish-recovery-contracts.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const baseline = '544ead13a212f1ba6253a3845def61baf5c92dbb';
@@ -111,3 +111,26 @@ test('manual contract-only route uses the bounded main publisher and excludes Py
   assert.match(step.run,/ONBOARDING_ONLY.*true.*CONTRACTS_ONLY.*true/s);
   assert.match(workflow.jobs['publish-python'].if,/inputs.contracts_only/);
 });
+test('contracts-only source admission precedes every generic artifact/attestation effect', () => {
+  const workflow=parse(readFileSync(resolve(root,'.github/workflows/publish.yml'),'utf8'));
+  const steps=workflow.jobs.publish.steps, admission=steps.findIndex(item=>item.name==='Validate publication scope');
+  assert.ok(admission>=0);
+  assert.match(steps[admission].run,/--expected-head "\$EXPECTED_HEAD" --admission-only/);
+  assert.match(steps[admission].run,/ONBOARDING_ONLY.*true.*CONTRACTS_ONLY.*true/s);
+  for(const name of ['Build release artifacts','Attest release artifacts']){
+    const index=steps.findIndex(item=>item.name===name);
+    assert.ok(admission<index);
+    assert.equal(steps[index].if,"!(github.event_name == 'workflow_dispatch' && inputs.contracts_only)");
+  }
+  assert.ok(admission<steps.findIndex(item=>item.run==='npm ci'));
+});
+test('admission-only performs source verification and no pack/network/publication callbacks',async()=>{
+  const f=fixture();
+  assert.deepEqual(await runRecoveryContractCommand(['--expected-head',head,'--admission-only'],f.io),{state:'source_admitted',head});
+  assert.deepEqual(f.events,['source']);
+});
+for(const args of [[],['--expected-head',head,'--admission-only','--publish'],['--expected-head',head,'--force'],['--expected-head','wrong','--admission-only']]){
+  test(`invalid or conflicting command is refused before callbacks: ${args.join(' ')}`,async()=>{
+    const f=fixture();await assert.rejects(runRecoveryContractCommand(args,f.io));assert.deepEqual(f.events,[]);
+  });
+}
