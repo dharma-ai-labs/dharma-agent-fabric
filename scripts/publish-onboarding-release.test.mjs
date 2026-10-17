@@ -146,7 +146,12 @@ function releaseSnapshot() {
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   const baselineCliSource = execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`],
     {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
-  const cliSource = readFileSync(join(root,'packages/cli/src/index.ts'),'utf8');
+  // Historical guard fixtures must use their qualified artifact source, not
+  // whichever unpublished CLI is currently being prepared in this checkout.
+  const qualified209 = 'beda0e1416e7f965101618486a48f4a289cb4d7f';
+  const historical = path => execFileSync('git', ['show', `${qualified209}:${path}`],
+    {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
+  const cliSource = historical('packages/cli/src/index.ts');
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
     dirty: '', lifecycleLauncher: git('ls-tree', reviewed, 'packages/lifecycle-adapter/bin/run.mjs'),
@@ -155,7 +160,7 @@ function releaseSnapshot() {
     manifest: JSON.parse(git('show', `${reviewed}:package.json`)), baselineCliManifest, cliManifest, baselineLock, lock,
     baselineCliSource, cliSource, baselineRuntimeManifests, runtimeManifests,
     productSourceHashes:Object.fromEntries(Object.keys(publisher.approvedProductSourceHashes).map(path=>
-      [path,publisher.sourceTextSha256(readFileSync(join(root,path),'utf8'))]))};
+      [path,publisher.sourceTextSha256(historical(path))]))};
   return snapshot;
 }
 
@@ -182,6 +187,11 @@ test('frozen source admits only exact CLI209 pins and reviewed prelude diagnosti
   for (const baselineCliSource of ['', "const VERSION = '0.2.208';\nconst VERSION = '0.2.208';\n"]) {
     assert.throws(() => assertSourceSnapshot(reviewed, {...snapshot, baselineCliSource}), /CLI version anchor required/);
   }
+});
+
+test('historical CLI209 guard still rejects the newly prepared CLI210 bytes', () => {
+  const snapshot=releaseSnapshot(), current=readFileSync(join(import.meta.dirname,'../packages/cli/src/index.ts'),'utf8');
+  assert.throws(()=>assertSourceSnapshot(snapshot.head,{...snapshot,cliSource:current}),/CLI source delta/);
 });
 
 test('runtime admission rejects altered dependencies, added manifests and old nested store pins', () => {
