@@ -67,7 +67,7 @@ export function containsCredential(value: unknown, depth = 0): boolean {
   if (record(value)) return Object.entries(value as Record<string, unknown>).some(([key, item]) => {
     const normalized = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z])([A-Z][a-z])/g, '$1_$2')
       .replace(/[-\s]+/g, '_').toLowerCase();
-    return /^(?:authorization|proxy_authorization|cookie|set_cookie|access_token|refresh_token|api_key|private_key|credential|credentials|grant|password|secret|token)$/.test(normalized)
+    return /^(?:authorization|proxy_authorization|cookie|set_cookie|access_token|refresh_token|api_key|private_key|client_secret|credential|credentials|grant|password|secret|token)$/.test(normalized)
       || containsCredential(item, depth + 1);
   });
   return false;
