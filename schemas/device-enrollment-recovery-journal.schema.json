@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-enrollment-recovery-journal/v1",
+  "title": "Protected local write-ahead transaction, never task-supplied authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "acceptedAt", "challenge", "candidate", "previousAnchor", "previousCurrentHash", "previousLegacyHash", "previousConnectionMode", "nextConfigDigest"],
+  "properties": {
+    "schema": {"const": "dharma.device-enrollment-recovery-journal/v1"},
+    "acceptedAt": {"type": "string", "format": "date-time", "maxLength": 40},
+    "challenge": {"$ref": "https://schemas.dharma-ai.io/device-signing-recovery-challenge/v1"},
+    "candidate": {"$ref": "https://schemas.dharma-ai.io/device-signing-recovery-candidate/v1"},
+    "previousAnchor": {"type": "string", "minLength": 2, "maxLength": 65536},
+    "previousCurrentHash": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+    "previousLegacyHash": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+    "previousConnectionMode": {"enum": [null, "manual", "resume"]},
+    "nextConfigDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"}}
+}

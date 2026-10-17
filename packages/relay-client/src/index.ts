@@ -18,6 +18,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
+import {resumeSigningRecoveryJournal} from './signingRecoveryJournal.js';
 export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
@@ -945,6 +946,22 @@ async function recoverEnrollmentLocked(input: {
     migratedLegacy = serialized !== null;
   }
   if (!serialized) return config;
+  if ((JSON.parse(serialized) as {schema?:unknown})?.schema === 'dharma.device-enrollment-recovery-journal/v1') {
+    const fence = input.hostFence;
+    if (!fence) throw Error('signing_recovery_host_scope_required');
+    return resumeSigningRecoveryJournal({fence, now: () => (input.now ?? new Date()).getTime(),
+      readConfig: () => loadDeviceConfig(input.configPath),
+      readAnchors: async () => ({current: await freshAnchorValue(store, account),
+        legacy: await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId))}),
+      compareAndPutAnchor: async ({expectedCurrent, expectedLegacy, secret}) => {
+        if (store.backend !== 'windows-credential-manager'
+          && (await freshAnchorValue(store, account) !== expectedCurrent
+            || await freshAnchorValue(store, legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)) !== expectedLegacy)) return false;
+        await writeEnrollmentAnchor(store, config, secret, expectedCurrent, expectedLegacy);
+        return true;
+      },
+      writeConfig: next => atomicJson(input.configPath, next, fence)});
+  }
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
   if (!enrollmentAnchorHasBaseIdentity(anchor, config)) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');

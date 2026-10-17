@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-delivery/v1",
+  "title": "Encrypted device signing recovery delivery, not installation authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "recoveryId", "approvalId", "deviceId", "issuedAt", "expiresAt", "ephemeralPublicKey", "iv", "ciphertext", "tag", "contextDigest"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-delivery/v1"},
+    "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])", "maxLength": 200},
+    "recoveryId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "approvalId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "deviceId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "ephemeralPublicKey": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$(?![\\s\\S])"},
+    "iv": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16}$(?![\\s\\S])"},
+    "ciphertext": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$(?![\\s\\S])", "minLength": 1, "maxLength": 43691},
+    "tag": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$(?![\\s\\S])"},
+    "contextDigest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"}
+  }
+}
