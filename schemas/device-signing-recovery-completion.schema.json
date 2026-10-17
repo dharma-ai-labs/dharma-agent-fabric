@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-completion/v1",
+  "title": "Trust installation receipt, not customer readiness",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "organizationId", "deviceId", "installationId", "workspaceId", "recoveryId", "approvalId", "generation", "keysetHash", "rootFingerprint", "publicationArtifactHash", "observedAt", "connectionMode", "ready", "disposition"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-completion/v1"},
+    "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])", "maxLength": 200},
+    "deviceId": {"$ref": "#/$defs/uuid"}, "installationId": {"$ref": "#/$defs/uuid"},
+    "workspaceId": {"$ref": "#/$defs/uuid"}, "recoveryId": {"$ref": "#/$defs/uuid"}, "approvalId": {"$ref": "#/$defs/uuid"},
+    "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "keysetHash": {"$ref": "#/$defs/digest"}, "rootFingerprint": {"$ref": "#/$defs/digest"},
+    "publicationArtifactHash": {"$ref": "#/$defs/digest"},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "connectionMode": {"enum": ["manual", "resume"]},
+    "ready": {"const": false}, "disposition": {"const": "signing_trust_installed_not_onboarding_ready"}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"}
+  }
+}

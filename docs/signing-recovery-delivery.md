@@ -25,13 +25,37 @@ both current browser consents, current publication, exact device possession
 and current source/session authority. That admission path is still to be wired;
 there is deliberately no model-supplied `approved` switch or public installer.
 
+## Owning-Host Completion Candidate
+
+`recoverExpiredDeviceSigningTrust` is a typed owning-host library boundary, not
+a CLI command, MCP tool, enrollment action or grant. It requires a current
+`HostOperationFence`, exact local read-only recovery plan, matching challenge
+and in-memory X25519 private key from the same handshake. The challenge cannot
+choose local device, installation, source or native-session expectations.
+
+The client reads the existing device key once through the official protected
+store, signs only the purpose-bound challenge and sends one bounded POST to the
+fixed same-origin recovery path, with no cookies, bearer token or redirects.
+It validates the bounded response and decrypts the matching candidate, then
+replans and rechecks the exact local context. Only the relay's private callback
+can enter the existing enrollment lock and journal commit. No callback,
+approval boolean or arbitrary URL is accepted from a model/tool. Withdrawal or
+uncertain network/write outcomes are sanitized and never retried automatically.
+
+The narrow completion receipt explicitly says `ready:false` and
+`signing_trust_installed_not_onboarding_ready`. It does not restore old-root
+startup opt-in or establish actual native continuity. The server's supported
+device-authenticated caller and handshake are still unconnected: tests use
+synthetic stores and bounded mock HTTP, not a live endpoint or user key.
+
 ## Protected Journal
 
 The package-private commit primitive requires the existing enrollment lock and
 owning `HostOperationFence`. It validates the expired historical signature at
 its historical validity boundary, exact config/anchor hashes and the new live
-candidate. It changes only server trust fields, retaining device identity,
-installation, enrollment time, repository references and preference files.
+candidate. It changes server trust fields and reduces legacy inline startup
+selection to manual, retaining device identity, installation, enrollment time,
+repository references and separate preference files.
 
 1. Compare and replace the existing protected anchor with a versioned journal.
 2. Confirm the exact protected write before replacing public configuration.
@@ -51,8 +75,11 @@ bytes stop completion without overwriting the conflicting state.
 
 The existing root-bound connection-preference guard remains intact: an old-root
 automatic-resume preference becomes effectively manual after root replacement.
-The journal tolerates only this lower-authority effective result and never
-rewrites the preference or resurrects an inline opt-in. Re-establishing startup
+The replacement public configuration explicitly sets manual mode, including
+legacy inline resume without any separate preference file. The protected
+journal retains the previous mode only to authenticate the exact old state,
+never as new-root startup authority. It does not rewrite the preference file
+or resurrect an inline opt-in. Re-establishing startup
 consent through the supported new-root setup flow is a separate remaining gate;
 trust repair alone must not be reported as automatic reconnect readiness.
 

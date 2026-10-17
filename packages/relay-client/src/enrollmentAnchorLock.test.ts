@@ -197,7 +197,8 @@ test('a replacement process cannot publish during stale primary inspection and r
     }
   };
   const oldOwner = child(script, f.path, readyOld, releaseOld);
-  let newOwner: Promise<void> | undefined, interleaved = false;
+  let newOwner: Promise<void> | undefined, interleaved = false, inspectionTime = 0;
+  let timerFailure: unknown;
   let releaseInspector: (() => Promise<void>) | undefined;
   try {
     await waitReady(readyOld);
@@ -211,8 +212,14 @@ test('a replacement process cannot publish during stale primary inspection and r
     // gets the next turn after mutex release. Both children run the real helper;
     // the preservation assertion below remains at the held-mutex boundary.
     const acquire = runInNewContext(compiled + '\nacquireEnrollmentAnchorLock', {...fs, dirname, randomUUID,
-      process, Date, setTimeout: (callback: () => void, delay: number) => {
-        if (interleaved && delay === 25) {void waitReady(readyNew).then(callback); return;}
+      // The inspector expires after the controlled replacement barrier, not
+      // because unrelated test/compiler load consumed its wall-clock budget.
+      process, Date: {now: () => inspectionTime}, setTimeout: (callback: () => void, delay: number) => {
+        if (interleaved && delay === 25) {
+          void waitReady(readyNew).then(() => {inspectionTime = 1500; callback();}, error => {
+            timerFailure = error; inspectionTime = 1500; callback();
+          }); return;
+        }
         return setTimeout(callback, delay);
       }, readFile: async (path: string, encoding: string) => {
         const text = await readFile(path, encoding as BufferEncoding);
@@ -228,6 +235,7 @@ test('a replacement process cannot publish during stale primary inspection and r
         return text;
       }}) as typeof acquireEnrollmentAnchorLock;
     await assert.rejects(async () => {releaseInspector = await acquire(f.path, undefined, 1500);}, /connection_anchor_busy/);
+    if (timerFailure) throw timerFailure;
     const replacementPid = await waitReady(readyNew);
     assert.equal(await readFile(f.path, 'utf8'), replacementPid + '\n');
     assert.equal(interleaved, true);
