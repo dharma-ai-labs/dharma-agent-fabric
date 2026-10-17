@@ -13,10 +13,10 @@ function event(x: Pick<NativeFactoryInput, 'events'>, index: number) {
 }
 function fixture(): NativeFactoryInput {
   const at = '2026-10-17T23:06:34.000Z';
-  return { factoryTaskId: 'DIA-1220-PUBLISHER-CLAIM-CONTEXT-20261017',
-    parentThreadId: '01a0eacf-ffd5-7d63-a0c4-2376e0700009',
-    parentTurnId: '01a14be9-9ee5-70d0-ab98-3c888f8ad070',
-    childThreadId: '01a14c1d-f1df-79f0-8943-53eab53dfa6c', organizationId: null,
+  return { factoryTaskId: 'factory-fixture-1',
+    parentThreadId: 'parent-thread-1',
+    parentTurnId: 'parent-turn-1',
+    childThreadId: 'child-thread-1', organizationId: null,
     workspace: resolve('synthetic-factory'), instructionHash: h('review fixed source'),
     scope: { readPaths: ['src/service.ts'], writePaths: [], tools: ['read'], startedAt: at,
       expiresAt: '2026-10-17T23:30:00.000Z', maximumChildTurns: 2, maximumUsd: null },
