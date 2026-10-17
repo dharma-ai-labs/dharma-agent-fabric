@@ -8688,7 +8688,11 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let policy = await withRepositoryRelayStage('policy_verification',
     () => loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
-  const fabric = await withRepositoryRelayStage('session_open', () => client());
+  const fabric = await withRepositoryRelayStage('session_identity', () => AgentFabricClient.open({
+    configPath: configPath(), statePath: protocolStatePath(),
+    hostScope: currentBootstrapHostScope(), isolatedSession: isIsolatedDeviceSession(),
+  }));
+  await withRepositoryRelayStage('session_open', () => fabric.openSession(VERSION));
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
   let stopping = signal.aborted;

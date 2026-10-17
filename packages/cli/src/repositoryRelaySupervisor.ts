@@ -1,11 +1,16 @@
 import { isAbsolute, resolve, win32 } from 'node:path';
 import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboardingWorkspace.js';
 import { relayRestartDelayMs } from './relaySupervisor.js';
+import {AgentFabricRequestError} from '@dharma-ai-labs/agent-fabric-relay-client';
 
 export interface RepositoryRelayRegistration { workspaceId: string; policyPath: string }
-export type RepositoryRelayStage = 'policy_verification' | 'session_open' | 'vault_open' | 'trajectory_recovery' | 'evidence_sync'
+export type RepositoryRelayStage = 'policy_verification' | 'session_identity' | 'session_open' | 'vault_open' | 'trajectory_recovery' | 'evidence_sync'
   | 'pending_capsule_sync' | 'evidence_request' | 'task_poll' | 'worker_run';
-export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_ready' | 'policy_invalid' | 'unexpected';
+const FAILURE_CATEGORIES = ['policy_boundary', 'retention_not_ready', 'policy_invalid', 'unexpected',
+  'secure_store_unavailable', 'enrollment_unconfirmed', 'protocol_state_invalid',
+  'relay_transport_unavailable', 'relay_response_timeout', 'relay_authentication_rejected',
+  'relay_request_rejected', 'relay_service_unavailable', 'relay_rate_limited', 'signing_trust_expired'] as const;
+export type RepositoryRelayFailureCategory = typeof FAILURE_CATEGORIES[number];
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
   category?: RepositoryRelayFailureCategory }
 
@@ -28,6 +33,28 @@ function failureCategory(error: unknown): RepositoryRelayFailureCategory {
   if (/^policy_boundary:/.test(message)) return 'policy_boundary';
   if (/^agent_fabric_retention_not_ready:/.test(message)) return 'retention_not_ready';
   if (/^agent_fabric_policy_invalid:/.test(message)) return 'policy_invalid';
+  if (cause instanceof AgentFabricRequestError) {
+    let status: number;
+    try {status = cause.status;} catch {return 'unexpected';}
+    if (status === 401 || status === 403) return 'relay_authentication_rejected';
+    if (status === 429) return 'relay_rate_limited';
+    if (status === 503 && /^agent_fabric_signing_expired:/.test(message)) return 'signing_trust_expired';
+    if (Number.isInteger(status) && status >= 500 && status <= 599) return 'relay_service_unavailable';
+    if (Number.isInteger(status) && status >= 400 && status <= 499) return 'relay_request_rejected';
+    return 'unexpected';
+  }
+  if (/^(Windows Credential Manager|Linux Secret Service|macOS Keychain) failed:/.test(message)) return 'secure_store_unavailable';
+  if (['connection_anchor_store_unavailable',
+    'Windows enrollment anchor operation unavailable or unconfirmed.'].includes(message)) return 'secure_store_unavailable';
+  if (['Enrolled device identity does not match the secure store.',
+    'Device configuration does not match the secure enrollment anchor. Run dharma login again.',
+    'Legacy device enrollment must be reauthenticated with dharma login before relay access.',
+    'connection_enrollment_changed', 'relay_host_device_identity_unavailable',
+    'Interrupted server signing keyset installation could not be verified. Run dharma login again.'].includes(message)) return 'enrollment_unconfirmed';
+  if (message === 'Relay protocol state is invalid.'
+    || message === 'Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.') return 'protocol_state_invalid';
+  if (message === 'Relay response timed out.') return 'relay_response_timeout';
+  if (message === 'Relay connection failed.' || /^Relay closed before acknowledgement \([0-9]{4}\)\.$/.test(message)) return 'relay_transport_unavailable';
   return 'unexpected';
 }
 
@@ -44,9 +71,9 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
     || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000
     || (input.lastSuccessfulPollAt && Date.parse(value.at) <= Date.parse(input.lastSuccessfulPollAt))
-    || !['policy_verification', 'session_open', 'vault_open', 'trajectory_recovery', 'evidence_sync', 'pending_capsule_sync',
+    || !['policy_verification', 'session_identity', 'session_open', 'vault_open', 'trajectory_recovery', 'evidence_sync', 'pending_capsule_sync',
       'evidence_request', 'task_poll', 'worker_run'].includes(String(value.stage))
-    || !['policy_boundary', 'retention_not_ready', 'policy_invalid', 'unexpected'].includes(String(value.category))) {
+    || !FAILURE_CATEGORIES.includes(value.category as RepositoryRelayFailureCategory)) {
     return null;
   }
   return { at: value.at, stage: value.stage, category: value.category };

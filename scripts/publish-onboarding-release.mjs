@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const source = 'cc470925d23f925cf5df3ef70f77b633e1cff7d9';
-const tree = '199d9e1d2409d2e15951d2b0c9b7859cbdca1894';
+const source = 'beda0e1416e7f965101618486a48f4a289cb4d7f';
+const tree = 'ff8d97ad604da6dc9ec63574ca27135d0285bcbc';
 const repository = 'https://github.com/dharma-ai-labs/dharma-agent-fabric';
 export const approvedPackages = Object.freeze([
   { workspace: 'packages/contracts', name: '@dharma-ai-labs/agent-fabric-contracts', version: '0.1.16',
@@ -31,13 +31,14 @@ export const approvedPackages = Object.freeze([
   { workspace: 'packages/local-vault', name: '@dharma-ai-labs/agent-fabric-local-vault', version: '0.1.31',
     existingArtifact: Object.freeze({source: '51c3a9ae10f43ff80efa4b0b63212c8ef2b7a824',
       integrity: 'sha512-cPbjNh+//3PiibUDhMCNsQ8oTZmlRbd871aeIDpfnWwp6V5hiQ4NXFSjCVOEIwu4bHoM99AnZBI5dTuziHdbaQ=='}) },
-  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.209' },
+  { workspace: 'packages/cli', name: '@dharma-ai-labs/agent-fabric', version: '0.2.210' },
 ].map(Object.freeze));
 
 export const approvedProductSourceHashes = Object.freeze({
-  "packages/cli/src/index.ts": "7f7e65d3ea46aa89d67ad80e4caf33ba4c0eeeefd6007a5d77e7f1ec4b42c06e",
-  "packages/cli/src/repositoryRelaySupervisor.ts": "eb60554d0bdb4958ecbc1ef36a231d71e58d920b0f68ed1e749e37da5b3042b1",
-  "packages/cli/src/repositoryRelayPreludeDiagnostic.test.ts": "da28a6d4cb01eb798c17f0e15d9b8c07c42ecd80e8da3b9d4e50c6c80c00d08e"
+  "packages/cli/src/index.ts": "67c833b38b0c87d4d47a4bfbccea552cc93d1fa81ef9fef80995c817d3237a61",
+  "packages/cli/src/repositoryRelaySupervisor.ts": "f19a9a5a2a4340d85a4dda717840994e1db465072e0e980acc38ccc9968275ca",
+  "packages/cli/src/repositoryRelaySessionFailure.test.ts": "57129abe2af0a181a6063593b2be139bc7ca014979250999aeaa465e79fe8e77",
+  "packages/cli/src/skillPreparationCache.test.ts": "291bff4fe225905a41cf08ac8a2cd0b163e3d1152596f08d66153ea73e89dd1a"
 });
 export function sourceTextSha256(text) {
   return createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex');
@@ -96,7 +97,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   assert.deepEqual(snapshot.productSourceHashes, approvedProductSourceHashes, 'unreviewed product source bytes');
   assert.deepEqual(snapshot.manifest, snapshot.baselineManifest, 'unreviewed root manifest delta');
   const cliManifest = structuredClone(snapshot.baselineCliManifest);
-  cliManifest.version = '0.2.209';
+  cliManifest.version = '0.2.210';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     cliManifest.dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
   }
@@ -121,7 +122,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
       `unreviewed runtime manifest delta:${path}`);
   }
   const lock = structuredClone(snapshot.baselineLock);
-  lock.packages['packages/cli'].version = '0.2.209';
+  lock.packages['packages/cli'].version = '0.2.210';
   for (const [name, version] of [['provider-adapters', '0.1.36'], ['task-runner', '0.1.38'], ['evidence-reduction', '0.2.35']]) {
     lock.packages[`packages/${name}`].version = version;
     lock.packages['packages/cli'].dependencies[`@dharma-ai-labs/agent-fabric-${name}`] = version;
@@ -131,7 +132,7 @@ export function assertSourceSnapshot(expectedHead, snapshot) {
   }
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   assert.deepEqual(snapshot.lock, lock, 'unreviewed lockfile delta');
-  const previousVersion = "const VERSION = '0.2.208';";
+  const previousVersion = "const VERSION = '0.2.209';";
   assert.equal(snapshot.baselineCliSource.split(previousVersion).length, 2, 'reviewed CLI version anchor required');
   assert.equal(sourceTextSha256(snapshot.cliSource),
     approvedProductSourceHashes['packages/cli/src/index.ts'], 'unreviewed CLI source delta');
