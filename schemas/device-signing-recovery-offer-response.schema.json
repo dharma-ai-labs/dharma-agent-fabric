@@ -1,0 +1,43 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.dharma-ai.io/device-signing-recovery-offer-response/v1",
+  "title":"Public pending challenge for its exact prepared device; always not ready",
+  "$comment":"Runtime additionally validates the original preparation and every local challenge binding, immutable expiry, exact next generation and distinct root. No intent, candidate keyset, credential, consent or installation is returned.",
+  "oneOf":[
+    {
+      "type":"object","additionalProperties":false,
+      "required":["schema","organizationId","deviceId","preparationId","expiresAt","state","deviceProofRegistered","clientTrustInstalled","ready"],
+      "properties":{
+        "schema":{"const":"dharma.device-signing-recovery-offer-response/v1"},
+        "organizationId":{"type":"string","maxLength":128,"pattern":"^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+        "deviceId":{"type":"string","format":"uuid"},"preparationId":{"type":"string","format":"uuid"},
+        "expiresAt":{"type":"string","format":"date-time","maxLength":40},"state":{"const":"awaiting_browser_offer"},
+        "deviceProofRegistered":{"const":false},"clientTrustInstalled":{"const":false},"ready":{"const":false}
+      }
+    },
+    {
+      "type":"object","additionalProperties":false,
+      "required":["schema","organizationId","deviceId","preparationId","expiresAt","state","deviceProofRegistered","clientTrustInstalled","ready","challenge"],
+      "properties":{
+        "schema":{"const":"dharma.device-signing-recovery-offer-response/v1"},
+        "organizationId":{"type":"string","maxLength":128,"pattern":"^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+        "deviceId":{"type":"string","format":"uuid"},"preparationId":{"type":"string","format":"uuid"},
+        "expiresAt":{"type":"string","format":"date-time","maxLength":40},"state":{"const":"awaiting_device_proof"},
+        "deviceProofRegistered":{"const":false},"clientTrustInstalled":{"const":false},"ready":{"const":false},
+        "challenge":{"$ref":"https://schemas.dharma-ai.io/device-signing-recovery-challenge/v1"}
+      }
+    },
+    {
+      "type":"object","additionalProperties":false,
+      "required":["schema","organizationId","deviceId","preparationId","expiresAt","state","deviceProofRegistered","clientTrustInstalled","ready","challenge"],
+      "properties":{
+        "schema":{"const":"dharma.device-signing-recovery-offer-response/v1"},
+        "organizationId":{"type":"string","maxLength":128,"pattern":"^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+        "deviceId":{"type":"string","format":"uuid"},"preparationId":{"type":"string","format":"uuid"},
+        "expiresAt":{"type":"string","format":"date-time","maxLength":40},"state":{"const":"pending_approval"},
+        "deviceProofRegistered":{"const":true},"clientTrustInstalled":{"const":false},"ready":{"const":false},
+        "challenge":{"$ref":"https://schemas.dharma-ai.io/device-signing-recovery-challenge/v1"}
+      }
+    }
+  ]
+}
