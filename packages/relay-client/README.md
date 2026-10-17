@@ -5,6 +5,53 @@ signatures, nonce and sequence replay protection, durable cursors, idempotent
 receipts, and organization-scoped browser approval. It does not expose an
 inbound shell or arbitrary local-file API.
 
+## Read-only signing-expiry recovery planning
+
+`planDeviceSigningRecovery()` prepares local public context under a mandatory
+owning-host scope. The host supplies already verified source consent and native
+session selections, never model/challenge declarations. The function reads the
+selected device configuration and its matching protected public enrollment
+anchor with fresh reads and `readOnly: true`. It does not migrate an old anchor,
+read a private key, generate an identity, contact the server, issue a proof or
+change trust. A second configuration read rejects replacement during planning;
+scope withdrawal and elapsed session/15-minute limits deny output.
+
+The plan is explicitly `local_context_only_not_recovery_authorization`. It does
+not authenticate the selections against current server membership, role,
+revocation, source policy or a live native session. Its recorded budget is only
+an input to a binding digest, not new spending authority. The old anchor does
+not itself attest installation, membership or source selection; the server and
+trusted native caller must independently verify those before approval/use.
+This API is not yet wired to bootstrap or an executable recovery command.
+
+Canonical bindings use the existing `canonicalize()` UTF-8 JSON representation:
+
+- `sourceSelectionDigest`: SHA-256 of
+  `dharma.agent-fabric.signing-recovery-source-selection/v1` + NUL + canonical
+  JSON of the exact source-selection fields and the existing public
+  `setupClaimReference`. Source consent references map to the original
+  generation/receipt/revision/policy-hash records, not raw repository contents.
+- `nativeSessionBindingDigest`: SHA-256 of
+  `dharma.agent-fabric.signing-recovery-native-session/v1` + NUL + canonical
+  JSON of `{session, hostBinding, installationId}`. The session selection binds
+  the exact member/device/repository/workspace/endpoint/binding/provider, named
+  session/owner/times/budget; the host selection binds connection/context/thread/
+  turn. Private local paths, cookies, transcripts and credentials are excluded.
+- `previousAnchorHash`, `protectedConfigDigest` and `previousKeysetHash`:
+  SHA-256 of canonical JSON of the exact corresponding public snapshots.
+  The configuration hash includes the merged on-disk connection preference but
+  changes none. It is not protected-store attestation; only the anchor snapshot
+  comes from the protected store.
+- `previousRootFingerprint`: SHA-256 of the canonical decoded 32-byte Ed25519
+  public root. Digests use the `sha256:` lowercase-hex prefix.
+
+Historical validation verifies the pinned-root signature and signer window
+immediately before the recorded old expiry; it does not make that trust valid
+now. This planner supports the pinned-root historical case, not arbitrary
+post-rotation lineage. Unsupported history fails closed. New signer provenance,
+owner/intended-recipient approval, one-use replay admission and a dedicated
+protected installation/restart journal remain separate unimplemented gates.
+
 `claimSetupReference` is the native, noninteractive public-reference enrollment
 transport used by agent-run bootstrap. A reference confers no bearer authority.
 The client proves its protected Ed25519 device identity, binds an ephemeral

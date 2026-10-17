@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-plan/v1",
+  "title": "Read-only local signing recovery context; not proof or authorization",
+  "$comment": "Issuer must equal origin; the existing protected anchor is matched to config. Current server source/session/role policy and recipient/owner approval must still be independently checked. This plan never establishes private-key possession or signing authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "planId", "authority", "preparedAt", "expiresAt", "origin", "issuer", "audience", "organizationId", "recipientMembershipId", "deviceId", "installationId", "workspaceId", "publicKeyEd25519", "repositoryFingerprint", "policyRevision", "scopeDigest", "contractDigest", "sourceSelectionDigest", "nativeSessionBindingDigest", "previousAnchorHash", "protectedConfigDigest", "previousGeneration", "previousKeysetHash", "previousRootFingerprint"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-plan/v1"},
+    "planId": {"$ref": "#/$defs/uuid"},
+    "authority": {"const": "local_context_only_not_recovery_authorization"},
+    "preparedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "origin": {"type": "string", "maxLength": 256, "format": "uri", "pattern": "^https://[^/@?#\\s]+$(?![\\s\\S])"},
+    "issuer": {"type": "string", "maxLength": 256, "format": "uri", "pattern": "^https://[^/@?#\\s]+$(?![\\s\\S])"},
+    "audience": {"const": "dharma.agent-fabric.signing-recovery/v1"},
+    "organizationId": {"type": "string", "maxLength": 256, "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])"},
+    "recipientMembershipId": {"$ref": "#/$defs/uuid"},
+    "deviceId": {"$ref": "#/$defs/uuid"},
+    "installationId": {"$ref": "#/$defs/uuid"},
+    "workspaceId": {"$ref": "#/$defs/uuid"},
+    "publicKeyEd25519": {"type": "string", "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"},
+    "repositoryFingerprint": {"$ref": "#/$defs/digest"},
+    "policyRevision": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$(?![\\s\\S])"},
+    "scopeDigest": {"$ref": "#/$defs/digest"},
+    "contractDigest": {"$ref": "#/$defs/digest"},
+    "sourceSelectionDigest": {"$ref": "#/$defs/digest"},
+    "nativeSessionBindingDigest": {"$ref": "#/$defs/digest"},
+    "previousAnchorHash": {"$ref": "#/$defs/digest"},
+    "protectedConfigDigest": {"$ref": "#/$defs/digest"},
+    "previousGeneration": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "previousKeysetHash": {"$ref": "#/$defs/digest"},
+    "previousRootFingerprint": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"}
+  }
+}
