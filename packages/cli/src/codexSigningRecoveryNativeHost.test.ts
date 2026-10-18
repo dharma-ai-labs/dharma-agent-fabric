@@ -4,6 +4,7 @@ import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import test from 'node:test';
+import {fileURLToPath} from 'node:url';
 import {canonicalize,parseDeviceSigningRecoveryPreparation,sealDeviceSigningRecoveryDelivery,signCanonicalObject,validateContract,
   type DeviceSigningRecoveryPreparation,type DeviceSigningRecoveryChallenge,type DeviceSigningRecoveryCandidate}
   from '@dharma-ai-labs/agent-fabric-contracts';
@@ -135,7 +136,7 @@ test('native ingress waits for a genuine turn event, then performs actual fenced
     f.emit('turn/started');const prepared=await f.call('prepare');assert.equal(prepared.success,true);
     const value=content(prepared);assert.equal(value.turnId,'synthetic_original_turn');assert.equal(value.progress.state,'prepared');
     assert.equal(value.ready,false);assert.equal(f.reads.includes(f.identityAccount),false);
-    const valid=await validateContract(resolve('schemas'),'https://schemas.dharma-ai.io/codex-signing-recovery-native-progress/v1',value);
+    const valid=await validateContract(fileURLToPath(new URL('./schemas/',import.meta.url)),'https://schemas.dharma-ai.io/codex-signing-recovery-native-progress/v1',value);
     assert.equal(valid.ok,true,JSON.stringify(valid));
     const submitted=content(await f.call('submit'));assert.equal(submitted.progress.state,'awaiting_browser_offer');
     assert.equal(submitted.progress.clientTrustInstalled,false);assert.equal(f.requests.length,1);
