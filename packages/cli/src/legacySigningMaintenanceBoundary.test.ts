@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {mkdir,mkdtemp,readFile,rm,unlink,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,realpath,rm,unlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -10,7 +10,7 @@ import * as boundary from './legacySigningMaintenanceBoundary.js';
 
 const id=(n:number)=>`df000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 async function fixture(){
-  const home=await mkdtemp(resolve(tmpdir(),'dhr-legacy-'));
+  const home=await realpath(await mkdtemp(resolve(tmpdir(),'mb-')));
   await saveNamedSession(home,{schema:'dharma.named-session/v1',name:'reviewer',bindingId:id(1),enabled:false,maximumCostCents:100,maximumTurnCostCents:25,
     identity:{organizationId:'org_fixture',deviceId:id(2),membershipId:id(3),endpointId:id(4),workspaceId:id(5),repositoryBindingId:id(6),provider:'codex'}});
   return {home,name:'reviewer',signal:new AbortController().signal,assertManagedCohort:async()=>'sha256:'+'f'.repeat(64)};

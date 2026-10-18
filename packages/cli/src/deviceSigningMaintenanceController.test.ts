@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,realpath,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -17,7 +17,7 @@ test('maintenance completion signaling cannot turn an unfinished component or na
 });
 
 test('official maintenance plan is grant-free and needs no protected-store, provider or active native session',async()=>{
-  const root=await mkdtemp(resolve(tmpdir(),'fabric-maintenance-cli-')),prior=process.env.DHARMA_HOME;
+  const root=await realpath(await mkdtemp(resolve(tmpdir(),'mc-'))),prior=process.env.DHARMA_HOME;
   try{
     process.env.DHARMA_HOME=root;
     const workspace={organizationId:'org_fixture',workspaceId:id(1),repositoryBindingId:id(2),repositoryRemoteHash:'sha256:'+'a'.repeat(64),path:resolve(root,'checkout')};

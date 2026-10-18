@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash,generateKeyPairSync,randomBytes,verify} from 'node:crypto';
-import {mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,realpath,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -20,7 +20,7 @@ const controlled=(input:Parameters<typeof runDeviceSigningMaintenanceController>
   ...input,assertManagedCohort:async()=>digest('f')},
   legacyBoundary=>runDeviceSigningMaintenanceController({...input,legacyBoundary}));
 async function fixture(){
-  const root=await mkdtemp(resolve(tmpdir(),'dhr-maintenance-')),now=Date.now(),masterKey=randomBytes(32);
+  const root=await realpath(await mkdtemp(resolve(tmpdir(),'mf-'))),now=Date.now(),masterKey=randomBytes(32);
   const old=generateKeyPairSync('ed25519'),next=generateKeyPairSync('ed25519'),device=generateKeyPairSync('ed25519');
   const pub=(key:typeof old)=>key.publicKey.export({format:'jwk'}).x!;
   const keyset=(key:typeof old,generation:number,issued:number,expiry:number)=>{
