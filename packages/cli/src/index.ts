@@ -140,6 +140,7 @@ import {readCodexSetupPublicStdin} from './codexSetupPublicStdin.js';
 import {reserveCodexSetupLaunch} from './codexSetupLaunchReservation.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
 export {attachCodexSigningRecoveryNativeHost,type CodexSigningRecoveryNativeInput} from './codexSigningRecoveryNativeHost.js';
+export {openCodexSigningRecoveryOwner,type CodexBoundSigningRecoveryInput} from './codexBoundSession.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 export {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
@@ -150,6 +151,7 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
+import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
 const VERSION = '0.2.210';
 const USAGE = CLI_USAGE;
@@ -5423,11 +5425,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     if (pending) {
       startupPhase = 'thread';
       const threadId = await startupStep(() => startNamedCodexThread(transport!, item.path, name));
+      const declaredRecoveryToolHash = inspectNamedCodexRecoveryToolDeclaration(transport!,threadId);
+      if (!declaredRecoveryToolHash) throw new Error('named_session_thread_invalid');
       startupPhase = 'binding';
       await startupStep(async () => vault.saveProviderSessionBinding({ schema: 'dharma.local-provider-session-binding/v1', ...pending!.identity,
         bindingId: pending!.bindingId, owner: 'dharma_bridge', sessionId: threadId, workspaceRoot: item.path,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
         maximumProviderCostCents: pending!.maximumTurnCostCents }));
+      await startupStep(async () => vault.saveProviderSessionRecoveryDeclaration(pending!.bindingId,pending!.identity,declaredRecoveryToolHash));
       registration = pending;
       await startupStep(async () => saveNamedSession(dharmaHome(), registration!));
     }

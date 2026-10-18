@@ -127,10 +127,10 @@ setup, named-task use, restart or independent guide-only rehearsal.
 ## Original Native-Turn Ingress
 
 The candidate CLI exports `attachCodexSigningRecoveryNativeHost` for an
-already-owned Codex transport. The original controller attaches it while its
-selected named thread is idle, registers the returned fixed tool definition
-through its supported native path, and starts only its separately admitted
-turn. The adapter does not start, resume, fork or interrupt a thread, start a
+already-owned Codex transport whose original thread creation declared the fixed
+tool. The original controller attaches it while that named thread is idle,
+then starts only its separately admitted turn. A successful resume request is
+not proof of a catalog update. The adapter does not start, resume, fork or interrupt a thread, start a
 provider process, reserve funds, read authentication, or close the caller's
 transport. It is not an effectful standalone CLI command.
 
@@ -168,3 +168,61 @@ native-event and in-memory-store fixtures, including actual client crypto and
 encrypted-delivery code. They do not qualify actual Codex tool registration,
 OS-store protection, production consent or a customer journey. Deployment and
 use by the existing controller remain required before live acceptance.
+
+## Protected Original-Controller Adoption
+
+The candidate `openCodexSigningRecoveryOwner` wraps the existing bound controller
+and exposes only `beginSigningRecovery`, `assertActive` and `close` for
+trusted host composition, not for peer tools or model-supplied authority. It
+derives device/member/repository/session identities from its encrypted existing
+binding and generates connection-context identifiers inside the original owner.
+The selected native thread is not replaced. No turn, provider, peer channel,
+grant, enrollment or budget reservation is started by this method.
+
+New eligible named-thread creation declares the stable recovery tool alongside
+the peer tools. Only after the original start and persistence readbacks succeed
+does the controller save its declaration in a separate encrypted, binding- and
+identity-scoped vault record. The legacy binding schema/bytes are unchanged. That
+hash describes a creation-time declaration; it does not prove effective tool
+availability, a particular installed Codex version, or actual use. The fixed
+declaration grants no authority and never embeds a future operation ID. Normal
+setup and peer handlers continue to refuse recovery calls.
+
+An existing binding with missing or different protected declaration provenance returns
+`codex_signing_recovery_catalog_unavailable` before recovery metadata requests,
+private reads, journal claims or model dispatch. The public owner refuses it
+before even opening its transport factory. Existing records are not
+retrofitted, re-enrolled or replaced. In particular, the current published
+[resume protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/typescript/v2/ThreadResumeParams.ts)
+does not declare a dynamic-tool replacement field. Do not send an undocumented
+field, edit native history or claim that an accepted resume changed its catalog.
+The existing clients' actual catalog/adoption remains a separately qualified
+gate, not something established by these source fixtures.
+
+After current ownership/source/account and the exclusive lease qualify, the
+owner claims the existing durable original-operation journal under a separate
+recovery-purpose digest. The digest binds the operation, protected session,
+source selection, declaration and config-path hash; it contains no credential.
+That claim remains consumed even when arming fails or the original owner closes.
+The journal's unconfirmed/running state is not evidence of a live model turn,
+successful recovery or readiness. It cannot authorize a replay after restart.
+New operation IDs do not replenish native, financial or policy admission limits.
+
+The owner remains recovery-only after admission: peer and write work cannot
+carry through the recovery turn or resume automatically after it. Closure
+withdraws recovery, waits for pending arming/callbacks and confirms transport
+closure before releasing its original lease. Source/session revocation is
+checked on both sides of awaited current-context qualification.
+
+This is a public controller composition surface, not a newly enabled CLI or
+local socket action. It does not supply missing protected source context,
+change an old native catalog, restore a real service, or qualify a production
+caller. Those exact original-host, OS-store, server, release and customer joins
+remain required. Synthetic Linux controller fixtures must pass on Linux CI;
+Windows builds cannot substitute for their execution.
+
+The candidate pins local-vault `0.1.32`, which must be published with reviewed
+provenance before CLI `0.2.210`. The published `0.1.31` artifact is immutable.
+The historical CLI209 publisher and its approved package list remain unchanged
+and do not admit this new cohort. A reviewed normal-main release freeze is still
+required; do not widen that old guard or invoke it as a candidate publisher.

@@ -4,6 +4,7 @@ import { CODEX_PEER_TOOLS } from './codexPeerTools.js';
 import { CODEX_SETUP_TOOL } from './codexSetupAdmission.js';
 import type {BootstrapHostScope} from './bootstrapHostScope.js';
 import {inspectCodexBootstrapHostPreparation} from './bootstrapHostScope.js';
+import {CODEX_SIGNING_RECOVERY_TOOL,recordNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
 export async function startNamedCodexThread(transport: CodexAppServerTransport, workspaceRoot: string, name: string) {
   return startThread(transport, workspaceRoot, name);
@@ -31,7 +32,7 @@ async function startThread(transport: CodexAppServerTransport, workspaceRoot: st
   }
   const created = await request('thread/start', { cwd: workspaceRoot,
     approvalPolicy: 'never', permissions: 'dharma_bridge', ephemeral: false,
-    dynamicTools: setupScope ? structuredClone([...CODEX_PEER_TOOLS, setupTool]) : CODEX_PEER_TOOLS }) as { thread?: { id?: string; cwd?: string; status?: { type?: string } } };
+    dynamicTools: structuredClone([...CODEX_PEER_TOOLS,CODEX_SIGNING_RECOVERY_TOOL,...(setupScope?[setupTool]:[])]) }) as { thread?: { id?: string; cwd?: string; status?: { type?: string } } };
   const thread = created?.thread;
   if (!thread || typeof thread.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(thread.id)
     || thread.cwd !== workspaceRoot || thread.status?.type !== 'idle') throw new Error('named_session_thread_invalid');
@@ -55,5 +56,6 @@ async function startThread(transport: CodexAppServerTransport, workspaceRoot: st
   };
   if (read?.thread?.id !== thread.id || read.thread.cwd !== workspaceRoot || read.thread.name !== name
     || read.thread.status?.type !== 'idle') throw new Error('named_session_thread_invalid');
+  recordNamedCodexRecoveryToolDeclaration(transport,thread.id);
   return thread.id;
 }

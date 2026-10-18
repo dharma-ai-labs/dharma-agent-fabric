@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/provider-session-recovery-declaration/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "workspaceId", "repositoryBindingId", "endpointId", "membershipId", "deviceId", "bindingId", "provider", "sessionId", "toolHash", "recordedAt"],
+  "properties": {
+    "schema": {"const": "dharma.provider-session-recovery-declaration/v1"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "repositoryBindingId": {"type": "string", "format": "uuid"},
+    "endpointId": {"type": "string", "format": "uuid"},
+    "membershipId": {"type": "string", "format": "uuid"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "bindingId": {"type": "string", "format": "uuid"},
+    "provider": {"const": "codex"},
+    "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+    "toolHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "recordedAt": {"type": "string", "format": "date-time"}
+  }
+}

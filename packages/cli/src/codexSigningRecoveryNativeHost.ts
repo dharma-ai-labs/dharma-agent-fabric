@@ -3,6 +3,7 @@ import {types} from 'node:util';
 import {verifyCodexSetupReadOnlyProfile,type CodexToolHandler,type CodexToolResult}
   from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
+import {CODEX_SIGNING_RECOVERY_TOOL} from './codexSigningRecoveryTool.js';
 import {prepareOwnedSigningRecovery,submitOwnedSigningRecoveryPreparation,progressOwnedSigningRecoveryOffer,
   completeOwnedSigningRecovery,inspectOwnedSigningRecovery,disposeOwnedSigningRecovery,OwnedSigningRecoveryError,
   type PrepareOwnedSigningRecoveryInput,type OwnedSigningRecoveryHandle}
@@ -141,10 +142,6 @@ export async function attachCodexSigningRecoveryNativeHost(input:CodexSigningRec
     });
     signal.addEventListener('abort',withdraw,{once:true});if(signal.aborted)withdraw();
     await assert();
-    const tool=Object.freeze({type:'function',name:'dharma_signing_recovery',
-      description:'Request a separately authorized phase on the original owning-host signing-recovery operation. Browser consent/publication stay separate; trust installation is not readiness. No shell, enrollment or provider authority.',
-      inputSchema:{type:'object',additionalProperties:false,properties:{operationId:{const:operationId},
-        action:{enum:['prepare','submit','progress','complete','status']}},required:['operationId','action']}});
-    return Object.freeze({operationId,tool,settled,close:async()=>{withdraw();await settled;}});
+    return Object.freeze({operationId,tool:CODEX_SIGNING_RECOVERY_TOOL,settled,close:async()=>{withdraw();await settled;}});
   }catch{withdraw();await settled;throw Error('codex_signing_recovery_native_unavailable');}
 }
