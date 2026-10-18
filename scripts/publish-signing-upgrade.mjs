@@ -5,10 +5,10 @@ import {mkdtempSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {lookupPublishedArtifact,assertProvenance} from './publish-onboarding-release.mjs';
+import {lookupPublishedArtifact} from './publish-onboarding-release.mjs';
 
 const repository='https://github.com/dharma-ai-labs/dharma-agent-fabric';
-const manifestHash='77f357ff4cdace5ab5931d86635e94aa95796f0c0d89e9b1c1adf356d9b9a7e1',workflowHash='99e5af97bf5ab0ea7f5b229313204d83f28ca48599184aa03de78262c60e4118',testHash='e9c8d0b8035cc215084937ba9534ad834cf4d6dba8bde908ae2c9cb3c85e26dd';
+const manifestHash='405fcabde6720c0a2d99ab7f147ce8bd114c37f1b7c70e40a704a8322f392237',workflowHash='99e5af97bf5ab0ea7f5b229313204d83f28ca48599184aa03de78262c60e4118',testHash='0275aedf9e9efa3167850bd6e275e592837c1361121089253088cf2a94001023';
 const manifestPath=new URL('./signing-upgrade-release.json',import.meta.url);
 export const textHash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
 export const normalizedWorkflowHash=value=>textHash(value.replace(/^(\s*SIGNING_PUBLISHER_SHA256:) [^\r\n]+$/gm,'$1 <publisher-pin>'));
@@ -86,12 +86,18 @@ export async function runSigningCommand(args,io){
 }
 
 export function assertReleaseProvenance(item,packed,attestations,source){
-  if(item.name!==release.cli.name)return assertProvenance(item,packed,attestations,source);
+  const cli=item.name===release.cli.name;
+  const expected=cli?release.cli:release.dependencies.find(d=>d.name===item.name);
+  assert.ok(expected,'unreviewed provenance package');assert.equal(item.version,expected.version,'provenance version mismatch');
+  if(!cli)assert.equal(source,expected.source,'immutable dependency source mismatch');
+  const ref=cli?'refs/heads/main':expected.publisherRef;
+  assert.match(ref,/^refs\/(heads\/main|tags\/v\d+\.\d+\.\d+)$/,'reviewed publisher reference required');
   const statements=attestations?.attestations?.map(a=>JSON.parse(Buffer.from(a.bundle.dsseEnvelope.payload,'base64').toString('utf8')));
   const statement=statements?.find(s=>s.predicateType==='https://slsa.dev/provenance/v1');assert.ok(statement,'SLSA provenance missing');
   const definition=statement.predicate.buildDefinition;
-  assert.deepEqual(definition.externalParameters.workflow,{ref:'refs/heads/main',repository,path:'.github/workflows/publish-signing-upgrade.yml'},'CLI publisher workflow mismatch');
-  assert.ok(definition.resolvedDependencies.some(d=>d.uri===`git+${repository}@refs/heads/main`&&d.digest?.gitCommit===source),'CLI publisher source mismatch');
+  assert.deepEqual(definition.externalParameters.workflow,{ref,repository,
+    path:cli?'.github/workflows/publish-signing-upgrade.yml':'.github/workflows/publish.yml'},'publisher workflow mismatch');
+  assert.ok(definition.resolvedDependencies.some(d=>d.uri===`git+${repository}@${ref}`&&d.digest?.gitCommit===source),'publisher source mismatch');
   const digest=Buffer.from(packed.integrity.slice(7),'base64').toString('hex');
   assert.ok(statement.subject.some(s=>s.name===`pkg:npm/${item.name.replace('@','%40')}@${item.version}`&&s.digest?.sha512===digest),'CLI provenance subject mismatch');
 }

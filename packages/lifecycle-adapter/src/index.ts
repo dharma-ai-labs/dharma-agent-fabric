@@ -217,13 +217,13 @@ export class SqliteLifecycleAdapter {
     const opened = await sourceDatabase(input.sourcePath);
     try {
       const statePath = resolve(input.statePath);
-      const existing = await lstat(statePath).catch(error => {
+      const existing = await lstat(statePath, { bigint: true }).catch(error => {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         return null;
       });
       if (existing && (!existing.isFile() || existing.isSymbolicLink())) fail('lifecycle_state_invalid');
       if (existing && await realpath(statePath) === opened.canonicalPath) fail('lifecycle_state_is_source');
-      const sourceStat = await lstat(opened.canonicalPath);
+      const sourceStat = await lstat(opened.canonicalPath, { bigint: true });
       if (existing && existing.dev === sourceStat.dev && existing.ino === sourceStat.ino) fail('lifecycle_state_is_source');
       await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
       const state = new DatabaseSync(statePath, { allowExtension: false });
