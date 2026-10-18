@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {lookupPublishedArtifact} from './publish-onboarding-release.mjs';
 
 const repository='https://github.com/dharma-ai-labs/dharma-agent-fabric';
-const manifestHash='beb9b55b2a2b86f7c0f7bb0b6adfa2d6c6c9d4ec92b0e6f79075ddf5c9bb41ec',workflowHash='99e5af97bf5ab0ea7f5b229313204d83f28ca48599184aa03de78262c60e4118',testHash='0275aedf9e9efa3167850bd6e275e592837c1361121089253088cf2a94001023';
+const manifestHash='405fcabde6720c0a2d99ab7f147ce8bd114c37f1b7c70e40a704a8322f392237',workflowHash='99e5af97bf5ab0ea7f5b229313204d83f28ca48599184aa03de78262c60e4118',testHash='0275aedf9e9efa3167850bd6e275e592837c1361121089253088cf2a94001023';
 const manifestPath=new URL('./signing-upgrade-release.json',import.meta.url);
 export const textHash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
 export const normalizedWorkflowHash=value=>textHash(value.replace(/^(\s*SIGNING_PUBLISHER_SHA256:) [^\r\n]+$/gm,'$1 <publisher-pin>'));

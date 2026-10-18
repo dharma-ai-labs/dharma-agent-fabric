@@ -109,6 +109,8 @@
     }
   ],
   "productHashes": {
+    "packages/lifecycle-adapter/src/index.ts": "bceceab8192b698329a07633a5cf007e0f7746aa12dded53edaf318380f328fa",
+    "packages/lifecycle-adapter/src/index.test.ts": "662379877f50f8b06c6b60cc9251527869334b6604e1b743acaff431e0fa351a",
     "packages/cli/src/index.ts": "66938939d109c71792bc2fda02ea60c4cc6a8d93e3547c4c96754363d0f532c6",
     "packages/cli/src/usage.ts": "290163e5fff26318ce6ed2cbae0afb3e813976097dfff09d89585943fa1976cf",
     "packages/cli/src/relayRuntimeUpgrade.ts": "ece13512cb23a2206a1838fcee2b479e239d33159da6348e0d5c77bf4d3841f2",
@@ -131,6 +133,8 @@
     "packages/cli/src/maintenanceControlCaller.test.ts": "e4f16d7ea84d920b89a00c48709cdef7a0fb2cade3c02596a65fedacd086a4a2"
   },
   "allowedPaths": [
+    "packages/lifecycle-adapter/src/index.ts",
+    "packages/lifecycle-adapter/src/index.test.ts",
     "packages/cli/src/index.ts",
     "packages/cli/src/usage.ts",
     "packages/cli/src/relayRuntimeUpgrade.ts",

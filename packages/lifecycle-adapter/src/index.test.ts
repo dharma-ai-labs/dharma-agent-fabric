@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { access, link, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -232,6 +234,28 @@ test('source aliases and reusing a state database for another repository are rej
     await assert.rejects(SqliteLifecycleAdapter.open({ ...f.input,
       scope: { ...scope, repositoryBindingId: randomUUID() } }), /lifecycle_state_scope_conflict/);
   } finally { await f.cleanup(); }
+});
+
+test('distinct 64-bit file IDs cannot round into a false source alias', async () => {
+  const f = await fixture(), original = fs.lstat;
+  const sourceId = 1n << 60n, stateId = sourceId + 1n;
+  assert.equal(Number(sourceId), Number(stateId));
+  try {
+    const adapter = await SqliteLifecycleAdapter.open(f.input); adapter.close();
+    const before = await readFile(f.statePath);
+    fs.lstat = (async (...args: Parameters<typeof original>) => {
+      const info = await original(...args), path = String(args[0]);
+      if (path === f.sourcePath || path === f.statePath) {
+        const ino = path === f.sourcePath ? sourceId : stateId;
+        Object.assign(info, { ino: args[1]?.bigint ? ino : Number(ino) });
+      }
+      return info;
+    }) as typeof original;
+    syncBuiltinESMExports();
+    await assert.rejects(SqliteLifecycleAdapter.open({ ...f.input,
+      scope: { ...scope, repositoryBindingId: randomUUID() } }), /lifecycle_state_scope_conflict/);
+    assert.deepEqual(await readFile(f.statePath), before);
+  } finally { fs.lstat = original; syncBuiltinESMExports(); await f.cleanup(); }
 });
 
 test('concurrent adapters cannot dispatch the same source while an owner is alive', async () => {
