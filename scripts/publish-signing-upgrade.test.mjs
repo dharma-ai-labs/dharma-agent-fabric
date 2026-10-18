@@ -144,6 +144,45 @@ test('CLI provenance binds the new official main workflow, source and artifact s
   const changed=structuredClone(statement);changed.subject[0].digest.sha512='foreign';assert.throws(()=>assertReleaseProvenance(item,packed,proof(changed),head));
 });
 
+test('immutable dependencies require their exact original main or tag provenance',()=>{
+  const tags={
+    '@dharma-ai-labs/agent-fabric-policy':'refs/tags/v0.1.10',
+    '@dharma-ai-labs/agent-fabric-sdk':'refs/tags/v0.2.47',
+    '@dharma-ai-labs/agent-fabric-skill-manager':'refs/tags/v0.2.154',
+  };
+  const repository='https://github.com/dharma-ai-labs/dharma-agent-fabric';
+  const proof=s=>({attestations:[{bundle:{dsseEnvelope:{payload:Buffer.from(JSON.stringify(s)).toString('base64')}}}]});
+  for(const item of release.dependencies){
+    const ref=tags[item.name]??'refs/heads/main';assert.equal(item.publisherRef,ref);
+    const statement={predicateType:'https://slsa.dev/provenance/v1',predicate:{buildDefinition:{
+      externalParameters:{workflow:{ref,repository,path:'.github/workflows/publish.yml'}},
+      resolvedDependencies:[{uri:`git+${repository}@${ref}`,digest:{gitCommit:item.source}}]}},
+      subject:[{name:`pkg:npm/${item.name.replace('@','%40')}@${item.version}`,
+        digest:{sha512:Buffer.from(item.integrity.slice(7),'base64').toString('hex')}}]};
+    const packed={integrity:item.integrity};
+    assert.doesNotThrow(()=>assertReleaseProvenance(item,packed,proof(statement),item.source));
+    for(const field of ['ref','repository','path']){
+      const changed=structuredClone(statement);changed.predicate.buildDefinition.externalParameters.workflow[field]='foreign';
+      assert.throws(()=>assertReleaseProvenance(item,packed,proof(changed),item.source));
+    }
+    const changedRef=structuredClone(statement),otherRef=ref==='refs/heads/main'?'refs/tags/v0.1.10':'refs/heads/main';
+    changedRef.predicate.buildDefinition.externalParameters.workflow.ref=otherRef;
+    changedRef.predicate.buildDefinition.resolvedDependencies[0].uri=`git+${repository}@${otherRef}`;
+    assert.throws(()=>assertReleaseProvenance(item,packed,proof(changedRef),item.source));
+    for(const kind of ['dependency-ref','dependency-commit','subject','integrity']){
+      const changed=structuredClone(statement);
+      if(kind==='dependency-ref')changed.predicate.buildDefinition.resolvedDependencies[0].uri=`git+${repository}@${otherRef}`;
+      if(kind==='dependency-commit')changed.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit=head;
+      if(kind==='subject')changed.subject[0].name='pkg:npm/foreign@0.0.0';
+      if(kind==='integrity')changed.subject[0].digest.sha512='foreign';
+      assert.throws(()=>assertReleaseProvenance(item,packed,proof(changed),item.source),kind);
+    }
+    assert.throws(()=>assertReleaseProvenance(item,packed,proof(statement),head));
+    assert.throws(()=>assertReleaseProvenance({...item,version:'0.0.0'},packed,proof(statement),item.source));
+    assert.throws(()=>assertReleaseProvenance({...item,name:'foreign'},packed,proof(statement),item.source));
+  }
+});
+
 test('Linux canonical packs retain the unchanged dependency SRIs without rebuilding preserved originals', {skip:process.platform!=='linux'},()=>{
   assert.ok(process.env.npm_execpath,'normal npm test context required');
   const directory=mkdtempSync(join(tmpdir(),'dharma-signing-dependency-packs-'));

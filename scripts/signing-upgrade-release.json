@@ -15,42 +15,48 @@
       "name": "@dharma-ai-labs/agent-fabric-contracts",
       "version": "0.1.18",
       "integrity": "sha512-dDUHpNnjFZFzo1cL7okHd0fhpR9cjxanACl4xyskdifI9Uy3IlvJDZejoO5q9p2ONlOmZIDLgoR/HkHDGSAa9g==",
-      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d"
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d",
+      "publisherRef": "refs/heads/main"
     },
     {
       "workspace": "packages/evidence-reduction",
       "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
       "version": "0.2.35",
       "integrity": "sha512-Sr3Rv1kLvZ3GE8vrrmYZDoFp41ypdAhinR3kZKS2jtsMmNBUIQpA+Q2OV1OtmtsrDs1yEo/rvMqYEIYUUAb5Aw==",
-      "source": "3038b4f53afcfa2825025e51f09d834c937115d4"
+      "source": "3038b4f53afcfa2825025e51f09d834c937115d4",
+      "publisherRef": "refs/heads/main"
     },
     {
       "workspace": "packages/local-vault",
       "name": "@dharma-ai-labs/agent-fabric-local-vault",
       "version": "0.1.32",
       "integrity": "sha512-qZC8a+YxXyXcCCZDSzjakWsYSXUOYfYUOZLYY0i3WssEbRgl2EWVP/HdPRmccqwzdsXDv6riFcfapG5pIQVaVg==",
-      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d"
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d",
+      "publisherRef": "refs/heads/main"
     },
     {
       "workspace": "packages/policy",
       "name": "@dharma-ai-labs/agent-fabric-policy",
       "version": "0.1.4",
       "integrity": "sha512-2ZDJxnL6cS1IRNF+B1I0XBMlRjisXIwb1Rbs8q+LQNpGA6mxeJJ5vej1vlV9Z9EfuUhJHkjMUz7uwfbrLnPssg==",
-      "source": "03a7096526660446a8e2cbb2483778cb201fcd31"
+      "source": "03a7096526660446a8e2cbb2483778cb201fcd31",
+      "publisherRef": "refs/tags/v0.1.10"
     },
     {
       "workspace": "packages/provider-adapters",
       "name": "@dharma-ai-labs/agent-fabric-provider-adapters",
       "version": "0.1.36",
       "integrity": "sha512-NdKtgL7IWIMtkN+pm0xRX4lP3zspwz4+c4N7IY/kNpqmcu32snIp3Z1oP5nYjIAyRcCxWPz6LEoEzU3CQ1WUaw==",
-      "source": "3038b4f53afcfa2825025e51f09d834c937115d4"
+      "source": "3038b4f53afcfa2825025e51f09d834c937115d4",
+      "publisherRef": "refs/heads/main"
     },
     {
       "workspace": "packages/relay-client",
       "name": "@dharma-ai-labs/agent-fabric-relay-client",
       "version": "0.2.34",
       "integrity": "sha512-NmyGa0Z9o/cMkuaM8pWznHpJP/3pO3E5q9sO5DkTWIJ4ExnCSGm/Yw1i8MV63CnRy9pYctFt/CgomKtkS/vpYA==",
-      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d"
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d",
+      "publisherRef": "refs/heads/main"
     },
     {
       "workspace": "packages/sdk",
@@ -58,6 +64,7 @@
       "version": "0.1.10",
       "integrity": "sha512-o5/CNYJasiBzBCJaU7D/cTlqa4dq1MfdltKozB7KB+HQz6LQkBUy9UpN6UH6kAE/WTRKmZRNrx5/nww9ILSqIQ==",
       "source": "e2b5b09f76be1fd95e7fcfaf49e691f9617651a6",
+      "publisherRef": "refs/tags/v0.2.47",
       "preserveOriginal": {
         "sourceChanges": [
           "packages/sdk/README.md"
@@ -72,7 +79,8 @@
       "name": "@dharma-ai-labs/agent-fabric-secure-store",
       "version": "0.1.10",
       "integrity": "sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw==",
-      "source": "1b8483f59dc1ba9f7aa0aef78ca984f309714e61"
+      "source": "1b8483f59dc1ba9f7aa0aef78ca984f309714e61",
+      "publisherRef": "refs/heads/main"
     },
     {
       "workspace": "packages/skill-manager",
@@ -80,6 +88,7 @@
       "version": "0.2.11",
       "integrity": "sha512-vk+SaciPg22Fh0XaGFFyKKOXDHTgsvGrB/ixqn1KQ9yqJIEfQzeXF+V41BU8KY4nWPYIRQ3p+ULtMVE52DgL6g==",
       "source": "95a5f2e572044a053348fcdd5e13f2ce4d2b510e",
+      "publisherRef": "refs/tags/v0.2.154",
       "preserveOriginal": {
         "sourceChanges": [
           "packages/skill-manager/src/installationScope.test.ts"
@@ -95,7 +104,8 @@
       "name": "@dharma-ai-labs/agent-fabric-task-runner",
       "version": "0.1.38",
       "integrity": "sha512-8wwADswTKRNidXWP2kGcCBsctY/wEJ43m5etVqyeBKxaUqca7GarhkrYoe/WseOYJFDGt1XfWxDDuXz2SPMXIg==",
-      "source": "3038b4f53afcfa2825025e51f09d834c937115d4"
+      "source": "3038b4f53afcfa2825025e51f09d834c937115d4",
+      "publisherRef": "refs/heads/main"
     }
   ],
   "productHashes": {
