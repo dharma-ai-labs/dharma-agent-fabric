@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-offer-progress/v1",
+  "title": "Prepared signing recovery offer progress without installed authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "deviceId", "preparationId", "state", "expiresAt", "deviceProofRegistered", "clientTrustInstalled", "ready", "disposition"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-offer-progress/v1"},
+    "organizationId": {"type": "string", "maxLength": 128, "pattern": "^org_[A-Za-z0-9]+$"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "preparationId": {"type": "string", "format": "uuid"},
+    "recoveryId": {"type": "string", "format": "uuid"},
+    "approvalId": {"type": "string", "format": "uuid"},
+    "state": {"enum": ["awaiting_browser_offer", "pending_approval"]},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "deviceProofRegistered": {"type": "boolean"},
+    "clientTrustInstalled": {"const": false},
+    "ready": {"const": false},
+    "disposition": {"const": "awaiting_separate_browser_consent_not_onboarding_ready"}
+  },
+  "oneOf": [
+    {
+      "properties": {"state": {"const": "awaiting_browser_offer"}, "deviceProofRegistered": {"const": false}},
+      "not": {"anyOf": [{"required": ["recoveryId"]}, {"required": ["approvalId"]}]}
+    },
+    {
+      "required": ["recoveryId", "approvalId"],
+      "properties": {"state": {"const": "pending_approval"}, "deviceProofRegistered": {"const": true}}
+    }
+  ]
+}

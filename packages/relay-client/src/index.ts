@@ -22,6 +22,8 @@ import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRe
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planDeviceSigningRecovery} from './signingRecoveryPlan.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
+export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
+  type ProgressPreparedDeviceSigningRecoveryOfferInput,type SigningRecoveryOfferClientPhase} from './signingRecoveryOfferClient.js';
 export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,

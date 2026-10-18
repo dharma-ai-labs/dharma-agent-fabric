@@ -47,11 +47,41 @@ server intent and recheck device possession and action-time mutable authority
 in the service transaction. Lost-response retries retain the first recovery
 IDs, nonce and deadline, rather than renewing authority.
 
+## Owning-Host Client
+
+The unpublished relay-client exports
+`progressPreparedDeviceSigningRecoveryOffer`. It accepts the original public
+preparation, its original in-memory X25519 private `KeyObject`, and the genuine
+current source/session/host context. It is a typed owning-host API, not a CLI
+option or remotely callable tool. Neither private key is a JSON argument.
+
+The client re-derives the current local plan, verifies the original preparation
+and encryption-key binding, then performs one fresh official read of the
+existing enrolled Ed25519 key. It sends at most one fixed signed offer read and
+one fixed signed proof registration. It rechecks local scope after each
+response. It never approves consent, publishes or installs trust, updates a
+credential journal, resumes a provider, or automatically retries. A lost
+registration response requires a later explicitly admitted read; a retained
+`pending_approval` response prevents another proof registration.
+
+Network admission is bounded to 30 seconds per request and the shorter request
+or preparation deadline. Redirects, unexpected origins, non-JSON responses,
+invalid UTF-8, and responses larger than 64 KiB are rejected. Host cancellation
+also bounds waiting on a non-cooperative injected fetch or response stream;
+this is not a guarantee of forced process termination. Errors expose only a
+fixed code, phase and HTTP status. Public progress has its own strict schema,
+keeps `ready: false` and `clientTrustInstalled: false`, and omits the challenge,
+signature, authenticator, keyset and encryption key.
+
+Synthetic tests include signed serialization over an owned loopback HTTP
+server. The loopback fixture is not deployed-route, TLS, OS key-store or native
+session evidence. It changes no TLS settings.
+
 ## Remaining Integration
 
-Official server device-principal/SQL adapters, the owning-host client calls,
+Official server device-principal/SQL adapters, the owning-host orchestration,
 recipient controls, separate owner/recipient consent, second-device adoption,
 protected continuation and normal package/main release remain. This source
-contract neither implements those operations nor proves them deployed. Pure
+client slice neither implements those joins nor proves them deployed. Pure
 synthetic protocol tests and schemas cannot substitute for actual two-client
 setup, named-task use, restart or independent guide-only rehearsal.
