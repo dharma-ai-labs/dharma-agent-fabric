@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-maintenance-challenge/v1",
+  "title": "Existing-device signing maintenance challenge; no native continuation authority",
+  "$comment": "Distinct device-maintenance origin. Device possession, both fresh browser consents, current member/device/source, independent configured-key provenance, publication CAS and protected installation remain separate and mandatory. Native session liveness or execution is not asserted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "origin",
+    "issuer",
+    "audience",
+    "recoveryId",
+    "approvalId",
+    "organizationId",
+    "recipientMembershipId",
+    "deviceId",
+    "installationId",
+    "workspaceId",
+    "publicKeyEd25519",
+    "credentialEncryptionPublicKey",
+    "repositoryFingerprint",
+    "policyRevision",
+    "scopeDigest",
+    "contractDigest",
+    "sourceSelectionDigest",
+    "controllerBindingDigest",
+    "previousAnchorHash",
+    "protectedConfigDigest",
+    "previousGeneration",
+    "previousKeysetHash",
+    "previousRootFingerprint",
+    "candidateGeneration",
+    "candidateKeysetHash",
+    "candidateRootFingerprint",
+    "candidateKeyVersionFingerprint",
+    "purpose",
+    "method",
+    "path",
+    "nonce",
+    "issuedAt",
+    "expiresAt",
+    "authenticator"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-signing-maintenance-challenge/v1"
+    },
+    "origin": {
+      "type": "string",
+      "maxLength": 256,
+      "format": "uri",
+      "pattern": "^https://[^/@?#\\s]+$"
+    },
+    "issuer": {
+      "type": "string",
+      "maxLength": 256,
+      "format": "uri",
+      "pattern": "^https://[^/@?#\\s]+$"
+    },
+    "audience": {
+      "const": "dharma.agent-fabric.signing-maintenance/v1"
+    },
+    "recoveryId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "approvalId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^org_[A-Za-z0-9]+$"
+    },
+    "recipientMembershipId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "deviceId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "installationId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "publicKeyEd25519": {
+      "$ref": "#/$defs/bytes32"
+    },
+    "credentialEncryptionPublicKey": {
+      "$ref": "#/$defs/bytes32"
+    },
+    "repositoryFingerprint": {
+      "$ref": "#/$defs/digest"
+    },
+    "policyRevision": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "scopeDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "contractDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "sourceSelectionDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "controllerBindingDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "previousAnchorHash": {
+      "$ref": "#/$defs/digest"
+    },
+    "protectedConfigDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "previousGeneration": {
+      "$ref": "#/$defs/generation"
+    },
+    "previousKeysetHash": {
+      "$ref": "#/$defs/digest"
+    },
+    "previousRootFingerprint": {
+      "$ref": "#/$defs/digest"
+    },
+    "candidateGeneration": {
+      "$ref": "#/$defs/generation"
+    },
+    "candidateKeysetHash": {
+      "$ref": "#/$defs/digest"
+    },
+    "candidateRootFingerprint": {
+      "$ref": "#/$defs/digest"
+    },
+    "candidateKeyVersionFingerprint": {
+      "$ref": "#/$defs/digest"
+    },
+    "purpose": {
+      "const": "expired_signing_trust_reapproval"
+    },
+    "method": {
+      "const": "POST"
+    },
+    "path": {
+      "const": "/api/v1/agent-fabric/signing-recovery"
+    },
+    "nonce": {
+      "$ref": "#/$defs/bytes32"
+    },
+    "issuedAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 256
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 256
+    },
+    "authenticator": {
+      "$ref": "#/$defs/bytes32"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "bytes32": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}

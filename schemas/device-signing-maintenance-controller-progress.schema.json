@@ -1,0 +1,26 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.dharma-ai.io/device-signing-maintenance-controller-progress/v1",
+  "title":"Owning controller progress; never native or onboarding readiness",
+  "type":"object","additionalProperties":false,
+  "required":["schema","operationId","organizationId","deviceId","workspaceId","bindingId","authorityKind","nativeContinuationAuthorized","ready","ok"],
+  "properties":{
+    "schema":{"const":"dharma.device-signing-maintenance-controller-progress/v1"},
+    "operationId":{"type":"string","format":"uuid"},"organizationId":{"type":"string","pattern":"^org_[A-Za-z0-9]+$"},
+    "deviceId":{"type":"string","format":"uuid"},"workspaceId":{"type":"string","format":"uuid"},"bindingId":{"type":"string","format":"uuid"},
+    "authorityKind":{"const":"device_trust_maintenance"},"nativeContinuationAuthorized":{"const":false},"ready":{"const":false},
+    "ok":{"type":"boolean"},"planned":{"const":true},"protectedStoreQualified":{"const":false},"currentSourceVerified":{"const":false},
+    "registrationDisabled":{"type":"boolean"},"processState":{"enum":["running","stopped","unknown"]},
+    "trustState":{"enum":["unavailable","expired","current"]},"clientTrustInstalled":{"const":false},
+    "progress":{"oneOf":[{"$ref":"https://schemas.dharma-ai.io/device-signing-maintenance-host-progress/v1"},{"type":"null"}]},
+    "recipientUrl":{"type":"string","maxLength":1024,"format":"uri","pattern":"^https://"},
+    "ownerUrl":{"type":"string","maxLength":1024,"format":"uri","pattern":"^https://"},
+    "state":{"enum":["unconfirmed","cancelled","closed_before_completion"]},"reconcileBeforeRetry":{"const":true},
+    "phase":{"type":"string","maxLength":64,"pattern":"^[a-z_]+$"},"httpStatus":{"type":["integer","null"],"minimum":100,"maximum":599}
+  },
+  "allOf":[
+    {"if":{"required":["planned"]},"then":{"required":["protectedStoreQualified","currentSourceVerified","registrationDisabled","processState","trustState","clientTrustInstalled"],"properties":{"ok":{"const":true}},"not":{"required":["progress"]}}},
+    {"if":{"properties":{"ok":{"const":false}}},"then":{"required":["state"]}},
+    {"if":{"properties":{"ok":{"const":true}},"not":{"required":["planned"]}},"then":{"required":["progress"],"properties":{"progress":{"$ref":"https://schemas.dharma-ai.io/device-signing-maintenance-host-progress/v1"}}}}
+  ]
+}

@@ -7,12 +7,12 @@ import {canonicalize,deviceSigningRecoverySigningPayload,parseDeviceSigningRecov
 import {createSystemSecureStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {loadDeviceConfig,loadDeviceIdentity} from './index.js';
 import {HostOperationFence} from './hostOperationScope.js';
-import {planDeviceSigningRecovery,type DeviceSigningRecoveryPlanInput} from './signingRecoveryPlan.js';
+import {planSigningRecovery,type OwnedSigningRecoveryPlanInput} from './signingRecoveryPlan.js';
 
 const READ='/api/v1/agent-fabric/signing-recovery/offers/read';
 const REGISTER='/api/v1/agent-fabric/signing-recovery/offers/register';
 const MAX_BYTES=65536;
-export interface ProgressPreparedDeviceSigningRecoveryOfferInput extends DeviceSigningRecoveryPlanInput {
+export type ProgressPreparedDeviceSigningRecoveryOfferInput = OwnedSigningRecoveryPlanInput & {
   /** The original owning-host preparation and ephemeral key, never tool arguments. */
   preparation:unknown;
   encryptionKey:KeyObject;
@@ -88,7 +88,7 @@ export async function progressPreparedSigningRecoveryOfferForHost(input:Progress
   let phase:SigningRecoveryOfferClientPhase='input',httpStatus:number|null=null;
   try{
     await fence.assert();phase='local_plan';
-    const initial=await planDeviceSigningRecovery(input);
+    const initial=await planSigningRecovery(input);
     const preparation=checkedPreparation(input,initial,clock()),plan=preparation.plan;
     const deadline=maximumExpiresAt===undefined?Date.parse(plan.expiresAt):Date.parse(maximumExpiresAt);
     if(!Number.isFinite(deadline)||deadline<=clock()||deadline>Date.parse(plan.expiresAt)
@@ -106,7 +106,7 @@ export async function progressPreparedSigningRecoveryOfferForHost(input:Progress
     const selection={organizationId:plan.organizationId,deviceId:plan.deviceId,preparationId:plan.planId};
     const localRecheck=async()=>{
       phase='local_recheck';
-      const fresh=await planDeviceSigningRecovery(input),current=checkedPreparation(input,fresh,clock());
+      const fresh=await planSigningRecovery(input),current=checkedPreparation(input,fresh,clock());
       if(canonicalize(current)!==canonicalize(preparation)||clock()>=deadline)return fail();await fence.assert();
     };
     const frame=(registration:boolean,proof?:{recoveryId:string;approvalId:string;signature:string})=>{

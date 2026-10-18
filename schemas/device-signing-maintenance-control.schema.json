@@ -1,0 +1,12 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://schemas.dharma-ai.io/device-signing-maintenance-control/v1",
+  "title":"Fixed control frame for one owning device-trust maintenance process",
+  "type":"object","additionalProperties":false,
+  "required":["schema","operationId","action"],
+  "properties":{
+    "schema":{"const":"dharma.device-signing-maintenance-control/v1"},
+    "operationId":{"type":"string","format":"uuid"},
+    "action":{"enum":["progress","complete","status","cancel"]}
+  }
+}

@@ -73,7 +73,11 @@ async function fixture(){
       messageId:headers.get('x-dharma-message-id'),method:'POST',nonce:headers.get('x-dharma-nonce'),organizationId:config.organizationId,
       pathname:address.pathname,sequence:1,sessionId:headers.get('x-dharma-session-id'),timestamp:headers.get('x-dharma-timestamp')}));
     assert.equal(verify(null,transport,device.publicKey,Buffer.from(headers.get('x-dharma-signature')??'','base64url')),true);
-    if(address.pathname.endsWith('/preparations')){
+    if(body.schema==='dharma.device-signing-maintenance-context-request/v1'){
+      assert.equal(address.pathname,'/api/v1/agent-fabric/signing-recovery/preparations');
+      assert.equal(headers.get('x-dharma-message-id'),body.operationId);assert.equal(headers.get('x-dharma-session-id'),body.operationId);
+      assert.equal(headers.get('x-dharma-nonce'),body.nonce);
+    }else if(address.pathname.endsWith('/preparations')){
       assert.equal(headers.get('x-dharma-message-id'),body.preparation.plan.planId);
       assert.equal(headers.get('x-dharma-session-id'),body.preparation.plan.planId);assert.equal(headers.get('x-dharma-nonce'),body.preparation.nonce);
     }else if(address.pathname.includes('/offers/')){
@@ -88,7 +92,9 @@ async function fixture(){
       preparation=parseDeviceSigningRecoveryPreparation(body.preparation,body.preparation.plan,clock);
       assert.equal(verify(null,deviceSigningRecoveryPreparationSigningPayload(preparation),device.publicKey,Buffer.from(body.signature,'base64url')),true);
       const {schema,planId,authority,preparedAt,expiresAt,...bound}=preparation.plan;void[schema,planId,authority,preparedAt,expiresAt];
-      challenge={...bound,schema:'dharma.device-signing-recovery-challenge/v1',purpose:'expired_signing_trust_reapproval',
+      const maintenance=preparation.plan.schema==='dharma.device-signing-maintenance-plan/v1';
+      assert.equal(body.schema,maintenance?'dharma.device-signing-maintenance-preparation-request/v1':'dharma.device-signing-recovery-preparation-request/v1');
+      challenge={...bound,schema:maintenance?'dharma.device-signing-maintenance-challenge/v1':'dharma.device-signing-recovery-challenge/v1',purpose:'expired_signing_trust_reapproval',
         recoveryId:id(12),approvalId:id(13),credentialEncryptionPublicKey:preparation.credentialEncryptionPublicKey,candidateGeneration:3,
         candidateKeysetHash:hash(canonicalize(nextKeyset)),candidateRootFingerprint:hash(Buffer.from(pub(next),'base64url')),
         candidateKeyVersionFingerprint:hash(nextKeyset.signedByKeyVersion),method:'POST',path:'/api/v1/agent-fabric/signing-recovery',
@@ -96,7 +102,8 @@ async function fixture(){
         issuedAt:new Date(clock).toISOString(),expiresAt:new Date(Math.min(clock+600000,NOW+receiptLifetime)).toISOString()};
       return Response.json({schema:'dharma.signing-recovery-preparation-receipt/v1',preparationId:planId,organizationId:config.organizationId,
         recipientMembershipId:session.membershipId,deviceId:config.deviceId,expiresAt:new Date(Math.min(Date.parse(String(expiresAt)),NOW+receiptLifetime)).toISOString(),state:'pending_browser_review',
-        clientTrustInstalled:false,nativeSessionBinding:'device_attested_not_verified'});
+        clientTrustInstalled:false,...(maintenance?{controllerBinding:'device_attested_not_native_authority',nativeContinuationAuthorized:false}
+          :{nativeSessionBinding:'device_attested_not_verified'})});
     }
     assert.ok(preparation&&challenge);
     const common={schema:'dharma.device-signing-recovery-offer-response/v1',organizationId:config.organizationId,deviceId:config.deviceId,
@@ -110,12 +117,15 @@ async function fixture(){
         recoveryId:challenge.recoveryId,approvalId:challenge.approvalId,state:'pending_approval',deviceProofRegistered:true,expiresAt:challenge.expiresAt});
     }
     assert.equal(address.pathname,'/api/v1/agent-fabric/signing-recovery');if(!published)return new Response(null,{status:409});
+    const maintenance=preparation.plan.schema==='dharma.device-signing-maintenance-plan/v1';
+    assert.equal(body.schema,maintenance?'dharma.device-signing-maintenance-delivery-request/v1':'dharma.device-signing-recovery-delivery-request/v1');
     const candidate:DeviceSigningRecoveryCandidate={schema:'dharma.device-signing-recovery-candidate/v1',organizationId:config.organizationId,
       recoveryId:challenge.recoveryId,approvalId:challenge.approvalId,keysetCanonical:canonicalize(nextKeyset),rootPublicKey:pub(next),
       publication:{schema:'dharma.signing-recovery-publication/v1',organizationId:config.organizationId,recoveryId:challenge.recoveryId,
         generation:3,artifactHash:digest('e'),publishedAt:new Date(clock).toISOString()}};
     return Response.json({ok:true,delivery:sealDeviceSigningRecoveryDelivery(challenge,candidate,clock),clientTrustInstalled:false,
-      nativeSessionBinding:'device_attested_not_independently_observed'});
+      ...(maintenance?{controllerBinding:'device_attested_not_native_authority',nativeContinuationAuthorized:false}
+        :{nativeSessionBinding:'device_attested_not_independently_observed'})});
   }) as typeof fetch;
   const input={configPath,source,session,hostBinding:{connectionId:id(10),hostContextId:id(11),threadId:session.sessionId,turnId:'fixture-original-turn'},
     hostScope:{signal:controller.signal,current:async()=>allowed},store,now:()=>clock,fetcher};
@@ -127,6 +137,74 @@ async function fixture(){
     },setOfferTransform:(fn:NonNullable<typeof offerTransform>)=>{offerTransform=fn;},shortenReceipt:(ms:number)=>{receiptLifetime=ms;}};
 }
 const safe=(value:unknown)=>assert.doesNotMatch(JSON.stringify(value),/signature|authenticator|keysetCanonical|credentialEncryption|privateJwk|PRIVATE_CANARY/);
+
+test('official maintenance context read signs only the fixed endpoint and returns exact current source without writes',async()=>{
+  const f=await fixture();
+  try{
+    f.setHandler(async(_path,init)=>{
+      const {schema,issuedAt,repositoryFingerprint,...selection}=JSON.parse(String(init.body));void[schema,issuedAt,repositoryFingerprint];
+      return Response.json({...selection,schema:'dharma.device-signing-maintenance-context/v1',
+        recipientMembershipId:f.input.session.membershipId,source:f.input.source,authority:'current_source_context_only_not_consent'});
+    });
+    const result=await relay.readOwnedSigningMaintenanceContext({...f.input,workspaceId:f.input.source.workspaceId,
+      repositoryBindingId:f.input.source.repositoryBindingId,membershipId:f.input.session.membershipId,operationId:id(21)});
+    assert.deepEqual(result.source,f.input.source);assert.equal(f.requests.length,1);
+    assert.equal(f.reads.filter(name=>name===f.identityAccount).length,1);assert.deepEqual(f.writes,[]);
+    assert.equal((await validateContract(resolve(import.meta.dirname,'../../../schemas'),
+      'https://schemas.dharma-ai.io/device-signing-maintenance-context-request/v1',f.requests[0]!.body)).ok,true);
+    assert.equal((await validateContract(resolve(import.meta.dirname,'../../../schemas'),
+      'https://schemas.dharma-ai.io/device-signing-maintenance-context/v1',result)).ok,true);safe(result);
+  }finally{await f.cleanup();}
+});
+for(const fault of ['device','member','source','nonce','expiry','extra','config','scope','http'] as const){
+  test('maintenance context rejects '+fault+' without replacing credentials or retrying',async()=>{
+    const f=await fixture();
+    try{
+      f.setHandler(async(_path,init)=>{
+        const {schema,issuedAt,repositoryFingerprint,...selection}=JSON.parse(String(init.body));void[schema,issuedAt,repositoryFingerprint];
+        const body={...selection,schema:'dharma.device-signing-maintenance-context/v1',recipientMembershipId:f.input.session.membershipId,
+          source:f.input.source,authority:'current_source_context_only_not_consent'};
+        if(fault==='device')body.deviceId=id(99);if(fault==='member')body.recipientMembershipId=id(99);
+        if(fault==='source')body.source={...body.source,repositoryBindingId:id(99)};
+        if(fault==='nonce')body.nonce=Buffer.alloc(32,3).toString('base64url');if(fault==='expiry')body.expiresAt=new Date(NOW).toISOString();
+        if(fault==='extra')body.token='SYNTHETIC_PRIVATE_CANARY';if(fault==='scope')f.revoke();
+        if(fault==='config')await writeFile(f.configPath,JSON.stringify({...f.config,deviceName:'Changed current config'}));
+        return fault==='http'?new Response(null,{status:503}):Response.json(body);
+      });
+      await assert.rejects(relay.readOwnedSigningMaintenanceContext({...f.input,workspaceId:f.input.source.workspaceId,
+        repositoryBindingId:f.input.source.repositoryBindingId,membershipId:f.input.session.membershipId,operationId:id(21)}),/owned_signing_recovery_failed/);
+      assert.equal(f.requests.length,1);assert.deepEqual(f.writes,[]);assert.equal(f.values.get(f.identityAccount),f.privateIdentity);
+    }finally{await f.cleanup();}
+  });
+}
+
+test('maintenance host carries a distinct origin through preparation, offer, encrypted delivery and protected journal',async()=>{
+  const fn=api(),f=await fixture();
+  try{
+    const {session,hostBinding,...base}=f.input;void hostBinding;
+    const controller={schema:'dharma.device-trust-maintenance-owner/v1' as const,operationId:id(21),controllerInstanceId:id(22),
+      processIdentityDigest:digest('e'),leaseDigest:digest('f'),registrationDigest:digest('a'),
+      deviceId:session.deviceId,recipientMembershipId:session.membershipId,originalBindingId:session.bindingId,
+      originalSessionId:session.sessionId,expiresAt:new Date(NOW+900000).toISOString()};
+    const handle=await relay.prepareOwnedSigningMaintenance({...base,controller});
+    const planned=await fn.inspectOwnedSigningRecovery!(handle);
+    assert.equal(planned.authorityKind,'device_trust_maintenance');assert.equal(planned.nativeContinuationAuthorized,false);
+    assert.equal((await validateContract(resolve(import.meta.dirname,'../../../schemas'),'https://schemas.dharma-ai.io/device-signing-maintenance-host-progress/v1',planned)).ok,true);
+    assert.equal(f.reads.filter(x=>x===f.identityAccount).length,0);assert.deepEqual(f.writes,[]);
+    await fn.submitOwnedSigningRecoveryPreparation!(handle);
+    const p=f.requests[0]!.body.preparation as DeviceSigningRecoveryPreparation;
+    assert.equal(p.plan.schema,'dharma.device-signing-maintenance-plan/v1');
+    assert.equal('nativeSessionBindingDigest'in p.plan,false);
+    f.offer();await fn.progressOwnedSigningRecoveryOffer!(handle);assert.deepEqual(f.writes,[]);
+    f.publish();const result=await fn.completeOwnedSigningRecovery!(handle);
+    assert.equal(result.state,'trust_installed');assert.equal(result.ready,false);assert.equal(result.nativeContinuationAuthorized,false);
+    const installed=JSON.parse(await readFile(f.configPath,'utf8'));
+    assert.equal(installed.serverSigningKeyset.generation,3);assert.equal(installed.deviceId,f.config.deviceId);
+    assert.equal(f.values.get(f.identityAccount),f.privateIdentity);
+    assert.ok(f.writes.every(key=>key===f.anchorAccount));safe(result);
+    const count=f.requests.length;await assert.rejects(fn.completeOwnedSigningRecovery!(handle));assert.equal(f.requests.length,count);
+  }finally{await f.cleanup();}
+});
 test('host plan returns only an opaque public handle, without private-key reads, network or writes',async()=>{
   const fn=api(),f=await fixture();try{const handle=await fn.prepareOwnedSigningRecovery!(f.input),summary=await fn.inspectOwnedSigningRecovery!(handle);
     assert.equal(f.requests.length,0);assert.equal(f.reads.filter(x=>x===f.identityAccount).length,0);assert.deepEqual(f.writes,[]);

@@ -48,6 +48,24 @@ function proof(value: unknown = challenge) {
   return sign(null, protocol().deviceSigningRecoverySigningPayload(value), device.privateKey).toString('base64url');
 }
 
+test('maintenance challenge is a disjoint device purpose, never a native-session attestation',()=>{
+  const {nativeSessionBindingDigest,...base}=expected;
+  const scope={...base,audience:'dharma.agent-fabric.signing-maintenance/v1',controllerBindingDigest:`sha256:${'7'.repeat(64)}`};
+  const body={...challenge,...scope,schema:'dharma.device-signing-maintenance-challenge/v1'} as Record<string,unknown>;
+  delete body.nativeSessionBindingDigest;
+  const parse=protocol().parseDeviceSigningRecoveryChallenge as (v:unknown,c:unknown,at:number)=>unknown;
+  const verify=protocol().verifyDeviceSigningRecoveryProof as (v:unknown,s:unknown,c:unknown,at:number)=>boolean;
+  assert.deepEqual(parse(body,scope,now),body);
+  const payload=protocol().deviceSigningRecoverySigningPayload(body);
+  assert.ok(payload.toString().startsWith('dharma.agent-fabric.device-signing-maintenance-proof/v1\0'));
+  const signature=sign(null,payload,device.privateKey).toString('base64url');
+  assert.equal(verify(body,signature,scope,now),true);
+  assert.equal(verify(challenge,signature,expected,now),false);
+  for(const changed of [{...body,nativeSessionBindingDigest},{...body,audience:expected.audience},
+    {...body,schema:challenge.schema},{...body,controllerBindingDigest:`sha256:${'8'.repeat(64)}`}])
+    assert.equal(verify(changed,signature,scope,now),false);
+});
+
 test('recovery public protocol validates and verifies exact real Ed25519 possession, not consent or server trust', () => {
   const api = protocol();
   assert.deepEqual(api.parseDeviceSigningRecoveryChallenge(challenge, expected, now), challenge);

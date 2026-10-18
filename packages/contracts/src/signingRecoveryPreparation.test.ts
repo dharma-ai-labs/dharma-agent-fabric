@@ -89,3 +89,25 @@ test('preparation rejects low-order encryption peers before a future root can be
     assert.throws(()=>api().parseDeviceSigningRecoveryPreparation({...preparation,credentialEncryptionPublicKey:point.toString('base64url')},plan,now));
   }
 });
+
+test('device maintenance has a distinct signed origin and cannot downgrade to native recovery',()=>{
+  const {nativeSessionBindingDigest,...base}=plan;
+  const maintenancePlan={...base,schema:'dharma.device-signing-maintenance-plan/v1',
+    audience:'dharma.agent-fabric.signing-maintenance/v1',controllerBindingDigest:hash('controller')};
+  const maintenance={...preparation,schema:'dharma.device-signing-maintenance-preparation/v1',plan:maintenancePlan};
+  const parse=api().parseDeviceSigningRecoveryPreparation as (v:unknown,p:unknown,at:number)=>unknown;
+  const verify=api().verifyDeviceSigningRecoveryPreparationProof as (v:unknown,s:unknown,p:unknown,at:number)=>boolean;
+  assert.deepEqual(parse(maintenance,maintenancePlan,now),maintenance);
+  const payload=api().deviceSigningRecoveryPreparationSigningPayload(maintenance);
+  assert.ok(payload.toString().startsWith('dharma.agent-fabric.device-signing-maintenance-preparation-proof/v1\0'));
+  const signature=sign(null,payload,device.privateKey).toString('base64url');
+  assert.equal(verify(maintenance,signature,maintenancePlan,now),true);
+  assert.equal(verify(maintenance,signature,plan,now),false);
+  assert.equal(verify(preparation,signature,plan,now),false);
+  for(const p of [{...maintenancePlan,nativeSessionBindingDigest},
+    {...maintenancePlan,controllerBindingDigest:undefined,nativeSessionBindingDigest},
+    {...maintenancePlan,schema:plan.schema},{...maintenancePlan,audience:plan.audience},
+    {...maintenancePlan,controllerBindingDigest:hash('foreign')}])
+    assert.equal(verify({...maintenance,plan:p},signature,maintenancePlan,now),false);
+  assert.equal(verify({...maintenance,schema:preparation.schema},signature,maintenancePlan,now),false);
+});

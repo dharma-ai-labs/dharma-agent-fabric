@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-maintenance-context/v1",
+  "title": "Current device/source context; not consent or native authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "deviceId",
+    "installationId",
+    "workspaceId",
+    "setupReference",
+    "operationId",
+    "nonce",
+    "expiresAt",
+    "recipientMembershipId",
+    "authority",
+    "source"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-signing-maintenance-context/v1"
+    },
+    "organizationId": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])"
+    },
+    "deviceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "installationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "setupReference": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"
+    },
+    "expiresAt": {
+      "type": "string",
+      "maxLength": 40,
+      "format": "date-time"
+    },
+    "recipientMembershipId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "authority": {
+      "const": "current_source_context_only_not_consent"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "organizationId",
+        "workspaceId",
+        "repositoryBindingId",
+        "repositoryFingerprint",
+        "policyRevision",
+        "scopeDigest",
+        "contractDigest",
+        "sourceGenerationId",
+        "sourceReceiptId",
+        "sourceRevision",
+        "sourcePolicyRevision",
+        "sourcePolicyHash"
+      ],
+      "properties": {
+        "organizationId": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])"
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+        },
+        "repositoryBindingId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+        },
+        "repositoryFingerprint": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"
+        },
+        "policyRevision": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$(?![\\s\\S])"
+        },
+        "scopeDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"
+        },
+        "contractDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"
+        },
+        "sourceGenerationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+        },
+        "sourceReceiptId": {
+          "type": "string",
+          "pattern": "^repo_consent_[0-9a-f-]{36}$(?![\\s\\S])"
+        },
+        "sourceRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483646
+        },
+        "sourcePolicyRevision": {
+          "type": "string",
+          "pattern": "^repository-source-[0-9a-f-]{36}$(?![\\s\\S])"
+        },
+        "sourcePolicyHash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 import {createHash, createPublicKey, randomUUID} from 'node:crypto';
 import {types} from 'node:util';
-import {canonicalize, verifyInitialServerSigningKeyset, type SessionBindingScope} from '@dharma-ai-labs/agent-fabric-contracts';
+import {canonicalize, verifyInitialServerSigningKeyset, type SessionBindingScope, type DeviceSigningRecoveryLocalPlan} from '@dharma-ai-labs/agent-fabric-contracts';
 import type {SecureSecretStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {loadDeviceConfig, loadDeviceEnrollmentAnchor} from './index.js';
 import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
@@ -30,15 +30,34 @@ export interface DeviceSigningRecoveryHostBinding {
   threadId: string;
   turnId: string;
 }
-export interface DeviceSigningRecoveryPlanInput {
+interface EnrolledRecoveryPlanInput {
   configPath: string;
   source: DeviceSigningRecoverySourceSelection;
-  session: DeviceSigningRecoverySessionSelection;
-  hostBinding: DeviceSigningRecoveryHostBinding;
   hostScope: HostOperationScope;
   store?: SecureSecretStore;
   now?: () => number;
 }
+export interface DeviceSigningRecoveryPlanInput extends EnrolledRecoveryPlanInput {
+  session: DeviceSigningRecoverySessionSelection;
+  hostBinding: DeviceSigningRecoveryHostBinding;
+}
+export interface DeviceTrustMaintenanceController {
+  schema: 'dharma.device-trust-maintenance-owner/v1';
+  operationId: string;
+  controllerInstanceId: string;
+  processIdentityDigest: string;
+  leaseDigest: string;
+  registrationDigest: string;
+  deviceId: string;
+  recipientMembershipId: string;
+  originalBindingId: string;
+  originalSessionId: string;
+  expiresAt: string;
+}
+export interface DeviceSigningMaintenancePlanInput extends EnrolledRecoveryPlanInput {
+  controller: DeviceTrustMaintenanceController;
+}
+export type OwnedSigningRecoveryPlanInput = DeviceSigningRecoveryPlanInput | DeviceSigningMaintenancePlanInput;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/;
 const DIGEST = /^sha256:[a-f0-9]{64}$(?![\s\S])/;
@@ -48,6 +67,8 @@ const SOURCE_KEYS = ['organizationId', 'workspaceId', 'repositoryBindingId', 're
 const SESSION_KEYS = ['organizationId', 'repositoryBindingId', 'workspaceId', 'endpointId', 'membershipId', 'deviceId',
   'bindingId', 'provider', 'expiresAt', 'maximumProviderCostCents', 'sessionId', 'owner', 'createdAt'];
 const HOST_KEYS = ['connectionId', 'hostContextId', 'threadId', 'turnId'];
+const CONTROLLER_KEYS = ['schema','operationId','controllerInstanceId','processIdentityDigest','leaseDigest','registrationDigest',
+  'deviceId','recipientMembershipId','originalBindingId','originalSessionId','expiresAt'];
 const invalid = (): never => {throw Error('signing_recovery_local_context_invalid');};
 function snapshot(value: unknown, keys: string[], numberKeys: string[] = []): Record<string, string | number> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || types.isProxy(value)
@@ -82,12 +103,28 @@ function domainHash(domain: string, value: unknown): string {
  * The owning host supplies already verified source/session selections and must
  * keep its scope current. No model/challenge fields may supply those records. */
 export async function planDeviceSigningRecovery(input: DeviceSigningRecoveryPlanInput) {
+  if (Object.hasOwn(input,'controller')) return invalid();
+  return planSigningRecovery(input);
+}
+
+/** A device-maintenance plan is not a native-session attestation. Its original
+ * session is an audit reference only. Fresh browser consent and server state
+ * must separately authorize any trust change; no provider is opened here. */
+export async function planDeviceSigningMaintenance(input: DeviceSigningMaintenancePlanInput) {
+  if (!Object.hasOwn(input,'controller') || Object.hasOwn(input,'session') || Object.hasOwn(input,'hostBinding')) return invalid();
+  return planSigningRecovery(input);
+}
+
+export async function planSigningRecovery(input: OwnedSigningRecoveryPlanInput): Promise<DeviceSigningRecoveryLocalPlan> {
   const scope = input.hostScope, fence = new HostOperationFence(scope);
   const configPath = input.configPath, store = input.store, clock = input.now ?? Date.now;
   try {
     const source = snapshot(input.source, SOURCE_KEYS, ['sourceRevision']);
-    const session = snapshot(input.session, SESSION_KEYS, ['maximumProviderCostCents']);
-    const hostBinding = snapshot(input.hostBinding, HOST_KEYS);
+    const maintenance = Object.hasOwn(input,'controller');
+    if (maintenance && (Object.hasOwn(input,'session') || Object.hasOwn(input,'hostBinding'))) return invalid();
+    const controller = maintenance ? snapshot((input as DeviceSigningMaintenancePlanInput).controller, CONTROLLER_KEYS) : null;
+    const session = maintenance ? null : snapshot((input as DeviceSigningRecoveryPlanInput).session, SESSION_KEYS, ['maximumProviderCostCents']);
+    const hostBinding = maintenance ? null : snapshot((input as DeviceSigningRecoveryPlanInput).hostBinding, HOST_KEYS);
     await fence.assert();
     const now = clock();
     if (!Number.isFinite(now)) return invalid();
@@ -98,17 +135,29 @@ export async function planDeviceSigningRecovery(input: DeviceSigningRecoveryPlan
       || Number(source.sourceRevision) < 1 || Number(source.sourceRevision) > 2147483646
       || source.sourceReceiptId !== `repo_consent_${source.sourceGenerationId}`
       || source.sourcePolicyRevision !== `repository-source-${source.sourceGenerationId}`) return invalid();
-    for (const key of ['endpointId', 'membershipId', 'deviceId', 'bindingId']) if (!UUID.test(String(session[key]))) return invalid();
-    for (const key of ['organizationId', 'workspaceId', 'repositoryBindingId']) if (session[key] !== source[key]) return invalid();
-    if (!['codex', 'claude', 'agy', 'hermes'].includes(String(session.provider))
+    let member: string, device: string, expiry: number;
+    if (controller) {
+      if (controller.schema !== 'dharma.device-trust-maintenance-owner/v1') return invalid();
+      for (const key of ['operationId','controllerInstanceId','deviceId','recipientMembershipId','originalBindingId'])
+        if (!UUID.test(String(controller[key]))) return invalid();
+      for (const key of ['processIdentityDigest','leaseDigest','registrationDigest']) if (!DIGEST.test(String(controller[key]))) return invalid();
+      expiry = timestamp(controller.expiresAt);
+      if (!NATIVE_ID.test(String(controller.originalSessionId)) || expiry <= now || expiry > now + 900_000) return invalid();
+      member = String(controller.recipientMembershipId); device = String(controller.deviceId);
+    } else if (session && hostBinding) {
+      for (const key of ['endpointId', 'membershipId', 'deviceId', 'bindingId']) if (!UUID.test(String(session[key]))) return invalid();
+      for (const key of ['organizationId', 'workspaceId', 'repositoryBindingId']) if (session[key] !== source[key]) return invalid();
+      if (!['codex', 'claude', 'agy', 'hermes'].includes(String(session.provider))
       || !['dharma_bridge', 'cooperative_session'].includes(String(session.owner))
       || !NATIVE_ID.test(String(session.sessionId)) || Number(session.maximumProviderCostCents) < 0
       || timestamp(session.createdAt) > now || timestamp(session.expiresAt) <= now
       || !UUID.test(String(hostBinding.connectionId)) || !UUID.test(String(hostBinding.hostContextId))
       || !NATIVE_ID.test(String(hostBinding.threadId)) || !NATIVE_ID.test(String(hostBinding.turnId))
       || hostBinding.threadId !== session.sessionId) return invalid();
+      member = String(session.membershipId); device = String(session.deviceId); expiry = timestamp(session.expiresAt);
+    } else return invalid();
     const config = await fence.step(() => loadDeviceConfig(configPath));
-    if (config.organizationId !== source.organizationId || config.deviceId !== session.deviceId
+    if (config.organizationId !== source.organizationId || config.deviceId !== device
       || !config.hqUrl.startsWith('https://') || new URL(config.hqUrl).origin !== config.hqUrl
       || !UUID.test(config.installationId ?? '') || !UUID.test(config.setupClaimReference ?? '')
       || config.setupClaimRepositoryFingerprint !== source.repositoryFingerprint || !config.serverSigningKeyset) return invalid();
@@ -131,22 +180,28 @@ export async function planDeviceSigningRecovery(input: DeviceSigningRecoveryPlan
     if (!verifyInitialServerSigningKeyset(previous, root, config.organizationId, new Date(expiredAt - 1)).ok) return invalid();
     if (canonicalize(await fence.step(() => loadDeviceConfig(configPath))) !== canonicalize(config)) return invalid();
     const completedAt = clock();
-    if (!Number.isFinite(completedAt) || completedAt < now || completedAt >= Math.min(now + 900_000, timestamp(session.expiresAt))) return invalid();
+    if (!Number.isFinite(completedAt) || completedAt < now || completedAt >= Math.min(now + 900_000, expiry)) return invalid();
     await fence.assert();
-    return Object.freeze({schema: 'dharma.device-signing-recovery-plan/v1' as const,
-      planId: randomUUID(), authority: 'local_context_only_not_recovery_authorization' as const,
-      preparedAt: new Date(now).toISOString(), expiresAt: new Date(Math.min(now + 900_000, timestamp(session.expiresAt))).toISOString(),
-      origin: config.hqUrl, issuer: config.hqUrl, audience: 'dharma.agent-fabric.signing-recovery/v1' as const,
-      organizationId: config.organizationId, recipientMembershipId: String(session.membershipId),
+    const common = {
+      authority: 'local_context_only_not_recovery_authorization' as const,
+      preparedAt: new Date(now).toISOString(), expiresAt: new Date(Math.min(now + 900_000, expiry)).toISOString(),
+      origin: config.hqUrl, issuer: config.hqUrl,
+      organizationId: config.organizationId, recipientMembershipId: member,
       deviceId: config.deviceId, installationId: config.installationId!, workspaceId: String(source.workspaceId),
       publicKeyEd25519: config.publicKeyEd25519, repositoryFingerprint: String(source.repositoryFingerprint),
       policyRevision: String(source.policyRevision), scopeDigest: String(source.scopeDigest), contractDigest: String(source.contractDigest),
       sourceSelectionDigest: domainHash('dharma.agent-fabric.signing-recovery-source-selection/v1',
         {...source, setupClaimReference: config.setupClaimReference}),
-      nativeSessionBindingDigest: domainHash('dharma.agent-fabric.signing-recovery-native-session/v1',
-        {session, hostBinding, installationId: config.installationId}),
       previousAnchorHash: hash(anchor), protectedConfigDigest: hash(config), previousGeneration: previous.generation,
-      previousKeysetHash: hash(previous), previousRootFingerprint: `sha256:${createHash('sha256').update(rootBytes).digest('hex')}`});
+      previousKeysetHash: hash(previous), previousRootFingerprint: `sha256:${createHash('sha256').update(rootBytes).digest('hex')}`};
+    return controller ? Object.freeze({...common, schema:'dharma.device-signing-maintenance-plan/v1' as const,
+      planId:String(controller.operationId), audience:'dharma.agent-fabric.signing-maintenance/v1' as const,
+      controllerBindingDigest:domainHash('dharma.agent-fabric.device-trust-maintenance-controller/v1',
+        {controller,source,installationId:config.installationId})})
+      : Object.freeze({...common, schema:'dharma.device-signing-recovery-plan/v1' as const, planId:randomUUID(),
+        audience:'dharma.agent-fabric.signing-recovery/v1' as const,
+        nativeSessionBindingDigest:domainHash('dharma.agent-fabric.signing-recovery-native-session/v1',
+          {session,hostBinding,installationId:config.installationId})});
   } catch {
     await fence.assert();
     return invalid();

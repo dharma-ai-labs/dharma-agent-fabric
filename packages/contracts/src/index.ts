@@ -20,6 +20,7 @@ export * from './signingRecovery.js';
 export * from './signingRecoveryPreparation.js';
 export * from './signingRecoveryOffer.js';
 export * from './signingRecoveryDelivery.js';
+export * from './signingMaintenanceContext.js';
 export * from './setupClaimCredential.js';
 
 const require = createRequire(import.meta.url);

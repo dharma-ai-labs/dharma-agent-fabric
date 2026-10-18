@@ -5,7 +5,7 @@ import {canonicalize,deviceSigningRecoverySigningPayload,openDeviceSigningRecove
 import {createSystemSecureStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {loadDeviceConfig,loadDeviceIdentity,type DeviceConfig} from './index.js';
 import {HostOperationFence} from './hostOperationScope.js';
-import {planDeviceSigningRecovery,type DeviceSigningRecoveryPlanInput} from './signingRecoveryPlan.js';
+import {planSigningRecovery,type OwnedSigningRecoveryPlanInput} from './signingRecoveryPlan.js';
 
 const PATH='/api/v1/agent-fabric/signing-recovery',MAX_BYTES=65536;
 export type SigningRecoveryClientPhase='input'|'local_plan'|'identity'|'request'|'response'|'decryption'|'local_recheck'|'commit'|'confirmation';
@@ -13,7 +13,7 @@ export class SigningRecoveryClientError extends Error {
   readonly code='signing_recovery_delivery_failed';
   constructor(readonly phase:SigningRecoveryClientPhase,readonly httpStatus:number|null){super('signing_recovery_delivery_failed');this.name='SigningRecoveryClientError';}
 }
-export interface RecoverExpiredDeviceSigningTrustInput extends DeviceSigningRecoveryPlanInput {
+export type RecoverExpiredDeviceSigningTrustInput = OwnedSigningRecoveryPlanInput & {
   /** Owning-host memory from the matching approval handshake, never JSON/tool arguments. */
   challenge:unknown;
   encryptionKey:KeyObject;
@@ -39,7 +39,7 @@ function record(value:unknown):Record<string,unknown>{
 }
 /** The challenge never supplies local identity/source/session expectations. */
 export function checkedRecoveryHostContext(input:RecoverExpiredDeviceSigningTrustInput,
-  plan:Awaited<ReturnType<typeof planDeviceSigningRecovery>>,now:number){
+  plan:Awaited<ReturnType<typeof planSigningRecovery>>,now:number){
   const key=input.encryptionKey;
   if(types.isProxy(key)||!(key instanceof KeyObject)||key.type!=='private'||key.asymmetricKeyType!=='x25519')return fail();
   const publicKey=createPublicKey(key).export({format:'jwk'}).x;
@@ -54,7 +54,7 @@ export function checkedRecoveryHostContext(input:RecoverExpiredDeviceSigningTrus
     ||challenge.candidateRootFingerprint===challenge.previousRootFingerprint)return fail();
   return {challenge,expected};
 }
-async function responseBody(response:Response,signal:AbortSignal){
+async function responseBody(response:Response,signal:AbortSignal,maintenance:boolean){
   const length=response.headers.get('content-length');
   if(!/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type')??'')
     ||length!==null&&(!/^\d+$/.test(length)||Number(length)>MAX_BYTES)||!response.body)return fail();
@@ -65,8 +65,11 @@ async function responseBody(response:Response,signal:AbortSignal){
     while(true){const next=await withAbort(reader.read(),signal);if(next.done)break;bytes+=next.value.byteLength;if(bytes>MAX_BYTES)return fail();chunks.push(next.value);}
     if(signal.aborted)return fail();
     const value=record(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))));
-    if(Object.keys(value).sort().join('\0')!==['ok','delivery','clientTrustInstalled','nativeSessionBinding'].sort().join('\0')
-      ||value.ok!==true||value.clientTrustInstalled!==false||value.nativeSessionBinding!=='device_attested_not_independently_observed')return fail();
+    const expectedKeys=maintenance?['ok','delivery','clientTrustInstalled','controllerBinding','nativeContinuationAuthorized']
+      :['ok','delivery','clientTrustInstalled','nativeSessionBinding'];
+    if(Object.keys(value).sort().join('\0')!==expectedKeys.sort().join('\0')||value.ok!==true||value.clientTrustInstalled!==false
+      ||(maintenance?value.controllerBinding!=='device_attested_not_native_authority'||value.nativeContinuationAuthorized!==false
+        :value.nativeSessionBinding!=='device_attested_not_independently_observed'))return fail();
     return value.delivery;
   }finally{signal.removeEventListener('abort',cancel);cancel();try{reader.releaseLock();}catch{/* A cancelled non-cooperative read may retain its lock. */}}
 }
@@ -87,7 +90,7 @@ export async function retrieveSigningRecoveryDelivery(input:RecoverExpiredDevice
   const fence=new HostOperationFence(input.hostScope),clock=input.now??Date.now;
   try{
     await fence.assert();
-    phase='local_plan';const initial=await planDeviceSigningRecovery(input);
+    phase='local_plan';const initial=await planSigningRecovery(input);
     const {challenge,expected}=checkedRecoveryHostContext(input,initial,clock());
     const raw=await fence.step(async()=>input.store??await createSystemSecureStore()),store=fence.store(raw);
     const config=await fence.step(()=>loadDeviceConfig(input.configPath));
@@ -103,7 +106,8 @@ export async function retrieveSigningRecoveryDelivery(input:RecoverExpiredDevice
     }finally{delete identity.privateJwk.d;}
     const url=initial.origin+PATH,remaining=Date.parse(challenge.expiresAt)-clock();if(remaining<=0)return fail();
     const signal=AbortSignal.any([fence.signal,AbortSignal.timeout(Math.max(1,Math.min(30000,remaining)))]);
-    const body=JSON.stringify({schema:'dharma.device-signing-recovery-delivery-request/v1',action:'delivery',
+    const maintenance=initial.schema==='dharma.device-signing-maintenance-plan/v1';
+    const body=JSON.stringify({schema:maintenance?'dharma.device-signing-maintenance-delivery-request/v1':'dharma.device-signing-recovery-delivery-request/v1',action:'delivery',
       organizationId:challenge.organizationId,recoveryId:challenge.recoveryId,approvalId:challenge.approvalId,signature});
     const timestamp=new Date(clock()).toISOString();
     // Recovery transport IDs are not a connected relay or Codex session.
@@ -122,9 +126,9 @@ export async function retrieveSigningRecoveryDelivery(input:RecoverExpiredDevice
     if(response.status!==200||response.redirected||(response.url&&response.url!==url)){
       void response.body?.cancel().catch(()=>{});return fail();
     }
-    phase='response';const envelope=await responseBody(response,signal);await fence.assert();
+    phase='response';const envelope=await responseBody(response,signal,maintenance);await fence.assert();
     phase='decryption';const candidate=openDeviceSigningRecoveryDelivery(challenge,envelope,input.encryptionKey,expected,clock());
-    phase='local_recheck';const fresh=await planDeviceSigningRecovery(input);
+    phase='local_recheck';const fresh=await planSigningRecovery(input);
     const current=checkedRecoveryHostContext({...input,challenge},fresh,clock());
     if(canonicalize(current.expected)!==canonicalize(expected))return fail();
     phase='commit';const installed=await fence.step(()=>apply({challenge,expected,candidate}));
@@ -134,12 +138,14 @@ export async function retrieveSigningRecoveryDelivery(input:RecoverExpiredDevice
     const finished=clock();if(!Number.isFinite(finished)||finished<Date.parse(challenge.issuedAt)
       ||finished>=Date.parse(installed.serverSigningKeyset!.expiresAt))return fail();
     await fence.assert();
-    return Object.freeze({schema:'dharma.device-signing-recovery-completion/v1' as const,organizationId:installed.organizationId,
+    return Object.freeze({schema:maintenance?'dharma.device-signing-maintenance-completion/v1' as const:'dharma.device-signing-recovery-completion/v1' as const,organizationId:installed.organizationId,
       deviceId:installed.deviceId,installationId:installed.installationId,workspaceId:challenge.workspaceId,
       recoveryId:challenge.recoveryId,approvalId:challenge.approvalId,generation:installed.serverSigningKeyset!.generation,
       keysetHash:hash(candidate.keysetCanonical),rootFingerprint:hash(Buffer.from(candidate.rootPublicKey,'base64url')),
       publicationArtifactHash:candidate.publication.artifactHash,observedAt:new Date(finished).toISOString(),
-      connectionMode:installed.connectionMode??'manual',ready:false as const,disposition:'signing_trust_installed_not_onboarding_ready' as const});
+      connectionMode:installed.connectionMode??'manual',ready:false as const,
+      ...(maintenance?{authorityKind:'device_trust_maintenance' as const,nativeContinuationAuthorized:false as const}:{}),
+      disposition:'signing_trust_installed_not_onboarding_ready' as const});
   }catch{
     await fence.assert();throw new SigningRecoveryClientError(phase,httpStatus);
   }finally{void response?.body?.cancel().catch(()=>{});}

@@ -29,6 +29,35 @@ const session = {organizationId: 'org_synthetic', workspaceId: id(4), repository
   expiresAt: '2026-10-17T10:20:00.000Z', maximumProviderCostCents: 4000};
 const hostBinding = {connectionId: id(10), hostContextId: id(11), threadId: session.sessionId, turnId: 'native-turn-1'};
 
+test('maintenance plan preserves the enrolled device and does not assert a native turn or session liveness',async()=>{
+  const f=await fixture();
+  try{
+    const fn=(relay as unknown as Record<string,unknown>).planDeviceSigningMaintenance;
+    assert.equal(typeof fn,'function');
+    const controller={schema:'dharma.device-trust-maintenance-owner/v1',operationId:id(12),controllerInstanceId:id(13),
+      processIdentityDigest:digest('e'),leaseDigest:digest('f'),registrationDigest:digest('a'),
+      deviceId:session.deviceId,recipientMembershipId:session.membershipId,originalBindingId:session.bindingId,
+      originalSessionId:session.sessionId,expiresAt:new Date(now+600000).toISOString()};
+    const {session:_session,hostBinding:_host,...base}=f.input;void[_session,_host];
+    const input={...base,controller};
+    const plan=await (fn as (v:Record<string,unknown>)=>Promise<Record<string,unknown>>)(input);
+    assert.equal(plan.schema,'dharma.device-signing-maintenance-plan/v1');
+    assert.equal(plan.audience,'dharma.agent-fabric.signing-maintenance/v1');
+    assert.equal(plan.planId,controller.operationId);
+    assert.equal('nativeSessionBindingDigest'in plan,false);
+    assert.match(String(plan.controllerBindingDigest),/^sha256:[a-f0-9]{64}$/);
+    assert.equal(plan.previousAnchorHash,hash(f.anchor));
+    assert.equal(plan.recipientMembershipId,session.membershipId);
+    assert.deepEqual(f.calls,[f.account]);
+    for(const change of [{session},{hostBinding},{controller:{...controller,deviceId:id(22)}},
+      {controller:{...controller,expiresAt:new Date(now).toISOString()}},
+      {controller:{...controller,leaseDigest:'unverified'}},
+      {controller:{...controller,approved:true}}])
+      await assert.rejects((fn as (v:Record<string,unknown>)=>Promise<unknown>)({...input,...change}));
+    await assert.rejects(api()({...f.input,controller}));
+  }finally{await f.cleanup();}
+});
+
 function api() {
   const fn = (relay as unknown as Record<string, unknown>).planDeviceSigningRecovery;
   assert.equal(typeof fn, 'function', 'missing public read-only recovery plan');

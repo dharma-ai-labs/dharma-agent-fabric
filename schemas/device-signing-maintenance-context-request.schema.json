@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-maintenance-context-request/v1",
+  "title": "Current device/source context; not consent or native authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "deviceId",
+    "installationId",
+    "workspaceId",
+    "setupReference",
+    "operationId",
+    "repositoryFingerprint",
+    "nonce",
+    "expiresAt",
+    "issuedAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-signing-maintenance-context-request/v1"
+    },
+    "organizationId": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])"
+    },
+    "deviceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "installationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "setupReference": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"
+    },
+    "repositoryFingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"
+    },
+    "expiresAt": {
+      "type": "string",
+      "maxLength": 40,
+      "format": "date-time"
+    },
+    "issuedAt": {
+      "type": "string",
+      "maxLength": 40,
+      "format": "date-time"
+    }
+  }
+}

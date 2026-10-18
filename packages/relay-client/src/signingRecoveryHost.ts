@@ -1,15 +1,19 @@
 import {createHash,createPrivateKey,createPublicKey,generateKeyPairSync,randomBytes,sign,type KeyObject} from 'node:crypto';
 import {types} from 'node:util';
 import {canonicalize,deviceSigningRecoveryPreparationSigningPayload,parseDeviceSigningRecoveryPreparation,
+  parseDeviceSigningMaintenanceContextRequest,parseDeviceSigningMaintenanceContext,
   type DeviceSigningRecoveryPreparation,type DeviceSigningRecoveryChallenge} from '@dharma-ai-labs/agent-fabric-contracts';
 import {createSystemSecureStore} from '@dharma-ai-labs/agent-fabric-secure-store';
-import {loadDeviceConfig,loadDeviceIdentity,recoverExpiredDeviceSigningTrust} from './index.js';
+import {loadDeviceConfig,loadDeviceIdentity,loadDeviceEnrollmentAnchor,recoverExpiredDeviceSigningTrust} from './index.js';
 import {SigningRecoveryClientError} from './signingRecoveryClient.js';
 import {HostOperationFence} from './hostOperationScope.js';
-import {planDeviceSigningRecovery,type DeviceSigningRecoveryPlanInput} from './signingRecoveryPlan.js';
+import {planSigningRecovery,type DeviceSigningRecoveryPlanInput,
+  type DeviceSigningMaintenancePlanInput,type OwnedSigningRecoveryPlanInput} from './signingRecoveryPlan.js';
 import {progressPreparedSigningRecoveryOfferForHost,SigningRecoveryOfferClientError} from './signingRecoveryOfferClient.js';
 
 export interface PrepareOwnedSigningRecoveryInput extends DeviceSigningRecoveryPlanInput {fetcher?:typeof fetch;}
+export interface PrepareOwnedSigningMaintenanceInput extends DeviceSigningMaintenancePlanInput {fetcher?:typeof fetch;}
+type PrepareOwnedDeviceTrustInput = OwnedSigningRecoveryPlanInput & {fetcher?:typeof fetch};
 export interface OwnedSigningRecoveryHandle {readonly schema:'dharma.owned-signing-recovery-handle/v1';readonly preparationId:string;}
 export type OwnedSigningRecoveryState='prepared'|'awaiting_browser_offer'|'pending_approval'|'submission_unconfirmed'
   |'offer_unconfirmed'|'delivery_unconfirmed'|'failed'|'trust_installed';
@@ -18,7 +22,7 @@ export class OwnedSigningRecoveryError extends Error {
   constructor(readonly phase:string,readonly httpStatus:number|null=null){super('owned_signing_recovery_failed');this.name='OwnedSigningRecoveryError';}
 }
 interface State {
-  input:PrepareOwnedSigningRecoveryInput;
+  input:PrepareOwnedDeviceTrustInput;
   fence:HostOperationFence;
   abort:AbortController;
   preparation:DeviceSigningRecoveryPreparation;
@@ -40,16 +44,19 @@ function owned(handle:OwnedSigningRecoveryHandle):State {
 }
 function summary(state:State){
   const plan=state.preparation.plan;
-  return Object.freeze({schema:'dharma.device-signing-recovery-host-progress/v1' as const,
+  return Object.freeze({schema:plan.schema==='dharma.device-signing-maintenance-plan/v1'
+    ?'dharma.device-signing-maintenance-host-progress/v1' as const:'dharma.device-signing-recovery-host-progress/v1' as const,
     organizationId:plan.organizationId,deviceId:plan.deviceId,preparationId:plan.planId,
     state:state.state,expiresAt:state.expiresAt,
     ...(state.challenge?{recoveryId:state.challenge.recoveryId,approvalId:state.challenge.approvalId}:{}),
+    ...(plan.schema==='dharma.device-signing-maintenance-plan/v1'
+      ?{authorityKind:'device_trust_maintenance' as const,nativeContinuationAuthorized:false as const}:{}),
     clientTrustInstalled:state.state==='trust_installed',ready:false as const,
     disposition:'owned_host_progress_not_onboarding_ready' as const});
 }
 async function recheck(state:State){
   await state.fence.assert();if(state.input.now!()>=Date.parse(state.expiresAt))return fail('expired');
-  const fresh=await planDeviceSigningRecovery(state.input),plan=state.preparation.plan;
+  const fresh=await planSigningRecovery(state.input),plan=state.preparation.plan;
   const original={...fresh,planId:plan.planId,preparedAt:plan.preparedAt,expiresAt:plan.expiresAt};
   if(Date.parse(plan.expiresAt)>Date.parse(fresh.expiresAt)
     ||canonicalize(original)!==canonicalize(plan))return fail('local_recheck');
@@ -76,18 +83,75 @@ async function receipt(response:Response,signal:AbortSignal){
   }finally{void reader.cancel().catch(()=>{});try{reader.releaseLock();}catch{/* Cancellation need not settle a non-cooperative stream. */}}
 }
 
+/** One signed, context-only read. The original controller supplies its current
+ * protected scope. No preparation, grant, approval, provider or trust write is
+ * performed; the later preparation transaction independently rechecks it. */
+export async function readOwnedSigningMaintenanceContext(input:Pick<PrepareOwnedSigningMaintenanceInput,'configPath'|'hostScope'|'store'|'fetcher'|'now'> & {
+  workspaceId:string;repositoryBindingId:string;membershipId:string;operationId:string;
+}){
+  const fence=new HostOperationFence(input.hostScope),clock=input.now??Date.now;
+  let phase='context_input',httpStatus:number|null=null;
+  try{
+    const config=await fence.step(()=>loadDeviceConfig(input.configPath));
+    if(!config.hqUrl.startsWith('https://')||new URL(config.hqUrl).origin!==config.hqUrl)return fail('context_input');
+    const raw=await fence.step(async()=>input.store??await createSystemSecureStore()),store=fence.store(raw);
+    const anchor=await loadDeviceEnrollmentAnchor({config,store,hostScope:input.hostScope,readOnly:true});
+    const scope={organizationId:config.organizationId,deviceId:config.deviceId,installationId:config.installationId!,
+      workspaceId:input.workspaceId,setupReference:config.setupClaimReference!,operationId:input.operationId};
+    const at=clock(),request=parseDeviceSigningMaintenanceContextRequest({schema:'dharma.device-signing-maintenance-context-request/v1',
+      ...scope,repositoryFingerprint:config.setupClaimRepositoryFingerprint,nonce:randomBytes(32).toString('base64url'),
+      issuedAt:new Date(at).toISOString(),expiresAt:new Date(at+60000).toISOString()},scope,at);
+    phase='context_identity';
+    const identity=await loadDeviceIdentity({config,hostScope:input.hostScope,store:{...store,get:account=>(store.getFresh??store.get).call(store,account)}});
+    let key:KeyObject;
+    try{key=createPrivateKey({format:'jwk',key:identity.privateJwk});
+      if(createPublicKey(key).export({format:'jwk'}).x!==config.publicKeyEd25519)return fail('context_identity');
+    }finally{delete identity.privateJwk.d;}
+    const body=JSON.stringify(request),payload=Buffer.from(JSON.stringify({bodyHash:hash(body),deviceId:config.deviceId,
+      messageId:request.operationId,method:'POST',nonce:request.nonce,organizationId:config.organizationId,pathname:PATH,
+      sequence:1,sessionId:request.operationId,timestamp:request.issuedAt}));
+    const signal=AbortSignal.any([fence.signal,AbortSignal.timeout(30000)]),url=config.hqUrl+PATH;
+    phase='context_request';await fence.assert();
+    const pending=(input.fetcher??fetch)(url,{method:'POST',redirect:'error',credentials:'omit',signal,body,
+      headers:{'content-type':'application/json','cache-control':'no-store','x-dharma-device-id':config.deviceId,
+        'x-dharma-session-id':request.operationId,'x-dharma-message-id':request.operationId,'x-dharma-timestamp':request.issuedAt,
+        'x-dharma-sequence':'1','x-dharma-nonce':request.nonce,'x-dharma-signature':sign(null,payload,key).toString('base64url')}});
+    void pending.then(value=>{if(signal.aborted)void value.body?.cancel().catch(()=>{});},()=>{});
+    const response=await withAbort(pending,signal);httpStatus=response.status;
+    try{
+      if(response.status!==200||response.redirected||response.url&&response.url!==url)return fail('context_response');
+      phase='context_response';const result=parseDeviceSigningMaintenanceContext(await receipt(response,signal),request,
+        {repositoryBindingId:input.repositoryBindingId,repositoryFingerprint:config.setupClaimRepositoryFingerprint!},clock());
+      if(result.recipientMembershipId!==input.membershipId)return fail('context_response');
+      phase='context_recheck';await fence.assert();
+      if(canonicalize(await fence.step(()=>loadDeviceConfig(input.configPath)))!==canonicalize(config)
+        ||canonicalize(await loadDeviceEnrollmentAnchor({config,store,hostScope:input.hostScope,readOnly:true}))!==canonicalize(anchor))return fail('context_changed');
+      await fence.assert();return result;
+    }finally{void response.body?.cancel().catch(()=>{});}
+  }catch{throw new OwnedSigningRecoveryError(phase,httpStatus);}
+}
+
 /** Trusted owning-host input only, never a tool/CLI authority object. Planning
  * reads public config and its protected anchor, not the private device key. */
 export async function prepareOwnedSigningRecovery(input:PrepareOwnedSigningRecoveryInput):Promise<OwnedSigningRecoveryHandle>{
+  if(Object.hasOwn(input,'controller'))return fail('prepare');
+  return prepareOwnedDeviceTrust(input);
+}
+export async function prepareOwnedSigningMaintenance(input:PrepareOwnedSigningMaintenanceInput):Promise<OwnedSigningRecoveryHandle>{
+  if(!Object.hasOwn(input,'controller')||Object.hasOwn(input,'session')||Object.hasOwn(input,'hostBinding'))return fail('prepare');
+  return prepareOwnedDeviceTrust(input);
+}
+async function prepareOwnedDeviceTrust(input:PrepareOwnedDeviceTrustInput):Promise<OwnedSigningRecoveryHandle>{
   try{
     const original=new HostOperationFence(input.hostScope),abort=new AbortController();
     const scope={signal:AbortSignal.any([original.signal,abort.signal]),current:async()=>{await original.assert();return true;}};
     const captured={...input,now:input.now??Date.now,hostScope:scope};
-    const fence=new HostOperationFence(scope),plan=await planDeviceSigningRecovery(captured);
+    const fence=new HostOperationFence(scope),plan=await planSigningRecovery(captured);
     const config=await fence.step(()=>loadDeviceConfig(captured.configPath));
     if(hash(canonicalize(config))!==plan.protectedConfigDigest)return fail('local_plan');
     const key=generateKeyPairSync('x25519');
-    const preparation=parseDeviceSigningRecoveryPreparation({schema:'dharma.device-signing-recovery-preparation/v1',
+    const preparation=parseDeviceSigningRecoveryPreparation({schema:plan.schema==='dharma.device-signing-maintenance-plan/v1'
+      ?'dharma.device-signing-maintenance-preparation/v1':'dharma.device-signing-recovery-preparation/v1',
       purpose:'prepare_expired_signing_trust_recovery',method:'POST',path:PATH,plan,
       historicalKeysetCanonical:canonicalize(config.serverSigningKeyset),historicalRootPublicKey:config.serverPublicKeyEd25519,
       credentialEncryptionPublicKey:key.publicKey.export({format:'jwk'}).x,nonce:randomBytes(32).toString('base64url')},plan,captured.now());
@@ -116,7 +180,8 @@ export async function submitOwnedSigningRecoveryPreparation(handle:OwnedSigningR
     }finally{delete identity.privateJwk.d;}
     await recheck(state);
     const preparation=state.preparation,plan=preparation.plan,clock=state.input.now!;
-    const body=JSON.stringify({schema:'dharma.device-signing-recovery-preparation-request/v1',preparation,
+    const maintenance=plan.schema==='dharma.device-signing-maintenance-plan/v1';
+    const body=JSON.stringify({schema:maintenance?'dharma.device-signing-maintenance-preparation-request/v1':'dharma.device-signing-recovery-preparation-request/v1',preparation,
       signature:sign(null,deviceSigningRecoveryPreparationSigningPayload(preparation),key).toString('base64url')});
     if(Buffer.byteLength(body)>32768)return fail('request');
     const at=clock(),remaining=Date.parse(plan.expiresAt)-at;if(!Number.isFinite(at)||remaining<=0)return fail('request');
@@ -138,7 +203,8 @@ export async function submitOwnedSigningRecoveryPreparation(handle:OwnedSigningR
         ||narrowed>Date.parse(plan.expiresAt))return fail('receipt');
       const expected={schema:'dharma.signing-recovery-preparation-receipt/v1',preparationId:plan.planId,organizationId:plan.organizationId,
         recipientMembershipId:plan.recipientMembershipId,deviceId:plan.deviceId,expiresAt:value.expiresAt,state:'pending_browser_review',
-        clientTrustInstalled:false,nativeSessionBinding:'device_attested_not_verified'};
+        clientTrustInstalled:false,...(maintenance?{controllerBinding:'device_attested_not_native_authority',nativeContinuationAuthorized:false}
+          :{nativeSessionBinding:'device_attested_not_verified'})};
       if(canonicalize(value)!==canonicalize(expected))return fail('receipt');
       state.expiresAt=String(value.expiresAt);await recheck(state);state.state='awaiting_browser_offer';return summary(state);
     }finally{void response.body?.cancel().catch(()=>{});}

@@ -20,19 +20,23 @@ import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs
 import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
 import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
-import {planDeviceSigningRecovery} from './signingRecoveryPlan.js';
+import {planSigningRecovery} from './signingRecoveryPlan.js';
+import {withDeviceSigningControl} from './deviceSigningControl.js';
+export {withDeviceSigningControl,type DeviceSigningControlLease} from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
   type ProgressPreparedDeviceSigningRecoveryOfferInput,type SigningRecoveryOfferClientPhase} from './signingRecoveryOfferClient.js';
 export {prepareOwnedSigningRecovery,submitOwnedSigningRecoveryPreparation,progressOwnedSigningRecoveryOffer,
   completeOwnedSigningRecovery,inspectOwnedSigningRecovery,disposeOwnedSigningRecovery,OwnedSigningRecoveryError,
+  prepareOwnedSigningMaintenance,readOwnedSigningMaintenanceContext,type PrepareOwnedSigningMaintenanceInput,
   type PrepareOwnedSigningRecoveryInput,type OwnedSigningRecoveryHandle,type OwnedSigningRecoveryState} from './signingRecoveryHost.js';
 export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
   type SetupClaimFailurePhase, type SetupClaimFailureDiagnostic } from './setupClaim.js';
 export {planDeviceSigningRecovery, type DeviceSigningRecoveryPlanInput, type DeviceSigningRecoverySourceSelection,
-  type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding} from './signingRecoveryPlan.js';
+  type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding,
+  planDeviceSigningMaintenance, type DeviceSigningMaintenancePlanInput, type DeviceTrustMaintenanceController} from './signingRecoveryPlan.js';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
@@ -333,6 +337,12 @@ export interface ActiveSkillAuthorizationAnchor {
 // DHARMA_HOME/configPath. Different configured homes share the same anchor lock.
 async function withEnrollmentAnchorLock<T>(config: DeviceConfig, fence: HostOperationFence | undefined,
   operation: () => Promise<T>): Promise<T> {
+  const hostScope=fence?{signal:fence.signal,current:async()=>{await fence.assert();return true;}}:undefined;
+  return withDeviceSigningControl({config,hostScope},()=>withEnrollmentAnchorLockUnderControl(config,fence,operation));
+}
+
+async function withEnrollmentAnchorLockUnderControl<T>(config: DeviceConfig, fence: HostOperationFence | undefined,
+  operation: () => Promise<T>): Promise<T> {
   const identity = userInfo();
   const user = createHash('sha256').update(identity.homedir + ':' + identity.username).digest('hex').slice(0, 32);
   const account = legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId);
@@ -387,7 +397,7 @@ export async function recoverExpiredDeviceSigningTrust(input:RecoverExpiredDevic
     const config=await fence.step(()=>loadDeviceConfig(input.configPath));
     return withEnrollmentAnchorLock(config,fence,async()=>{
       // Waiting for another writer never preserves a stale source/session plan.
-      const plan=await planDeviceSigningRecovery({...input,store});
+      const plan=await planSigningRecovery({...input,store});
       const current=checkedRecoveryHostContext({...input,challenge:accepted.challenge},plan,clock());
       if(canonicalize(current.expected)!==canonicalize(accepted.expected))throw Error('signing_recovery_local_context_changed');
       return commitSigningRecoveryJournal({io:signingRecoveryJournalIO({configPath:input.configPath,config,store,fence,clock}),
@@ -1338,6 +1348,11 @@ export class AgentFabricClient {
   }
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
+    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
+    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#signedRequestWithSigningControl(method,route,body));
+  }
+
+  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     if (this.#readOnly) {
@@ -1398,6 +1413,11 @@ export class AgentFabricClient {
   }
 
   async #sendPending(): Promise<Record<string, unknown>> {
+    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
+    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#sendPendingWithSigningControl());
+  }
+
+  async #sendPendingWithSigningControl(): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');

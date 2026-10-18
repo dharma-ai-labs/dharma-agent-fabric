@@ -20,6 +20,7 @@ import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
+  withDeviceSigningControl,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
@@ -39,6 +40,8 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
+import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
@@ -248,11 +251,25 @@ export function portalUrl(flags: Map<string, string | boolean>, fallback = 'http
 }
 
 function print(value: Output): void {
-  process.stdout.write(typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
+  process.stdout.write(formatCommandOutput(value));
+}
+
+export function formatCommandOutput(value:unknown):string{
+  if(typeof value==='string')return value+'\n';
+  const streaming=value&&typeof value==='object'&&!Array.isArray(value)
+    &&(value as Record<string,unknown>).schema==='dharma.device-signing-maintenance-controller-progress/v1';
+  return JSON.stringify(value,null,streaming?undefined:2)+'\n';
 }
 
 export function commandExitCode(argv: string[], value: Output): number {
   const { positional, flags } = parseCliOptions(argv);
+  if(positional[0]==='signing-recovery'){
+    if(!value||typeof value!=='object'||Array.isArray(value))return 2;
+    const receipt=value as Record<string,unknown>,progress=receipt.progress as Record<string,unknown>|undefined;
+    return receipt.schema==='dharma.device-signing-maintenance-controller-progress/v1'&&receipt.ok===true
+      &&receipt.nativeContinuationAuthorized===false&&receipt.ready===false
+      &&(flags.get('apply')===true?progress?.state==='trust_installed'&&progress.clientTrustInstalled===true:receipt.planned===true)?0:2;
+  }
   if (positional[0] === 'sessions' && positional[1] === 'readiness' && flags.get('diagnostic') === true) {
     const diagnosticResult = value && typeof value === 'object' && !Array.isArray(value)
       ? value as Record<string,unknown> : null;
@@ -1066,7 +1083,7 @@ async function pidProcessState(pidPath: string): Promise<'running' | 'stopped' |
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ESRCH') return 'stopped';
-    return code === 'EPERM' ? 'unknown' : 'stopped';
+    return 'unknown';
   }
 }
 
@@ -1076,6 +1093,27 @@ export async function relayProcessState(home = dharmaHome()): Promise<'running' 
 
 export async function relaySupervisorProcessState(home = dharmaHome()): Promise<'running' | 'stopped' | 'unknown'> {
   return pidProcessState(resolve(home, 'relay', 'supervisor.pid'));
+}
+
+/** A legacy runtime may not participate in the new signing mutex. Require all
+ * registrations belonging to this device disabled and their known owned PID
+ * locks stopped, plus its relay/supervisor, before any maintenance store read.
+ * This check never stops a process or changes startup/registration state. */
+export async function deviceTrustMaintenanceProcessState(home:string,name:string):Promise<'running'|'stopped'|'unknown'>{
+  const selected=await readNamedSession(home,name);
+  if(!selected)return 'unknown';
+  const states=await Promise.all([relayProcessState(home),relaySupervisorProcessState(home)]);
+  let entries:string[];
+  try{entries=await readdir(resolve(home,'sessions'));}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')return 'unknown';entries=[];}
+  for(const entry of entries){
+    if(!/^[a-z][a-z0-9-]{0,47}$/.test(String(entry)))continue;
+    let registration:Awaited<ReturnType<typeof readNamedSession>>;
+    try{registration=await readNamedSession(home,String(entry));}catch{return 'unknown';}
+    if(!registration)return 'unknown';
+    if(registration.identity.deviceId!==selected.identity.deviceId||registration.identity.organizationId!==selected.identity.organizationId)continue;
+    states.push(registration.enabled?'unknown':await pidProcessState(resolve(namedSessionPaths(home,String(entry)).root,'service.lock')));
+  }
+  return states.includes('running')?'running':states.includes('unknown')?'unknown':'stopped';
 }
 
 export async function acquireRelayProcessLease(home = dharmaHome()): Promise<() => Promise<void>> {
@@ -1257,6 +1295,37 @@ export async function withRelayStartupMutation<T>(operation: () => Promise<T>, h
       'demo_watch_startup_busy: another startup operation is still running.');});
     return await step(operation);
   } finally { await release?.(); }
+}
+
+export async function acquireNamedSessionStartupAdmission(home = dharmaHome()): Promise<() => Promise<void>> {
+  return acquirePidLock(resolve(home, 'autostart-mutation.lock'), 250, 'named_session_startup_busy');
+}
+
+async function assertSigningMaintenanceManagedCohort(home: string, workspace: string): Promise<string> {
+  const startup = await inspectOwnedRelayAutostart({home});
+  const bin = resolve(workspace, '.dharma', 'bin');
+  if (startup.version !== VERSION || startup.workspace !== workspace
+    || startup.launcher !== resolve(bin, process.platform === 'win32' ? 'dharma.cmd' : 'dharma')
+    || startup.policy !== resolve(workspace, '.dharma', 'approved-policy.json')) {
+    throw Error('device_signing_maintenance_managed_cohort_upgrade_required');
+  }
+  const readLauncher = async (name: string) => {
+    const path = resolve(bin, name), before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 65536 || await realpath(path) !== path) {
+      throw Error('device_signing_maintenance_managed_cohort_upgrade_required');
+    }
+    const contents = await readFile(path, 'utf8'), after = await lstat(path);
+    if (after.ino !== before.ino || after.dev !== before.dev || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || after.isSymbolicLink()) {
+      throw Error('device_signing_maintenance_managed_cohort_upgrade_required');
+    }
+    return contents;
+  };
+  const launchers = {shell: await readLauncher('dharma'), windows: await readLauncher('dharma.cmd')};
+  if (!await verifyRecordedRepositoryLaunchers(VERSION, launchers)) {
+    throw Error('device_signing_maintenance_managed_cohort_upgrade_required');
+  }
+  return sha256(JSON.stringify({schema:'dharma.managed-signing-maintenance-cohort/v1', startup, launchers}));
 }
 
 export async function withWorkspacePolicyRefreshLock<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
@@ -5163,6 +5232,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   const paths = namedSessionPaths(dharmaHome(), name);
   if (process.platform !== 'linux') throw new Error('codex_session_sandbox_unqualified');
   const workspaceId = required(flags, 'workspace-id');
+  let startupAdmission: (() => Promise<void>) | undefined;
+  const releaseStartupAdmission = async () => {
+    const release = startupAdmission; startupAdmission = undefined; await release?.();
+  };
+  try {
+  if (['start', 'serve'].includes(action) && flags.has('apply')) {
+    startupAdmission = await step(() => acquireNamedSessionStartupAdmission());
+  }
   let childMessage: Readonly<CodexSetupChildMessage> | undefined;
   if (flags.has('setup-handoff')) {
     if (action !== 'serve' || flags.get('setup-handoff') !== true
@@ -5278,9 +5355,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           || [...flags.keys()].some(key=>!['name','workspace-id','fence-id','apply','json'].includes(key))) {
           throw new Error('named_session_quiesced');
         }
-        await withRelayStartupMutation(() => activateMaintenanceRestart({registration:existing, fenceId:required(flags,'fence-id'),
+        await activateMaintenanceRestart({registration:existing, fenceId:required(flags,'fence-id'),
           processState:() => pidProcessState(resolve(paths.root,'service.lock')),
-          readRegistration:() => readNamedSession(dharmaHome(),name), saveRegistration:value=>saveNamedSession(dharmaHome(),value)}));
+          readRegistration:() => readNamedSession(dharmaHome(),name), saveRegistration:value=>saveNamedSession(dharmaHome(),value)});
       } else {
         if (supervisorOwner) throw new Error('named_session_disabled');
         const live = await step(() => namedSessionRequest(dharmaHome(), name, {action:'status'})).catch(() => null);
@@ -5299,6 +5376,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     }
     let startupChild: ReturnType<typeof observeNamedSessionStartupChild> | undefined;
     try {
+    // The child takes this same admission lock before private startup. Never
+    // wait for it while holding its parent-side registration/enablement lock.
+    await releaseStartupAdmission();
     await step(async () => {
       const start = () => {
         const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
@@ -5336,6 +5416,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       .catch(error => {throw namedSessionStartupPhaseError('lock', error);});
     // A startup poll may predate quiescence. Recheck durable admission after winning the owner lock.
     assertNamedSessionStartupRegistration(existing, await step(() => readNamedSession(dharmaHome(), name)));
+    // Once the per-service lock is held, maintenance cannot acquire its stopped
+    // topology. Release home-wide admission before the long-lived provider loop.
+    await releaseStartupAdmission();
     const startProvider = async (childScope?: CodexSetupChildScope) => {
     let startupPhase: NamedSessionStartupPhase = 'client';
     try {
@@ -5497,7 +5580,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
-      withActivationBoundary: (operation, work) => withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withDeviceSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
         const sharedReady = await repositorySharedReady(item);
@@ -5543,7 +5626,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           return await operation(context);
         }
         finally { taskState = null; }
-      }),
+      })),
       retainRepositoryState: async capture => {
         const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
         if (current.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') {
@@ -5589,6 +5672,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         if (childMessage) process.removeListener('disconnect', stop);}
     }
   }
+  } finally {await releaseStartupAdmission();}
 }
 
 async function workspaceSync(flags: Map<string, string | boolean>, positional: string[]): Promise<Output> {
@@ -9121,6 +9205,31 @@ export async function run(argv: string[]): Promise<Output> {
   }
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
+  if(command==='signing-recovery'){
+    if(positional.length!==1||[...repeated.values()].some(values=>values.length!==1)
+      ||[...flags.keys()].some(key=>!['name','workspace-id','operation-id','apply','json'].includes(key))
+      ||flags.has('apply')&&flags.get('apply')!==true)throw Error('device_signing_maintenance_options_invalid');
+    const home=dharmaHome(),name=required(flags,'name'),workspaceId=required(flags,'workspace-id');
+    const controller=new AbortController(),stop=()=>controller.abort();
+    process.once('SIGTERM',stop);process.once('SIGINT',stop);
+    const execute=(legacyBoundary?:LegacySigningMaintenanceBoundary)=>runDeviceSigningMaintenanceController({home,configPath:configPath(),name,workspaceId,
+      operationId:typeof flags.get('operation-id')==='string'?String(flags.get('operation-id')):undefined,apply:flags.get('apply')===true,
+      readWorkspace:async()=>{
+        const selected=(await registry()).find(value=>value.workspaceId===workspaceId);
+        return selected&&selected.repositoryBindingId&&selected.repositoryRemoteHash?{organizationId:selected.organizationId,workspaceId:selected.workspaceId,
+          repositoryBindingId:selected.repositoryBindingId,repositoryRemoteHash:selected.repositoryRemoteHash,path:selected.path}:null;
+      },processState:legacyBoundary?async()=>{await legacyBoundary.assertHeld();return 'stopped';}:()=>deviceTrustMaintenanceProcessState(home,name),
+      legacyBoundary,
+      openVault:()=>openBootstrapVault({root:resolve(home,'vault')}),signal:controller.signal,frames:process.stdin,
+      emit:value=>process.stdout.write(JSON.stringify(value)+'\n')});
+    try{return await (flags.get('apply')===true
+      ?withLegacySigningMaintenanceBoundary({home,name,signal:controller.signal,assertManagedCohort:async()=>{
+        const selected=(await registry()).find(value=>value.workspaceId===workspaceId);
+        if(!selected)throw Error('device_signing_maintenance_scope_unavailable');
+        return assertSigningMaintenanceManagedCohort(home,selected.path);
+      }},execute):execute());
+    }finally{controller.abort();process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);}
+  }
   if (command === 'demo' && ['connect', 'status', 'role', 'peers', 'ask', 'reply', 'inbox', 'ack', 'resume',
     'package', 'package-status', 'watch', 'watch-enable', 'watch-status', 'watch-disable',
     'signing-client-proof', 'signing-owner-proof', 'transport-connect']

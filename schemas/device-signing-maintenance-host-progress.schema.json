@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-maintenance-host-progress/v1",
+  "title": "Device trust maintenance host-progress; not native continuation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "deviceId",
+    "preparationId",
+    "state",
+    "expiresAt",
+    "clientTrustInstalled",
+    "ready",
+    "disposition",
+    "authorityKind",
+    "nativeContinuationAuthorized"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-signing-maintenance-host-progress/v1"
+    },
+    "organizationId": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^org_[A-Za-z0-9]+$"
+    },
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "preparationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "recoveryId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "approvalId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "awaiting_browser_offer",
+        "pending_approval",
+        "submission_unconfirmed",
+        "offer_unconfirmed",
+        "delivery_unconfirmed",
+        "failed",
+        "trust_installed"
+      ]
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "clientTrustInstalled": {
+      "type": "boolean"
+    },
+    "ready": {
+      "const": false
+    },
+    "disposition": {
+      "const": "owned_host_progress_not_onboarding_ready"
+    },
+    "authorityKind": {
+      "const": "device_trust_maintenance"
+    },
+    "nativeContinuationAuthorized": {
+      "const": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "pending_approval",
+              "delivery_unconfirmed",
+              "trust_installed"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "recoveryId",
+          "approvalId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "trust_installed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "clientTrustInstalled": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "clientTrustInstalled": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}
