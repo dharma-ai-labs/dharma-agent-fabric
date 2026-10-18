@@ -6,6 +6,7 @@ import type {CodexStdioTransport} from '@dharma-ai-labs/agent-fabric-provider-ad
 import type {CodexToolHandler} from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import {CODEX_SETUP_TOOL, type CodexSetupIntent, type CodexSetupJournal} from './codexSetupAdmission.js';
 import {CODEX_PEER_TOOLS} from './codexPeerTools.js';
+import {CODEX_SIGNING_RECOVERY_TOOL} from './codexSigningRecoveryTool.js';
 import type {BootstrapHostScope} from './bootstrapHostScope.js';
 import {captureBootstrapHostChild, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 import {EventEmitter} from 'node:events';
@@ -92,7 +93,7 @@ test('native setup host registers only fixed tools and binds execution to verifi
   try {
     assert.equal(host.threadId, 'synthetic_thread'); assert.equal(host.turnId, 'synthetic_turn');
     const start = f.calls.find(call => call.method === 'thread/start')!;
-    assert.deepEqual(start.params.dynamicTools, [...CODEX_PEER_TOOLS, CODEX_SETUP_TOOL]);
+    assert.deepEqual(start.params.dynamicTools, [...CODEX_PEER_TOOLS,CODEX_SIGNING_RECOVERY_TOOL, CODEX_SETUP_TOOL]);
     assert.equal(start.params.permissions, 'dharma_bridge'); assert.equal(start.params.approvalPolicy, 'never');
     assert.equal(f.counts.reserved, 1);
     assert.equal((await f.tool({turnId: 'foreign'})).success, false);

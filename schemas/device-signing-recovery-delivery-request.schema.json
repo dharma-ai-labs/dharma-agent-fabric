@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-delivery-request/v1",
+  "title": "Existing device possession request for exact approved recovery delivery",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "action", "organizationId", "recoveryId", "approvalId", "signature"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-delivery-request/v1"},
+    "action": {"const": "delivery"},
+    "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])", "maxLength": 200},
+    "recoveryId": {"$ref": "#/$defs/uuid"},
+    "approvalId": {"$ref": "#/$defs/uuid"},
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$(?![\\s\\S])"}
+  },
+  "$defs": {"uuid": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"}}
+}

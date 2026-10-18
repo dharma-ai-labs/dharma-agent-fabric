@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-candidate/v1",
+  "title": "Public candidate and publication evidence, not installation authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "recoveryId", "approvalId", "keysetCanonical", "rootPublicKey", "publication"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-candidate/v1"},
+    "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])", "maxLength": 200},
+    "recoveryId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "approvalId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+    "keysetCanonical": {"type": "string", "minLength": 1, "maxLength": 16384},
+    "rootPublicKey": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$(?![\\s\\S])"},
+    "publication": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "organizationId", "recoveryId", "generation", "artifactHash", "publishedAt"],
+      "properties": {
+        "schema": {"const": "dharma.signing-recovery-publication/v1"},
+        "organizationId": {"type": "string", "pattern": "^org_[A-Za-z0-9]+$(?![\\s\\S])", "maxLength": 200},
+        "recoveryId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\\s\\S])"},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "artifactHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$(?![\\s\\S])"},
+        "publishedAt": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

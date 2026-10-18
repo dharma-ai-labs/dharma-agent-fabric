@@ -112,7 +112,7 @@ test('every CLI vault-key caller explicitly forwards the owning host scope', asy
   assert.deepEqual(opened, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'namedSessionCommand', 'evidenceSync',
     'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
-    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);
+    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop', 'run']);
 });
 
 test('receiver readiness forwards the owning scope into its journal self-test', async () => {

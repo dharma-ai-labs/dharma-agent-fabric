@@ -3,6 +3,7 @@ import test from 'node:test';
 import { resolve } from 'node:path';
 import type { CodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { CODEX_PEER_TOOLS } from './codexPeerTools.js';
+import {CODEX_SIGNING_RECOVERY_TOOL,CODEX_SIGNING_RECOVERY_TOOL_HASH,inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 import { startNamedCodexThread, startNamedCodexSetupThread } from './namedCodexThread.js';
 import type { BootstrapHostScope } from './bootstrapHostScope.js';
 
@@ -22,13 +23,28 @@ test('new named threads materialize and resume before returning an identity for 
   assert.equal(await startNamedCodexThread(f.transport, workspace, 'implementer'), 'thread-1');
   assert.deepEqual(f.calls, [
     { method: 'thread/start', params: { cwd: workspace, approvalPolicy: 'never', permissions: 'dharma_bridge',
-      ephemeral: false, dynamicTools: CODEX_PEER_TOOLS } },
+      ephemeral: false, dynamicTools: [...CODEX_PEER_TOOLS,CODEX_SIGNING_RECOVERY_TOOL] } },
     { method: 'thread/name/set', params: { threadId: 'thread-1', name: 'implementer' } },
     { method: 'thread/archive', params: { threadId: 'thread-1' } },
     { method: 'thread/unarchive', params: { threadId: 'thread-1' } },
     { method: 'thread/resume', params: { threadId: 'thread-1' } },
     { method: 'thread/read', params: { threadId: 'thread-1', includeTurns: false } },
   ]);
+});
+
+test('an original named-thread creation declares the fixed recovery tool without granting recovery authority', async () => {
+  const f = fixture();
+  await startNamedCodexThread(f.transport, workspace, 'implementer');
+  const tools = f.calls[0]!.params.dynamicTools as Array<Record<string, any>>;
+  const recovery = tools.filter(tool => tool.name === 'dharma_signing_recovery');
+  assert.equal(recovery.length, 1, 'the recovery tool is absent from the original thread catalog');
+  assert.deepEqual(recovery[0]!.inputSchema.required, ['operationId', 'action']);
+  assert.equal(recovery[0]!.inputSchema.additionalProperties, false);
+  assert.equal(recovery[0]!.inputSchema.properties.operationId.format, 'uuid');
+  assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
+  assert.equal(f.calls.some(call => call.method === 'thread/resume' && 'dynamicTools' in call.params), false);
+  assert.equal(inspectNamedCodexRecoveryToolDeclaration(f.transport,'thread-1'),CODEX_SIGNING_RECOVERY_TOOL_HASH);
+  assert.equal(inspectNamedCodexRecoveryToolDeclaration(fixture().transport,'thread-1'),null);
 });
 
 test('invalid names and workspace roots never start a thread', async () => {
@@ -81,6 +97,7 @@ test('persistence failures do not return or silently replace a new session ident
     assert.equal(f.calls.at(-1)!.method, failure);
     assert.equal(f.calls.filter(call => call.method === 'thread/start').length, 1);
     assert.equal(f.calls.some(call => call.method === 'turn/start'), false);
+    assert.equal(inspectNamedCodexRecoveryToolDeclaration(f.transport,'thread-1'),null);
   }
 });
 

@@ -12,6 +12,7 @@ import {runCodexSetupChildStartup, type CodexSetupChildScope} from './codexSetup
 import {isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt} from './namedSessionTrust.js';
 import {namedCodexNodeOutputArguments} from './namedCodexNodeOutput.js';
 import {namedSessionStartupPhaseError} from './namedSessionStartupDiagnostic.js';
+import {CODEX_SIGNING_RECOVERY_TOOL_HASH} from './codexSigningRecoveryTool.js';
 
 const uuid = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const digest = `sha256:${'a'.repeat(64)}`;
@@ -64,6 +65,9 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     }};}, flags: new Map(), boundedInteger: (_raw: unknown, fallback: number) => fallback,
     randomUUID: () => uuid(40), UUID_PATTERN: /^[0-9a-f-]{36}$/, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, startNamedCodexThread: async () => {
       effects.push('thread-start'); mutations.thread?.(); return 'synthetic-thread';
+    }, inspectNamedCodexRecoveryToolDeclaration: (transport: unknown, threadId: string) => {
+      assert.ok(transport); assert.equal(threadId, 'synthetic-thread');
+      effects.push('thread-declaration'); return CODEX_SIGNING_RECOVERY_TOOL_HASH;
     }, saveNamedSession: async () => {effects.push('save-registration');}};
   async function compile() {
     const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
@@ -97,6 +101,21 @@ test('actual provider initializer validates exact recipient receipt before provi
   assert.ok(f.effects.indexOf('attach') < f.effects.indexOf('transport'));
   assert.equal(f.effects.filter(value => value === 'thread-start').length, 1);
   assert.equal((await f.vault.getProviderSessionBinding(uuid(40), result.registration.identity))?.sessionId, 'synthetic-thread');
+  assert.equal(f.vault.readProviderSessionRecoveryDeclaration(uuid(40), result.registration.identity)?.toolHash,
+    CODEX_SIGNING_RECOVERY_TOOL_HASH);
+  assert.ok(f.effects.indexOf('thread-start') < f.effects.indexOf('thread-declaration'));
+  assert.ok(f.effects.indexOf('thread-declaration') < f.effects.indexOf('save-registration'));
+});
+
+test('actual initializer refuses a missing original-thread declaration before persisting the binding', async t => {
+  const f = await fixture(t); f.dependencies.inspectNamedCodexRecoveryToolDeclaration = () => null;
+  await assert.rejects(f.run(), /named_session_startup_phase_thread_unclassified/);
+  assert.equal(f.effects.filter(value => value === 'thread-start').length, 1);
+  assert.equal(f.effects.includes('save-registration'), false);
+  assert.equal(f.vault.getProviderSessionBinding(uuid(40), {
+    organizationId: f.request.organizationId, workspaceId: f.request.workspaceId, repositoryBindingId: f.request.repositoryBindingId,
+    endpointId: f.request.endpointId, membershipId: f.request.membershipId, deviceId: f.request.deviceId, provider: 'codex',
+  }), null);
 });
 
 test('actual initializer reports a sanitized transport failure without creating a thread or binding', async t => {

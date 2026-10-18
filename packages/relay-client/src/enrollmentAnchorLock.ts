@@ -3,6 +3,11 @@ import {link, lstat, mkdir, readFile, rename, unlink, writeFile} from 'node:fs/p
 import {dirname} from 'node:path';
 import type {HostOperationFence} from './hostOperationScope.js';
 
+export interface EnrollmentAnchorLockRelease {
+  (): Promise<void>;
+  assertHeld(): Promise<void>;
+}
+
 // Adapted from the CLI PID-lock publication pattern. Fully initialized owner
 // files are published by hard link, never by an overwriting rename.
 // A recovery mutex serializes dead-primary cleanup; an abandoned recovery mutex
@@ -10,7 +15,7 @@ import type {HostOperationFence} from './hostOperationScope.js';
 // introduce another check-then-replace race.
 export async function acquireEnrollmentAnchorLock(
   lockPath: string, scope?: HostOperationFence, timeoutMs = 10_000,
-): Promise<() => Promise<void>> {
+): Promise<EnrollmentAnchorLockRelease> {
   const step = <T>(operation: () => Promise<T>) => scope ? scope.step(operation) : operation();
   type Owned = {dev: bigint; ino: bigint};
   const owned = new Map<string, Owned | null>();
@@ -102,7 +107,12 @@ export async function acquireEnrollmentAnchorLock(
           try {
             await publish(lockPath);
             let released: Promise<void> | undefined;
-            return () => released ??= cleanup(lockPath);
+            return Object.assign(() => released ??= cleanup(lockPath), {assertHeld: async () => {
+              if (released) throw Error('connection_anchor_lock_invalid');
+              await step(assertNamespace);
+              const expected = owned.get(lockPath), actual = await step(() => metadata(lockPath));
+              if (!expected || actual.dev !== expected.dev || actual.ino !== expected.ino) throw Error('connection_anchor_lock_invalid');
+            }});
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
           }

@@ -45,7 +45,30 @@ test('actual CLI full-vault callsites all use the single scoped owner', async ()
   assert.deepEqual(owned, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'namedSessionCommand', 'evidenceSync',
     'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
-    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop']);
+    'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop', 'run']);
+});
+
+test('new CLI maintenance vault callback belongs only to the separate guarded device controller', async () => {
+  const source=await readFile(new URL('../src/index.ts',import.meta.url),'utf8');
+  const ast=ts.createSourceFile('index.ts',source,ts.ScriptTarget.Latest,true);
+  const callbacks:ts.PropertyAssignment[]=[];
+  const visit=(node:ts.Node)=>{
+    if(ts.isPropertyAssignment(node)&&node.name.getText(ast)==='openVault')callbacks.push(node);
+    ts.forEachChild(node,visit);
+  };
+  visit(ast);assert.equal(callbacks.length,1);
+  const callback=callbacks[0]!, object=callback.parent;
+  assert.ok(ts.isObjectLiteralExpression(object)&&ts.isCallExpression(object.parent));
+  assert.equal(object.parent.expression.getText(ast),'runDeviceSigningMaintenanceController');
+  assert.ok(ts.isArrowFunction(callback.initializer));
+  assert.equal(callback.initializer.body.getText(ast),"openBootstrapVault({root:resolve(home,'vault')})");
+  const fields=new Map(object.properties.map(field=>[field.name?.getText(ast),field]));
+  assert.equal(fields.get('legacyBoundary')?.getText(ast),'legacyBoundary');
+  assert.equal(fields.get('signal')?.getText(ast),'signal:controller.signal');
+  assert.equal(fields.get('apply')?.getText(ast),"apply:flags.get('apply')===true");
+  const controller=await readFile(new URL('../src/deviceSigningMaintenanceController.ts',import.meta.url),'utf8');
+  const guard=controller.indexOf('await input.legacyBoundary.assertHeld()'),open=controller.indexOf('vault=await input.openVault()');
+  assert.ok(guard>=0&&open>guard,'held maintenance boundary must precede protected vault admission');
 });
 
 test('stopped maintenance recovery accessor reads only the exact existing provider binding', async () => {

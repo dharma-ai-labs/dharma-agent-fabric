@@ -1,6 +1,9 @@
 import { createPublicKey, verify } from 'node:crypto';
+import { types } from 'node:util';
 
-export interface DeviceSigningRecoveryContext {
+export const DEVICE_SIGNING_MAINTENANCE_PROTOCOL = 'dharma.device-trust-maintenance/v1' as const;
+
+interface DeviceSigningRecoveryContextBase {
   origin: string;
   issuer: string;
   audience: string;
@@ -18,7 +21,6 @@ export interface DeviceSigningRecoveryContext {
   scopeDigest: string;
   contractDigest: string;
   sourceSelectionDigest: string;
-  nativeSessionBindingDigest: string;
   previousAnchorHash: string;
   protectedConfigDigest: string;
   previousGeneration: number;
@@ -30,8 +32,12 @@ export interface DeviceSigningRecoveryContext {
   candidateKeyVersionFingerprint: string;
 }
 
-export interface DeviceSigningRecoveryChallenge extends DeviceSigningRecoveryContext {
-  schema: 'dharma.device-signing-recovery-challenge/v1';
+export type DeviceSigningRecoveryContext = DeviceSigningRecoveryContextBase & (
+  {nativeSessionBindingDigest: string; controllerBindingDigest?: never}
+  | {controllerBindingDigest: string; nativeSessionBindingDigest?: never});
+
+export type DeviceSigningRecoveryChallenge = DeviceSigningRecoveryContext & {
+  schema: 'dharma.device-signing-recovery-challenge/v1' | 'dharma.device-signing-maintenance-challenge/v1';
   purpose: 'expired_signing_trust_reapproval';
   method: 'POST';
   path: '/api/v1/agent-fabric/signing-recovery';
@@ -39,7 +45,7 @@ export interface DeviceSigningRecoveryChallenge extends DeviceSigningRecoveryCon
   issuedAt: string;
   expiresAt: string;
   authenticator: string;
-}
+};
 
 const CONTEXT_KEYS = ['origin', 'issuer', 'audience', 'recoveryId', 'approvalId', 'organizationId', 'recipientMembershipId',
   'deviceId', 'installationId', 'workspaceId', 'publicKeyEd25519', 'credentialEncryptionPublicKey',
@@ -47,10 +53,22 @@ const CONTEXT_KEYS = ['origin', 'issuer', 'audience', 'recoveryId', 'approvalId'
   'sourceSelectionDigest', 'nativeSessionBindingDigest', 'previousAnchorHash', 'protectedConfigDigest',
   'previousGeneration', 'previousKeysetHash', 'previousRootFingerprint',
   'candidateGeneration', 'candidateKeysetHash', 'candidateRootFingerprint', 'candidateKeyVersionFingerprint'] as const;
-const KEYS = ['schema', ...CONTEXT_KEYS, 'purpose', 'method', 'path', 'nonce', 'issuedAt', 'expiresAt', 'authenticator'] as const;
+const SUFFIX_KEYS = ['purpose', 'method', 'path', 'nonce', 'issuedAt', 'expiresAt', 'authenticator'] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const invalid = (): never => { throw new Error('device_signing_recovery_challenge_invalid'); };
+
+function origin(value: unknown) {
+  if (!value || typeof value !== 'object' || types.isProxy(value)) return invalid();
+  const fields = Object.getOwnPropertyDescriptors(value);
+  const maintenance = fields.audience?.value === 'dharma.agent-fabric.signing-maintenance/v1';
+  const binding = maintenance ? 'controllerBindingDigest' : 'nativeSessionBindingDigest';
+  const forbidden = maintenance ? 'nativeSessionBindingDigest' : 'controllerBindingDigest';
+  if (!Object.hasOwn(fields, binding) || Object.hasOwn(fields, forbidden)
+    || fields.audience?.value !== (maintenance ? 'dharma.agent-fabric.signing-maintenance/v1' : 'dharma.agent-fabric.signing-recovery/v1')) return invalid();
+  const contextKeys = CONTEXT_KEYS.map(key => key === 'nativeSessionBindingDigest' ? binding : key);
+  return {maintenance, binding, contextKeys, keys: ['schema', ...contextKeys, ...SUFFIX_KEYS]};
+}
 
 function bytes(value: unknown, size: number): boolean {
   if (typeof value !== 'string' || value.length !== Math.ceil(size * 4 / 3)
@@ -66,12 +84,13 @@ export function parseDeviceSigningRecoveryChallenge(
   value: unknown, expected: DeviceSigningRecoveryContext, now: number,
 ): DeviceSigningRecoveryChallenge {
   try {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
+    if (!value || typeof value !== 'object' || Array.isArray(value) || types.isProxy(value)) invalid();
     if (Object.getOwnPropertySymbols(value).length !== 0) invalid();
+    const kind = origin(expected), {keys, contextKeys} = kind;
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (Object.keys(descriptors).sort().join('\0') !== [...KEYS].sort().join('\0')) invalid();
+    if (Object.keys(descriptors).sort().join('\0') !== [...keys].sort().join('\0')) invalid();
     const body: Record<string, string | number> = {};
-    for (const key of KEYS) {
+    for (const key of keys) {
       const field = descriptors[key] ?? invalid();
       if (!field.enumerable || !('value' in field)) invalid();
       if (key === 'previousGeneration' || key === 'candidateGeneration') {
@@ -79,18 +98,22 @@ export function parseDeviceSigningRecoveryChallenge(
       } else if (typeof field.value !== 'string' || field.value.length > 256) invalid();
       body[key] = field.value as string | number;
     }
-    for (const key of CONTEXT_KEYS) if (body[key] !== expected[key]) invalid();
-    if (body.schema !== 'dharma.device-signing-recovery-challenge/v1'
+    const expectedFields = Object.getOwnPropertyDescriptors(expected);
+    for (const key of contextKeys) {
+      const field = expectedFields[key];
+      if (!field?.enumerable || !Object.hasOwn(field, 'value') || body[key] !== field.value) invalid();
+    }
+    if (body.schema !== (kind.maintenance ? 'dharma.device-signing-maintenance-challenge/v1' : 'dharma.device-signing-recovery-challenge/v1')
       || body.purpose !== 'expired_signing_trust_reapproval' || body.method !== 'POST'
       || body.path !== '/api/v1/agent-fabric/signing-recovery') invalid();
     const url = new URL(String(body.origin));
     if (url.protocol !== 'https:' || url.username || url.password || url.origin !== body.origin
-      || body.issuer !== body.origin || body.audience !== 'dharma.agent-fabric.signing-recovery/v1') invalid();
+      || body.issuer !== body.origin) invalid();
     for (const key of ['recoveryId', 'approvalId', 'recipientMembershipId', 'deviceId', 'installationId', 'workspaceId']) {
       if (!UUID.test(String(body[key]))) invalid();
     }
     for (const key of ['repositoryFingerprint', 'scopeDigest', 'contractDigest', 'sourceSelectionDigest',
-      'nativeSessionBindingDigest', 'previousAnchorHash', 'protectedConfigDigest', 'previousKeysetHash',
+      kind.binding, 'previousAnchorHash', 'protectedConfigDigest', 'previousKeysetHash',
       'previousRootFingerprint', 'candidateKeysetHash', 'candidateRootFingerprint', 'candidateKeyVersionFingerprint']) {
       if (!DIGEST.test(String(body[key]))) invalid();
     }
@@ -112,13 +135,15 @@ export function parseDeviceSigningRecoveryChallenge(
 export function deviceSigningRecoverySigningPayload(value: unknown): Buffer {
   try {
     // Snapshot descriptors before parsing so caller accessors are never evaluated.
-    if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
+    if (!value || typeof value !== 'object' || Array.isArray(value) || types.isProxy(value)) invalid();
+    const kind = origin(value);
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    const expected = Object.fromEntries(CONTEXT_KEYS.map(key => [key, descriptors[key]?.value])) as unknown as DeviceSigningRecoveryContext;
+    const expected = Object.fromEntries(kind.contextKeys.map(key => [key, descriptors[key]?.value])) as unknown as DeviceSigningRecoveryContext;
     const issuedAt = descriptors.issuedAt?.value;
     const body = parseDeviceSigningRecoveryChallenge(value, expected, typeof issuedAt === 'string' ? Date.parse(issuedAt) : NaN);
-    return Buffer.from('dharma.agent-fabric.device-signing-expiry-recovery-proof/v1\0'
-      + JSON.stringify(KEYS.map(key => [key, body[key]])), 'utf8');
+    const domain = kind.maintenance ? 'dharma.agent-fabric.device-signing-maintenance-proof/v1' : 'dharma.agent-fabric.device-signing-expiry-recovery-proof/v1';
+    const fields = body as unknown as Record<string, string | number>;
+    return Buffer.from(domain + '\0' + JSON.stringify(kind.keys.map(key => [key, fields[key]])), 'utf8');
   } catch { return invalid(); }
 }
 

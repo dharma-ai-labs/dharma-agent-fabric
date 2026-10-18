@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-maintenance-preparation/v1",
+  "title": "Existing-device signing maintenance preparation; no native continuation authority",
+  "$comment": "Distinct device-maintenance origin. Device possession, both fresh browser consents, current member/device/source, independent configured-key provenance, publication CAS and protected installation remain separate and mandatory. Native session liveness or execution is not asserted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "purpose",
+    "method",
+    "path",
+    "plan",
+    "historicalKeysetCanonical",
+    "historicalRootPublicKey",
+    "credentialEncryptionPublicKey",
+    "nonce"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.device-signing-maintenance-preparation/v1"
+    },
+    "purpose": {
+      "const": "prepare_expired_signing_trust_recovery"
+    },
+    "method": {
+      "const": "POST"
+    },
+    "path": {
+      "const": "/api/v1/agent-fabric/signing-recovery/preparations"
+    },
+    "plan": {
+      "$ref": "https://schemas.dharma-ai.io/device-signing-maintenance-plan/v1"
+    },
+    "historicalKeysetCanonical": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "historicalRootPublicKey": {
+      "$ref": "#/$defs/bytes32"
+    },
+    "credentialEncryptionPublicKey": {
+      "$ref": "#/$defs/bytes32"
+    },
+    "nonce": {
+      "$ref": "#/$defs/bytes32"
+    }
+  },
+  "$defs": {
+    "bytes32": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"
+    }
+  }
+}

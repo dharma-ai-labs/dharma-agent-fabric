@@ -18,12 +18,25 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
+import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
+import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
+import {planSigningRecovery} from './signingRecoveryPlan.js';
+import {withDeviceSigningControl} from './deviceSigningControl.js';
+export {withDeviceSigningControl,type DeviceSigningControlLease} from './deviceSigningControl.js';
+export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
+export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
+  type ProgressPreparedDeviceSigningRecoveryOfferInput,type SigningRecoveryOfferClientPhase} from './signingRecoveryOfferClient.js';
+export {prepareOwnedSigningRecovery,submitOwnedSigningRecoveryPreparation,progressOwnedSigningRecoveryOffer,
+  completeOwnedSigningRecovery,inspectOwnedSigningRecovery,disposeOwnedSigningRecovery,OwnedSigningRecoveryError,
+  prepareOwnedSigningMaintenance,readOwnedSigningMaintenanceContext,type PrepareOwnedSigningMaintenanceInput,
+  type PrepareOwnedSigningRecoveryInput,type OwnedSigningRecoveryHandle,type OwnedSigningRecoveryState} from './signingRecoveryHost.js';
 export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
   type SetupClaimFailurePhase, type SetupClaimFailureDiagnostic } from './setupClaim.js';
 export {planDeviceSigningRecovery, type DeviceSigningRecoveryPlanInput, type DeviceSigningRecoverySourceSelection,
-  type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding} from './signingRecoveryPlan.js';
+  type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding,
+  planDeviceSigningMaintenance, type DeviceSigningMaintenancePlanInput, type DeviceTrustMaintenanceController} from './signingRecoveryPlan.js';
 
 export interface DeviceConfig {
   schema: 'dharma.device-config/v1';
@@ -324,6 +337,12 @@ export interface ActiveSkillAuthorizationAnchor {
 // DHARMA_HOME/configPath. Different configured homes share the same anchor lock.
 async function withEnrollmentAnchorLock<T>(config: DeviceConfig, fence: HostOperationFence | undefined,
   operation: () => Promise<T>): Promise<T> {
+  const hostScope=fence?{signal:fence.signal,current:async()=>{await fence.assert();return true;}}:undefined;
+  return withDeviceSigningControl({config,hostScope},()=>withEnrollmentAnchorLockUnderControl(config,fence,operation));
+}
+
+async function withEnrollmentAnchorLockUnderControl<T>(config: DeviceConfig, fence: HostOperationFence | undefined,
+  operation: () => Promise<T>): Promise<T> {
   const identity = userInfo();
   const user = createHash('sha256').update(identity.homedir + ':' + identity.username).digest('hex').slice(0, 32);
   const account = legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId);
@@ -350,6 +369,41 @@ async function writeEnrollmentAnchor(store: SecureSecretStore, config: DeviceCon
       legacyAccount: legacyEnrollmentAnchorAccountFor(config.hqUrl, config.organizationId)});
     if (!written) throw Error('connection_existing_anchor_requires_recovery');
   } else {await store.put(account, secret);}
+}
+
+// Both callers already hold the OS-user enrollment lock. Windows additionally
+// performs current+legacy comparison in the existing shared vault helper.
+function signingRecoveryJournalIO(input:{configPath:string;config:DeviceConfig;store:SecureSecretStore;
+  fence:HostOperationFence;clock:()=>number}):SigningRecoveryJournalIO{
+  const {configPath,config,store,fence,clock}=input;
+  const account=enrollmentAnchorAccountFor(config.hqUrl,config.organizationId,config.deviceId);
+  const legacy=legacyEnrollmentAnchorAccountFor(config.hqUrl,config.organizationId);
+  return {fence,now:clock,readConfig:()=>loadDeviceConfig(configPath),
+    readAnchors:async()=>({current:await freshAnchorValue(store,account),legacy:await freshAnchorValue(store,legacy)}),
+    compareAndPutAnchor:async({expectedCurrent,expectedLegacy,secret})=>{
+      if(store.backend!=='windows-credential-manager'
+        &&(await freshAnchorValue(store,account)!==expectedCurrent||await freshAnchorValue(store,legacy)!==expectedLegacy))return false;
+      await writeEnrollmentAnchor(store,config,secret,expectedCurrent,expectedLegacy);return true;
+    },writeConfig:next=>atomicJson(configPath,next,fence)};
+}
+
+/** Typed owning-host phase completion only, not a CLI/MCP command. The matching
+ * approval handshake and ephemeral key stay in that host's native memory.
+ * This never creates/replaces a device, grants access or retries a failed run. */
+export async function recoverExpiredDeviceSigningTrust(input:RecoverExpiredDeviceSigningTrustInput){
+  return retrieveSigningRecoveryDelivery(input,async accepted=>{
+    const fence=new HostOperationFence(input.hostScope),clock=input.now??Date.now;
+    const raw=await fence.step(async()=>input.store??await createSystemSecureStore()),store=fence.store(raw);
+    const config=await fence.step(()=>loadDeviceConfig(input.configPath));
+    return withEnrollmentAnchorLock(config,fence,async()=>{
+      // Waiting for another writer never preserves a stale source/session plan.
+      const plan=await planSigningRecovery({...input,store});
+      const current=checkedRecoveryHostContext({...input,challenge:accepted.challenge},plan,clock());
+      if(canonicalize(current.expected)!==canonicalize(accepted.expected))throw Error('signing_recovery_local_context_changed');
+      return commitSigningRecoveryJournal({io:signingRecoveryJournalIO({configPath:input.configPath,config,store,fence,clock}),
+        challenge:current.challenge,expected:current.expected,candidate:accepted.candidate});
+    });
+  });
 }
 
 /** Missing-anchor recovery must prove both current and historical slots absent. */
@@ -945,6 +999,12 @@ async function recoverEnrollmentLocked(input: {
     migratedLegacy = serialized !== null;
   }
   if (!serialized) return config;
+  if ((JSON.parse(serialized) as {schema?:unknown})?.schema === 'dharma.device-enrollment-recovery-journal/v1') {
+    const fence = input.hostFence;
+    if (!fence) throw Error('signing_recovery_host_scope_required');
+    return resumeSigningRecoveryJournal(signingRecoveryJournalIO({configPath:input.configPath,config,store,fence,
+      clock:()=>(input.now??new Date()).getTime()}));
+  }
   const anchor = JSON.parse(serialized) as DeviceEnrollmentAnchor;
   if (!enrollmentAnchorHasBaseIdentity(anchor, config)) {
     throw new Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.');
@@ -1288,6 +1348,11 @@ export class AgentFabricClient {
   }
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
+    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
+    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#signedRequestWithSigningControl(method,route,body));
+  }
+
+  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     if (this.#readOnly) {
@@ -1348,6 +1413,11 @@ export class AgentFabricClient {
   }
 
   async #sendPending(): Promise<Record<string, unknown>> {
+    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
+    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#sendPendingWithSigningControl());
+  }
+
+  async #sendPendingWithSigningControl(): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     const pending = this.#state.pending;
     if (!pending) throw new Error('No pending protocol request.');

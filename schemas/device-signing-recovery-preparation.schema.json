@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-signing-recovery-preparation/v1",
+  "title": "Device-attested recovery preparation; not consent, enrollment or trust activation",
+  "$comment": "Runtime binds every plan field to independently obtained local expectations and verifies the historical keyset hash/signature at its original expiry. The server separately checks current member/device/source and frozen server history. Native session metadata is device-attested, not independently observed. No secret, token or arbitrary approval flag is accepted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "purpose", "method", "path", "plan", "historicalKeysetCanonical", "historicalRootPublicKey", "credentialEncryptionPublicKey", "nonce"],
+  "properties": {
+    "schema": {"const": "dharma.device-signing-recovery-preparation/v1"},
+    "purpose": {"const": "prepare_expired_signing_trust_recovery"},
+    "method": {"const": "POST"},
+    "path": {"const": "/api/v1/agent-fabric/signing-recovery/preparations"},
+    "plan": {"$ref": "https://schemas.dharma-ai.io/device-signing-recovery-plan/v1"},
+    "historicalKeysetCanonical": {"type": "string", "minLength": 2, "maxLength": 16384},
+    "historicalRootPublicKey": {"$ref": "#/$defs/bytes32"},
+    "credentialEncryptionPublicKey": {"$ref": "#/$defs/bytes32"},
+    "nonce": {"$ref": "#/$defs/bytes32"}
+  },
+  "$defs": {
+    "bytes32": {"type": "string", "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$(?![\\s\\S])"}
+  }
+}

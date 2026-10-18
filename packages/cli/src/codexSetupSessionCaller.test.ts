@@ -58,6 +58,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, managedCleanup
   request.policyHash = codexSetupSessionPolicyHash(policy as Parameters<typeof codexSetupSessionPolicyHash>[0]);
   const sender = {uid: 1000, startTicks: '10'};
   const dependencies: Record<string, unknown> = {process: {platform: 'linux', getuid: () => 1000},
+    acquireNamedSessionStartupAdmission:async()=>async()=>{},
     NamedSessionTransportFailure, namedSessionReadinessDiagnostic, namedSessionReadinessDiagnosticRequested,
     Date, resolve, canonicalize, sha256, codexSetupSessionPolicyHash, currentNamedSessionChildOwner,
     readDeviceConfig: async () => config, normalizeHqUrl: (value: string) => value,

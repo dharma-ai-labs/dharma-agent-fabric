@@ -65,6 +65,11 @@ export interface LocalProviderSessionBinding extends SessionBindingScope {
   createdAt: string;
 }
 
+export interface ProviderSessionRecoveryDeclaration extends LocalProviderSessionIdentity {
+  schema:'dharma.provider-session-recovery-declaration/v1';
+  bindingId:string;sessionId:string;toolHash:string;recordedAt:string;
+}
+
 export type LocalProviderSessionIdentity = Pick<SessionBindingScope,
   'organizationId' | 'repositoryBindingId' | 'workspaceId' | 'endpointId'
   | 'membershipId' | 'deviceId' | 'provider'>;
@@ -545,6 +550,12 @@ export class LocalVault {
         host_name text not null,
         owner_pid integer not null,
         acquired_at text not null
+      );
+      create table if not exists provider_session_recovery_declarations (
+        binding_id text primary key references provider_session_bindings(binding_id),
+        nonce blob not null,
+        tag blob not null,
+        ciphertext blob not null
       );
       create table if not exists provider_session_binding_renewals (
         binding_id text not null references provider_session_bindings(binding_id),
@@ -1320,6 +1331,47 @@ export class LocalVault {
       throw new Error('provider_session_binding_scope_mismatch');
     }
     return record;
+  }
+
+  #recoveryDeclarationContext(bindingId:string,expected:LocalProviderSessionIdentity){
+    const binding=this.getProviderSessionBinding(bindingId,expected);
+    if(!binding||binding.provider!=='codex'||binding.owner!=='dharma_bridge'||Date.now()>=Date.parse(binding.expiresAt))
+      throw Error('provider_session_recovery_declaration_unavailable');
+    return {schema:'dharma.provider-session-recovery-declaration/v1' as const,bindingId,sessionId:binding.sessionId,
+      organizationId:binding.organizationId,workspaceId:binding.workspaceId,repositoryBindingId:binding.repositoryBindingId,
+      endpointId:binding.endpointId,membershipId:binding.membershipId,deviceId:binding.deviceId,provider:binding.provider};
+  }
+
+  /** This separate encrypted record leaves legacy binding bytes/schema intact. */
+  readProviderSessionRecoveryDeclaration(bindingId:string,expected:LocalProviderSessionIdentity):ProviderSessionRecoveryDeclaration|null{
+    const context=this.#recoveryDeclarationContext(bindingId,expected);
+    const row=this.#database.prepare('select nonce,tag,ciphertext from provider_session_recovery_declarations where binding_id = ?')
+      .get(bindingId) as {nonce:Uint8Array;tag:Uint8Array;ciphertext:Uint8Array}|undefined;
+    if(!row)return null;
+    try{
+      const decipher=createDecipheriv('aes-256-gcm',this.#masterKey,row.nonce);
+      decipher.setAAD(Buffer.from(canonicalize(context)));decipher.setAuthTag(row.tag);
+      const value=JSON.parse(Buffer.concat([decipher.update(row.ciphertext),decipher.final()]).toString('utf8')) as ProviderSessionRecoveryDeclaration;
+      const {toolHash,recordedAt,...actual}=value;
+      if(canonicalize(actual)!==canonicalize(context)||typeof toolHash!=='string'||!/^sha256:[a-f0-9]{64}$(?![\s\S])/.test(toolHash)
+        ||typeof recordedAt!=='string'||!Number.isFinite(Date.parse(recordedAt))||new Date(recordedAt).toISOString()!==recordedAt)
+        throw Error('invalid');
+      return value;
+    }catch{throw Error('provider_session_recovery_declaration_integrity_failed');}
+  }
+
+  saveProviderSessionRecoveryDeclaration(bindingId:string,expected:LocalProviderSessionIdentity,toolHash:string):void{
+    if(typeof toolHash!=='string'||!/^sha256:[a-f0-9]{64}$(?![\s\S])/.test(toolHash))throw Error('provider_session_recovery_declaration_invalid');
+    const context=this.#recoveryDeclarationContext(bindingId,expected),existing=this.readProviderSessionRecoveryDeclaration(bindingId,expected);
+    if(existing){if(existing.toolHash!==toolHash)throw Error('provider_session_recovery_declaration_conflict');return;}
+    const value:ProviderSessionRecoveryDeclaration={...context,toolHash,recordedAt:new Date().toISOString()};
+    const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',this.#masterKey,nonce);
+    cipher.setAAD(Buffer.from(canonicalize(context)));
+    const ciphertext=Buffer.concat([cipher.update(canonicalize(value)),cipher.final()]);
+    this.#database.prepare(`insert into provider_session_recovery_declarations(binding_id,nonce,tag,ciphertext)
+      values(?,?,?,?) on conflict(binding_id) do nothing`).run(bindingId,nonce,cipher.getAuthTag(),ciphertext);
+    if(this.readProviderSessionRecoveryDeclaration(bindingId,expected)?.toolHash!==toolHash)
+      throw Error('provider_session_recovery_declaration_conflict');
   }
 
   revokeProviderSessionBinding(bindingId: string, expected: LocalProviderSessionIdentity): void {
