@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/codex-signing-recovery-native-progress/v1",
+  "title": "Original native-turn signing recovery progress, not customer readiness",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "operationId", "threadId", "turnId", "ready", "progress"],
+  "properties": {
+    "schema": {"const": "dharma.codex-signing-recovery-native-progress/v1"},
+    "operationId": {"type": "string", "format": "uuid"},
+    "threadId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+    "turnId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+    "ready": {"const": false},
+    "progress": {"anyOf": [{"type": "null"}, {"$ref": "https://schemas.dharma-ai.io/device-signing-recovery-host-progress/v1"}]}
+  }
+}
