@@ -4,9 +4,11 @@ import {execFileSync} from 'node:child_process';
 import {mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import {parse} from 'yaml';
-import {release,textHash,normalizedWorkflowHash,assertSigningSource,publishSigningUpgrade,runSigningCommand,assertReleaseProvenance} from './publish-signing-upgrade.mjs';
+import {release,textHash,normalizedWorkflowHash,assertSigningSource,publishSigningUpgrade,runSigningCommand,assertReleaseProvenance,
+  assertPreservedRuntime,packPreservedDependency} from './publish-signing-upgrade.mjs';
 
 const head='a'.repeat(40),digest='sha512-'+Buffer.alloc(64,7).toString('base64');
 const root=new URL('../',import.meta.url),read=p=>readFileSync(new URL(p,root),'utf8');
@@ -137,12 +139,12 @@ test('CLI provenance binds the new official main workflow, source and artifact s
   const changed=structuredClone(statement);changed.subject[0].digest.sha512='foreign';assert.throws(()=>assertReleaseProvenance(item,packed,proof(changed),head));
 });
 
-test('Linux canonical packs retain all ten immutable dependency SRIs', {skip:process.platform!=='linux'},()=>{
+test('Linux canonical packs retain the unchanged dependency SRIs without rebuilding preserved originals', {skip:process.platform!=='linux'},()=>{
   assert.ok(process.env.npm_execpath,'normal npm test context required');
   const directory=mkdtempSync(join(tmpdir(),'dharma-signing-dependency-packs-'));
   try{
     const globalConfig=join(directory,'public-global.npmrc');writeFileSync(globalConfig,'',{mode:0o600,flag:'wx'});
-    for(const item of release.dependencies){
+    for(const item of release.dependencies.filter(i=>!i.preserveOriginal)){
       const packed=JSON.parse(execFileSync(process.execPath,[process.env.npm_execpath,'pack','--workspace',item.workspace,
         '--json','--pack-destination',directory],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8388608,
         stdio:['ignore','pipe','pipe'],env:{...process.env,HOME:directory,XDG_CONFIG_HOME:directory,
@@ -153,4 +155,31 @@ test('Linux canonical packs retain all ten immutable dependency SRIs', {skip:pro
       assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),item.integrity);
     }
   }finally{rmSync(directory,{recursive:true,force:true});}
+});
+
+test('preserved original artifacts require exact runtime bytes, file set, manifest and bounded non-runtime source drift',()=>{
+  const bytes=Buffer.from('// original runtime\n'),runtimeHash=createHash('sha256').update(bytes).digest('hex');
+  const item={name:'@dharma-ai-labs/agent-fabric-sdk',integrity:digest,
+    preserveOriginal:{sourceChanges:['packages/sdk/README.md'],runtimeHashes:{'dist/index.js':runtimeHash}}};
+  const snapshot={integrity:digest,sourceChanges:['packages/sdk/README.md'],publishedManifest:{name:item.name},localManifest:{name:item.name},
+    publishedRuntime:{'dist/index.js':bytes},localRuntime:{'dist/index.js':bytes}};
+  assert.doesNotThrow(()=>assertPreservedRuntime(item,snapshot));
+  for(const kind of ['integrity','source','manifest','published-runtime','local-runtime','extra-runtime']){
+    const s={...snapshot,publishedRuntime:{...snapshot.publishedRuntime},localRuntime:{...snapshot.localRuntime},localManifest:{...snapshot.localManifest}};
+    if(kind==='integrity')s.integrity='foreign';if(kind==='source')s.sourceChanges=['packages/sdk/src/index.ts'];
+    if(kind==='manifest')s.localManifest.foreign=true;
+    if(kind==='published-runtime')s.publishedRuntime['dist/index.js']=Buffer.from('foreign');
+    if(kind==='local-runtime')s.localRuntime['dist/index.js']=Buffer.from('foreign');
+    if(kind==='extra-runtime')s.localRuntime['dist/extra.js']=Buffer.from('foreign');
+    assert.throws(()=>assertPreservedRuntime(item,s),kind);
+  }
+});
+
+test('Linux preserves SDK and skill-manager registry tarballs and verifies every shipped runtime byte', {skip:process.platform!=='linux'},async()=>{
+  const directory=mkdtempSync(join(tmpdir(),'dharma-preserved-originals-'));
+  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8388608}).trim();
+  try{for(const item of release.dependencies.filter(i=>i.preserveOriginal)){
+    const packed=await packPreservedDependency(item,fileURLToPath(root),directory,{git});
+    assert.equal(packed.integrity,item.integrity);assert.equal(packed.preservedOriginalArtifact,true);
+  }}finally{rmSync(directory,{recursive:true,force:true});}
 });

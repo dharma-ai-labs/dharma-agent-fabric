@@ -57,7 +57,15 @@
       "name": "@dharma-ai-labs/agent-fabric-sdk",
       "version": "0.1.10",
       "integrity": "sha512-o5/CNYJasiBzBCJaU7D/cTlqa4dq1MfdltKozB7KB+HQz6LQkBUy9UpN6UH6kAE/WTRKmZRNrx5/nww9ILSqIQ==",
-      "source": "e2b5b09f76be1fd95e7fcfaf49e691f9617651a6"
+      "source": "e2b5b09f76be1fd95e7fcfaf49e691f9617651a6",
+      "preserveOriginal": {
+        "sourceChanges": [
+          "packages/sdk/README.md"
+        ],
+        "runtimeHashes": {
+          "dist/index.js": "d49a8810d7af03ad25e6c8c918b5977fb23379282991aa18bf2a37d59b502485"
+        }
+      }
     },
     {
       "workspace": "packages/secure-store",
@@ -71,7 +79,16 @@
       "name": "@dharma-ai-labs/agent-fabric-skill-manager",
       "version": "0.2.11",
       "integrity": "sha512-vk+SaciPg22Fh0XaGFFyKKOXDHTgsvGrB/ixqn1KQ9yqJIEfQzeXF+V41BU8KY4nWPYIRQ3p+ULtMVE52DgL6g==",
-      "source": "95a5f2e572044a053348fcdd5e13f2ce4d2b510e"
+      "source": "95a5f2e572044a053348fcdd5e13f2ce4d2b510e",
+      "preserveOriginal": {
+        "sourceChanges": [
+          "packages/skill-manager/src/installationScope.test.ts"
+        ],
+        "runtimeHashes": {
+          "dist/index.js": "ebb29a88e1210f51cfb7f70be5a889147f6f42ec85affda9accbc78fbd4d50ed",
+          "dist/installationScope.js": "b5b8b455e2e82eb86d62260346fe20f41a756ee73e25764fda64bc5cbffc50e9"
+        }
+      }
     },
     {
       "workspace": "packages/task-runner",

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,readFileSync} from 'node:fs';
+import {mkdtempSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {lookupPublishedArtifact,assertProvenance} from './publish-onboarding-release.mjs';
 
 const repository='https://github.com/dharma-ai-labs/dharma-agent-fabric';
-const manifestHash='d988e226f8709bc339bab930cf3404f534a3ad5e35159975397e45748e772f7e',workflowHash='4fe2b54c96c6db0207831c450a11e860a2d6c3789889073d4cf77c2d0d9a5ef4',testHash='211fb669846da4e8cfe1a8b983c9c2685d72d23ec9627e46fc11e9c43d8bde21';
+const manifestHash='77f357ff4cdace5ab5931d86635e94aa95796f0c0d89e9b1c1adf356d9b9a7e1',workflowHash='4fe2b54c96c6db0207831c450a11e860a2d6c3789889073d4cf77c2d0d9a5ef4',testHash='fafe6aeba29f84455db83770ada9d9cbe5388a5debf15aa8c132ddbbcd85a4a3';
 const manifestPath=new URL('./signing-upgrade-release.json',import.meta.url);
 export const textHash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
 export const normalizedWorkflowHash=value=>textHash(value.replace(/^(\s*SIGNING_PUBLISHER_SHA256:) [^\r\n]+$/gm,'$1 <publisher-pin>'));
@@ -95,6 +95,47 @@ export function assertReleaseProvenance(item,packed,attestations,source){
   assert.ok(statement.subject.some(s=>s.name===`pkg:npm/${item.name.replace('@','%40')}@${item.version}`&&s.digest?.sha512===digest),'CLI provenance subject mismatch');
 }
 
+export function assertPreservedRuntime(item,snapshot){
+  assert.ok(['@dharma-ai-labs/agent-fabric-sdk','@dharma-ai-labs/agent-fabric-skill-manager'].includes(item.name),'preserved package not reviewed');
+  assert.ok(item.preserveOriginal,'exact historical artifact contract required');
+  assert.equal(snapshot.integrity,item.integrity,'historical artifact integrity mismatch');
+  assert.deepEqual(snapshot.sourceChanges.slice().sort(),item.preserveOriginal.sourceChanges.slice().sort(),'unreviewed historical source drift');
+  assert.deepEqual(snapshot.publishedManifest,snapshot.localManifest,'historical manifest drift');
+  const expected=Object.keys(item.preserveOriginal.runtimeHashes).sort();
+  assert.deepEqual(Object.keys(snapshot.publishedRuntime).sort(),expected,'historical runtime file set changed');
+  assert.deepEqual(Object.keys(snapshot.localRuntime).sort(),expected,'local runtime file set changed');
+  for(const name of expected){
+    const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+    assert.equal(hash(snapshot.publishedRuntime[name]),item.preserveOriginal.runtimeHashes[name],'historical runtime bytes changed');
+    assert.equal(hash(snapshot.localRuntime[name]),item.preserveOriginal.runtimeHashes[name],'local runtime bytes changed');
+  }
+}
+
+export async function packPreservedDependency(item,root,directory,{read=publicGet,git}={}){
+  assert.ok(item.preserveOriginal&&typeof git==='function','reviewed historical package context required');
+  const basename=item.name.split('/').at(-1),filename=item.name.slice(1).replace('/','-')+'-'+item.version+'.tgz';
+  const bytes=await read(`https://registry.npmjs.org/${item.name}/-/${basename}-${item.version}.tgz`,false);
+  assert.ok(bytes&&bytes.length<=131072,'bounded immutable artifact required');
+  const integrity='sha512-'+createHash('sha512').update(bytes).digest('base64');assert.equal(integrity,item.integrity,'historical artifact integrity mismatch');
+  const file=join(directory,filename);writeFileSync(file,bytes,{mode:0o600,flag:'wx'});
+  const tar=(...args)=>execFileSync('tar',args,{timeout:15000,maxBuffer:4194304,stdio:['ignore','pipe','pipe']});
+  const entries=tar('-tzf',file).toString('utf8').trim().split(/\r?\n/);
+  assert.ok(entries.length>0&&entries.length<1000&&new Set(entries).size===entries.length,'bounded unique archive entries required');
+  assert.ok(entries.every(p=>p.startsWith('package/')&&!p.includes('\\')&&!p.split('/').includes('..')&&!p.includes('\0')),'unsafe archive entry');
+  const runtime=entries.filter(p=>p.startsWith('package/dist/')&&p.endsWith('.js')&&!p.endsWith('.test.js'));
+  const publishedRuntime=Object.fromEntries(runtime.map(p=>[p.slice(8),tar('-xOf',file,p)]));
+  const localRuntime={};
+  function walk(relative){for(const entry of readdirSync(join(root,item.workspace,relative),{withFileTypes:true})){
+    const name=relative+'/'+entry.name;
+    assert.ok(!entry.isSymbolicLink(),'local runtime symlink refused');
+    if(entry.isDirectory())walk(name);else if(entry.isFile()&&name.endsWith('.js')&&!name.endsWith('.test.js'))localRuntime[name]=readFileSync(join(root,item.workspace,name));
+  }}walk('dist');
+  assertPreservedRuntime(item,{integrity,sourceChanges:git('diff','--name-only',item.source,'HEAD','--',item.workspace).split('\n').filter(Boolean),
+    publishedManifest:JSON.parse(tar('-xOf',file,'package/package.json').toString('utf8')),
+    localManifest:JSON.parse(readFileSync(join(root,item.workspace,'package.json'),'utf8')),publishedRuntime,localRuntime});
+  return{name:item.name,version:item.version,filename,integrity,preservedOriginalArtifact:true};
+}
+
 async function publicGet(url,json=true,timeout=30000){
   assert.equal(new URL(url).origin,'https://registry.npmjs.org','public registry only');
   const response=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(timeout)});
@@ -127,6 +168,7 @@ if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.u
         baselineLock:baseline('package-lock.json'),lock:json('package-lock.json')});
     },
     pack:async item=>{directory??=mkdtempSync(join(tmpdir(),'dharma-signing-cli-release-'));
+      if(item.preserveOriginal)return packPreservedDependency(item,root,directory,{git});
       return JSON.parse(npm('pack','--workspace',item.workspace,'--json','--pack-destination',directory))[0];},
     lookup:async(item,published)=>{const read=timeout=>publicGet(`https://registry.npmjs.org/${encodeURIComponent(item.name)}/${item.version}`,true,timeout);
       return published?lookupPublishedArtifact(read):read(30000);},
