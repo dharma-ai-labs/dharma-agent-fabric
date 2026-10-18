@@ -139,6 +139,7 @@ import {requestCodexSetupHostPreparation} from './codexSetupPortalPreparation.js
 import {readCodexSetupPublicStdin} from './codexSetupPublicStdin.js';
 import {reserveCodexSetupLaunch} from './codexSetupLaunchReservation.js';
 export {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+export {attachCodexSigningRecoveryNativeHost,type CodexSigningRecoveryNativeInput} from './codexSigningRecoveryNativeHost.js';
 export {openCodexSetupVaultJournal} from './codexSetupVaultJournal.js';
 import {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';
 export {createCodexSetupReadinessOwner} from './codexSetupReadiness.js';

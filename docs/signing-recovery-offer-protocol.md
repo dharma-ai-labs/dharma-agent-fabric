@@ -117,9 +117,54 @@ The same-package challenge handoff is not exported from the package entrypoint.
 These APIs accept trusted native-host facts only; accepting a matching JSON
 object from a model does not establish a genuine current Codex host/session.
 
-The genuine native caller, official server device-principal/SQL adapters,
+The deployed native caller, official server device-principal/SQL adapters,
 recipient controls, separate owner/recipient consent, second-device adoption,
 protected continuation and normal package/main release remain. This source
 client slice neither completes those joins nor proves them deployed. Pure
 synthetic protocol tests and schemas cannot substitute for actual two-client
 setup, named-task use, restart or independent guide-only rehearsal.
+
+## Original Native-Turn Ingress
+
+The candidate CLI exports `attachCodexSigningRecoveryNativeHost` for an
+already-owned Codex transport. The original controller attaches it while its
+selected named thread is idle, registers the returned fixed tool definition
+through its supported native path, and starts only its separately admitted
+turn. The adapter does not start, resume, fork or interrupt a thread, start a
+provider process, reserve funds, read authentication, or close the caller's
+transport. It is not an effectful standalone CLI command.
+
+The selected thread and source/session facts come from the qualified owning
+controller, not model arguments. The adapter captures the turn ID from the
+original transport's `turn/started` event. Each request must match that exact
+thread/turn and a single operation ID. Only `prepare`, `submit`, `progress`,
+`complete` and `status` are accepted; arguments cannot contain approvals,
+credentials, paths, commands or replacement context. Peer tools and other
+namespaces are rejected. The native permission profile must remain read-only
+with network denied, independently of the host's fixed signed recovery HTTP.
+
+Every protected phase rechecks the original host's side-effect-free `authorize`
+decision and `current` ownership/source/account/turn qualification. The separate
+recipient/owner consent and publication must already permit completion; a model
+request is never that approval. The adapter calls the reviewed owning-host client
+phases directly, retaining its original opaque handle and private in-memory
+challenge. Public status uses a separate strict schema, always keeps `ready:
+false`, and retains uncertain submission/delivery states instead of reporting an
+earlier safe-looking state. Installation of trust is not onboarding readiness.
+
+Original-turn completion, a different next turn, cancellation, transport loss
+or expiry withdraws the handler and client handle. Closing waits for admitted
+callbacks to settle; it does not claim a noncooperative OS operation or provider
+process has terminated. A failed preparation cannot repeat protected-anchor
+access in the same operation. Operation IDs cannot be reused on the same
+transport. This in-process guard is not a durable retry ledger: the original
+controller must preserve its existing operation, native-retry and financial
+records across restarts, without replaying uncertain work on another connection.
+
+The adapter accepts only independently qualified controller callbacks. A
+matching JavaScript interface or serialized context is not proof of an owned
+native transport, account or actual permission enforcement. Synthetic tests use
+native-event and in-memory-store fixtures, including actual client crypto and
+encrypted-delivery code. They do not qualify actual Codex tool registration,
+OS-store protection, production consent or a customer journey. Deployment and
+use by the existing controller remain required before live acceptance.
