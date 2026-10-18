@@ -35,7 +35,7 @@ async function fixture(){
   const packed=item=>({name:item.name,version:item.version,filename:item.name.slice(1).replace('/','-')+'-'+item.version+'.tgz',
     integrity:item.existingArtifact?.integrity??digest});
   const metadata=item=>({name:item.name,version:item.version,dist:{integrity:packed(item).integrity,
-    tarball:'https://registry.npmjs.org/'+item.name+'/-/'+packed(item).filename,
+    tarball:'https://registry.npmjs.org/'+item.name+'/-/'+item.name.split('/')[1]+'-'+item.version+'.tgz',
     attestations:{url:'https://registry.npmjs.org/-/npm/v1/attestations/fixture'}}});
   const io={verifySource:async value=>{assert.equal(value,head);events.push('source');},manifest:async item=>({name:item.name,version:item.version}),
     pack:async item=>{events.push('pack:'+item.name);return packed(item);},
@@ -80,6 +80,14 @@ test('current main is read through the exact remote ref rather than a cached tra
 test('default plan validates every package and never publishes',async()=>{
   const {m,io,events}=await fixture();const r=await m.publishDeviceMaintenance(head,io);
   assert.equal(r.state,'ready_not_published');assert.equal(events.filter(x=>x.startsWith('pack:')).length,8);
+  assert.equal(events.some(x=>x.startsWith('publish:')),false);
+});
+test('a local scope-prefixed pack filename is not an official registry tarball basename',async()=>{
+  const {m,io,events,packed}=await fixture(),lookup=io.lookup;
+  io.lookup=async item=>{const record=await lookup(item);if(record){
+    record.dist.tarball='https://registry.npmjs.org/'+item.name+'/-/'+packed(item).filename;
+  }return record;};
+  await assert.rejects(m.publishDeviceMaintenance(head,io),/registry tarball mismatch/);
   assert.equal(events.some(x=>x.startsWith('publish:')),false);
 });
 test('explicit publication validates the entire cohort before the first write and keeps CLI last',async()=>{
