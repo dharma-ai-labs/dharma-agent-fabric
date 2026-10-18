@@ -14,6 +14,10 @@ on:
         description: Publish only the exact reviewed recovery contracts package from main
         type: boolean
         default: false
+      device_maintenance_only:
+        description: Publish only the exact reviewed device-trust maintenance cohort from main
+        type: boolean
+        default: false
       expected_head:
         description: Exact reviewed main SHA (required for onboarding-only publication)
         type: string
@@ -43,14 +47,24 @@ jobs:
         env:
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
           CONTRACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.contracts_only || false }}
+          DEVICE_MAINTENANCE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.device_maintenance_only || false }}
+          MAINTENANCE_PUBLISHER_SHA256: 3761b321dc5c9586fdf1bf39ecc957c697b46fdd111c0b4d1d94c1d869dd6b50
           EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
-          if [ "$ONBOARDING_ONLY" = "true" ] && [ "$CONTRACTS_ONLY" = "true" ]; then
+          selected_scopes=0
+          for selected in "$ONBOARDING_ONLY" "$CONTRACTS_ONLY" "$DEVICE_MAINTENANCE_ONLY"; do
+            if [ "$selected" = "true" ]; then selected_scopes=$((selected_scopes + 1)); fi
+          done
+          if [ "$selected_scopes" -gt 1 ]; then
             echo "Choose exactly one bounded release scope." >&2
             exit 1
           fi
           if [ "$CONTRACTS_ONLY" = "true" ]; then
             node scripts/publish-recovery-contracts.mjs --expected-head "$EXPECTED_HEAD" --admission-only
+          fi
+          if [ "$DEVICE_MAINTENANCE_ONLY" = "true" ]; then
+            printf '%s  %s\n' "$MAINTENANCE_PUBLISHER_SHA256" scripts/publish-device-maintenance.mjs | sha256sum --check --status
+            node scripts/publish-device-maintenance.mjs --expected-head "$EXPECTED_HEAD" --admission-only
           fi
       - run: npm ci
       - run: npm run check
@@ -73,9 +87,15 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
           CONTRACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.contracts_only || false }}
+          DEVICE_MAINTENANCE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.device_maintenance_only || false }}
+          MAINTENANCE_PUBLISHER_SHA256: 3761b321dc5c9586fdf1bf39ecc957c697b46fdd111c0b4d1d94c1d869dd6b50
           EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
-          if [ "$ONBOARDING_ONLY" = "true" ] && [ "$CONTRACTS_ONLY" = "true" ]; then
+          selected_scopes=0
+          for selected in "$ONBOARDING_ONLY" "$CONTRACTS_ONLY" "$DEVICE_MAINTENANCE_ONLY"; do
+            if [ "$selected" = "true" ]; then selected_scopes=$((selected_scopes + 1)); fi
+          done
+          if [ "$selected_scopes" -gt 1 ]; then
             echo "Choose exactly one bounded release scope." >&2
             exit 1
           fi
@@ -85,6 +105,11 @@ jobs:
           fi
           if [ "$ONBOARDING_ONLY" = "true" ]; then
             npm run publish:onboarding -- --expected-head "$EXPECTED_HEAD"
+            exit 0
+          fi
+          if [ "$DEVICE_MAINTENANCE_ONLY" = "true" ]; then
+            printf '%s  %s\n' "$MAINTENANCE_PUBLISHER_SHA256" scripts/publish-device-maintenance.mjs | sha256sum --check --status
+            npm run publish:device-maintenance -- --expected-head "$EXPECTED_HEAD" --publish
             exit 0
           fi
 
@@ -146,7 +171,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --generate-notes
   publish-python:
-    if: vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only))
+    if: vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only || inputs.device_maintenance_only))
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
