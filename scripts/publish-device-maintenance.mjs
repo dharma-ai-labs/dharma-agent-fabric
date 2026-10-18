@@ -11,7 +11,7 @@ export const maintenanceBaseline=Object.freeze({commit:'4ed6b35547ac6d05feb9d292
   tree:'86f7887b6f569721a1fe786f221484bad1736b53'});
 export const reviewedWorkflowHash='473304bb901ab151a5a805a821dd74d592fbc0d64335ccf65f92e4dc92a44c80';
 export const reviewedWorkflowTestHash='b2c2180ebd84bfccc312a90655505aa4ad117b4c312bf43cd49560d04bcc693e';
-export const reviewedReleaseTestHash='f02595a575c6639de371047ca1f30537835a8e6ddb9d7e2916102dd9fd369c8c';
+export const reviewedReleaseTestHash='2d6f817e0ea028b0b6ab865c0f9be0b85248fdef2e1ca41e3d0bceb333b15e5b';
 const packageItem=(workspace,version)=>Object.freeze({workspace:'packages/'+workspace,
   name:'@dharma-ai-labs/'+(workspace==='cli'?'agent-fabric':'agent-fabric-'+workspace),version});
 export const maintenancePackages=Object.freeze([
@@ -71,7 +71,8 @@ function registryUrl(value){
 function assertArtifact(item,packed,metadata){
   assert.equal(metadata.name,item.name,'registry name mismatch');assert.equal(metadata.version,item.version,'registry version mismatch');
   assert.equal(metadata.dist?.integrity,packed.integrity,'registry artifact changed');
-  assert.equal(decodeURIComponent(registryUrl(metadata.dist?.tarball).pathname),'/'+item.name+'/-/'+packed.filename,'registry tarball mismatch');
+  const registryFilename=item.name.split('/')[1]+'-'+item.version+'.tgz';
+  assert.equal(decodeURIComponent(registryUrl(metadata.dist?.tarball).pathname),'/'+item.name+'/-/'+registryFilename,'registry tarball mismatch');
   assert.ok(registryUrl(metadata.dist?.attestations?.url).pathname.startsWith('/-/npm/v1/attestations/'),'registry attestation mismatch');
 }
 /** No automatic publish retry: every pack/existing artifact is validated first.

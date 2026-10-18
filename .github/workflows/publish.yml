@@ -48,7 +48,7 @@ jobs:
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
           CONTRACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.contracts_only || false }}
           DEVICE_MAINTENANCE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.device_maintenance_only || false }}
-          MAINTENANCE_PUBLISHER_SHA256: 3761b321dc5c9586fdf1bf39ecc957c697b46fdd111c0b4d1d94c1d869dd6b50
+          MAINTENANCE_PUBLISHER_SHA256: 4ac232f94c46eaee923df9ac44ad6ea33e2c6337e448c54bebb6f74076c83a8b
           EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
           selected_scopes=0
@@ -88,7 +88,7 @@ jobs:
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
           CONTRACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.contracts_only || false }}
           DEVICE_MAINTENANCE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.device_maintenance_only || false }}
-          MAINTENANCE_PUBLISHER_SHA256: 3761b321dc5c9586fdf1bf39ecc957c697b46fdd111c0b4d1d94c1d869dd6b50
+          MAINTENANCE_PUBLISHER_SHA256: 4ac232f94c46eaee923df9ac44ad6ea33e2c6337e448c54bebb6f74076c83a8b
           EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
           selected_scopes=0
