@@ -46,12 +46,13 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
-import { assertRelayStartupOwnership, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
+import {upgradeRelayForSigningMaintenance} from './relaySigningMaintenanceUpgrade.js';
 import {activateMaintenanceRestart, maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
 import {assertNamedSessionStartupRegistration} from './namedSessionAdmission.js';
 import { recoverableContainerJournal } from './containerRelayRecovery.js';
@@ -263,6 +264,16 @@ export function formatCommandOutput(value:unknown):string{
 
 export function commandExitCode(argv: string[], value: Output): number {
   const { positional, flags } = parseCliOptions(argv);
+  if(positional[0]==='relay'&&positional[1]==='upgrade'
+    &&(flags.has('stage-signing-maintenance')||flags.has('finish-signing-maintenance'))){
+    if(!value||typeof value!=='object'||Array.isArray(value))return 2;
+    const receipt=value as Record<string,unknown>;
+    if(receipt.schema!=='dharma.local-signing-maintenance-upgrade/v1'||receipt.ready!==false
+      ||receipt.nativeContinuationAuthorized!==false)return 2;
+    return flags.get('apply')!==true?receipt.state==='planned'?0:2
+      :flags.has('finish-signing-maintenance')?receipt.state==='completed'&&receipt.upgradeComplete===true?0:2
+        :receipt.state==='staged'&&receipt.upgradeComplete===false?0:2;
+  }
   if(positional[0]==='signing-recovery'){
     if(!value||typeof value!=='object'||Array.isArray(value))return 2;
     const receipt=value as Record<string,unknown>,progress=receipt.progress as Record<string,unknown>|undefined;
@@ -2051,6 +2062,13 @@ async function installStableRepositoryLauncher(workspace: string) {
 }
 
 async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Output> {
+  const stageMaintenance=flags.has('stage-signing-maintenance'),finishMaintenance=flags.has('finish-signing-maintenance');
+  const maintenance=stageMaintenance||finishMaintenance;
+  if(maintenance&&process.platform!=='linux')throw new Error('relay_signing_maintenance_linux_required');
+  if(stageMaintenance&&finishMaintenance||maintenance&&flags.has('rollback')
+    ||['stage-signing-maintenance','finish-signing-maintenance'].some(key=>flags.has(key)&&flags.get(key)!==true)
+    ||maintenance&&['apply','dry-run'].some(key=>flags.has(key)&&flags.get(key)!==true)
+    ||flags.has('previous-upgrade-sha256')&&!stageMaintenance)throw new Error('relay_signing_maintenance_options_invalid');
   const config = await readDeviceConfig();
   if (!config) throw new Error('relay_upgrade_enrollment_required');
   if (flags.has('dry-run') && flags.has('apply')) throw new Error('relay_upgrade_flags_conflict');
@@ -2088,10 +2106,40 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     const npmCliPath = process.platform === 'linux' && !flags.has('rollback') ? await resolveRepositoryNpmCli() : undefined;
     const codexDirectory = !flags.has('rollback')
       ? await resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
-    const receipt = await upgradeRelayRuntime({ home, workspace, version: VERSION,
+    const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
+    const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
-      dryRun: !flags.has('apply'), rollback: flags.has('rollback') }, {
+      dryRun: !flags.has('apply'), rollback: flags.has('rollback'),
+      trustGeneration:config.serverSigningKeyset?.generation??0,finish:finishMaintenance,
+      ...(flags.has('previous-upgrade-sha256')?{previousUpgradeSha256:String(flags.get('previous-upgrade-sha256'))}:{}) }, {
       assertStopped,
+      assertStartupPaused:()=>assertRelayAutostartPaused(startupOptions),
+      stageStartup:(version:string,restore:{codexHome:string|null})=>enableRelayAutostart({...startupOptions,workspace,
+        launcher:startup.launcher,policy:startup.policy,version,restoreCodexHome:restore.codexHome,pauseForSigningMaintenance:true}),
+      assertNamedDisabled:async()=>{
+        const entries=await readdir(resolve(home,'sessions'),{withFileTypes:true});
+        const names=entries.filter(entry=>entry.isDirectory()&&/^[a-z][a-z0-9-]{0,47}$/.test(entry.name));
+        if(names.length!==1)throw Error('relay_signing_maintenance_session_scope_unavailable');
+        const registration=await readNamedSession(home,names[0]!.name);
+        if(!registration||registration.enabled||registration.identity.organizationId!==config.organizationId
+          ||registration.identity.deviceId!==config.deviceId||registration.identity.workspaceId!==selected.workspaceId)
+          throw Error('relay_signing_maintenance_session_scope_unavailable');
+        try{await lstat(resolve(home,'sessions',names[0]!.name,'service.lock'));
+          throw Error('relay_signing_maintenance_session_lock_requires_reconciliation');
+        }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      },
+      assertRecoveredTrust:async(previousGeneration:number)=>{
+        const current=await readDeviceConfig(),keyset=current?.serverSigningKeyset;
+        if(!current||current.organizationId!==config.organizationId||current.deviceId!==config.deviceId
+          ||current.hqUrl!==config.hqUrl||current.relayUrl!==config.relayUrl||current.enrolledAt!==config.enrolledAt
+          ||current.connectionMode!==config.connectionMode
+          ||current.installationId!==config.installationId||current.publicKeyEd25519!==config.publicKeyEd25519
+          ||current.setupClaimReference!==config.setupClaimReference||current.setupClaimRepositoryFingerprint!==config.setupClaimRepositoryFingerprint
+          ||!keyset||keyset.generation<=previousGeneration||!validateTrustedServerSigningKeysetContract(keyset).ok
+          ||!verifyInitialServerSigningKeyset(keyset,createPublicKey({key:{kty:'OKP',crv:'Ed25519',x:current.serverPublicKeyEd25519},format:'jwk'}),current.organizationId).ok)
+          throw Error('relay_signing_maintenance_trust_not_recovered');
+        await loadDeviceEnrollmentAnchor({config:current,readOnly:true});
+      },
       recoverableJournal: startup.backend === 'container-entrypoint' ? recoverableContainerJournal : undefined,
       inspectStartup: async () => {
         const current = await inspectOwnedRelayAutostart(startupOptions);
@@ -2146,7 +2194,8 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       },
     });
     const validation = await validateContract(resolve(fileURLToPath(new URL('.', import.meta.url)), 'schemas'),
-      'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
+      maintenance?'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1'
+        :'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
     if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
     return receipt;
   });

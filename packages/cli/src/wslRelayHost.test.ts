@@ -7,7 +7,7 @@ import {compileFunction} from 'node:vm';
 import test, {type TestContext} from 'node:test';
 import ts from 'typescript';
 import {enableRelayAutostart, relayAutostartStatus, disableRelayAutostart, startRelayAutostart,
-  assertRelayStartupOwnership} from './relayAutostart.js';
+  assertRelayStartupOwnership,assertRelayAutostartPaused} from './relayAutostart.js';
 import {resolveWslRelayContext} from './wslRelayHost.js';
 import {validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
 import {prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
@@ -40,12 +40,17 @@ async function fixture(t: TestContext) {
   t.after(() => rm(root, {recursive: true, force: true}));
   const scripts: string[] = [];
   let exists = false;
+  let enabled = false;
   let running = false;
   let loseRegistrationResponse = false;
+  let systemdEnabled=true;
   const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
     workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
     policy: '/fixtures/repo/.dharma/approved-policy.json', version: '0.2.198',
-    run: async () => ({stdout: 'enabled\n'}),
+    run: async (_file:string,args:string[]) => {
+      if(args.includes('enable'))systemdEnabled=true;if(args.includes('disable'))systemdEnabled=false;
+      return {stdout:(args.includes('is-active')?'inactive':systemdEnabled?'enabled':'disabled')+'\n'};
+    },
     wslHost: {
       context: async () => ({distribution: 'Ubuntu', linuxUser: 'maatru'}),
       run: async (script: string) => {
@@ -54,16 +59,66 @@ async function fixture(t: TestContext) {
           sid: 'S-1-5-21-123-456-789-1001', executable: 'C:\\Windows\\System32\\wsl.exe'})};
         if (script.includes('dharma-wsl-host:register')) {
           exists = true;
+          enabled = true;
           if (loseRegistrationResponse) throw new Error('registration response lost');
         }
         if (script.includes('dharma-wsl-host:start')) running = true;
-        if (script.includes('dharma-wsl-host:disable')) {exists = false; running = false;}
-        return {stdout: JSON.stringify({exists, enabled: exists, running})};
+        if (script.includes('dharma-wsl-host:disable')) {exists = false;enabled=false;running = false;}
+        if (script.includes('dharma-wsl-host:pause')) enabled=false;
+        return {stdout: JSON.stringify({exists, enabled, running})};
       },
     },
   };
-  return {options, scripts, foreignTask: () => {exists = true;}, loseResponse: () => {loseRegistrationResponse = true;}};
+  return {options, scripts, foreignTask: () => {exists = true;enabled=true;}, loseResponse: () => {loseRegistrationResponse = true;}};
 }
+
+test('WSL pause preserves its exact owned host receipt and remains independently verifiable',async t=>{
+  const f=await fixture(t);let state='enabled';
+  const options={...f.options,run:async(_file:string,args:string[])=>{
+    if(args.includes('disable'))state='disabled';return{stdout:(args.includes('is-active')?'inactive':state)+'\n'};}};
+  await enableRelayAutostart(options);
+  const receipt=await readFile(join(options.home,'relay','wsl-host.json'),'utf8');
+  await enableRelayAutostart({...options,pauseForSigningMaintenance:true});
+  assert.equal(await readFile(join(options.home,'relay','wsl-host.json'),'utf8'),receipt);
+  await assertRelayAutostartPaused(options);
+  assert(!f.scripts.some(s=>s.includes('dharma-wsl-host:start')));
+});
+
+test('WSL pause verification rejects an unreceipted task and never converts denial to absence',async t=>{
+  const f=await fixture(t);let state='enabled';
+  const options={...f.options,run:async(_file:string,args:string[])=>{
+    if(args.includes('disable'))state='disabled';return{stdout:(args.includes('is-active')?'inactive':state)+'\n'};}};
+  await enableRelayAutostart(options);await enableRelayAutostart({...options,pauseForSigningMaintenance:true});
+  await rm(join(options.home,'relay','wsl-host.json'));
+  f.foreignTask();await assert.rejects(assertRelayAutostartPaused(options),/autostart_conflict/);
+  const original=options.wslHost.run;
+  let deniedReads=0;
+  const denied={...options,wslHost:{...options.wslHost,run:async(script:string)=>{
+    if(script.includes('dharma-wsl-host:status')){deniedReads++;throw Error('scheduler read denied fixture');}return original(script);}}};
+  await assert.rejects(assertRelayAutostartPaused(denied),/wsl_host_startup_unavailable/);
+  assert.equal(deniedReads,1);
+});
+
+test('WSL receipt-backed context survives maintenance pause when the environment has no distro name',async t=>{
+  const f=await fixture(t);let state='enabled';
+  const original={...f.options,run:async(_file:string,args:string[])=>{
+    if(args.includes('disable'))state='disabled';return{stdout:(args.includes('is-active')?'inactive':state)+'\n'};}};
+  await enableRelayAutostart(original);
+  const receiptPath=join(original.home,'relay','wsl-host.json'),before=await readFile(receiptPath,'utf8');
+  const options={...original,wslHost:{...original.wslHost,context:async()=>resolveWslRelayContext(undefined,'maatru',
+    JSON.parse(await readFile(receiptPath,'utf8')))}};
+  await enableRelayAutostart({...options,pauseForSigningMaintenance:true});await assertRelayAutostartPaused(options);
+  assert.equal(await readFile(receiptPath,'utf8'),before);
+  assert(f.scripts.some(s=>s.includes('dharma-wsl-host:pause')));
+  assert(!f.scripts.some(s=>s.includes('dharma-wsl-host:disable')));
+});
+
+test('maintenance pause never disables or unregisters an owned host task that is still running',async t=>{
+  const f=await fixture(t);await enableRelayAutostart(f.options);await startRelayAutostart(f.options);
+  const before=f.scripts.length;
+  await assert.rejects(enableRelayAutostart({...f.options,pauseForSigningMaintenance:true}),/wsl_host_startup_unavailable/);
+  assert(!f.scripts.slice(before).some(s=>/dharma-wsl-host:(pause|disable)/.test(s)));
+});
 
 function registeredTaskAction(scripts: string[]) {
   const registration = scripts.find(script => script.includes('dharma-wsl-host:register'))!;

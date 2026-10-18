@@ -211,6 +211,32 @@ export async function wslRelayHostStatus(options: WslHostOptions) {
   return query(options, target);
 }
 
+export async function assertWslRelayHostPaused(options:WslHostOptions):Promise<void>{
+  const current=await context(options);if(!current)return;
+  const target=await expected(options,current),previous=await saved(options);
+  if(previous&&!sameReceipt(previous,target))return fail(true);
+  // Unregistration removes the receipt. Prove exact task absence under the same
+  // derived SID/home/action rather than interpreting a missing receipt as safety.
+  const state=await query(options,target);
+  if(state.exists&&(!previous||state.enabled||state.running))return fail(true);
+}
+
+export async function pauseWslRelayHost(options:WslHostOptions):Promise<void>{
+  const current=await context(options);if(!current)return;
+  const target=await expected(options,current),previous=await saved(options);
+  if(!previous||!sameReceipt(previous,target))return fail(true);
+  const before=await query(options,target);
+  if(before.running)return fail();
+  if(!before.exists)return;
+  await invoke(options,taskPreamble(target,'pause')
+    +`if ($null -ne $task) { Assert-OwnedTask $task; if ($task.State -eq 'Running') {throw 'wsl_host_still_running'}; `
+    +`Disable-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)}|Out-Null }; `
+    +lookup(target)+renderState);
+  const after=await query(options,target);if(after.enabled||after.running)return fail();
+  // Preserve the exact ownership/context receipt, including receipt-backed WSL
+  // distribution discovery used by systemd when WSL_DISTRO_NAME is absent.
+}
+
 export async function startWslRelayHost(options: WslHostOptions): Promise<void> {
   const current = await context(options); if (!current) return;
   const target = await expected(options, current), previous = await saved(options);

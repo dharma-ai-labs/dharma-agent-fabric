@@ -23,6 +23,7 @@ async function fixture() {
     inspectOwnedRelayAutostart: async () => startup,
     relaySupervisorProcessState: async () => 'stopped', relayProcessState: async () => 'stopped',
     readdir: async () => [], pidProcessState: async () => 'stopped',
+    lstat:async()=>{throw Object.assign(Error('absent fixture lock'),{code:'ENOENT'});},
     VERSION: '0.2.118', stableRepositoryLauncherContents: (version: string) => ({ version }),
     resolveRepositoryNpmCli: async () => '/fixtures/npm/bin/npm-cli.js',
     providerProcessEnvironment: (source: NodeJS.ProcessEnv) => source,
@@ -267,4 +268,58 @@ test('actual upgrade caller rejects an old receiver even when the invoked CLI is
     await hooks.verify('0.2.118', new Date(Date.now() - 1000).toISOString());
   };
   await assert.rejects(f.run()(f.flags), /receiver_unconfirmed/);
+});
+
+test('actual caller dispatches only the explicit maintenance mode and validates its distinct receipt',async()=>{
+  const f=await fixture();f.flags.set('stage-signing-maintenance',true);let schema='';
+  f.deps.readdir=async()=>[{name:'original',isDirectory:()=>true}];
+  f.deps.readNamedSession=async()=>({enabled:false,identity:{organizationId:'org_fixture',deviceId:'device',workspaceId:'workspace'}});
+  f.deps.upgradeRelayForSigningMaintenance=async(input:{finish:boolean;dryRun:boolean},hooks:{assertNamedDisabled():Promise<void>})=>{
+    assert.equal(input.finish,false);assert.equal(input.dryRun,true);await hooks.assertNamedDisabled();return{state:'planned'};};
+  f.deps.upgradeRelayRuntime=async()=>{throw Error('ordinary upgrade must not run');};
+  f.deps.validateContract=async(_root:string,id:string)=>{schema=id;return{ok:true};};
+  assert.deepEqual(JSON.parse(JSON.stringify(await f.run()(f.flags))),{state:'planned'});
+  assert.equal(schema,'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1');assert.deepEqual(f.calls,['lock']);
+});
+
+test('actual maintenance caller refuses conflicting options before enrollment reads',async()=>{
+  for(const entries of[
+    [['stage-signing-maintenance',true],['finish-signing-maintenance',true]],
+    [['stage-signing-maintenance',true],['rollback',true]],
+    [['stage-signing-maintenance','false']],
+    [['stage-signing-maintenance',true],['apply','false']],
+    [['stage-signing-maintenance',true],['dry-run','false']],
+    [['previous-upgrade-sha256','sha256:public']]
+  ]as Array<Array<[string,string|boolean]>>){
+    const f=await fixture();for(const[key,value]of entries)f.flags.set(key,value);
+    f.deps.readDeviceConfig=()=>{throw Error('enrollment read must not occur');};
+    await assert.rejects(f.run()(f.flags),/maintenance_options_invalid/);assert.deepEqual(f.calls,[]);
+  }
+});
+
+test('actual maintenance caller refuses enabled, foreign or stale-lock named registration before staging',async()=>{
+  for(const mode of['enabled','foreign','absent','dead-lock']){
+    const f=await fixture();f.flags.set('stage-signing-maintenance',true);
+    f.deps.readdir=async()=>mode==='absent'?[]:[{name:'original',isDirectory:()=>true}];
+    f.deps.readNamedSession=async()=>({enabled:mode==='enabled',identity:{organizationId:'org_fixture',deviceId:mode==='foreign'?'other':'device',workspaceId:'workspace'}});
+    if(mode==='dead-lock')f.deps.lstat=async()=>({isFile:()=>true});
+    f.deps.upgradeRelayForSigningMaintenance=async(_input:unknown,hooks:{assertNamedDisabled():Promise<void>})=>hooks.assertNamedDisabled();
+    await assert.rejects(f.run()(f.flags),/session_scope_unavailable|session_lock_requires_reconciliation/);assert.deepEqual(f.calls,['lock']);
+  }
+});
+
+test('actual maintenance finish checks newer verified trust and the same protected enrollment anchor',async()=>{
+  for(const failure of['none','generation','device','signature','anchor']){
+    const f=await fixture();f.flags.set('finish-signing-maintenance',true);f.flags.set('apply',true);let reads=0;
+    f.deps.readDeviceConfig=async()=>({organizationId:'org_fixture',deviceId:failure==='device'&&reads++>0?'other':'device',
+      serverSigningKeyset:{generation:failure==='generation'?2:3},serverPublicKeyEd25519:'SYNTHETIC_PUBLIC'});
+    f.deps.validateTrustedServerSigningKeysetContract=()=>({ok:true});f.deps.createPublicKey=()=>({});
+    f.deps.verifyInitialServerSigningKeyset=()=>({ok:failure!=='signature'});
+    f.deps.loadDeviceEnrollmentAnchor=async(input:{readOnly:boolean})=>{f.calls.push('anchor');assert.equal(input.readOnly,true);if(failure==='anchor')throw Error('anchor mismatch');};
+    f.deps.upgradeRelayForSigningMaintenance=async(_input:unknown,hooks:{assertRecoveredTrust(previous:number):Promise<void>})=>{
+      await hooks.assertRecoveredTrust(2);return{state:'completed'};};
+    if(failure==='none'){await f.run()(f.flags);assert.deepEqual(f.calls,['lock','anchor']);}
+    else{await assert.rejects(f.run()(f.flags),/trust_not_recovered|anchor mismatch/);
+      assert.deepEqual(f.calls,failure==='anchor'?['lock','anchor']:['lock']);}
+  }
 });

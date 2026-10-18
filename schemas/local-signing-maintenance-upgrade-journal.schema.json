@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-signing-maintenance-upgrade-journal/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "upgradeId", "organizationId", "deviceId", "workspaceId", "workspace", "version", "previousVersion", "previousCodexHome", "previous", "next", "previousHash", "nextHash", "priorJournalSha256", "priorJournalArchive", "trustGeneration", "createdAt", "updatedAt", "state"],
+  "properties": {
+    "schema": {"const": "dharma.local-signing-maintenance-upgrade-journal/v1"},
+    "upgradeId": {"type": "string", "format": "uuid"},
+    "organizationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$"},
+    "deviceId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "workspace": {"type": "string", "maxLength": 4096},
+    "version": {"type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
+    "previousVersion": {"type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
+    "previousCodexHome": {"type": ["string", "null"], "maxLength": 4096},
+    "previous": {"$ref": "#/$defs/launchers"},
+    "next": {"$ref": "#/$defs/launchers"},
+    "previousHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "nextHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "priorJournalSha256": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+    "priorJournalArchive": {"type": ["string", "null"], "pattern": "^runtime-upgrade\\.[a-f0-9-]{36}\\.[a-f0-9]{64}\\.history\\.json$"},
+    "trustGeneration": {"type": "integer", "minimum": 1},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "updatedAt": {"type": "string", "format": "date-time"},
+    "state": {"enum": ["prepared", "staged", "finishing", "completed", "staging_reverted", "staging_failed", "finish_failed"]}
+  },
+  "$defs": {
+    "launchers": {
+      "type": "object", "additionalProperties": false, "required": ["shell", "windows"],
+      "properties": {"shell": {"type": "string", "maxLength": 16384}, "windows": {"type": "string", "maxLength": 16384}}
+    }
+  }
+}

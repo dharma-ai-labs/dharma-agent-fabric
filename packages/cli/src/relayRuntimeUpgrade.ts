@@ -72,7 +72,7 @@ async function expectedNext(journal: Journal, deps: RelayUpgradeDependencies) {
 const nextLaunchers = (journal: Journal, deps: RelayUpgradeDependencies) =>
   journal.schema === 'dharma.local-relay-upgrade-journal/v3' ? journal.next! : deps.launcherContents(journal.version);
 
-async function validateJournal(value: unknown, input: Input, deps: RelayUpgradeDependencies) {
+export async function validateRelayUpgradeJournal(value: unknown, input: Input, deps: RelayUpgradeDependencies) {
   const journal = value as Journal;
   const keys = ['schema', 'upgradeId', 'organizationId', 'deviceId', 'workspaceId', 'workspace',
     'previousVersion', 'version', 'startedAt', 'updatedAt', 'state', 'previous', 'previousHash'];
@@ -124,10 +124,10 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
     // A different release may replace a completed journal, but cannot take over unfinished recovery.
     const old = saved as Journal;
     if (!input.rollback && ['completed', 'rolled_back'].includes(old.state)) {
-      await validateJournal(old, { ...input, version: old.version }, deps);
+      await validateRelayUpgradeJournal(old, { ...input, version: old.version }, deps);
       saved = undefined;
     }
-    else await validateJournal(saved, input, deps);
+    else await validateRelayUpgradeJournal(saved, input, deps);
   }
   if (saved && !input.rollback) fail('recovery_required');
   if (input.rollback && !saved) fail('rollback_unavailable');
