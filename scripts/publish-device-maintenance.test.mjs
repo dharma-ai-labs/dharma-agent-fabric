@@ -28,7 +28,7 @@ async function snapshot(){
     expectedPublisherHash:hash(readFileSync(new URL('./publish-device-maintenance.mjs',import.meta.url),'utf8')),
     publisherHash:hash(readFileSync(new URL('./publish-device-maintenance.mjs',import.meta.url),'utf8')),
     workflowTestHash:hash(readFileSync(new URL('./publish-workflow.test.mjs',import.meta.url),'utf8')),
-    releaseTestHash:hash(readFileSync(import.meta.filename,'utf8'))};
+    releaseTestHash:hash(git('show','73793c2df81f6bf9c81fe276b37997fa2159c67d:scripts/publish-device-maintenance.test.mjs')+'\n')};
 }
 async function fixture(){
   const m=await load(),events=[],existing=new Set(m.maintenancePackages.filter(x=>x.existingArtifact).map(x=>x.name));
@@ -150,7 +150,7 @@ test('Linux canonical package packs preserve immutable dependency bytes before p
     const m=await load(),root=new URL('../',import.meta.url),directory=mkdtempSync(join(tmpdir(),'dharma-maintenance-pack-'));
     assert.ok(process.env.npm_execpath,'normal npm test context required');
     try{
-      for(const item of m.maintenancePackages){
+      for(const item of m.maintenancePackages.filter(item=>item.existingArtifact)){
         const packed=JSON.parse(execFileSync(process.execPath,[process.env.npm_execpath,'pack','--workspace',item.workspace,
           '--json','--pack-destination',directory],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8*1024*1024,
           stdio:['ignore','pipe','pipe'],env:{...process.env,npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}}))[0];

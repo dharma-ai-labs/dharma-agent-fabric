@@ -10,6 +10,7 @@ import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
   startRelayAutostart, stopRelayAutostart, inspectOwnedRelayAutostart, macRelayLaunchAgent,
+  assertRelayAutostartPaused,
 } from './relayAutostart.js';
 
 const startupPreflight = async (options: RelayAutostartOptions & { version?: string }) => {
@@ -17,6 +18,41 @@ const startupPreflight = async (options: RelayAutostartOptions & { version?: str
   assert.equal(typeof check, 'function', 'startup ownership must be checked before enrollment');
   await check(options);
 };
+
+test('signing-maintenance staging retains owned Linux startup metadata but never enables or starts it',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'dharma-paused-startup-'));const calls:string[][]=[];let state='enabled';
+  const options={platform:'linux' as const,home:join(root,'device'),userHome:root,workspace:'/fixtures/repo',
+    launcher:'/fixtures/repo/.dharma/bin/dharma',policy:'/fixtures/repo/.dharma/approved-policy.json',version:'0.2.207',
+    wslHost:{context:async()=>null},run:async(file:string,args:string[])=>{
+      calls.push([file,...args]);if(args.includes('disable'))state='disabled';if(args.includes('enable'))state='enabled';return{stdout:(args.includes('is-active')?'inactive':state)+'\n'};}};
+  await enableRelayAutostart(options);calls.length=0;
+  const result=await enableRelayAutostart({...options,version:'0.2.211',pauseForSigningMaintenance:true});
+  assert.equal(result.state,'disabled');assert.equal((await inspectOwnedRelayAutostart(options)).version,'0.2.211');
+  await assertRelayAutostartPaused(options);
+  assert(calls.some(v=>v.includes('disable')));assert(!calls.some(v=>v.includes('enable')||v.includes('start')));
+  assert((await readFile(join(root,'.config','systemd','user','dharma-agent-fabric.service'),'utf8')).includes(options.launcher));
+});
+
+test('disabled startup alone does not prove a paused systemd receiver',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'dharma-pause-active-rejection-'));let state='enabled';
+  const options={platform:'linux'as const,home:join(root,'device'),userHome:root,workspace:'/fixtures/repo',
+    launcher:'/fixtures/repo/.dharma/bin/dharma',policy:'/fixtures/repo/.dharma/approved-policy.json',version:'0.2.207',
+    wslHost:{context:async()=>null},run:async(_file:string,args:string[])=>{
+      if(args.includes('disable'))state='disabled';return{stdout:(args.includes('is-active')?'active':state)+'\n'};}};
+  await enableRelayAutostart(options);await enableRelayAutostart({...options,pauseForSigningMaintenance:true});
+  await assert.rejects(assertRelayAutostartPaused(options),/pause_unconfirmed/);
+});
+
+test('paused signing-maintenance startup cannot create an enrollment registration or change platform',async()=>{
+  for(const platform of['linux','win32','darwin']as const){
+    const root=await mkdtemp(join(tmpdir(),'dharma-paused-new-startup-')),calls:string[][]=[];
+    await assert.rejects(enableRelayAutostart({platform,home:join(root,'device'),userHome:root,workspace:'/fixtures/repo',
+      launcher:'/fixtures/repo/.dharma/bin/dharma',policy:'/fixtures/repo/.dharma/approved-policy.json',version:'0.2.211',
+      pauseForSigningMaintenance:true,run:async(file,args)=>{calls.push([file,...args]);return{stdout:'disabled\n'};}}),/startup_scope_invalid/);
+    assert.deepEqual(calls,[]);
+    await assert.rejects(readFile(join(root,'device','relay','autostart.json')),/ENOENT/);
+  }
+});
 
 test('Linux startup retains only the selected nondefault Codex home in an owned versioned receipt', async t => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-codex-startup-context-'));

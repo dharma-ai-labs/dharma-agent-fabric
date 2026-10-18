@@ -341,6 +341,17 @@ export async function containerStartupState(options: ContainerLifecycleOptions, 
     lifecycle, restartCoverage: 'container-entrypoint-only' as const };
 }
 
+export async function containerStartupPaused(options:ContainerLifecycleOptions,registration:ContainerRelayRegistration){
+  if(!await containerEntrypointAvailable(options))throw unavailable();
+  const value=await privateJson(options,'container-control.json');
+  if(!exactObject(value,['schema','home','registrationHash','running'])
+    ||value.schema!=='dharma.container-relay-control/v1'||value.home!==options.home
+    ||value.registrationHash!==registrationHash(options.home,registration)||value.running!==false)throw unavailable();
+  const heartbeat=await readContainerHeartbeat(options,false);
+  return heartbeat?.registrationHash===registrationHash(options.home,registration)&&heartbeat.lifecycle==='paused'
+    &&heartbeat.childPid===null&&heartbeat.childStartTicks===null;
+}
+
 export async function ownsContainerStartup(options: ContainerLifecycleOptions, registration: ContainerRelayRegistration) {
   // Stop/disable authority comes from the private matching configuration, not a
   // transient child heartbeat. A child may be exiting when control is paused.

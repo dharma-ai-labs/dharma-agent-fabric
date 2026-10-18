@@ -42,6 +42,18 @@ async function fixture() {
 // qualify rejection/schema behavior through the public command tests.
 const posix = { skip: process.platform !== 'linux' };
 
+test('signing-maintenance startup rewrite preserves a paused container control instead of resuming its receiver',posix,async()=>{
+  const f=await fixture();await enableRelayAutostart(f.options);await stopRelayAutostart(f.options);
+  const result=await enableRelayAutostart({...f.options,pauseForSigningMaintenance:true});
+  assert.equal(result.state,'enabled');
+  const control=JSON.parse(await readFile(join(f.home,'relay','container-control.json'),'utf8'));
+  assert.equal(control.running,false);assert.deepEqual(f.calls,[]);
+  await writeFile(join(f.home,'relay','container-heartbeat.json'),JSON.stringify({schema:'dharma.container-relay-heartbeat/v1',
+    home:f.home,startTicks:f.marker.startTicks,polledAt:Date.now(),lifecycle:'paused',reason:null,
+    registrationHash:control.registrationHash,childPid:null,childStartTicks:null}),{mode:0o600});
+  assert.equal(await lifecycle.containerStartupPaused(f.options,await lifecycle.readContainerRegistration(f.options) as lifecycle.ContainerRelayRegistration),true);
+});
+
 test('startup preflight uses a verified container entrypoint without touching the user systemd slot', posix, async () => {
   const f = await fixture();
   const unit = join(f.root, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
@@ -430,12 +442,20 @@ test('private lifecycle marker and control reject unsafe files and malformed con
 test('entrypoint does not launch a registration from a different installed runtime version', posix, async () => {
   const run = entrypoint(); const f = await fixture();
   await enableRelayAutostart({ ...f.options, version: '0.0.1' });
-  const controller = new AbortController(); let launches = 0;
+  const controller = new AbortController(); let launches = 0,storeReads=0;
   const result = run({ home: f.home, uid: f.options.uid, signal: controller.signal,
-    containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
+    containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => {storeReads++;return true;}, pollMs: 10, restartDelayMs: 10,
     spawnRelay: () => { launches++; return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); } });
-  await new Promise(resolve => setTimeout(resolve, 50)); controller.abort(); await result;
-  assert.equal(launches, 0);
+  try{
+    await until(async()=>{
+      try{return JSON.parse(await readFile(join(f.home,'relay','container-heartbeat.json'),'utf8')).reason==='relay_runtime_upgrade_required';}
+      catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+    });
+    assert.equal(launches,0);assert.equal(storeReads,0);
+    await stopRelayAutostart(f.options);
+    await until(async()=>JSON.parse(await readFile(join(f.home,'relay','container-heartbeat.json'),'utf8')).lifecycle==='paused');
+    assert.equal(launches,0);assert.equal(storeReads,0);
+  }finally{controller.abort();await result;}
 });
 
 

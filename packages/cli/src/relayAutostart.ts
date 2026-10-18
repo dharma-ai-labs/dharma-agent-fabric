@@ -5,9 +5,9 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { assertContainerStartupOwnership, containerEntrypointAvailable, containerStartupControl, containerStartupState, ownsContainerStartup,
-  writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
+  containerStartupPaused,writeContainerRegistration, readContainerRegistration, type ContainerRuntime, type ContainerRelayRegistration } from './containerRelayLifecycle.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
-import {assertWslHostPreflight, disableWslRelayHost, enableWslRelayHost, startWslRelayHost,
+import {assertWslHostPreflight,assertWslRelayHostPaused,pauseWslRelayHost, disableWslRelayHost, enableWslRelayHost, startWslRelayHost,
   wslRelayHostStatus, type WslHostOptions} from './wslRelayHost.js';
 
 const execFileAsync = promisify(execFile);
@@ -386,8 +386,13 @@ export async function relayAutostartStatus(options: RelayAutostartOptions): Prom
 export async function enableRelayAutostart(options: RelayAutostartOptions & {
   workspace: string; launcher: string; policy: string | null; version: string;
   preserveStandardAnchor?: boolean;
+  /** Existing Linux registration only; keep its controller paused during a signing-maintenance upgrade. */
+  pauseForSigningMaintenance?: boolean;
 }): Promise<RelayAutostartState> {
   const platform = options.platform || process.platform;
+  if(options.pauseForSigningMaintenance&&(platform!=='linux'||options.preserveStandardAnchor)){
+    throw new Error('relay_signing_maintenance_startup_scope_invalid');
+  }
   if (platform !== 'linux' && platform !== 'win32' && platform !== 'darwin') {
     throw new Error(`Relay autostart is unsupported on ${platform}.`);
   }
@@ -395,6 +400,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   const userHome = options.userHome || homedir();
   const run = options.run || defaultRunner;
   const previous = await readRegistration(options);
+  if(options.pauseForSigningMaintenance&&!previous)throw new Error('relay_signing_maintenance_startup_scope_invalid');
   const backend = platform === 'linux'
     ? await containerEntrypointAvailable(options) ? 'container-entrypoint' : 'systemd-user'
     : platform === 'darwin' ? 'launchd-user' : 'windows-task';
@@ -438,7 +444,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     }
     if (previous && !await ownsStartupFile(options, previous)) throw new Error('autostart_conflict: container startup is not owned.');
     await writeContainerRegistration(options, registration as ContainerRelayRegistration);
-    await containerStartupControl(options, registration as ContainerRelayRegistration, true);
+    await containerStartupControl(options, registration as ContainerRelayRegistration, !options.pauseForSigningMaintenance);
     return containerStartupState(options, registration as ContainerRelayRegistration);
   }
   if (platform === 'win32' && !previous) {
@@ -492,8 +498,9 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   await writeFile(registrationPath(options.home), `${JSON.stringify(registration, null, 2)}\n`, { mode: 0o600 });
   if (platform === 'linux') {
     await run('systemctl', ['--user', 'daemon-reload']);
-    await run('systemctl', ['--user', 'enable', UNIT_NAME]);
-    await enableWslRelayHost(options);
+    await run('systemctl', ['--user', options.pauseForSigningMaintenance?'disable':'enable', UNIT_NAME]);
+    if(options.pauseForSigningMaintenance)await pauseWslRelayHost(options);
+    else await enableWslRelayHost(options);
   } else if (platform === 'darwin') {
     await run('/usr/bin/plutil', ['-lint', destination]);
     await run('/bin/launchctl', ['enable', `${macDomain(options)}/${MAC_LABEL}`]);
@@ -513,7 +520,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     await run('powershell.exe', encodedPowerShell(command));
   }
   const status = await relayAutostartStatus(options);
-  if (status.state !== 'enabled') throw new Error(`Relay autostart registration was not verified (${status.state}).`);
+  if (status.state !== (options.pauseForSigningMaintenance?'disabled':'enabled')) throw new Error(`Relay autostart registration was not verified (${status.state}).`);
   return status;
 }
 
@@ -594,6 +601,30 @@ export async function inspectOwnedRelayAutostart(options: RelayAutostartOptions,
   }
   if (registration.backend === 'launchd-user') await macLoaded(options, registration);
   return registration;
+}
+
+export async function assertRelayAutostartPaused(options:RelayAutostartOptions){
+  const registration=await inspectOwnedRelayAutostart(options);
+  if(registration.backend==='container-entrypoint'){
+    // Only a valid paused control awaiting its new matching heartbeat is polled.
+    // Identity, permission, malformed metadata and other failures stop immediately.
+    for(let attempt=0;attempt<50;attempt++){
+      if(await containerStartupPaused(options,registration as ContainerRelayRegistration))return;
+      if(attempt<49)await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    throw Error('relay_startup_pause_unconfirmed');
+  }
+  if(registration.backend!=='systemd-user'||(await relayAutostartStatus(options)).state!=='disabled'){
+    throw Error('relay_startup_pause_unconfirmed');
+  }
+  const run=options.run||defaultRunner;
+  let active:string;
+  try{active=(await run('systemctl',['--user','is-active',UNIT_NAME])).stdout.trim();}
+  catch(error){const e=error as {code?:unknown;stdout?:unknown};
+    if(e.code!==3||typeof e.stdout!=='string'||e.stdout.trim()!=='inactive')throw error;
+    active='inactive';}
+  if(active!=='inactive')throw Error('relay_startup_pause_unconfirmed');
+  await assertWslRelayHostPaused(options);
 }
 
 export async function stopRelayAutostart(options: RelayAutostartOptions) {
