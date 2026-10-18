@@ -73,6 +73,11 @@ test('new workflow is explicit main-only, independent, pinned and CLI-only',()=>
     assert.ok(step.run.indexOf('sha256sum')<step.run.indexOf(command));
   }
   assert.ok(job.steps.findIndex(s=>s.name==='Admit exact reviewed source before installing dependencies')<job.steps.findIndex(s=>s.run==='npm ci'));
+  const command='npm run test:signing-upgrade';
+  assert.equal(job.steps.filter(s=>s.run===command).length,1,'publisher tests require the normal npm execution context');
+  assert.equal(JSON.parse(read('package.json')).scripts['test:signing-upgrade'],
+    'node --test scripts/publish-signing-upgrade.test.mjs');
+  assert.ok(job.steps.findIndex(s=>s.run===command)<job.steps.findIndex(s=>s.name==='Publish only the reviewed CLI patch'));
 });
 
 test('default plan verifies all eleven artifacts but performs no publication',async()=>{

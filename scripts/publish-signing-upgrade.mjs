@@ -8,7 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {lookupPublishedArtifact,assertProvenance} from './publish-onboarding-release.mjs';
 
 const repository='https://github.com/dharma-ai-labs/dharma-agent-fabric';
-const manifestHash='77f357ff4cdace5ab5931d86635e94aa95796f0c0d89e9b1c1adf356d9b9a7e1',workflowHash='4fe2b54c96c6db0207831c450a11e860a2d6c3789889073d4cf77c2d0d9a5ef4',testHash='fafe6aeba29f84455db83770ada9d9cbe5388a5debf15aa8c132ddbbcd85a4a3';
+const manifestHash='77f357ff4cdace5ab5931d86635e94aa95796f0c0d89e9b1c1adf356d9b9a7e1',workflowHash='99e5af97bf5ab0ea7f5b229313204d83f28ca48599184aa03de78262c60e4118',testHash='e9c8d0b8035cc215084937ba9534ad834cf4d6dba8bde908ae2c9cb3c85e26dd';
 const manifestPath=new URL('./signing-upgrade-release.json',import.meta.url);
 export const textHash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
 export const normalizedWorkflowHash=value=>textHash(value.replace(/^(\s*SIGNING_PUBLISHER_SHA256:) [^\r\n]+$/gm,'$1 <publisher-pin>'));
@@ -34,6 +34,7 @@ export function assertSigningSource(expectedHead,s){
   root.scripts['pack:verify']=root.scripts['pack:verify'].replace('scripts/publish-device-maintenance.test.mjs &&',
     'scripts/publish-device-maintenance.test.mjs scripts/publish-signing-upgrade.test.mjs &&');
   root.scripts['publish:signing-upgrade']='node scripts/publish-signing-upgrade.mjs';
+  root.scripts['test:signing-upgrade']='node --test scripts/publish-signing-upgrade.test.mjs';
   assert.deepEqual(s.manifest,root,'root manifest changed beyond release-test admission');
   const cli=structuredClone(s.baselineCliManifest);cli.version=release.cli.version;
   assert.deepEqual(s.cliManifest,cli,'CLI manifest changed beyond version');
