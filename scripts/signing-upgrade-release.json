@@ -1,0 +1,135 @@
+{
+  "schema": "dharma.fixed-cli-signing-upgrade-release/v1",
+  "baseline": {
+    "commit": "73793c2df81f6bf9c81fe276b37997fa2159c67d",
+    "tree": "606e6717112e5f456baae61179386ed5e57de61a"
+  },
+  "cli": {
+    "workspace": "packages/cli",
+    "name": "@dharma-ai-labs/agent-fabric",
+    "version": "0.2.211"
+  },
+  "dependencies": [
+    {
+      "workspace": "packages/contracts",
+      "name": "@dharma-ai-labs/agent-fabric-contracts",
+      "version": "0.1.18",
+      "integrity": "sha512-dDUHpNnjFZFzo1cL7okHd0fhpR9cjxanACl4xyskdifI9Uy3IlvJDZejoO5q9p2ONlOmZIDLgoR/HkHDGSAa9g==",
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d"
+    },
+    {
+      "workspace": "packages/evidence-reduction",
+      "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
+      "version": "0.2.35",
+      "integrity": "sha512-Sr3Rv1kLvZ3GE8vrrmYZDoFp41ypdAhinR3kZKS2jtsMmNBUIQpA+Q2OV1OtmtsrDs1yEo/rvMqYEIYUUAb5Aw==",
+      "source": "3038b4f53afcfa2825025e51f09d834c937115d4"
+    },
+    {
+      "workspace": "packages/local-vault",
+      "name": "@dharma-ai-labs/agent-fabric-local-vault",
+      "version": "0.1.32",
+      "integrity": "sha512-qZC8a+YxXyXcCCZDSzjakWsYSXUOYfYUOZLYY0i3WssEbRgl2EWVP/HdPRmccqwzdsXDv6riFcfapG5pIQVaVg==",
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d"
+    },
+    {
+      "workspace": "packages/policy",
+      "name": "@dharma-ai-labs/agent-fabric-policy",
+      "version": "0.1.4",
+      "integrity": "sha512-2ZDJxnL6cS1IRNF+B1I0XBMlRjisXIwb1Rbs8q+LQNpGA6mxeJJ5vej1vlV9Z9EfuUhJHkjMUz7uwfbrLnPssg==",
+      "source": "03a7096526660446a8e2cbb2483778cb201fcd31"
+    },
+    {
+      "workspace": "packages/provider-adapters",
+      "name": "@dharma-ai-labs/agent-fabric-provider-adapters",
+      "version": "0.1.36",
+      "integrity": "sha512-NdKtgL7IWIMtkN+pm0xRX4lP3zspwz4+c4N7IY/kNpqmcu32snIp3Z1oP5nYjIAyRcCxWPz6LEoEzU3CQ1WUaw==",
+      "source": "3038b4f53afcfa2825025e51f09d834c937115d4"
+    },
+    {
+      "workspace": "packages/relay-client",
+      "name": "@dharma-ai-labs/agent-fabric-relay-client",
+      "version": "0.2.34",
+      "integrity": "sha512-NmyGa0Z9o/cMkuaM8pWznHpJP/3pO3E5q9sO5DkTWIJ4ExnCSGm/Yw1i8MV63CnRy9pYctFt/CgomKtkS/vpYA==",
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d"
+    },
+    {
+      "workspace": "packages/sdk",
+      "name": "@dharma-ai-labs/agent-fabric-sdk",
+      "version": "0.1.10",
+      "integrity": "sha512-o5/CNYJasiBzBCJaU7D/cTlqa4dq1MfdltKozB7KB+HQz6LQkBUy9UpN6UH6kAE/WTRKmZRNrx5/nww9ILSqIQ==",
+      "source": "e2b5b09f76be1fd95e7fcfaf49e691f9617651a6"
+    },
+    {
+      "workspace": "packages/secure-store",
+      "name": "@dharma-ai-labs/agent-fabric-secure-store",
+      "version": "0.1.10",
+      "integrity": "sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw==",
+      "source": "1b8483f59dc1ba9f7aa0aef78ca984f309714e61"
+    },
+    {
+      "workspace": "packages/skill-manager",
+      "name": "@dharma-ai-labs/agent-fabric-skill-manager",
+      "version": "0.2.11",
+      "integrity": "sha512-vk+SaciPg22Fh0XaGFFyKKOXDHTgsvGrB/ixqn1KQ9yqJIEfQzeXF+V41BU8KY4nWPYIRQ3p+ULtMVE52DgL6g==",
+      "source": "95a5f2e572044a053348fcdd5e13f2ce4d2b510e"
+    },
+    {
+      "workspace": "packages/task-runner",
+      "name": "@dharma-ai-labs/agent-fabric-task-runner",
+      "version": "0.1.38",
+      "integrity": "sha512-8wwADswTKRNidXWP2kGcCBsctY/wEJ43m5etVqyeBKxaUqca7GarhkrYoe/WseOYJFDGt1XfWxDDuXz2SPMXIg==",
+      "source": "3038b4f53afcfa2825025e51f09d834c937115d4"
+    }
+  ],
+  "productHashes": {
+    "packages/cli/src/index.ts": "66938939d109c71792bc2fda02ea60c4cc6a8d93e3547c4c96754363d0f532c6",
+    "packages/cli/src/usage.ts": "290163e5fff26318ce6ed2cbae0afb3e813976097dfff09d89585943fa1976cf",
+    "packages/cli/src/relayRuntimeUpgrade.ts": "ece13512cb23a2206a1838fcee2b479e239d33159da6348e0d5c77bf4d3841f2",
+    "packages/cli/src/relayRuntimeUpgradeCaller.test.ts": "47dbe1185128ee1bcf5b401f63da157f8f6ece571e424d63b1ed5efdb4f96e56",
+    "packages/cli/src/relayAutostart.ts": "d96613f7683ede86ea01f27dca4fbd10b306e314090bad1c5be5ef18693c2b30",
+    "packages/cli/src/relayAutostart.test.ts": "708bfd5a909fe49834926f775498d2ea736088c8b676e1c07e09b493892ada8b",
+    "packages/cli/src/containerRelayLifecycle.test.ts": "87c99097c4b7195a87b834fa7635fbe7234e166bb89db805daa77fbabcabfdc5",
+    "packages/cli/src/relaySigningMaintenanceUpgrade.ts": "58b2dd4b3b63ebebb6204cd871fe9457e0c4ec929bc24cea88f619c4d90aab29",
+    "packages/cli/src/relaySigningMaintenanceUpgrade.test.ts": "aeb562ac0cc901a5990c25a0dfbd5af6c735d97725643bbf65ecf0bd8d7df539",
+    "schemas/local-signing-maintenance-upgrade.schema.json": "ebe41f1654701be16feae7cf59df31d6e15a857dd6e238b53f783af292b3ae6e",
+    "schemas/local-signing-maintenance-upgrade-journal.schema.json": "af40b8a11f67986297f916df018e8f683c72fe5b79517954797bc22d442f1e48",
+    "docs/signing-maintenance-runtime-upgrade.md": "8ba224def28c3f573e8093a0a1d1e673b51f10b814c8cdda1f429b87c2d55c82",
+    "packages/cli/src/containerRelayLifecycle.ts": "6965c3782980e9a937d451e33735b7a70667022da0a61ea02be315db0e9e0a08",
+    "packages/cli/src/wslRelayHost.ts": "805bb5241ebc6c9a18576bfb445d8e127df5e5d21b45b654c68ac45cd31edb31",
+    "packages/cli/src/wslRelayHost.test.ts": "8191497b9f0e4d8ee594e3a1da9c4a6c71c7281a8654a1169b65c94722d9cdb8",
+    "packages/cli/src/containerRelayRuntimeTrust.test.ts": "3ac41594d3c50ee0d5b9b22ddf64732f3c3cf9c2e1fdd38fe16f72733192ff61",
+    "scripts/publish-device-maintenance.test.mjs": "2d1b586a39210a482fcdb70c9616232b82c94ff1ecbb8b1742f1873b3571b358",
+    "packages/cli/src/namedSessionStoppedLock.ts": "22dc33270e3e488c9e197517948abe636c2f43f1ca74197ee3f8807fb80fadd1",
+    "packages/cli/src/namedSessionStoppedLock.test.ts": "c8c3e0e70c71a55d6e10bb81074b6f044c43e750434410219a1fc095b6b2c64c",
+    "packages/cli/src/maintenanceControlCaller.test.ts": "e4f16d7ea84d920b89a00c48709cdef7a0fb2cade3c02596a65fedacd086a4a2"
+  },
+  "allowedPaths": [
+    "packages/cli/src/index.ts",
+    "packages/cli/src/usage.ts",
+    "packages/cli/src/relayRuntimeUpgrade.ts",
+    "packages/cli/src/relayRuntimeUpgradeCaller.test.ts",
+    "packages/cli/src/relayAutostart.ts",
+    "packages/cli/src/relayAutostart.test.ts",
+    "packages/cli/src/containerRelayLifecycle.test.ts",
+    "packages/cli/src/relaySigningMaintenanceUpgrade.ts",
+    "packages/cli/src/relaySigningMaintenanceUpgrade.test.ts",
+    "schemas/local-signing-maintenance-upgrade.schema.json",
+    "schemas/local-signing-maintenance-upgrade-journal.schema.json",
+    "docs/signing-maintenance-runtime-upgrade.md",
+    "packages/cli/src/containerRelayLifecycle.ts",
+    "packages/cli/src/wslRelayHost.ts",
+    "packages/cli/src/wslRelayHost.test.ts",
+    "packages/cli/src/containerRelayRuntimeTrust.test.ts",
+    "scripts/publish-device-maintenance.test.mjs",
+    "packages/cli/src/namedSessionStoppedLock.ts",
+    "packages/cli/src/namedSessionStoppedLock.test.ts",
+    "packages/cli/src/maintenanceControlCaller.test.ts",
+    "package.json",
+    "packages/cli/package.json",
+    "package-lock.json",
+    "scripts/publish-signing-upgrade.mjs",
+    "scripts/publish-signing-upgrade.test.mjs",
+    "scripts/signing-upgrade-release.json",
+    ".github/workflows/publish-signing-upgrade.yml"
+  ]
+}

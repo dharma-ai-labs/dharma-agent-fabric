@@ -442,12 +442,20 @@ test('private lifecycle marker and control reject unsafe files and malformed con
 test('entrypoint does not launch a registration from a different installed runtime version', posix, async () => {
   const run = entrypoint(); const f = await fixture();
   await enableRelayAutostart({ ...f.options, version: '0.0.1' });
-  const controller = new AbortController(); let launches = 0;
+  const controller = new AbortController(); let launches = 0,storeReads=0;
   const result = run({ home: f.home, uid: f.options.uid, signal: controller.signal,
-    containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
+    containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => {storeReads++;return true;}, pollMs: 10, restartDelayMs: 10,
     spawnRelay: () => { launches++; return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); } });
-  await new Promise(resolve => setTimeout(resolve, 50)); controller.abort(); await result;
-  assert.equal(launches, 0);
+  try{
+    await until(async()=>{
+      try{return JSON.parse(await readFile(join(f.home,'relay','container-heartbeat.json'),'utf8')).reason==='relay_runtime_upgrade_required';}
+      catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+    });
+    assert.equal(launches,0);assert.equal(storeReads,0);
+    await stopRelayAutostart(f.options);
+    await until(async()=>JSON.parse(await readFile(join(f.home,'relay','container-heartbeat.json'),'utf8')).lifecycle==='paused');
+    assert.equal(launches,0);assert.equal(storeReads,0);
+  }finally{controller.abort();await result;}
 });
 
 

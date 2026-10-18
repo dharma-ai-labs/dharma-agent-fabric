@@ -52,6 +52,7 @@ import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
 import { relayRuntimeObservationReady, upgradeRelayRuntime } from './relayRuntimeUpgrade.js';
+import {reconcileStoppedNamedSessionLock} from './namedSessionStoppedLock.js';
 import {upgradeRelayForSigningMaintenance} from './relaySigningMaintenanceUpgrade.js';
 import {activateMaintenanceRestart, maintainNamedSession, recoverStoppedNamedSession} from './namedSessionMaintenance.js';
 import {assertNamedSessionStartupRegistration} from './namedSessionAdmission.js';
@@ -157,7 +158,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.210';
+const VERSION = '0.2.211';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -5269,6 +5270,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   const hostScope = currentBootstrapHostScope();
   const setupSessionScope = currentAcceptedSetupSessionScope();
   const supervisorOwner = currentNamedSessionChildOwner();
+  if(action==='reconcile-stopped-lock'&&(hostScope||setupSessionScope||supervisorOwner
+    ||[...flags.keys()].some(k=>!['name','workspace-id','registration-sha256','lock-sha256','apply','dry-run','json'].includes(k))
+    ||['apply','dry-run','json'].some(k=>flags.has(k)&&flags.get(k)!==true)
+    ||flags.has('apply')&&flags.has('dry-run')))throw Error('named_session_stopped_lock_options_invalid');
   if (hostScope && (supervisorOwner || setupSessionScope)) throw new Error('named_session_child_owner_conflict');
   if (setupSessionScope && !['start', 'status', 'readiness'].includes(action)) throw new Error('setup_session_scope_changed');
   const step = <T>(operation: () => Promise<T>) => hostScope ? hostScope.step(operation)
@@ -5286,7 +5291,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     const release = startupAdmission; startupAdmission = undefined; await release?.();
   };
   try {
-  if (['start', 'serve'].includes(action) && flags.has('apply')) {
+  if (['start', 'serve'].includes(action) && flags.has('apply') || action==='reconcile-stopped-lock') {
     startupAdmission = await step(() => acquireNamedSessionStartupAdmission());
   }
   let childMessage: Readonly<CodexSetupChildMessage> | undefined;
@@ -5314,6 +5319,25 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     try { return await namedSessionRequest(dharmaHome(), name, { action: 'status' }); }
     catch { return { ok: true, name, state: 'stopped', registered: Boolean(existing), enabled: existing?.enabled ?? false,
       bindingId: existing?.bindingId ?? null }; }
+  }
+  if(action==='reconcile-stopped-lock'){
+    if(!existing)throw Error('named_session_stopped_lock_unconfirmed');
+    return await reconcileStoppedNamedSessionLock({home:dharmaHome(),name,registration:existing,
+      registrationSha256:required(flags,'registration-sha256'),lockSha256:required(flags,'lock-sha256'),apply:flags.has('apply')},{
+      assertTopology:async()=>{
+        await assertRelayAutostartPaused({home:dharmaHome()});
+        if(await relayProcessState(dharmaHome())!=='stopped'||await relaySupervisorProcessState(dharmaHome())!=='stopped')
+          throw Error('named_session_stopped_lock_unconfirmed');
+        try{await namedSessionRequest(dharmaHome(),name,{action:'status'},{diagnostic:true});
+          throw Error('named_session_stopped_lock_unconfirmed');}
+        catch(error){
+          if(!(error instanceof NamedSessionTransportFailure)||error.diagnostic.phase!=='connect'
+            ||!['ENOENT','ECONNREFUSED'].includes(String(error.diagnostic.osCode)))throw Error('named_session_stopped_lock_unconfirmed');
+        }
+      },
+      processState:async pid=>{try{process.kill(pid,0);return 'running';}
+        catch(error){return(error as NodeJS.ErrnoException).code==='ESRCH'?'stopped':'unknown';}},
+    });
   }
   if (action === 'readiness') {
     if (!existing?.enabled) throw new Error('named_session_readiness_unavailable');
@@ -9586,8 +9610,19 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'relay' && subcommand === 'upgrade') return relayUpgrade(flags);
   if (command === 'relay' && subcommand === 'autostart') {
     if (positional[2] === 'status') return relayAutostartStatus({ home: dharmaHome() });
+    if(positional[2]==='pause'){
+      if([...flags.keys()].some(k=>!['apply','dry-run','json'].includes(k))
+        ||[...flags.values()].some(v=>v!==true)||flags.has('apply')&&flags.has('dry-run'))throw Error('relay_pause_options_invalid');
+      return withRelayStartupMutation(async()=>{
+        const registration=await inspectOwnedRelayAutostart({home:dharmaHome()});
+        if(registration.backend!=='container-entrypoint')throw Error('relay_pause_container_required');
+        if(!flags.has('apply'))return{ok:true,planned:true,state:'pause_planned',backend:registration.backend};
+        await stopRelayAutostart({home:dharmaHome()});await assertRelayAutostartPaused({home:dharmaHome()});
+        return{ok:true,planned:false,state:'paused',backend:registration.backend,registrationPreserved:true};
+      });
+    }
     if (positional[2] === 'disable') return withRelayStartupMutation(() => disableRelayAutostart({ home: dharmaHome() }));
-    throw new Error('Use dharma relay autostart status or dharma relay autostart disable.');
+    throw new Error('Use dharma relay autostart status, pause or disable.');
   }
   if (command === 'relay' && subcommand === 'supervise') return relaySupervise(flags);
   if (command === 'relay' && subcommand === 'start') return relayStart(flags);

@@ -15,6 +15,43 @@ admission. This command does not remove service locks or supply stop authority.
 A present named-session service lock, including one naming a dead PID, requires
 supported ownership reconciliation; the staging command never removes it.
 
+### Container Controller Handover Comes First
+
+Staging does not upgrade PID1 or admit a different-version controller. Before
+running a newer CLI in a container, its owner must complete a separately reviewed
+immutable-image handover through the existing container lifecycle controls:
+
+1. Verify the original container, controller process, image digest, configuration,
+   exact persistent-volume bindings and the published target package integrity.
+2. Drain current owned work and verify the original named session is disabled
+   and stopped. Stop only that app container through its owned graceful lifecycle
+   control and verify its controller and children are terminal. Preserve it for
+   rollback. Leave protected
+   credential and transport services running with their existing identities.
+3. Start the qualified target image with the same user, encrypted home volume,
+   source scope, limits and sandbox configuration. Never run two containers
+   against that writable home. Do not export or copy credentials.
+   An older registration is blocked by the target controller's runtime-version
+   check without opening the protected store or starting a receiver.
+4. Verify that blocked no-child state and the target controller's actual process
+   and executable bytes. Use the target CLI's `relay autostart pause` plan, then
+   `relay autostart pause --apply`; require fresh paused control and no child.
+   The startup registration is preserved, not disabled/unregistered.
+5. For a retained stopped lock, use `sessions reconcile-stopped-lock --name
+   <original-name> --workspace-id <workspace> --registration-sha256 <exact-hash>
+   --lock-sha256 <exact-hash>` to plan, then the same command with `--apply`.
+   This requires verified paused/stopped topology and a disabled original
+   registration. It preserves the exact old lock in a hash-named archive and
+   changes neither registration, budget, protected storage nor session state.
+   Any live/unknown owner, changed input or denied read refuses reconciliation.
+6. Verify the same enrollment and named-session registration and no active lock.
+   The target CLI must pass normal startup ownership inspection before staging.
+
+A cross-version failure is a controller prerequisite, not permission to use the
+rollback compatibility path, edit the running image, forge a marker or relax
+ownership checks. If handover or rollback cannot be proved safe, leave the
+receiver paused and retain the exact unresolved operation for its owner.
+
 Ordinary `relay upgrade` is unchanged. It requires a fresh actual receiver poll
 before reporting a successful upgrade. It is not suitable for staging a runtime
 whose expired server trust must be repaired before it can poll.

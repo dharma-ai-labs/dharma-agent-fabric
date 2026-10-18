@@ -27,6 +27,18 @@ test('ordinary runtime ownership retains exact executable bytes despite differen
   await assert.rejects(verifyContainerControllerRuntime(f.installed, f.current), /container_startup_unavailable/);
 });
 
+test('maintenance image handover requires the target controller before the newer caller is admitted', { skip: process.platform !== 'linux' }, async () => {
+  const old = await fixture('0.2.207', '0.2.211');
+  await assert.rejects(verifyContainerControllerRuntime(old.installed, old.current), /container_startup_unavailable/);
+  await assert.rejects(verifyContainerControllerRuntime(old.installed, old.current, true), /container_startup_unavailable/);
+
+  const target = await fixture('0.2.211', '0.2.211');
+  assert.equal(await verifyContainerControllerRuntime(target.installed, target.current), target.installed);
+  await chmod(join(target.candidate, 'index.js'), 0o644);
+  await writeFile(join(target.candidate, 'index.js'), '// substituted target controller\n');
+  await assert.rejects(verifyContainerControllerRuntime(target.installed, target.current), /container_startup_unavailable/);
+});
+
 test('version labels cannot admit synthetic or tampered historical controller bytes even in rollback', { skip: process.platform !== 'linux' }, async () => {
   for (const version of ['0.2.148', '0.2.149', '0.2.151']) {
     const f = await fixture(version);

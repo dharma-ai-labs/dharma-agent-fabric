@@ -1,0 +1,45 @@
+name: Publish signing-maintenance CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head:
+        description: Exact reviewed main SHA for the CLI-only signing-maintenance patch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: npm
+    env:
+      EXPECTED_HEAD: ${{ inputs.expected_head }}
+      SIGNING_PUBLISHER_SHA256: e41b736f03ecaf5020e362840f83b44182ce365c92fc1e16e4a0174af03dc5ac
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - name: Admit exact reviewed source before installing dependencies
+        run: |
+          printf '%s  %s\n' "$SIGNING_PUBLISHER_SHA256" scripts/publish-signing-upgrade.mjs | sha256sum --check --status
+          node scripts/publish-signing-upgrade.mjs --expected-head "$EXPECTED_HEAD" --admission-only
+      - run: npm ci
+      - run: npm run check
+      - run: node --test scripts/publish-signing-upgrade.test.mjs
+      - name: Publish only the reviewed CLI patch
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          printf '%s  %s\n' "$SIGNING_PUBLISHER_SHA256" scripts/publish-signing-upgrade.mjs | sha256sum --check --status
+          npm run publish:signing-upgrade -- --expected-head "$EXPECTED_HEAD" --publish
