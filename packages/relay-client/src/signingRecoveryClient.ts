@@ -55,19 +55,26 @@ export function checkedRecoveryHostContext(input:RecoverExpiredDeviceSigningTrus
   return {challenge,expected};
 }
 async function responseBody(response:Response,signal:AbortSignal){
-  if(!response.headers.get('content-type')?.toLowerCase().startsWith('application/json')
-    ||Number(response.headers.get('content-length'))>MAX_BYTES||!response.body)return fail();
+  const length=response.headers.get('content-length');
+  if(!/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type')??'')
+    ||length!==null&&(!/^\d+$/.test(length)||Number(length)>MAX_BYTES)||!response.body)return fail();
   const reader=response.body.getReader(),chunks:Uint8Array[]=[];let bytes=0;
   const cancel=()=>{void reader.cancel().catch(()=>{});};signal.addEventListener('abort',cancel,{once:true});
   try{
     if(signal.aborted)return fail();
-    while(true){const next=await reader.read();if(next.done)break;bytes+=next.value.byteLength;if(bytes>MAX_BYTES)return fail();chunks.push(next.value);}
+    while(true){const next=await withAbort(reader.read(),signal);if(next.done)break;bytes+=next.value.byteLength;if(bytes>MAX_BYTES)return fail();chunks.push(next.value);}
     if(signal.aborted)return fail();
     const value=record(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))));
     if(Object.keys(value).sort().join('\0')!==['ok','delivery','clientTrustInstalled','nativeSessionBinding'].sort().join('\0')
       ||value.ok!==true||value.clientTrustInstalled!==false||value.nativeSessionBinding!=='device_attested_not_independently_observed')return fail();
     return value.delivery;
-  }finally{signal.removeEventListener('abort',cancel);cancel();reader.releaseLock();}
+  }finally{signal.removeEventListener('abort',cancel);cancel();try{reader.releaseLock();}catch{/* A cancelled non-cooperative read may retain its lock. */}}
+}
+
+async function withAbort<T>(work:Promise<T>,signal:AbortSignal):Promise<T>{
+  if(signal.aborted)return fail();let stop!:()=>void;
+  const aborted=new Promise<never>((_,reject)=>{stop=()=>reject(Error('signing_recovery_delivery_failed'));signal.addEventListener('abort',stop,{once:true});});
+  try{return await Promise.race([work,aborted]);}finally{signal.removeEventListener('abort',stop);}
 }
 
 /** Internal orchestration used only by the typed owning-host library API. The
@@ -105,10 +112,12 @@ export async function retrieveSigningRecoveryDelivery(input:RecoverExpiredDevice
       nonce:challenge.nonce,organizationId:challenge.organizationId,pathname:PATH,sequence:1,sessionId:challenge.recoveryId,timestamp}));
     const transportSignature=sign(null,transport,deviceKey).toString('base64url');
     phase='request';await fence.assert();
-    response=await (input.fetcher??fetch)(url,{method:'POST',redirect:'error',credentials:'omit',
+    const request=(input.fetcher??fetch)(url,{method:'POST',redirect:'error',credentials:'omit',
       headers:{'content-type':'application/json','cache-control':'no-store','x-dharma-device-id':challenge.deviceId,
         'x-dharma-session-id':challenge.recoveryId,'x-dharma-message-id':challenge.approvalId,'x-dharma-timestamp':timestamp,
         'x-dharma-sequence':'1','x-dharma-nonce':challenge.nonce,'x-dharma-signature':transportSignature},signal,body});
+    void request.then(late=>{if(signal.aborted)void late.body?.cancel().catch(()=>{});},()=>{});
+    response=await withAbort(request,signal);
     httpStatus=response.status;await fence.assert();
     if(response.status!==200||response.redirected||(response.url&&response.url!==url)){
       void response.body?.cancel().catch(()=>{});return fail();

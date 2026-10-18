@@ -79,9 +79,47 @@ session evidence. It changes no TLS settings.
 
 ## Remaining Integration
 
-Official server device-principal/SQL adapters, the owning-host orchestration,
+The candidate also exports an explicit owning-host connection:
+
+1. `prepareOwnedSigningRecovery` validates the existing public config and
+   protected enrollment anchor, and retains an original ephemeral X25519 key
+   in process memory. It does not read the private device identity or send a
+   request. The returned frozen handle is opaque; serialized copies and proxies
+   have no execution authority.
+2. `submitOwnedSigningRecoveryPreparation` rechecks the original source,
+   session and host fence, reads the existing device key once, and submits the
+   purpose-signed preparation with a separately signed transport frame. It
+   accepts only the exact bounded receipt. A possible committed or lost
+   response becomes `submission_unconfirmed`, with no repeat submission.
+   A current shorter server expiry is retained as a stricter deadline; a later
+   offer cannot extend it or register a proof outside that admitted lifetime.
+3. `progressOwnedSigningRecoveryOffer` explicitly reads an offer and, if needed,
+   registers the existing purpose proof. The original challenge stays inside
+   the handle's owning process. Only a sanitized progress summary is returned;
+   this does not approve browser consent or publish anything.
+4. `completeOwnedSigningRecovery` explicitly attempts delivery once, through
+   the existing protected recovery journal. The server must independently have
+   the required consent and publication. Failed or uncertain delivery cannot
+   silently retry, including after a later publication. Confirmed installation
+   is `trust_installed` with `ready: false`, not customer readiness.
+
+`inspectOwnedSigningRecovery` returns a saved progress snapshot, not a fresh
+authority check. `disposeOwnedSigningRecovery` withdraws owned operations and
+drops the handle; it does not guarantee physical memory erasure, termination
+of a non-cooperative process, or rollback of an already admitted write. The
+original handle is not durable across process restart. No credential, grant,
+password, approval, command or replacement identity is supplied by this API.
+Network waits are bounded by abort and the existing deadline. Submission
+receipts have a strict 8 KiB limit; preparation requests retain 32 KiB and
+delivery responses retain 64 KiB limits.
+
+The same-package challenge handoff is not exported from the package entrypoint.
+These APIs accept trusted native-host facts only; accepting a matching JSON
+object from a model does not establish a genuine current Codex host/session.
+
+The genuine native caller, official server device-principal/SQL adapters,
 recipient controls, separate owner/recipient consent, second-device adoption,
 protected continuation and normal package/main release remain. This source
-client slice neither implements those joins nor proves them deployed. Pure
+client slice neither completes those joins nor proves them deployed. Pure
 synthetic protocol tests and schemas cannot substitute for actual two-client
 setup, named-task use, restart or independent guide-only rehearsal.

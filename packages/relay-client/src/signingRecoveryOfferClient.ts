@@ -79,12 +79,20 @@ function publicSummary(response:DeviceSigningRecoveryOfferResponse){
 /** At most one official read and one proof registration. This typed host API
  * never approves, publishes, installs trust, resumes a provider or retries. */
 export async function progressPreparedDeviceSigningRecoveryOffer(input:ProgressPreparedDeviceSigningRecoveryOfferInput){
+  return (await progressPreparedSigningRecoveryOfferForHost(input)).summary;
+}
+
+/** Same-package handoff only. The public entrypoint never returns the challenge. */
+export async function progressPreparedSigningRecoveryOfferForHost(input:ProgressPreparedDeviceSigningRecoveryOfferInput,maximumExpiresAt?:string){
   const fence=new HostOperationFence(input.hostScope),clock=input.now??Date.now;
   let phase:SigningRecoveryOfferClientPhase='input',httpStatus:number|null=null;
   try{
     await fence.assert();phase='local_plan';
     const initial=await planDeviceSigningRecovery(input);
     const preparation=checkedPreparation(input,initial,clock()),plan=preparation.plan;
+    const deadline=maximumExpiresAt===undefined?Date.parse(plan.expiresAt):Date.parse(maximumExpiresAt);
+    if(!Number.isFinite(deadline)||deadline<=clock()||deadline>Date.parse(plan.expiresAt)
+      ||maximumExpiresAt!==undefined&&new Date(deadline).toISOString()!==maximumExpiresAt)return fail();
     const raw=await fence.step(async()=>input.store??await createSystemSecureStore()),store=fence.store(raw);
     const config=await fence.step(()=>loadDeviceConfig(input.configPath));
     phase='identity';
@@ -99,10 +107,10 @@ export async function progressPreparedDeviceSigningRecoveryOffer(input:ProgressP
     const localRecheck=async()=>{
       phase='local_recheck';
       const fresh=await planDeviceSigningRecovery(input),current=checkedPreparation(input,fresh,clock());
-      if(canonicalize(current)!==canonicalize(preparation))return fail();await fence.assert();
+      if(canonicalize(current)!==canonicalize(preparation)||clock()>=deadline)return fail();await fence.assert();
     };
     const frame=(registration:boolean,proof?:{recoveryId:string;approvalId:string;signature:string})=>{
-      const at=clock(),until=Math.min(at+60000,Date.parse(plan.expiresAt));
+      const at=clock(),until=Math.min(at+60000,Date.parse(plan.expiresAt),deadline);
       if(!Number.isFinite(at)||until<=at)return fail();
       const common={schema:registration?'dharma.device-signing-recovery-offer-registration-request/v1':'dharma.device-signing-recovery-offer-read-request/v1',
         purpose:registration?'register_prepared_recovery_proof':'read_prepared_recovery_offer',method:'POST',path:registration?REGISTER:READ,
@@ -112,7 +120,7 @@ export async function progressPreparedDeviceSigningRecoveryOffer(input:ProgressP
     };
     const send=async(payload:ReturnType<typeof frame>)=>{
       await fence.assert();const body=JSON.stringify(payload),url=plan.origin+payload.path;
-      const remaining=Math.min(Date.parse(payload.expiresAt),Date.parse(plan.expiresAt))-clock();if(remaining<=0)return fail();
+      const remaining=Math.min(Date.parse(payload.expiresAt),Date.parse(plan.expiresAt),deadline)-clock();if(remaining<=0)return fail();
       const signal=AbortSignal.any([fence.signal,AbortSignal.timeout(Math.max(1,Math.min(30000,remaining)))]);
       const signed=Buffer.from(JSON.stringify({bodyHash:hash(body),deviceId:plan.deviceId,messageId:payload.requestId,method:'POST',
         nonce:payload.nonce,organizationId:plan.organizationId,pathname:payload.path,sequence:1,sessionId:plan.planId,timestamp:payload.issuedAt}));
@@ -129,8 +137,10 @@ export async function progressPreparedDeviceSigningRecoveryOffer(input:ProgressP
     };
     phase='read';const received=await send(frame(false));phase='read_response';
     const offer=parseDeviceSigningRecoveryOfferResponse(received,preparation,plan,clock());
+    if(Date.parse(offer.expiresAt)>deadline)return fail();
     await localRecheck();
-    if(offer.state!=='awaiting_device_proof')return publicSummary(offer);
+    if(offer.state!=='awaiting_device_proof')return {summary:publicSummary(offer),
+      ...('challenge'in offer?{challenge:offer.challenge}:{})};
     const proof={recoveryId:offer.challenge.recoveryId,approvalId:offer.challenge.approvalId,
       signature:sign(null,deviceSigningRecoverySigningPayload(offer.challenge),key).toString('base64url')};
     phase='registration';const request=frame(true,proof);
@@ -138,7 +148,8 @@ export async function progressPreparedDeviceSigningRecoveryOffer(input:ProgressP
     const registered=parseDeviceSigningRecoveryOfferRegistrationReceipt(response,
       parseDeviceSigningRecoveryOfferRegistrationRequest(request,selection,clock()),offer.challenge.expiresAt,clock());
     await localRecheck();
-    return publicSummary({...offer,state:registered.state,deviceProofRegistered:true,expiresAt:registered.expiresAt});
+    return {summary:publicSummary({...offer,state:registered.state,deviceProofRegistered:true,expiresAt:registered.expiresAt}),
+      challenge:offer.challenge};
   }catch{
     await fence.assert();throw new SigningRecoveryOfferClientError(phase,httpStatus);
   }
