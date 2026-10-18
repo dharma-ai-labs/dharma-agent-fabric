@@ -121,7 +121,7 @@ export async function openCodexBoundSession(input: CodexBoundSessionInput) {
         const request=recoveryRequest(value);
         const source=recoverySourceSnapshot(request.recovery.source);
         if(!(request.signal instanceof AbortSignal)||typeof request.current!=='function'||typeof request.authorize!=='function'
-          ||typeof request.operationId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{12}$(?![\s\S])/.test(request.operationId)
+          ||typeof request.operationId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/.test(request.operationId)
           ||typeof request.recovery.configPath!=='string'||!isAbsolute(request.recovery.configPath)
           ||resolve(request.recovery.configPath)!==request.recovery.configPath||/[\x00-\x1f\x7f]/.test(request.recovery.configPath)
           ||['organizationId','workspaceId','repositoryBindingId'].some(key=>source[key]!==selected[key as keyof typeof selected]))

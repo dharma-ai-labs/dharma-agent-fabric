@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
@@ -17,7 +18,7 @@ test('async scoped binding lookup reserves the local question turn before yieldi
     maximumProviderCostCents: 1};
   const open = runInNewContext(`${result.outputText}\nopenCodexBoundSession`, {
     // Control-flow fixture only: no Linux sandbox or provider execution claim.
-    process: {platform: 'linux'}, inspectSessionQuestionForBinding: () => ({ok: true}),
+    process: {platform: 'linux'}, AbortController, randomUUID, inspectSessionQuestionForBinding: () => ({ok: true}),
     runCodexBridgeQuestion: async () => ({}), runCodexLocalWork: async () => ({}),
     CodexSessionAnswerTooLargeError: class extends Error {},
   }, {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}});

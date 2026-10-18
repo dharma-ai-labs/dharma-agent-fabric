@@ -143,6 +143,16 @@ test('a private session selection cannot be supplied by the caller',async()=>{
   }finally{await f.cleanup();}
 });
 
+test('malformed operation IDs are rejected before journal admission or native effects',async()=>{
+  const f=await fixture();try{
+    for(const operationId of [id(10)+'\n',id(10).replace('-8000-','-0000-'),id(10).replace('-4000-','-0000-'),
+      'd3000000-0000-4000-8000000000000',id(10).slice(0,-1)]){
+      await assert.rejects(f.owner.beginSigningRecovery({...f.intent,operationId}),/input_invalid/);
+    }
+    assert.equal(f.handler,undefined);assert.deepEqual(f.rpc,[]);assert.deepEqual(f.reads,[]);assert.equal(f.reserved,0);
+  }finally{await f.cleanup();}
+});
+
 test('revocation during awaited qualification is observed before durable admission or native metadata',async()=>{
   const f=await fixture();try{
     await assert.rejects(f.owner.beginSigningRecovery({...f.intent,current:async()=>{
