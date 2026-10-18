@@ -19,7 +19,7 @@ jobs:
     environment: npm
     env:
       EXPECTED_HEAD: ${{ inputs.expected_head }}
-      SIGNING_PUBLISHER_SHA256: 52831817d20a7f6840b9964548c3cebd97ef4e72c7b4e50e664699a65000903a
+      SIGNING_PUBLISHER_SHA256: 23dd735260b739e6e4fc275979e2db2612d2f749c0053748c35d7eef88c8df44
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -36,7 +36,7 @@ jobs:
           node scripts/publish-signing-upgrade.mjs --expected-head "$EXPECTED_HEAD" --admission-only
       - run: npm ci
       - run: npm run check
-      - run: node --test scripts/publish-signing-upgrade.test.mjs
+      - run: npm run test:signing-upgrade
       - name: Publish only the reviewed CLI patch
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
