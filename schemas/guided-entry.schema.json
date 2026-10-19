@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/guided-entry/v1",
+  "title": "Blocked public customer entry; no enrollment authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "operationId", "organizationId", "recipientMembershipId", "roleRevision", "repositoryBindingId", "cliVersion", "createdAt", "expiresAt", "ok", "stage", "code", "effects", "ready", "enrollmentStarted", "authorityVerified", "nextAction", "integrity"],
+  "properties": {
+    "schema": { "const": "dharma.guided-entry/v1" },
+    "operationId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "null" },
+    "recipientMembershipId": { "type": "null" },
+    "roleRevision": { "type": "null" },
+    "repositoryBindingId": { "type": "null" },
+    "cliVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "maxLength": 32 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "ok": { "const": false },
+    "stage": { "const": "blocked" },
+    "code": { "enum": ["guided_entry_interactive_required", "guided_entry_runtime_unsupported", "guided_entry_context_required"] },
+    "effects": { "const": false },
+    "ready": { "const": false },
+    "enrollmentStarted": { "const": false },
+    "authorityVerified": { "const": false },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "hash", "authorizesEffects"],
+      "properties": {
+        "kind": { "const": "public_unkeyed_sha256" },
+        "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "authorizesEffects": { "const": false }
+      }
+    },
+    "nextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "url"],
+      "properties": {
+        "kind": { "const": "select_recipient_context_in_portal" },
+        "url": { "const": "https://www.dharma-ai.io/portal?section=agent-fabric&tab=instructions" }
+      }
+    }
+  }
+}

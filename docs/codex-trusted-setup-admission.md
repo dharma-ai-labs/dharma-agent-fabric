@@ -1,5 +1,30 @@
 # Codex trusted setup admission: candidate boundary
 
+## October 19 Scoped Guided Entry Candidate
+
+The existing portal issuer and `setup codex` preparation remain the only source
+of setup context. After the original native tool admission, its private callback
+now calls `run([])` with that same captured scope. The dispatcher accepts no new
+flags, checks the supported runtime, requires the original execution lease and
+dispatches that guided scope at most once. Cancellation, expiry and uncertain
+effects do not create retry authority. Explicit commands and planning-only
+continuations retain their existing behavior.
+
+The outer CLI emits a public organization/recipient/client/purpose selection
+before opening the provider account or reserving a turn. It marks repository
+role authorization pending and readiness false. The native instruction repeats
+the selection, but actual customer-visible display still needs live qualification.
+The original browser approval, source-policy checks, protected store, signed
+package/role checks and readiness verifier are unchanged.
+
+This is a connected source component, not complete bare-CLI first run. An
+ordinary shell or environment marker cannot create its private native scope;
+unscoped bare CLI still returns a typed no-effect result. Independently signed
+route freshness, authenticated assigned-role/catalog discovery, knowledge-only
+guided choice, other providers and no-shell transports are not supplied here.
+Offline fixtures do not establish new enrollment, production rollout or an
+independent guide-only rehearsal.
+
 ## October 13 Customer-Ingress Candidate
 
 The source candidate adds the official `dharma setup codex --stdin` dispatcher.

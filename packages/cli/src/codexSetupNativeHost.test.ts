@@ -114,6 +114,12 @@ test('setup ingress keeps asynchronous tool execution in the original turn until
     const content = start.params.input as Array<{type: string; text: string}>;
     assert.equal(content.length, 1);
     const text = content[0]!.text;
+    assert.ok(text.startsWith(`Selected organization: ${f.input.intent.organizationId}.`));
+    assert.match(text, new RegExp(`Intended recipient membership: ${f.input.intent.recipientMembershipId}`));
+    assert.match(text, /Client: Codex, Linux, named session/);
+    assert.match(text, /Purpose: source-connected repository setup/);
+    assert.match(text, /organization membership alone is not a repository role/);
+    assert.ok(text.indexOf('Display this selection before invoking the setup tool.') < text.indexOf('Perform the recipient-bound'));
     assert.match(text, /functions\.exec.*running cell/);
     assert.match(text, /functions\.wait.*terminal result/);
     assert.match(text, /Do not end this turn.*pending/);
