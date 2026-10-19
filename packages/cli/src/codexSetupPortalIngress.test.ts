@@ -38,6 +38,11 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
       scopeDigest: 'sha256:' + 'd'.repeat(64), contractDigest: 'sha256:' + 'e'.repeat(64),
       policyRevision: 'policy-v1', expiresAt: new Date(Date.now() + 60000).toISOString()}};
   const counts = {inputs: 0, preparations: 0, accounts: 0, accountCloses: 0, hosts: 0, closes: 0, reserves: 0, resumes: 0};
+  const selections: Array<Record<string, unknown>> = [];
+  Object.assign(process_, {stderr: {write: (text: string) => {
+    assert.equal(counts.accounts, 0); assert.equal(counts.hosts, 0); assert.equal(counts.reserves, 0);
+    selections.push(JSON.parse(text)); return true;
+  }}});
   let changed = false, denyBudget = false, failClose = false, failPreparation = false, foreignConfig = false;
   let changeOnAccountClose = false, harness = 'codex', sourceMatches = true;
   let revokeBeforeTurn = false, dispatched = 0;
@@ -108,7 +113,7 @@ async function fixture(inputMode: 'stdin' | 'portal' = 'stdin') {
     flags.delete('stdin'); flags.set('portal-context-sha256', 'f'.repeat(64)); flags.set('portal-prompt-sha256', 'e'.repeat(64));
     Object.assign(prepared, {promptProvenance: 'verified_portal_prompt', nativeOriginalUserPromptAttested: false});
   }
-  return {ingress, flags, counts, prepared, process: process_,
+  return {ingress, flags, counts, prepared, process: process_, selections,
     changeRuntime: () => {changed = true;}, denyBudget: () => {denyBudget = true;}, failClose: () => {failClose = true;},
     failPreparation: () => {failPreparation = true;}, foreignConfig: () => {foreignConfig = true;}, setResult: (value: any) => {result = value;},
     changeOnAccountClose: () => {changeOnAccountClose = true;}, wrongHarness: () => {harness = 'unknown';},
@@ -195,6 +200,20 @@ test('portal input completes composition without stdin or native-history access 
   assert.equal(f.counts.preparations,2);
   assert.equal(result.portalIngress.promptProvenance,'verified_portal_prompt');
   assert.equal(result.portalIngress.nativeOriginalUserPromptAttested,false);
+  assert.deepEqual(f.selections, [{schema: 'dharma.setup-selection/v1', stage: 'selected',
+    organizationId: f.prepared.intent.organizationId, recipientMembershipId: f.prepared.intent.recipientMembershipId,
+    recipientEmail: f.prepared.binding.recipientEmail, repositoryFingerprint: f.prepared.intent.repositoryFingerprint,
+    cliVersion: 'synthetic-version', provider: 'codex', clientPlatform: 'linux', clientTransport: 'named_session',
+    purpose: 'source_connected_repository_setup', roleState: 'pending_repository_authorization',
+    approvalRequired: true, ready: false, effects: false}]);
+});
+
+test('an unavailable selection display stops before provider admission without disclosing its exception', async () => {
+  const f = await fixture('portal');
+  (f.process as unknown as {stderr: {write(text: string): boolean}}).stderr.write = () => {throw new Error('PRIVATE_DISPLAY_FAILURE');};
+  const result = await f.ingress(f.flags);
+  assert.equal(result.ok, false); assert.equal(f.counts.accounts, 0); assert.equal(f.counts.hosts, 0);
+  assert.equal(f.counts.reserves, 0); assert.doesNotMatch(JSON.stringify(result), /PRIVATE_DISPLAY_FAILURE/);
 });
 test('conflicting portal and stdin options fail before any provider, input or network effect', async () => {
   const f=await fixture('portal');f.flags.set('stdin',true);

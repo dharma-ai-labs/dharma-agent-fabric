@@ -163,6 +163,7 @@ const VERSION = '0.2.211';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
+const guidedSetupEntries = new WeakSet<BootstrapHostScope>();
 type Output = unknown;
 
 const AGENT_FABRIC_ONBOARDING_URL = new URL('../AGENT_FABRIC_ONBOARDING.md', import.meta.url);
@@ -2707,9 +2708,9 @@ export async function bootstrapFromCodexSetup(input: CodexBootstrapHostInput): P
 /** Native-owner continuation: no caller-selected flags or replacement authority. */
 export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope,
   observeFailure?: CodexSetupFailureObserver): Promise<Output> {
-  try {return await runCodexBootstrapHostScope(scope, prepared => run(['bootstrap',
+  try {return await runCodexBootstrapHostScope(scope, prepared => prepared.flags.has('dry-run') ? run(['bootstrap',
     ...[...prepared.flags].flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)]),
-  ]));}
+  ]) : run([]));}
   catch (error) {
     if (observeFailure) reportCodexSetupFailure(observeFailure, error, 'bootstrap');
     if (error instanceof Error && error.message === 'setup_session_sender_unavailable') {
@@ -2717,7 +2718,8 @@ export async function bootstrapFromCodexSetupScope(scope: BootstrapHostScope,
         code: 'codex_setup_host_execution_unqualified', effects: false, grantRedeemed: false};
     }
     const safe = new Set(['codex_setup_host_scope_invalid', 'codex_setup_host_scope_unavailable',
-      'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch', 'codex_setup_host_command_mismatch']);
+      'codex_setup_host_context_conflict', 'codex_setup_host_source_mismatch', 'codex_setup_host_command_mismatch',
+      'guided_entry_already_dispatched']);
     let code = 'codex_setup_host_operation_failed';
     try {if (error instanceof Error && safe.has(error.message)) code = error.message;} catch {}
     throw new Error(code);
@@ -3257,6 +3259,14 @@ async function codexPortalSetup(flags: Map<string, string | boolean>): Promise<O
     if (!await current() || await detectBootstrapProvider(workspace) !== 'codex') {
       throw new Error('codex_setup_ingress_context_unqualified');
     }
+    // Public, verified selection is visible before account/provider admission.
+    // A membership is not an assigned repository role or a readiness receipt.
+    process.stderr.write(JSON.stringify({schema: 'dharma.setup-selection/v1', stage: 'selected',
+      organizationId, recipientMembershipId: prepared.intent.recipientMembershipId,
+      recipientEmail: prepared.binding.recipientEmail, repositoryFingerprint: prepared.intent.repositoryFingerprint,
+      cliVersion: VERSION, provider: 'codex', clientPlatform: 'linux', clientTransport: 'named_session',
+      purpose: 'source_connected_repository_setup', roleState: 'pending_repository_authorization',
+      approvalRequired: true, ready: false, effects: false}) + '\n');
     // Read only public account identity through the official owned provider.
     // It is not the portal recipient, a credential copy or a nested login shell.
     const account = await openCodexSetupOwnedConnection({workspace, deviceHome: home,
@@ -9247,13 +9257,24 @@ export async function run(argv: string[]): Promise<Output> {
     // An admitted native callback keeps its original authority through the
     // official dispatcher. Closed descendants never use the legacy route.
     const prepared = await inspectCodexBootstrapHostPreparation(setupScope);
-    if (command !== 'bootstrap' || positional.length !== 1 || flags.size !== prepared.flags.size
+    const guided = argv.length === 0;
+    if (!guided && (command !== 'bootstrap' || positional.length !== 1 || flags.size !== prepared.flags.size
       || [...repeated.values()].some(values => values.length !== 1)
-      || [...prepared.flags].some(([key, value]) => flags.get(key) !== value)) {
+      || [...prepared.flags].some(([key, value]) => flags.get(key) !== value))) {
       throw new Error('codex_setup_host_command_mismatch');
     }
+    if (guided) {
+      // Interactive admission is the original private native lease, not TTY or
+      // environment markers. Public-shaped preparations cannot enter this path.
+      const preflight = blockedGuidedEntry({cliVersion: VERSION, nodeVersion: process.versions.node, interactive: true});
+      if (preflight.code !== 'guided_entry_context_required') return preflight;
+    }
     if (!prepared.flags.has('dry-run')) await originalCodexSetupSessionSender(setupScope);
-    return setupScope.step(() => bootstrap(flags, setupScope));
+    if (guided && !prepared.flags.has('dry-run')) {
+      if (guidedSetupEntries.has(setupScope)) throw new Error('guided_entry_already_dispatched');
+      guidedSetupEntries.add(setupScope);
+    }
+    return setupScope.step(() => bootstrap(guided ? prepared.flags : flags, setupScope));
   }
   if (argv.length === 0) return blockedGuidedEntry({ cliVersion: VERSION,
     nodeVersion: process.versions.node, interactive: process.stdin.isTTY === true && process.stdout.isTTY === true });

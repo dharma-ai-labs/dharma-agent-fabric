@@ -24,6 +24,7 @@ import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
 import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
+import {blockedGuidedEntry} from './guidedEntry.js';
 import {applyServerEvidencePolicy, bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, materializeWorkspacePolicy, parseCliOptions} from './index.js';
 import {clearCodexSetupSessionPostCommitAcknowledgment, codexSetupSessionPolicyHash,
   originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
@@ -545,7 +546,8 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient', '
       },
     }) as (flags: Map<string, string | boolean>, scope: typeof f.prepared.scope) => Promise<unknown>;
     const run = await declaration('run', {parseCliOptions, currentBootstrapHostScope,
-      inspectCodexBootstrapHostPreparation, originalCodexSetupSessionSender, bootstrap}) as (argv: string[]) => Promise<unknown>;
+      inspectCodexBootstrapHostPreparation, originalCodexSetupSessionSender, bootstrap, blockedGuidedEntry,
+      VERSION: '0.2.211', process: {versions: {node: process.versions.node}}, guidedSetupEntries: new WeakSet()}) as (argv: string[]) => Promise<unknown>;
     const continueFromScope = await declaration('bootstrapFromCodexSetupScope', {runCodexBootstrapHostScope, run}) as
       (scope: typeof f.prepared.scope) => Promise<unknown>;
     const vault = {...f.vault, ...f.providerVault,

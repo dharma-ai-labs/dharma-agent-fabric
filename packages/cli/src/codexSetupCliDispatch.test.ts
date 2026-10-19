@@ -10,11 +10,12 @@ import {currentBootstrapHostScope, inspectCodexBootstrapHostPreparation,
 import {createCodexSetupAdmission} from './codexSetupAdmission.js';
 import {originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import {parseCliOptions} from './index.js';
+import {blockedGuidedEntry} from './guidedEntry.js';
 
 const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 
 // Actual CLI dispatcher; its effectful bootstrap boundary alone is synthetic.
-async function fixture(dryRun = false) {
+async function fixture(dryRun = false, nodeVersion = process.versions.node) {
   const now = Date.now(), prepared = prepareCodexBootstrapHost({workspace: resolve('synthetic-source'),
     signal: new AbortController().signal, current: async () => true, dryRun,
     intent: {schema: 'dharma.codex-setup-intent/v1', operationId: id(1), setupReference: id(2),
@@ -33,7 +34,8 @@ async function fixture(dryRun = false) {
   assert.equal(output.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
   let effects = 0;
   const dependencies = {parseCliOptions, currentBootstrapHostScope, inspectCodexBootstrapHostPreparation,
-    originalCodexSetupSessionSender, canonicalize, USAGE: 'synthetic usage', VERSION: 'synthetic-version',
+    originalCodexSetupSessionSender, canonicalize, USAGE: 'synthetic usage', VERSION: '0.2.211',
+    blockedGuidedEntry, process: {versions: {node: nodeVersion}}, guidedSetupEntries: new WeakSet(),
     bootstrap: async (flags: Map<string, string | boolean>, scope?: typeof prepared.scope) => {
       effects++; return {scopeMatched: scope === prepared.scope, flags: [...flags]};
     }};
@@ -79,7 +81,24 @@ test('scoped official dispatcher refuses a prepared scope without its private ex
   } finally {f.prepared.scope.close();}
 });
 
-test('scoped official dispatcher carries only the original privately admitted execution into bootstrap', async () => {
+test('bare entry cannot treat a prepared public-shaped scope as an admitted native session', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(runCodexBootstrapHostScope(f.prepared.scope, () => f.run([])), /setup_session_sender_unavailable/);
+    assert.equal(f.effects, 0);
+  } finally {f.prepared.scope.close();}
+});
+
+test('bare scoped entry rejects an unsupported runtime before native admission or bootstrap', async () => {
+  const f = await fixture(false, '25.0.0');
+  try {
+    const result = await runCodexBootstrapHostScope(f.prepared.scope, () => f.run([])) as Record<string, unknown>;
+    assert.equal(result.code, 'guided_entry_runtime_unsupported');
+    assert.equal(result.effects, false); assert.equal(f.effects, 0);
+  } finally {f.prepared.scope.close();}
+});
+
+for (const bare of [false, true]) test(`scoped official dispatcher carries only the original privately admitted execution into ${bare ? 'bare guided entry' : 'explicit bootstrap'}`, async () => {
   const f = await fixture(), binding = {connectionId: id(5), threadId: 'fixture_thread', turnId: 'fixture_turn', hostContextId: id(4)};
   let originalScopeMatched = false;
   const owner = createCodexSetupAdmission({...binding, intent: f.prepared.intent,
@@ -90,7 +109,11 @@ test('scoped official dispatcher carries only the original privately admitted ex
       const result = await withCodexSetupSessionSender({scope: f.prepared.scope, lease,
         vault: {stageCodexSetupSession: async () => {throw new Error('unexpected fixture effect');},
           readCodexSetupSession: async () => null}}, () =>
-        runCodexBootstrapHostScope(f.prepared.scope, () => f.run(f.argv))) as {scopeMatched: boolean};
+        runCodexBootstrapHostScope(f.prepared.scope, async () => {
+          const result = await f.run(bare ? [] : f.argv);
+          if (bare) await assert.rejects(f.run([]), /guided_entry_already_dispatched/);
+          return result;
+        })) as {scopeMatched: boolean};
       originalScopeMatched = result.scopeMatched;
       return {state: 'unconfirmed', code: 'setup_execution_unconfirmed'};
     }, verifyReadiness: async () => false});
