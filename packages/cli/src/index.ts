@@ -40,6 +40,7 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { blockedGuidedEntry } from './guidedEntry.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
@@ -264,6 +265,9 @@ export function formatCommandOutput(value:unknown):string{
 }
 
 export function commandExitCode(argv: string[], value: Output): number {
+  // A bare-entry refusal is not completed onboarding, even if a caller
+  // supplies a malformed object or an invented ready marker.
+  if (argv.length === 0) return 2;
   const { positional, flags } = parseCliOptions(argv);
   if(positional[0]==='relay'&&positional[1]==='upgrade'
     &&(flags.has('stage-signing-maintenance')||flags.has('finish-signing-maintenance'))){
@@ -9251,6 +9255,8 @@ export async function run(argv: string[]): Promise<Output> {
     if (!prepared.flags.has('dry-run')) await originalCodexSetupSessionSender(setupScope);
     return setupScope.step(() => bootstrap(flags, setupScope));
   }
+  if (argv.length === 0) return blockedGuidedEntry({ cliVersion: VERSION,
+    nodeVersion: process.versions.node, interactive: process.stdin.isTTY === true && process.stdout.isTTY === true });
   if (command === 'setup' && subcommand === 'codex') {
     if (positional.length !== 2 || [...repeated.values()].some(values => values.length !== 1)) {
       throw new Error('codex_setup_ingress_options_invalid');
