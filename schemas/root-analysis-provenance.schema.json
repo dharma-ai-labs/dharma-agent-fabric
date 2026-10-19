@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/root-analysis-provenance/v1",
+  "title": "Candidate root analysis provenance for no-effect scope planning",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "recordId", "organizationId", "membershipId", "membershipStatus", "bindingId", "policyRevision", "rootIdentity", "targetKind", "targetId", "host", "registeredSelectors", "observedAt", "expiresAt", "signature"],
+  "properties": {
+    "schema": { "const": "dharma.root-analysis-provenance/v1" },
+    "recordId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_]{1,120}$" },
+    "membershipId": { "type": "string", "format": "uuid" },
+    "membershipStatus": { "const": "active" },
+    "bindingId": { "type": "string", "format": "uuid" },
+    "policyRevision": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "rootIdentity": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "targetKind": { "enum": ["agent", "endpoint"] },
+    "targetId": { "type": "string", "format": "uuid", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "registeredSelectors": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 80 } },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" },
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mcpOrigin", "mcpPath", "appId", "appVersion", "deploymentId", "sourceSha", "registrationRevision", "schemaHash", "adapterId", "adapterVersion", "selectedLinkId"],
+      "properties": {
+        "mcpOrigin": { "type": "string", "format": "uri", "maxLength": 256 },
+        "mcpPath": { "type": "string", "pattern": "^/[A-Za-z0-9_/-]{1,160}$" },
+        "appId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "appVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "maxLength": 32 },
+        "deploymentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "sourceSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "registrationRevision": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "schemaHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "adapterId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "adapterVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "maxLength": 32 },
+        "selectedLinkId": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    }
+  }
+}
