@@ -12,15 +12,19 @@ import {release,textHash,normalizedWorkflowHash,assertSigningSource,publishSigni
 
 const head='a'.repeat(40),digest='sha512-'+Buffer.alloc(64,7).toString('base64');
 const root=new URL('../',import.meta.url),read=p=>readFileSync(new URL(p,root),'utf8');
-function snapshot(){
+const releasedSource='a44c6d776a35f130bd1c83982f061572e5bb9a18';
+function snapshot({historical=true}={}){
   const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8388608}).trim();
   const baseline=p=>JSON.parse(git('show',release.baseline.commit+':'+p));
+  // This publisher is deliberately frozen to CLI211. Exercise its original
+  // admission fixture, not a claim that future product edits may republish it.
+  const released=p=>historical?execFileSync('git',['show',releasedSource+':'+p],{cwd:root,encoding:'utf8',maxBuffer:8388608}):read(p);
   return{head,remoteMain:head,ref:'refs/heads/main',baselineTree:release.baseline.tree,dirty:'',untracked:[],changed:release.allowedPaths,
     manifestHash:textHash(read('scripts/signing-upgrade-release.json')),
     publisherHash:textHash(read('scripts/publish-signing-upgrade.mjs')),expectedPublisherHash:textHash(read('scripts/publish-signing-upgrade.mjs')),
     workflowHash:normalizedWorkflowHash(read('.github/workflows/publish-signing-upgrade.yml')),
-    testHash:textHash(read('scripts/publish-signing-upgrade.test.mjs')),
-    productHashes:Object.fromEntries(Object.keys(release.productHashes).map(p=>[p,textHash(read(p))])),
+    testHash:textHash(released('scripts/publish-signing-upgrade.test.mjs')),
+    productHashes:Object.fromEntries(Object.keys(release.productHashes).map(p=>[p,textHash(released(p))])),
     baselineManifest:baseline('package.json'),manifest:JSON.parse(read('package.json')),
     baselineCliManifest:baseline('packages/cli/package.json'),cliManifest:JSON.parse(read('packages/cli/package.json')),
     baselineLock:baseline('package-lock.json'),lock:JSON.parse(read('package-lock.json'))};
@@ -46,6 +50,13 @@ test('reviewed release changes only CLI211 and retains ten exact immutable depen
   assert.equal(release.dependencies.length,10);assert.equal(new Set(release.dependencies.map(i=>i.name)).size,10);
   for(const item of release.dependencies){assert.match(item.source,/^[a-f0-9]{40}$/);assert.match(item.integrity,/^sha512-/);}
   assert.doesNotThrow(()=>assertSigningSource(head,snapshot()));
+});
+
+test('frozen CLI211 publisher rejects current test and product changes without repinning either guard',()=>{
+  const historical=snapshot(),current=snapshot({historical:false});
+  assert.throws(()=>assertSigningSource(head,current),/release tests changed/);
+  assert.throws(()=>assertSigningSource(head,{...historical,productHashes:current.productHashes}),/product bytes changed/);
+  assert.equal(release.productHashes['packages/cli/src/index.ts'],'66938939d109c71792bc2fda02ea60c4cc6a8d93e3547c4c96754363d0f532c6');
 });
 
 test('source admission rejects changed main, policy, publisher, product, lock and workflow bytes',()=>{
