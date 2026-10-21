@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/provider-execution-qualification/v1",
+  "title": "Local Provider Execution Qualification Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "receiptId", "startedAt", "observedAt", "declared", "invocation", "outcome", "unverified"],
+  "properties": {
+    "schema": { "const": "dharma.provider-execution-qualification/v1" },
+    "receiptId": { "$ref": "#/$defs/uuid" },
+    "startedAt": { "$ref": "#/$defs/time" },
+    "observedAt": { "$ref": "#/$defs/time" },
+    "declared": {
+      "type": "object", "additionalProperties": false,
+      "required": ["organizationId", "taskId", "inputSha256", "candidateSha256", "oracleReceiptSha256", "fileRootsSha256", "skillRootsSha256", "settingsSha256", "contextSha256"],
+      "properties": {
+        "organizationId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,200}$" },
+        "taskId": { "$ref": "#/$defs/uuid" },
+        "inputSha256": { "$ref": "#/$defs/hash" },
+        "candidateSha256": { "$ref": "#/$defs/hash" },
+        "oracleReceiptSha256": { "$ref": "#/$defs/hash" },
+        "fileRootsSha256": { "$ref": "#/$defs/nullableHash" },
+        "skillRootsSha256": { "$ref": "#/$defs/nullableHash" },
+        "settingsSha256": { "$ref": "#/$defs/nullableHash" },
+        "contextSha256": { "$ref": "#/$defs/nullableHash" }
+      }
+    },
+    "invocation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "runner", "argvSha256", "stdinSha256", "workspaceSha256", "allowedCommandArgvSha256", "environmentOverrideSha256", "configuredModelSha256", "timeoutMs", "allowWrites"],
+      "properties": {
+        "provider": { "enum": ["codex", "claude", "agy", "hermes"] },
+        "runner": { "enum": ["default_process", "injected"] },
+        "argvSha256": { "$ref": "#/$defs/hash" },
+        "stdinSha256": { "$ref": "#/$defs/hash" },
+        "workspaceSha256": { "$ref": "#/$defs/hash" },
+        "allowedCommandArgvSha256": { "$ref": "#/$defs/hash" },
+        "environmentOverrideSha256": { "$ref": "#/$defs/hash" },
+        "configuredModelSha256": { "$ref": "#/$defs/nullableHash" },
+        "timeoutMs": { "type": "number", "minimum": 1000, "maximum": 3600000 },
+        "allowWrites": { "type": "boolean" }
+      }
+    },
+    "outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["exitCode", "signal", "timedOut", "stdoutSha256", "stderrSha256", "failureCategory"],
+      "properties": {
+        "exitCode": { "type": ["integer", "null"] },
+        "signal": { "type": ["string", "null"], "maxLength": 32, "pattern": "^SIG[A-Z0-9]+$" },
+        "timedOut": { "type": "boolean" },
+        "stdoutSha256": { "$ref": "#/$defs/hash" },
+        "stderrSha256": { "$ref": "#/$defs/hash" },
+        "failureCategory": { "enum": [null, "quota", "authentication", "model_unavailable", "transport", "timeout", "unknown"] }
+      }
+    },
+    "unverified": { "const": ["effective_model_and_settings", "effective_file_roots", "effective_skill_roots", "tool_policy_enforcement", "fresh_context", "independent_oracle_custody"] }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "nullableHash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+    "uuid": { "type": "string", "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$" },
+    "time": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+  }
+}
