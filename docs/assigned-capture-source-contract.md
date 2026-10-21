@@ -1,9 +1,11 @@
 # Assignment-first capture selection
 
-This is an internal source-only adapter slice. It is not connected to a CLI
-command, a live owner-host export, a vault or a server. Production CLI212 and the
-existing `capture` / `evidenceSync` commands are unchanged. Root's real account,
-endpoint and session assignment remains UNASSIGNED.
+Classification: public API, integration and local security-boundary reference
+under [the public documentation policy](PUBLIC_DOCUMENTATION_POLICY.md).
+
+This source-level helper is not connected to a CLI command, a live owner-host
+export, a vault or a server. The existing `capture` / `evidenceSync` commands are
+unchanged. A caller must independently qualify its binding and reader capability.
 
 ## Implemented Boundary
 
@@ -53,7 +55,7 @@ Tests include forbidden-effect traps. This does NOT repair or change those
 behaviors in the older CLI paths; a future integration must not wrap those
 paths and claim that this guard automatically contains their effects.
 
-## Exact Reader Is Still Unassigned
+## Exact Reader Requirements
 
 The owner-host bridge must be independently qualified before supplying this
 port. It must select an already-permitted exact file/session, enforce streaming
@@ -96,6 +98,7 @@ explicitly admitted selected-capsule commit/sync contract. It must retain
 idempotency, lost-response reconciliation, conservative accounting, policy,
 analysis-consent and pause gates. Those operations are not implemented here.
 
-This work does not unblock Reviewer storage/restart eligibility, signing,
-two-client production proof, automatic learning, Bruno's enrollment or guide-only
-rehearsal. It adds no deployment, SQL, configuration, credential or access change.
+This helper alone does not establish protected-storage recovery, signing trust,
+native provider readiness, end-to-end onboarding, accepted learning or guide-only
+qualification. It performs no deployment, SQL, configuration, credential or access
+change.
