@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/capture-assignment/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "assignmentId", "organizationId", "createdAt", "expiresAt", "target", "source", "policy", "effects", "integrity"],
+  "properties": {
+    "schema": { "const": "dharma.capture-assignment/v1" },
+    "assignmentId": { "type": "string", "format": "uuid" },
+    "organizationId": { "type": "string", "pattern": "^org_[A-Za-z0-9_-]{1,120}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["accountId", "membershipId", "hostId", "deviceId", "workspaceId", "endpointId", "repositoryFingerprint", "workspacePath", "provider", "sessionId"],
+      "properties": {
+        "accountId": { "type": "string", "pattern": "^user_[A-Za-z0-9_-]{1,120}$" },
+        "membershipId": { "type": "string", "format": "uuid" },
+        "hostId": { "$ref": "#/$defs/token" },
+        "deviceId": { "type": "string", "format": "uuid" },
+        "workspaceId": { "type": "string", "format": "uuid" },
+        "endpointId": { "type": "string", "format": "uuid" },
+        "repositoryFingerprint": { "$ref": "#/$defs/hash" },
+        "workspacePath": { "$ref": "#/$defs/path" },
+        "provider": { "enum": ["codex", "claude", "agy", "hermes"] },
+        "sessionId": { "$ref": "#/$defs/token" }
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceClass", "locator", "sha256", "maximumBytes", "maximumRecordBytes", "maximumRecords", "since", "until"],
+      "properties": {
+        "sourceClass": { "enum": ["provider_discovery", "explicit_import"] },
+        "locator": { "$ref": "#/$defs/path" },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "maximumBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "maximumRecordBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+        "maximumRecords": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "since": { "type": "string", "format": "date-time" },
+        "until": { "type": "string", "format": "date-time" }
+      }
+    },
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceRevision", "sourceHash", "disclosureRevision", "disclosureHash", "consentRevision", "retentionDays"],
+      "properties": {
+        "sourceRevision": { "$ref": "#/$defs/token" },
+        "sourceHash": { "$ref": "#/$defs/hash" },
+        "disclosureRevision": { "$ref": "#/$defs/token" },
+        "disclosureHash": { "$ref": "#/$defs/hash" },
+        "consentRevision": { "$ref": "#/$defs/token" },
+        "retentionDays": { "type": "integer", "minimum": 1, "maximum": 365 }
+      }
+    },
+    "effects": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sync", "analysis", "learning", "maximumModelCostCents"],
+      "properties": {
+        "sync": { "const": false }, "analysis": { "const": false }, "learning": { "const": false },
+        "maximumModelCostCents": { "const": 0 }
+      }
+    },
+    "integrity": {
+      "type": "object", "additionalProperties": false, "required": ["sha256"],
+      "properties": { "sha256": { "$ref": "#/$defs/hash" } }
+    }
+  },
+  "$defs": {
+    "token": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$" },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "path": { "type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^(?:/|[A-Za-z]:[\\\\/])[^\\u0000-\\u001f\\u007f]*$" }
+  }
+}
