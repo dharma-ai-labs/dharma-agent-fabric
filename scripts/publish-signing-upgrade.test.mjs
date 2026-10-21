@@ -11,19 +11,23 @@ import {release,textHash,normalizedWorkflowHash,assertSigningSource,publishSigni
   assertPreservedRuntime,packPreservedDependency} from './publish-signing-upgrade.mjs';
 
 const head='a'.repeat(40),digest='sha512-'+Buffer.alloc(64,7).toString('base64');
+const qualifiedReleaseSource='a44c6d776a35f130bd1c83982f061572e5bb9a18';
 const root=new URL('../',import.meta.url),read=p=>readFileSync(new URL(p,root),'utf8');
 function snapshot(){
   const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8388608}).trim();
+  // The one-shot CLI211 contract is historical; later product work must not
+  // alter its qualification fixture or make the old publisher admit new bytes.
+  const qualified=p=>execFileSync('git',['show',qualifiedReleaseSource+':'+p],{cwd:root,encoding:'utf8',maxBuffer:8388608});
   const baseline=p=>JSON.parse(git('show',release.baseline.commit+':'+p));
   return{head,remoteMain:head,ref:'refs/heads/main',baselineTree:release.baseline.tree,dirty:'',untracked:[],changed:release.allowedPaths,
-    manifestHash:textHash(read('scripts/signing-upgrade-release.json')),
-    publisherHash:textHash(read('scripts/publish-signing-upgrade.mjs')),expectedPublisherHash:textHash(read('scripts/publish-signing-upgrade.mjs')),
-    workflowHash:normalizedWorkflowHash(read('.github/workflows/publish-signing-upgrade.yml')),
-    testHash:textHash(read('scripts/publish-signing-upgrade.test.mjs')),
-    productHashes:Object.fromEntries(Object.keys(release.productHashes).map(p=>[p,textHash(read(p))])),
-    baselineManifest:baseline('package.json'),manifest:JSON.parse(read('package.json')),
-    baselineCliManifest:baseline('packages/cli/package.json'),cliManifest:JSON.parse(read('packages/cli/package.json')),
-    baselineLock:baseline('package-lock.json'),lock:JSON.parse(read('package-lock.json'))};
+    manifestHash:textHash(qualified('scripts/signing-upgrade-release.json')),
+    publisherHash:textHash(qualified('scripts/publish-signing-upgrade.mjs')),expectedPublisherHash:textHash(qualified('scripts/publish-signing-upgrade.mjs')),
+    workflowHash:normalizedWorkflowHash(qualified('.github/workflows/publish-signing-upgrade.yml')),
+    testHash:textHash(qualified('scripts/publish-signing-upgrade.test.mjs')),
+    productHashes:Object.fromEntries(Object.keys(release.productHashes).map(p=>[p,textHash(qualified(p))])),
+    baselineManifest:baseline('package.json'),manifest:JSON.parse(qualified('package.json')),
+    baselineCliManifest:baseline('packages/cli/package.json'),cliManifest:JSON.parse(qualified('packages/cli/package.json')),
+    baselineLock:baseline('package-lock.json'),lock:JSON.parse(qualified('package-lock.json'))};
 }
 
 function fixture(){
@@ -46,6 +50,16 @@ test('reviewed release changes only CLI211 and retains ten exact immutable depen
   assert.equal(release.dependencies.length,10);assert.equal(new Set(release.dependencies.map(i=>i.name)).size,10);
   for(const item of release.dependencies){assert.match(item.source,/^[a-f0-9]{40}$/);assert.match(item.integrity,/^sha512-/);}
   assert.doesNotThrow(()=>assertSigningSource(head,snapshot()));
+});
+
+test('historical CLI211 admission still refuses the current changed product and test bytes',()=>{
+  const qualified=snapshot();
+  assert.doesNotThrow(()=>assertSigningSource(head,qualified));
+  const currentProducts=Object.fromEntries(Object.keys(release.productHashes).map(p=>[p,textHash(read(p))]));
+  if(JSON.stringify(currentProducts)!==JSON.stringify(release.productHashes)){
+    assert.throws(()=>assertSigningSource(head,{...qualified,productHashes:currentProducts}),/product bytes changed/);
+  }
+  assert.throws(()=>assertSigningSource(head,{...qualified,testHash:textHash(read('scripts/publish-signing-upgrade.test.mjs'))}),/release tests changed/);
 });
 
 test('source admission rejects changed main, policy, publisher, product, lock and workflow bytes',()=>{
