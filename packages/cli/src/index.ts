@@ -47,7 +47,7 @@ import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegi
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
-import { runOwnedContainerEntrypoint, readContainerProcessIdentity } from './containerRelayLifecycle.js';
+import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
   resolveRegistryRecoveryProjection } from './workspaceRegistryRecovery.js';
@@ -9265,11 +9265,16 @@ export async function run(argv: string[]): Promise<Output> {
         requiresNormalRecipientEnrollment: true, restartCoverage: 'container-entrypoint-only',
         changesHostStartup: false };
     }
-    if (flags.size || positional.length !== 2) throw new Error('container_entrypoint_options_forbidden: use the owned runtime configuration, without grant or policy arguments.');
+    const inspection = flags.size === 1 && flags.get('inspect-startup') === true;
+    if ((!inspection && flags.size) || positional.length !== 2
+      || [...repeated.values()].some(values => values.length !== 1)) {
+      throw new Error('container_entrypoint_options_forbidden: use the owned runtime configuration, without grant or policy arguments.');
+    }
     if (process.platform !== 'linux' || process.pid !== 1 && process.ppid !== 1 || !process.getuid?.()
       || !process.env.DHARMA_HOME || !isAbsolute(process.env.DHARMA_HOME)) {
       throw new Error('container_entrypoint_requires_pid1: a non-root Linux PID1 or verified Docker-init direct child with an explicit private DHARMA_HOME is required.');
     }
+    if (inspection) return inspectOwnedContainerStartup({ home: dharmaHome() });
     const controller = new AbortController();
     const stop = () => controller.abort();
     process.on('SIGTERM', stop); process.on('SIGINT', stop);

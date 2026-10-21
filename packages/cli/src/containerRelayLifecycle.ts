@@ -188,9 +188,10 @@ export async function verifyContainerControllerRuntime(candidate: string | undef
   } catch { throw unavailable(); }
 }
 
-function ownedIdentity(identity: ContainerProcessIdentity, uid: number, entrypoint: string) {
+function ownedIdentity(identity: ContainerProcessIdentity, uid: number, entrypoint: string, inspection = false) {
   return Number.isSafeInteger(identity.pid) && identity.pid >= 1 && identity.uid === uid && Number.isSafeInteger(uid) && uid > 0 && /^\d{1,20}$/.test(identity.startTicks)
-    && identity.argv.length === 4 && identity.argv[2] === 'relay' && identity.argv[3] === 'container-entrypoint'
+    && identity.argv.length === (inspection ? 5 : 4) && identity.argv[2] === 'relay' && identity.argv[3] === 'container-entrypoint'
+    && (!inspection || identity.argv[4] === '--inspect-startup')
     && identity.argv[1] === entrypoint && isAbsolute(entrypoint);
 }
 
@@ -204,11 +205,11 @@ function validMarker(value: unknown): value is Marker {
     && typeof value.startTicks === 'string' && /^\d{1,20}$/.test(value.startTicks);
 }
 
-async function ownedController(options: ContainerLifecycleOptions, pid?: number) {
+async function ownedController(options: ContainerLifecycleOptions, pid?: number, inspection = false) {
   const init = await (options.containerRuntime?.identity || readContainerPid1Identity)();
   if (init.pid !== 1 || init.uid !== ownUid(options) || !/^\d{1,20}$/.test(init.startTicks)) throw unavailable();
   if (init.argv[2] === 'relay' && init.argv[3] === 'container-entrypoint') {
-    if (pid !== undefined && pid !== 1 || !ownedIdentity(init, ownUid(options), await canonicalEntrypoint(options, init))) throw unavailable();
+    if (pid !== undefined && pid !== 1 || !ownedIdentity(init, ownUid(options), await canonicalEntrypoint(options, init), inspection)) throw unavailable();
     return { identity: init, initStartTicks: undefined };
   }
   // Bounded migration of the existing official Node-image startup. Neither an
@@ -222,7 +223,7 @@ async function ownedController(options: ContainerLifecycleOptions, pid?: number)
     || !Number.isSafeInteger(init.sessionId) || Number(init.sessionId) <= 0
     || controller.sessionId !== init.sessionId || controller.processGroupId !== controller.pid
     || await (options.containerRuntime?.dockerInitMainChild || dockerInitMainChild)() !== controller.pid
-    || !ownedIdentity(controller, ownUid(options), await canonicalEntrypoint(options, controller))
+    || !ownedIdentity(controller, ownUid(options), await canonicalEntrypoint(options, controller), inspection)
     || !await (options.containerRuntime?.controllerExecutableVerified || verifiedControllerExecutable)(controller)) throw unavailable();
   const [freshInit, freshController, freshMainChild] = await Promise.all([
     (options.containerRuntime?.identity || readContainerPid1Identity)(),
@@ -408,6 +409,36 @@ async function readConfiguration(options: ContainerLifecycleOptions) {
     || typeof control.running !== 'boolean' || typeof control.registrationHash !== 'string') throw unavailable();
   if (control.registrationHash !== registrationHash(options.home, value)) return null; // fail closed during an owned update
   return { registration: value, running: control.running };
+}
+
+/** Explicit PID1 inspection: never enters the consumer, child or write lifecycle. */
+export async function inspectOwnedContainerStartup(options: ContainerLifecycleOptions) {
+  const before = await ownedController(options, undefined, true);
+  const snapshot = async () => {
+    await privateDirectory(options);
+    const registration = await readContainerRegistration(options);
+    const control = await privateJson(options, 'container-control.json');
+    if (registration === null && control === null) return null;
+    if (!registration || !exactObject(control, ['schema', 'home', 'registrationHash', 'running'])
+      || control.schema !== 'dharma.container-relay-control/v1' || control.home !== options.home
+      || control.registrationHash !== registrationHash(options.home, registration)
+      || typeof control.running !== 'boolean') throw unavailable();
+    return { registration, running: control.running };
+  };
+  const first = await snapshot();
+  const second = await snapshot();
+  const after = await ownedController(options, undefined, true);
+  if (JSON.stringify(first) !== JSON.stringify(second)
+    || JSON.stringify(before) !== JSON.stringify(after)) throw unavailable();
+  return {
+    schema: 'dharma.container-startup-inspection/v1',
+    ok: true, stage: 'container_startup_inspection', observedAt: new Date().toISOString(),
+    state: first === null ? 'unconfigured' as const : first.running ? 'resume_requested' as const : 'paused' as const,
+    registrationHash: first ? registrationHash(options.home, first.registration) : null,
+    version: first?.registration.version ?? null,
+    ready: false, started: false, startupWrites: false, consumerStoreChecked: false,
+    requiresSeparateLifecycleAdmission: true,
+  };
 }
 
 async function wait(milliseconds: number, signal: AbortSignal) {
