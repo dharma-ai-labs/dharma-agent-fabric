@@ -300,6 +300,79 @@ test('required artifacts preserve provider failure and cancelled status', async 
   }
 });
 
+test('task cancellation without artifacts overrides a successful provider result and remains durable', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const controller = new AbortController();
+  const task = fixture.signed();
+  let calls = 0;
+  const providerExecutor = async () => {
+    calls++;
+    controller.abort(new Error('private-cancellation-sentinel'));
+    return fixture.providerResult;
+  };
+  const receipt = await executeTask({ ...fixture.input, task, signal: controller.signal, providerExecutor });
+  assert.equal(calls, 1);
+  assert.equal(receipt.commandResults[0]?.exitCode, 0);
+  assert.equal(receipt.status, 'cancelled');
+  assert.equal(receipt.commandResults.at(-1)?.stderr, 'required_artifact_interrupted');
+  assert.equal(JSON.stringify(receipt).includes('private-cancellation-sentinel'), false);
+  const durable = await fixture.input.receiptStore.get(task.taskId);
+  assert.equal(durable?.status, 'cancelled');
+  assert.equal(JSON.stringify(durable).includes('private-cancellation-sentinel'), false);
+  const duplicate = await executeTask({ ...fixture.input, task, providerExecutor });
+  assert.equal(duplicate.status, 'cancelled');
+  assert.equal(calls, 1);
+});
+
+test('task cancellation without artifacts stops before provider execution when already aborted', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const controller = new AbortController();
+  controller.abort(new Error('private-cancellation-sentinel'));
+  let calls = 0;
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), signal: controller.signal,
+    providerExecutor: async () => { calls++; return fixture.providerResult; } });
+  assert.equal(calls, 0);
+  assert.equal(receipt.status, 'cancelled');
+  assert.equal(receipt.commandResults.at(-1)?.stderr, 'required_artifact_interrupted');
+  assert.equal(JSON.stringify(receipt).includes('private-cancellation-sentinel'), false);
+});
+
+test('task cancellation without artifacts is checked again after final Git inspection', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const controller = new AbortController();
+  const originalSpawn = childProcess.spawn;
+  let inspections = 0;
+  const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
+    const child = originalSpawn(command, argv, options);
+    if (command === 'git' && argv[0] === 'ls-files') {
+      inspections++;
+      child.once('close', () => controller.abort(new Error('private-cancellation-sentinel')));
+    }
+    return child;
+  });
+  syncBuiltinESMExports();
+  try {
+    const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), signal: controller.signal,
+      providerExecutor: async () => fixture.providerResult });
+    assert.equal(inspections, 1);
+    assert.equal(receipt.commandResults[0]?.exitCode, 0);
+    assert.equal(receipt.status, 'cancelled');
+    assert.equal(receipt.commandResults.at(-1)?.stderr, 'required_artifact_interrupted');
+    assert.equal(JSON.stringify(receipt).includes('private-cancellation-sentinel'), false);
+  } finally { patch.mock.restore(); syncBuiltinESMExports(); }
+});
+
+test('task cancellation without artifacts still permits an uninterrupted successful task', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const controller = new AbortController();
+  let calls = 0;
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), signal: controller.signal,
+    providerExecutor: async () => { calls++; return fixture.providerResult; } });
+  assert.equal(calls, 1);
+  assert.equal(receipt.status, 'completed');
+  assert.deepEqual(receipt.commandResults.map(result => result.commandId), ['provider.codex']);
+});
+
 test('required artifacts keep failed receipts durable and suppress duplicate execution', async (t) => {
   const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
   const task = fixture.signed();
