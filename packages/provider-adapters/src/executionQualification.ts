@@ -99,6 +99,7 @@ const reportSchema = z.object({
 export function reportedProviderExecutionQualification(
   result: ProviderExecutionResult,
   declared: ProviderExecutionQualification,
+  expectedProvider: ProviderExecutionResult['provider'],
 ): ProviderExecutionQualificationReceipt | null {
   try {
     const descriptor = Object.getOwnPropertyDescriptor(result, 'qualificationReceipt');
@@ -137,7 +138,7 @@ export function reportedProviderExecutionQualification(
     if (!parsed.success) return null;
     const receipt = parsed.data;
     if (JSON.stringify(receipt.declared) !== JSON.stringify(declared)
-      || receipt.invocation.provider !== result.provider
+      || result.provider !== expectedProvider || receipt.invocation.provider !== expectedProvider
       || receipt.outcome.exitCode !== result.exitCode || receipt.outcome.signal !== result.signal
       || receipt.outcome.timedOut !== result.timedOut
       || receipt.outcome.stdoutSha256 !== result.stdoutSha256 || receipt.outcome.stderrSha256 !== result.stderrSha256

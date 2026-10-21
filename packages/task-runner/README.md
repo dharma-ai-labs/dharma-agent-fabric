@@ -5,7 +5,7 @@ Local callers may opt into adapter-boundary digest receipts with
 must match the already signed task; the option adds no execution authority or
 new acceptance gate. It is forwarded to the existing provider executor and the
 returned qualification is retained in that provider command's stored result.
-A bounded data-only report must match the declaration, provider and outcome;
+A bounded data-only report must match the declaration, signed target provider and outcome;
 extra raw fields, accessors and mismatched reports are discarded, not persisted.
 An executor report remains a report, not an independent attestation.
 A custom executor that does not report valid qualification produces an explicit

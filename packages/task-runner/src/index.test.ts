@@ -136,13 +136,14 @@ test('missing custom-executor qualification is explicit and does not add a legac
 });
 
 test('custom qualification reports cannot bypass receipt redaction or bind a different task', async (t) => {
-  for (const variant of ['raw-top-level', 'raw-invocation', 'foreign-task', 'accessor']) {
+  for (const variant of ['raw-top-level', 'raw-invocation', 'foreign-task', 'accessor', 'foreign-provider']) {
     await t.test(variant, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
       const decisionKeys = generateKeyPairSync('ed25519');
       const signedBase = { ...fixture.unsigned, target: { ...fixture.unsigned.target, endpointId: randomUUID() },
         requiredCapabilities: ['action_decision_receipts_v1'] as const };
-      const task = variant === 'accessor' ? fixture.signed({ ...signedBase,
+      const journaled = variant === 'accessor' || variant === 'foreign-provider';
+      const task = journaled ? fixture.signed({ ...signedBase,
         actionDecision: embedDecision(signedBase, 'release', decisionKeys.privateKey, new Date()) }) : fixture.signed();
       const digest = `sha256:${'a'.repeat(64)}`;
       const qualification = { organizationId: task.organizationId, taskId: task.taskId,
@@ -150,9 +151,11 @@ test('custom qualification reports cannot bypass receipt redaction or bind a dif
         fileRootsSha256: null, skillRootsSha256: null, settingsSha256: null, contextSha256: null };
       let getterCalls = 0;
       const receipt = await executeTask({ ...fixture.input, task, providerQualification: qualification,
-        ...(variant === 'accessor' ? { actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey } } : {}),
+        ...(journaled ? { actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey } } : {}),
         providerExecutor: async (input) => {
-          const result = await executeProviderTask({ ...input, runner: async () => ({
+          const result = await executeProviderTask({ ...input,
+            ...(variant === 'foreign-provider' ? { provider: 'claude' as const } : {}),
+            runner: async () => ({
             exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0),
           }) });
           const report = result.qualificationReceipt!;
@@ -169,6 +172,15 @@ test('custom qualification reports cannot bypass receipt redaction or bind a dif
       assert.equal(Reflect.get(receipt.commandResults[0]!, 'qualificationReceipt'), null);
       assert.equal(getterCalls, 0);
       assert.equal(JSON.stringify(await fixture.input.receiptStore.get(task.taskId)).includes('private-receipt-canary'), false);
+      if (journaled) {
+        const journal = new FileActionExecutionJournal(resolve(fixture.input.relayStateDirectory, 'action-execution-journal'));
+        const record = await journal.get(task.taskId);
+        assert.equal(record?.state, 'receipt_recorded');
+        assert.equal(record?.receipt?.commandResults[0]?.qualificationReceipt, null);
+        const observed = { provider: variant === 'foreign-provider' ? 'claude' : 'codex', ...receipt.commandResults[0] };
+        assert.equal(record?.providerResultDigest,
+          `sha256:${createHash('sha256').update(JSON.stringify(observed)).digest('hex')}`);
+      }
     });
   }
 });

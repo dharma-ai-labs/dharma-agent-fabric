@@ -123,7 +123,7 @@ test('execution qualification preserves explicit unknowns even when all declarat
   const receipt = result.qualificationReceipt!;
   assert.equal(receipt.unverified.length, 6);
   assert.equal(Object.isFrozen(receipt.unverified), true);
-  const report = reportedProviderExecutionQualification(result, declaration);
+  const report = reportedProviderExecutionQualification(result, declaration, base.provider);
   assert.ok(report);
   assert.deepEqual(report.declared, declaration);
   assert.notEqual(report, receipt);
@@ -134,7 +134,7 @@ test('execution qualification preserves explicit unknowns even when all declarat
     () => ({ ...receipt, declared: { ...declaration, toJSON() { throw new Error('must-not-run'); } } }),
   ]) {
     assert.equal(reportedProviderExecutionQualification({ ...result,
-      qualificationReceipt: mutate() as typeof receipt }, declaration), null);
+      qualificationReceipt: mutate() as typeof receipt }, declaration, base.provider), null);
   }
 });
 
@@ -153,7 +153,7 @@ test('execution qualification supports all existing providers without launching 
       assert.equal(result.exitCode, 0);
       assert.equal(result.qualificationReceipt?.invocation.provider, provider);
       assert.equal(result.qualificationReceipt?.invocation.runner, 'injected');
-      assert.ok(reportedProviderExecutionQualification(result, qualification()));
+      assert.ok(reportedProviderExecutionQualification(result, qualification(), provider));
     });
   }
 });

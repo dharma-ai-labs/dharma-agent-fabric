@@ -1210,7 +1210,7 @@ export async function executeTask(input: {
       stderrSha256: providerResult.stderrSha256,
       failureCategory: providerResult.failureCategory,
       ...(providerQualification ? {
-        qualificationReceipt: reportedProviderExecutionQualification(providerResult, providerQualification),
+        qualificationReceipt: reportedProviderExecutionQualification(providerResult, providerQualification, input.task.target.provider),
       } : {}),
     };
     if (executionClaimed) await journal.recordEffectObserved(input.task.taskId,
