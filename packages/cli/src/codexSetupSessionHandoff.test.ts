@@ -98,18 +98,21 @@ test('accepted wait bounds protected-scope churn while retaining final observati
   });
 });
 
-test('accepted wait returns a result recorded during its final idle interval', async () => {
+test('accepted wait returns a result recorded during its final idle interval', async t => {
   await fixture(async f => {
     let reads = 0, available = false, resultRecordedAt: string | null = null;
-    const acceptedAt = new Date().toISOString();
+    const startedAt = Date.now(); let now = startedAt;
+    t.mock.method(Date, 'now', () => now);
+    const acceptedAt = new Date(now).toISOString();
     const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
       sessionId: 'synthetic_final_observation', sessionPid: 42, supervisorPid: process.pid,
       sessionStartTicks: '1', supervisorStartTicks: '1'};
-    const timer = setTimeout(() => {available = true; resultRecordedAt = new Date().toISOString();}, 50);
+    const timer = setTimeout(() => {now += 50; available = true; resultRecordedAt = new Date(now).toISOString();}, 50);
     const vault = {
       async stageCodexSetupSession() {return {async withdraw() {}};},
       async readCodexSetupSession() {
         reads++;
+        if (reads === 2) now = startedAt + 225;
         return {request: f.request, state: 'accepted' as const, acceptedAt,
           result: available ? result : null, resultRecordedAt};
       },
@@ -122,19 +125,22 @@ test('accepted wait returns a result recorded during its final idle interval', a
   });
 });
 
-test('pending wait observes a timely acceptance and result from its final idle interval', async () => {
+test('pending wait observes a timely acceptance and result from its final idle interval', async t => {
   await fixture(async f => {
     let reads = 0, acceptedAt: string | null = null, resultRecordedAt: string | null = null;
+    const startedAt = Date.now(); let now = startedAt;
+    t.mock.method(Date, 'now', () => now);
     const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
       sessionId: 'synthetic_pending_final_observation', sessionPid: 42, supervisorPid: process.pid,
       sessionStartTicks: '1', supervisorStartTicks: '1'};
     const timer = setTimeout(() => {
-      acceptedAt = new Date().toISOString(); resultRecordedAt = acceptedAt;
+      now += 50; acceptedAt = new Date(now).toISOString(); resultRecordedAt = acceptedAt;
     }, 50);
     const vault = {
       async stageCodexSetupSession() {return {async withdraw() {}};},
       async readCodexSetupSession() {
         reads++;
+        if (reads === 2) now = startedAt + 225;
         return acceptedAt === null
           ? {request: f.request, state: 'pending' as const, acceptedAt: null, result: null, resultRecordedAt: null}
           : {request: f.request, state: 'accepted' as const, acceptedAt, result, resultRecordedAt};
@@ -144,6 +150,33 @@ test('pending wait observes a timely acceptance and result from its final idle i
       assert.deepEqual(await awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
         leaseId: f.leaseId, waitMs: 250}), result);
     } finally {clearTimeout(timer);}
+    assert.equal(reads, 2);
+  });
+});
+
+test('accepted result observations must finish strictly before the finite deadline', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  for (const observedDelay of [99, 100, 101]) await fixture(async f => {
+    let reads = 0;
+    const acceptedAt = new Date(now).toISOString(), resultRecordedAt = new Date(now + 50).toISOString();
+    const result: LocalCodexSetupSessionResult = {state: 'started', bindingId: uuid(9),
+      sessionId: 'synthetic_observation_boundary', sessionPid: 42, supervisorPid: process.pid,
+      sessionStartTicks: '1', supervisorStartTicks: '1'};
+    const vault = {
+      async stageCodexSetupSession() {return {async withdraw() {}};},
+      async readCodexSetupSession() {
+        reads++;
+        if (reads === 1) return {request: f.request, state: 'accepted' as const,
+          acceptedAt, result: null, resultRecordedAt: null};
+        now += observedDelay;
+        return {request: f.request, state: 'accepted' as const, acceptedAt, result, resultRecordedAt};
+      },
+    };
+    const waiting = awaitCodexSetupSession({vault, scope: f.scope, request: f.request,
+      leaseId: f.leaseId, acceptedWaitMs: 100});
+    if (observedDelay < 100) assert.deepEqual(await waiting, result);
+    else await assert.rejects(waiting, /setup_session_accepted_unconfirmed/);
     assert.equal(reads, 2);
   });
 });
