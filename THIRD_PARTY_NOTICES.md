@@ -10,3 +10,13 @@ Dharma Agent Fabric is designed to reuse or derive portions of QoderAI/better-ha
 - Integration: Git subtree under `vendor/better-harness`; Dharma access is isolated to `packages/better-harness-bridge`.
 
 Retain the upstream MIT notice in copied or substantially derived portions and in distributed packages containing them.
+
+## Model Context Protocol Server
+
+- Package: `@modelcontextprotocol/server` 2.3.0
+- Upstream: https://github.com/modelcontextprotocol/typescript-sdk
+- License: Apache-2.0, as declared by the exact upstream npm package.
+- Integration: unmodified npm dependency of the task-local stdio knowledge server.
+- Distribution: retain the upstream package's own license and notices when
+  distributing that dependency. This entry does not relicense Dharma's code or
+  the unchanged older dependency artifacts.

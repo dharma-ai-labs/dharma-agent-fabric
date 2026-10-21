@@ -47,3 +47,16 @@ completion and capture do not establish server intake, an automatic policy
 counter, a replay evaluation, canary approval or a signed learning release.
 
 Licensed under MIT.
+
+## Task Knowledge Transport
+
+The task-local knowledge server uses MCP SDK server 2.3.0 over stdio, with a fresh
+server factory for each transport and an explicit 1,024-element raw tool-input
+budget. The existing document, page and response limits remain in force. The
+normal valid client continues after an oversized request is rejected; separate
+stdio clients retain their own receipt-pinned catalog scope.
+
+This adapter does not expose an HTTP transport or bearer-authentication endpoint.
+These tests do not qualify an HTTP deployment, shared HTTP transport, audience
+validation or HTTP body limits. Introducing such a deployment requires separate
+transport and authorization qualification, not reuse of stdio evidence.

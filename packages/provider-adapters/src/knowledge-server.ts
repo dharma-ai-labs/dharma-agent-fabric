@@ -61,7 +61,9 @@ function failure(error: unknown) {
 
 export function createTaskKnowledgeServer(scope: TaskKnowledgeScope): McpServer {
   validateTaskKnowledgeScope(scope);
-  const server = new McpServer({ name: 'dharma-task-knowledge', version: '1.0.0' });
+  const server = new McpServer({ name: 'dharma-task-knowledge', version: '1.0.0' }, {
+    maxToolInputElements: 1_024,
+  });
   const annotations = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 
   server.registerTool('read_document', {

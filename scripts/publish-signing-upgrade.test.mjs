@@ -197,7 +197,7 @@ test('immutable dependencies require their exact original main or tag provenance
   }
 });
 
-test('Linux canonical packs retain the unchanged dependency SRIs without rebuilding preserved originals', {skip:process.platform!=='linux'},()=>{
+test('Linux packs retain immutable artifacts or reject explicitly versioned replacements before publication', {skip:process.platform!=='linux'},async()=>{
   assert.ok(process.env.npm_execpath,'normal npm test context required');
   const directory=mkdtempSync(join(tmpdir(),'dharma-signing-dependency-packs-'));
   try{
@@ -208,9 +208,21 @@ test('Linux canonical packs retain the unchanged dependency SRIs without rebuild
         stdio:['ignore','pipe','pipe'],env:{...process.env,HOME:directory,XDG_CONFIG_HOME:directory,
           npm_config_userconfig:'/dev/null',npm_config_globalconfig:globalConfig,
           npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}}))[0];
-      assert.equal(packed.name,item.name);assert.equal(packed.version,item.version);
-      assert.equal(packed.integrity,item.integrity,'immutable package changed: '+item.name);
-      assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),item.integrity);
+      const current=JSON.parse(read(item.workspace+'/package.json'));
+      assert.equal(packed.name,item.name);assert.equal(packed.version,current.version);
+      assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),packed.integrity);
+      if(current.version===item.version){
+        assert.equal(packed.integrity,item.integrity,'immutable package changed: '+item.name);
+      }else{
+        const historical=JSON.parse(execFileSync('git',['show',qualifiedReleaseSource+':'+item.workspace+'/package.json'],
+          {cwd:root,encoding:'utf8',maxBuffer:8388608}));
+        assert.equal(historical.name,item.name);assert.equal(historical.version,item.version);
+        assert.notEqual(packed.version,item.version);assert.notEqual(packed.integrity,item.integrity);
+        const {io,events}=fixture(),originalPack=io.pack;
+        io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
+        await assert.rejects(publishSigningUpgrade(head,io,{publish:true}),/immutable dependency changed/);
+        assert.equal(events.some(event=>event.startsWith('publish:')),false);
+      }
     }
   }finally{rmSync(directory,{recursive:true,force:true});}
 });
