@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -94,6 +94,81 @@ test('diagnostic status reports registry health instead of masking corruption', 
       state: 'unavailable', repositories: [], reason: 'workspace_registry_invalid',
     });
     await assert.rejects(run(['repositories', 'list']), /workspace_registry_invalid/);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('real metadata dispatcher reads a scoped fixture registry without enrollment or creating state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-metadata-fixture-'));
+  const home = join(root, 'fixture-home'), repository = join(root, 'checkout');
+  await mkdir(join(home, 'registry'), { recursive: true });
+  await mkdir(repository);
+  const records = [{ organizationId: 'org_fixture', workspaceId: '11111111-1111-4111-8111-111111111111',
+    name: 'fixture', path: repository, routeHash: 'fixture-route', repositoryRemoteHash: null,
+    defaultBranch: null, status: 'active' }];
+  const registry = join(home, 'registry', 'workspaces.json');
+  const original = JSON.stringify(records);
+  await writeFile(registry, original);
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    const result = await run(['repositories', 'metadata', '--repo', repository, '--json']) as any;
+    assert.equal(result.stage, 'repository_registry_metadata');
+    assert.equal(result.identityVerified, false);
+    assert.equal(result.repositories[0].workspaceId, '11111111-1111-4111-8111-111111111111');
+    assert.equal(result.repositories[0].sharedRepositoryReady, null);
+    assert.equal(result.repositories[0].readinessChecked, false);
+    assert.equal(await readFile(registry, 'utf8'), original);
+    assert.deepEqual(await readdir(home), ['registry']);
+    assert.deepEqual(await readdir(join(home, 'registry')), ['workspaces.json']);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('metadata preserves corrupt registry bytes without starting recovery or initializing identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-metadata-corrupt-fixture-'));
+  const home = join(root, 'fixture-home'), repository = join(root, 'checkout');
+  await mkdir(join(home, 'registry'), { recursive: true });
+  await mkdir(repository);
+  const registry = join(home, 'registry', 'workspaces.json');
+  await writeFile(registry, '{private-parser-canary');
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    await assert.rejects(run(['repositories', 'metadata', '--repo', repository]), /workspace_registry_invalid/);
+    assert.equal(await readFile(registry, 'utf8'), '{private-parser-canary');
+    assert.deepEqual(await readdir(home), ['registry']);
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME;
+    else process.env.DHARMA_HOME = previous;
+  }
+});
+
+test('real metadata dispatch rejects nested private fields with only a fixed sanitized error', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-metadata-shape-fixture-'));
+  const home = join(root, 'fixture-home'), repository = join(root, 'checkout');
+  await mkdir(join(home, 'registry'), { recursive: true });
+  await mkdir(repository);
+  const registry = join(home, 'registry', 'workspaces.json');
+  const original = JSON.stringify([{ organizationId: 'org_fixture',
+    workspaceId: '11111111-1111-4111-8111-111111111111', path: repository,
+    repositoryBindingId: { privateKey: 'PRIVATE_SHAPE_CANARY' },
+  }]);
+  await writeFile(registry, original);
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  try {
+    await assert.rejects(run(['repositories', 'metadata', '--repo', repository]), error => {
+      assert.equal((error as Error).message, 'repository_metadata_record_invalid');
+      assert.equal((error as Error).cause, undefined);
+      return true;
+    });
+    assert.equal(await readFile(registry, 'utf8'), original);
+    assert.deepEqual(await readdir(home), ['registry']);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
