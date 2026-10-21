@@ -1,0 +1,113 @@
+{
+  "schema": "dharma.fixed-security-recovery-release/v1",
+  "baseline": {
+    "commit": "6c11a350a179c78c6145240d638f3a18fbe26f8e",
+    "tree": "ba5f637fbcdc4b6e0de65e9e902d910d0059265a"
+  },
+  "cohort": [
+    {
+      "workspace": "packages/provider-adapters",
+      "name": "@dharma-ai-labs/agent-fabric-provider-adapters",
+      "version": "0.1.37",
+      "integrity": "sha512-ghm9xutl4wMXLjPUKBheSvPGoWvDXFKafyLAe19Y0ZlatBeMP1xL56SA93a/GuuuwnGfgpBb2py+kULhcrK0hA=="
+    },
+    {
+      "workspace": "packages/evidence-reduction",
+      "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
+      "version": "0.2.36",
+      "integrity": "sha512-4Yqo3t4NPTicsvPUN5gSBbfbhpHEoibYapqcIXskRYfE8Xsiv/AnULvNzz0kKJCgVeFYYI9vIqZ2ckyDWRURrA=="
+    },
+    {
+      "workspace": "packages/task-runner",
+      "name": "@dharma-ai-labs/agent-fabric-task-runner",
+      "version": "0.1.39",
+      "integrity": "sha512-sFPQ5unFVmnRl3qKPsFDXxiAx0EJ7u62sUqvv0X65kNyGnkYi14I+VMSRFNDhCFEVc/anR9aI4udkCUDSZJk1Q=="
+    },
+    {
+      "workspace": "packages/local-vault",
+      "name": "@dharma-ai-labs/agent-fabric-local-vault",
+      "version": "0.1.33",
+      "integrity": "sha512-X64Pub7ZWlgvwLJFkzoF7nKADhiu2j3cBlF0Bn9fiATfllHOdN7fv4TkjxtrQjBgpG0j1LbGOTNlXKPzJLrpuw=="
+    },
+    {
+      "workspace": "packages/cli",
+      "name": "@dharma-ai-labs/agent-fabric",
+      "version": "0.2.212",
+      "integrity": "sha512-p69IXqX+2DFm2Jnrmyx2tM0tlSiPWDxBhqyhHXVYBN1ADO1uq27vdlm4EVQgzcBpg048g62tYCyqvHhPzexVsA=="
+    }
+  ],
+  "unchangedDependencies": [
+    {
+      "workspace": "packages/contracts",
+      "name": "@dharma-ai-labs/agent-fabric-contracts",
+      "version": "0.1.18",
+      "integrity": "sha512-dDUHpNnjFZFzo1cL7okHd0fhpR9cjxanACl4xyskdifI9Uy3IlvJDZejoO5q9p2ONlOmZIDLgoR/HkHDGSAa9g==",
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d",
+      "publisherRef": "refs/heads/main"
+    },
+    {
+      "workspace": "packages/policy",
+      "name": "@dharma-ai-labs/agent-fabric-policy",
+      "version": "0.1.4",
+      "integrity": "sha512-2ZDJxnL6cS1IRNF+B1I0XBMlRjisXIwb1Rbs8q+LQNpGA6mxeJJ5vej1vlV9Z9EfuUhJHkjMUz7uwfbrLnPssg==",
+      "source": "03a7096526660446a8e2cbb2483778cb201fcd31",
+      "publisherRef": "refs/tags/v0.1.10"
+    },
+    {
+      "workspace": "packages/relay-client",
+      "name": "@dharma-ai-labs/agent-fabric-relay-client",
+      "version": "0.2.34",
+      "integrity": "sha512-NmyGa0Z9o/cMkuaM8pWznHpJP/3pO3E5q9sO5DkTWIJ4ExnCSGm/Yw1i8MV63CnRy9pYctFt/CgomKtkS/vpYA==",
+      "source": "73793c2df81f6bf9c81fe276b37997fa2159c67d",
+      "publisherRef": "refs/heads/main"
+    },
+    {
+      "workspace": "packages/sdk",
+      "name": "@dharma-ai-labs/agent-fabric-sdk",
+      "version": "0.1.10",
+      "integrity": "sha512-o5/CNYJasiBzBCJaU7D/cTlqa4dq1MfdltKozB7KB+HQz6LQkBUy9UpN6UH6kAE/WTRKmZRNrx5/nww9ILSqIQ==",
+      "source": "e2b5b09f76be1fd95e7fcfaf49e691f9617651a6",
+      "publisherRef": "refs/tags/v0.2.47",
+      "preserveOriginal": {
+        "sourceChanges": [
+          "packages/sdk/README.md"
+        ],
+        "runtimeHashes": {
+          "dist/index.js": "d49a8810d7af03ad25e6c8c918b5977fb23379282991aa18bf2a37d59b502485"
+        }
+      }
+    },
+    {
+      "workspace": "packages/secure-store",
+      "name": "@dharma-ai-labs/agent-fabric-secure-store",
+      "version": "0.1.10",
+      "integrity": "sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw==",
+      "source": "1b8483f59dc1ba9f7aa0aef78ca984f309714e61",
+      "publisherRef": "refs/heads/main"
+    },
+    {
+      "workspace": "packages/skill-manager",
+      "name": "@dharma-ai-labs/agent-fabric-skill-manager",
+      "version": "0.2.11",
+      "integrity": "sha512-vk+SaciPg22Fh0XaGFFyKKOXDHTgsvGrB/ixqn1KQ9yqJIEfQzeXF+V41BU8KY4nWPYIRQ3p+ULtMVE52DgL6g==",
+      "source": "95a5f2e572044a053348fcdd5e13f2ce4d2b510e",
+      "publisherRef": "refs/tags/v0.2.154",
+      "preserveOriginal": {
+        "sourceChanges": [
+          "packages/skill-manager/src/installationScope.test.ts"
+        ],
+        "runtimeHashes": {
+          "dist/index.js": "ebb29a88e1210f51cfb7f70be5a889147f6f42ec85affda9accbc78fbd4d50ed",
+          "dist/installationScope.js": "b5b8b455e2e82eb86d62260346fe20f41a756ee73e25764fda64bc5cbffc50e9"
+        }
+      }
+    }
+  ],
+  "allowedPaths": [
+    "package.json",
+    ".github/workflows/publish-security-recovery.yml",
+    "scripts/security-recovery-release.json",
+    "scripts/publish-security-recovery.mjs",
+    "scripts/publish-security-recovery.test.mjs"
+  ]
+}

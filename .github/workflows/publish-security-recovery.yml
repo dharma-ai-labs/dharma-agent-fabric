@@ -1,0 +1,51 @@
+name: Publish bounded security-recovery cohort
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head:
+        description: Exact reviewed main SHA for the five-package security-recovery cohort
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agent-fabric-security-recovery-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: npm
+    env:
+      EXPECTED_HEAD: ${{ inputs.expected_head }}
+      SECURITY_PUBLISHER_SHA256: a712df8d8e92dd3b9b54d85a39694e2e1746b7d78bdfa2b774160677986dd4de
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.3"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Admit exact reviewed source before installing dependencies
+        run: |
+          printf '%s  %s\n' "$SECURITY_PUBLISHER_SHA256" scripts/publish-security-recovery.mjs | sha256sum --check --status
+          node scripts/publish-security-recovery.mjs --expected-head "$EXPECTED_HEAD" --admission-only
+      - run: npm install --global npm@11.5.1
+      - run: npm ci
+      - run: npm run check
+      - name: Qualify all eleven artifacts without publication
+        run: npm run publish:security-recovery -- --expected-head "$EXPECTED_HEAD"
+      - name: Publish only the exact reviewed five-package cohort
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          printf '%s  %s\n' "$SECURITY_PUBLISHER_SHA256" scripts/publish-security-recovery.mjs | sha256sum --check --status
+          npm run publish:security-recovery -- --expected-head "$EXPECTED_HEAD" --publish
