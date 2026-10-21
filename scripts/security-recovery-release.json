@@ -83,7 +83,15 @@
       "version": "0.1.10",
       "integrity": "sha512-n3nah4kTTqhx+VKdrT/zzomGo8yxCaW44y4JrlAb3G+DhOl802VUzwhniCU9eAXucvp4Uhu7VXMKmSkVYEHwGw==",
       "source": "1b8483f59dc1ba9f7aa0aef78ca984f309714e61",
-      "publisherRef": "refs/heads/main"
+      "publisherRef": "refs/heads/main",
+      "preserveOriginal": {
+        "sourceChanges": ["packages/secure-store/src/windowsEnrollmentAnchor.test.ts"],
+        "runtimeHashes": {
+          "dist/index.js": "e71d1c263502ae0d728e24158ca9476e7b51feecaff23b3bb2b4adb27bbee2f1",
+          "dist/windowsEnrollmentAnchor.js": "1c11f988bc663b48aee2981446d11bb4f1b6e73488df766b832f6b019d5aa760",
+          "dist/windowsFreshRead.js": "b45b158fe1d1c3b25a2157b5f14774b33d79e803e5572a0b83e508cf32c3315e"
+        }
+      }
     },
     {
       "workspace": "packages/skill-manager",
@@ -108,6 +116,7 @@
     ".github/workflows/publish-security-recovery.yml",
     "scripts/security-recovery-release.json",
     "scripts/publish-security-recovery.mjs",
-    "scripts/publish-security-recovery.test.mjs"
+    "scripts/publish-security-recovery.test.mjs",
+    "packages/secure-store/src/windowsEnrollmentAnchor.test.ts"
   ]
 }

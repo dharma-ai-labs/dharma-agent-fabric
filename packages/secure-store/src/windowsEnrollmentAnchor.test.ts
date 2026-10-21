@@ -52,8 +52,8 @@ test('conditional backend writes invalidate stale process cache on success, conf
 });
 
 function syntheticVault(root: string) {
-  // Only vault construction and credential values are replaced. The production
-  // script's SID, kernel mutex, ACL, comparisons and error handling run unchanged.
+  // Replace the vault and classify only fixture failures; production SID, mutex,
+  // ACL, comparisons, deadline and failure exit remain unchanged.
   const preamble = `
 class SyntheticCredential {
   [string]$Resource; [string]$UserName; [string]$Password
@@ -81,11 +81,28 @@ class SyntheticVault {
 }
 $vault=[SyntheticVault]::new('${root.replaceAll("'", "''")}')
 `;
-  return windowsEnrollmentAnchorWrite.replace(
+  const script=windowsEnrollmentAnchorWrite.replace(/\r\n/g,'\n').replace(
     'Add-Type -AssemblyName System.Runtime.WindowsRuntime\n  $vault=[Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]::new()', preamble)
     .replace('[Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime]::new(',
       '[SyntheticCredential]::new(');
+  assert.doesNotMatch(script,/Windows\.Security\.Credentials/);
+  return script.replace('[Console]::Error.Write("Enrollment anchor operation failed.")',`
+  $category="UNCLASSIFIED"
+  if ($_.Exception.GetBaseException().Message -ceq "Anchor busy") {$category="LOCK_BUSY"}
+  elseif ($_.Exception.GetBaseException().Message -ceq "Unsafe anchor mutex") {$category="UNSAFE_MUTEX"}
+  elseif ($_.Exception.GetBaseException() -is [Threading.AbandonedMutexException]) {$category="ABANDONED_MUTEX"}
+  [Console]::Error.Write("ANCHOR_FIXTURE_"+$category)`);
 }
+
+test('synthetic Windows anchor diagnostics are newline-stable, fixed and fail-closed', () => {
+  const script=syntheticVault('C:/synthetic-anchor-fixture');
+  assert.doesNotMatch(script,/Windows\.Security\.Credentials/);
+  assert.equal(script.includes('\r\n'),false);
+  assert.match(script,/ANCHOR_FIXTURE_/);
+  assert.match(script,/\$mutex\.WaitOne\(2000\)/);
+  assert.match(script,/if \(!\$owned\) \{throw "Anchor busy"\}/);
+  assert.match(script,/exit 1/);
+});
 
 test('independent Windows helpers serialize both anchor slots at the actual SID/kernel boundary', {skip: process.platform !== 'win32'}, async t => {
   const root = await mkdtemp(join(tmpdir(), 'fabric-cas-kernel-'));
