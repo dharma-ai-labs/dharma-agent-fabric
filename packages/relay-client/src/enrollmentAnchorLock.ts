@@ -69,8 +69,16 @@ export async function acquireEnrollmentAnchorLock(
     } finally {await cleanup(candidate);}
   };
   const owner = async (path: string) => {
-    const identity = await step(() => metadata(path));
-    const text = (await step(() => readFile(path, 'utf8'))).trim();
+    let identity: Owned, text: string;
+    try {
+      identity = await step(() => metadata(path));
+      text = (await step(() => readFile(path, 'utf8'))).trim();
+    } catch (error) {
+      // Unreadable Windows ownership is unknown, not absent. The caller waits
+      // under its existing deadline/fence without reclaiming this owner.
+      if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') return null;
+      throw error;
+    }
     if (!/^[1-9][0-9]*$/.test(text) || !Number.isSafeInteger(Number(text))) {
       throw Error('connection_anchor_lock_invalid');
     }
@@ -97,7 +105,8 @@ export async function acquireEnrollmentAnchorLock(
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         try {
-          if (!(await owner(recovery)).alive) throw Error('connection_anchor_recovery_required');
+          const current = await owner(recovery);
+          if (current && !current.alive) throw Error('connection_anchor_recovery_required');
         } catch (inspection) {
           if ((inspection as NodeJS.ErrnoException).code !== 'ENOENT') throw inspection;
         }
