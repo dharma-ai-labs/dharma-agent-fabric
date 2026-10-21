@@ -29,6 +29,7 @@
     "publish:onboarding": "node scripts/publish-onboarding-release.mjs",
     "publish:recovery-contracts": "node scripts/publish-recovery-contracts.mjs",
     "publish:device-maintenance": "node scripts/publish-device-maintenance.mjs",
+    "test:device-maintenance": "node --test scripts/publish-device-maintenance.test.mjs",
     "publish:signing-upgrade": "node scripts/publish-signing-upgrade.mjs",
     "test:signing-upgrade": "node --test scripts/publish-signing-upgrade.test.mjs",
     "pack:setup-readiness": "node --test scripts/verify-setup-readiness-package.test.mjs && node scripts/verify-setup-readiness-package.mjs",

@@ -9,6 +9,12 @@ import test from 'node:test';
 const load=()=>import('./publish-device-maintenance.mjs');
 const head='a'.repeat(40),digest='sha512-'+Buffer.alloc(64,7).toString('base64');
 const hash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
+
+test('device maintenance tests have an explicit normal npm execution entry point',()=>{
+  const manifest=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+  assert.equal(manifest.scripts['test:device-maintenance'],'node --test scripts/publish-device-maintenance.test.mjs');
+});
+
 async function snapshot(){
   const m=await load(),root=new URL('../',import.meta.url);
   const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim();
@@ -63,6 +69,16 @@ test('exact qualified source admits only the fixed normal-main publisher delta',
   assert.throws(()=>m.assertMaintenanceSource(head,{...s,lock:s.lock+'\nforeign'}));
   const altered=structuredClone(s);altered.manifests['packages/cli/package.json'].dependencies={};
   assert.throws(()=>m.assertMaintenanceSource(head,altered));
+});
+
+test('historical CLI210 admission refuses current runtime manifests and changed release-test bytes',async()=>{
+  const m=await load(),s=await snapshot(),root=new URL('../',import.meta.url);
+  assert.throws(()=>m.assertMaintenanceSource(head,{...s,
+    releaseTestHash:hash(readFileSync(import.meta.filename,'utf8'))}),/release tests/);
+  const current=Object.fromEntries(Object.keys(s.manifests).map(path=>
+    [path,JSON.parse(readFileSync(new URL(path,root),'utf8'))]));
+  assert.notDeepEqual(current,s.baselineManifests);
+  assert.throws(()=>m.assertMaintenanceSource(head,{...s,manifests:current}),/package manifest/);
 });
 test('admission binds executed publisher bytes to the independently pinned workflow value',async()=>{
   const m=await load(),s=await snapshot();
@@ -145,7 +161,7 @@ test('fixed command parser refuses extra flags and defaults to no publication',a
   const {m,io,events}=await fixture();assert.equal((await m.runMaintenanceCommand(['--expected-head',head,'--admission-only'],io)).state,'source_admitted');
   assert.deepEqual(events,['source']);
 });
-test('Linux canonical package packs preserve immutable dependency bytes before publication',
+test('Linux canonical packs preserve immutable artifacts or reject explicitly versioned replacements before publication',
   {skip:process.platform!=='linux'},async()=>{
     const m=await load(),root=new URL('../',import.meta.url),directory=mkdtempSync(join(tmpdir(),'dharma-maintenance-pack-'));
     assert.ok(process.env.npm_execpath,'normal npm test context required');
@@ -154,9 +170,21 @@ test('Linux canonical package packs preserve immutable dependency bytes before p
         const packed=JSON.parse(execFileSync(process.execPath,[process.env.npm_execpath,'pack','--workspace',item.workspace,
           '--json','--pack-destination',directory],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8*1024*1024,
           stdio:['ignore','pipe','pipe'],env:{...process.env,npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}}))[0];
-        assert.equal(packed.name,item.name);assert.equal(packed.version,item.version);
+        const current=JSON.parse(readFileSync(new URL(item.workspace+'/package.json',root),'utf8'));
+        assert.equal(packed.name,item.name);assert.equal(packed.version,current.version);
         assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),packed.integrity);
-        if(item.existingArtifact)assert.equal(packed.integrity,item.existingArtifact.integrity,'immutable package bytes changed: '+item.name);
+        if(current.version===item.version){
+          assert.equal(packed.integrity,item.existingArtifact.integrity,'immutable package bytes changed: '+item.name);
+        }else{
+          const historical=JSON.parse(execFileSync('git',['show','73793c2df81f6bf9c81fe276b37997fa2159c67d:'+item.workspace+'/package.json'],
+            {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}));
+          assert.equal(historical.name,item.name);assert.equal(historical.version,item.version);
+          assert.notEqual(packed.version,item.version);assert.notEqual(packed.integrity,item.existingArtifact.integrity);
+          const {io,events,packed:originalPack}=await fixture();
+          io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
+          await assert.rejects(m.publishDeviceMaintenance(head,io,{publish:true}),/packed version mismatch/);
+          assert.equal(events.some(event=>event.startsWith('publish:')),false);
+        }
       }
     }finally{rmSync(directory,{recursive:true,force:true});}
   });

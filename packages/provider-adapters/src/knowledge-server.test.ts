@@ -26,6 +26,58 @@ async function fixture(definition = 'A verified progression of signed releases.'
   return { workspace, directory, manifest, catalog, scope };
 }
 
+test('task knowledge rejects oversized raw argument structure before normal tool execution', async () => {
+  const f = await fixture();
+  const client = new Client({ name: 'dharma-input-bound-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [resolve(import.meta.dirname, 'knowledge-server.js'), f.directory,
+      f.scope.manifestSha256, f.scope.catalogSha256] });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({ name: 'catalog_search', arguments: {
+      query: 'Lifecycle', unused: Array.from({ length: 2_000 }, () => 'CANARY_PRIVATE_INPUT'),
+    } });
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result), /maximum of 1024 elements/);
+    assert.doesNotMatch(JSON.stringify(result), /CANARY_PRIVATE_INPUT/);
+    const continued = await client.callTool({ name: 'catalog_search', arguments: { query: 'Lifecycle' } });
+    assert.equal(continued.isError, undefined);
+    const content = JSON.parse(String(continued.content[0]?.type === 'text' ? continued.content[0].text : ''));
+    assert.equal(content.catalogSha256, f.scope.catalogSha256);
+  } finally {
+    await client.close(); await rm(f.workspace, { recursive: true, force: true });
+  }
+});
+
+test('separate task knowledge stdio clients retain independent catalogs and continuation', async () => {
+  const first = await fixture('First scope only');
+  const second = await fixture('Second scope only');
+  const clients = [first, second].map((f, index) => ({ f,
+    client: new Client({ name: `independent-${index}`, version: '1.0.0' }),
+    transport: new StdioClientTransport({ command: process.execPath, args: [
+      resolve(import.meta.dirname, 'knowledge-server.js'), f.directory, f.scope.manifestSha256, f.scope.catalogSha256,
+    ] }),
+  }));
+  try {
+    await Promise.all(clients.map(({ client, transport }) => client.connect(transport)));
+    const responses = await Promise.all(clients.map(({ client }) => client.callTool({
+      name: 'catalog_concept', arguments: { conceptId: 'concept_lifecycle' },
+    })));
+    for (const [index, result] of responses.entries()) {
+      assert.equal(result.isError, undefined);
+      const content = JSON.parse(String(result.content[0]?.type === 'text' ? result.content[0].text : ''));
+      assert.equal(content.catalogSha256, clients[index]!.f.scope.catalogSha256);
+      assert.equal(content.concept.definition, index === 0 ? 'First scope only' : 'Second scope only');
+    }
+    await clients[0]!.client.close();
+    const continued = await clients[1]!.client.callTool({ name: 'catalog_search', arguments: { query: 'Second' } });
+    assert.equal(continued.isError, undefined);
+  } finally {
+    await Promise.all(clients.map(({ client }) => client.close()));
+    await Promise.all([first, second].map(f => rm(f.workspace, { recursive: true, force: true })));
+  }
+});
+
 test('task knowledge stdio tools only expose hash-verified bounded documents', async () => {
   const f = await fixture();
   const client = new Client({ name: 'dharma-task-test', version: '1.0.0' });

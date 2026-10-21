@@ -8,6 +8,19 @@ async function validator(name: string) {
   return new Ajv2020({ strict: true, strictRequired: false }).compile(schema);
 }
 
+test('startup inspection schema forbids ready, consumer access, secret fields and inconsistent absence', async () => {
+  const validate = await validator('container-startup-inspection.v1');
+  const value = { schema: 'dharma.container-startup-inspection/v1', ok: true,
+    stage: 'container_startup_inspection', observedAt: '2026-10-21T02:00:00.000Z', state: 'paused',
+    registrationHash: 'a'.repeat(64), version: '0.2.211', ready: false, started: false,
+    startupWrites: false, consumerStoreChecked: false, requiresSeparateLifecycleAdmission: true };
+  assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...value, state: 'unconfigured', version: null, registrationHash: null }), true);
+  for (const delta of [{ ready: true }, { started: true }, { startupWrites: true }, { consumerStoreChecked: true },
+    { secret: 'CANARY_PRIVATE_INPUT' }, { state: 'unconfigured' }, { version: null }, { registrationHash: null },
+    { observedAt: 'invalid' }, { state: 'ready' }]) assert.equal(validate({ ...value, ...delta }), false);
+});
+
 test('Linux Codex startup schema admits only a non-secret profile location and fixed backend', async () => {
   const validate = await validator('relay-autostart.v4');
   const value = {schema: 'dharma.relay-autostart/v4', backend: 'systemd-user', launcher: '/repo/.dharma/bin/dharma',
