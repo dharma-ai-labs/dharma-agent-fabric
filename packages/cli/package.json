@@ -39,7 +39,7 @@
     "@dharma-ai-labs/agent-fabric-local-vault": "0.1.33",
     "@dharma-ai-labs/agent-fabric-policy": "0.1.4",
     "@dharma-ai-labs/agent-fabric-provider-adapters": "0.1.37",
-    "@dharma-ai-labs/agent-fabric-relay-client": "0.2.34",
+    "@dharma-ai-labs/agent-fabric-relay-client": "0.2.35",
     "@dharma-ai-labs/agent-fabric-sdk": "0.1.10",
     "@dharma-ai-labs/agent-fabric-secure-store": "0.1.10",
     "@dharma-ai-labs/agent-fabric-skill-manager": "0.2.11",

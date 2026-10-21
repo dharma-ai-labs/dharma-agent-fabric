@@ -215,7 +215,8 @@ test('Linux packs keep historical artifacts immutable and reject replacement sou
         assert.notEqual(packed.integrity,item.integrity);
         const changed=execFileSync('git',['diff','--name-only',item.source,'HEAD','--',item.workspace],
           {cwd:root,encoding:'utf8',maxBuffer:8388608}).trim().split('\n').filter(Boolean);
-        assert.deepEqual(changed,['packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
+        assert.deepEqual(changed,['packages/secure-store/src/index.test.ts',
+          'packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
         const {io,events}=fixture(),originalPack=io.pack;
         io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
         await assert.rejects(publishSigningUpgrade(head,io,{publish:true}),/immutable dependency changed/);
