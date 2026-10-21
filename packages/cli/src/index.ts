@@ -160,7 +160,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.212';
+const VERSION = '0.2.213';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;

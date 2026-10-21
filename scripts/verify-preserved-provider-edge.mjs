@@ -12,6 +12,13 @@ const stable = value => Array.isArray(value) ? value.map(stable) : value && type
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
 export const packageManifestHash = value => createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 
+export function assertPreservedEvidenceManifest(manifest) {
+  const expected = preservedEvidenceProvider.evidence;
+  assert.equal(manifest.name, expected.name, 'preserved_evidence_name');
+  assert.equal(manifest.version, expected.version, 'preserved_evidence_version');
+  assert.equal(packageManifestHash(manifest), expected.manifestSha256, 'preserved_evidence_manifest');
+}
+
 // One immutable artifact edge, not an exemption for arbitrary old dependencies.
 export function assertPreservedEvidenceProvider(input) {
   const expected = preservedEvidenceProvider;
@@ -19,9 +26,7 @@ export function assertPreservedEvidenceProvider(input) {
   assert.equal(input.providerVersion, expected.newCohort.provider, 'preserved_provider_current_cohort');
   assert.equal(input.taskRunnerVersion, expected.newCohort.taskRunner, 'preserved_provider_task_cohort');
   assert.equal(input.relayClientVersion, expected.newCohort.relayClient, 'preserved_provider_relay_cohort');
-  assert.equal(input.evidenceManifest.name, expected.evidence.name, 'preserved_evidence_name');
-  assert.equal(input.evidenceManifest.version, expected.evidence.version, 'preserved_evidence_version');
-  assert.equal(packageManifestHash(input.evidenceManifest), expected.evidence.manifestSha256, 'preserved_evidence_manifest');
+  assertPreservedEvidenceManifest(input.evidenceManifest);
   assert.equal(input.sourceTree, expected.evidence.sourceTree, 'preserved_evidence_source_tree');
   assert.equal(input.worktreeChanges, '', 'preserved_evidence_worktree_changes');
   assert.equal(input.untracked, '', 'preserved_evidence_untracked_source');

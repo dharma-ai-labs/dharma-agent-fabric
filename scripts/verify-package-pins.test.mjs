@@ -21,9 +21,11 @@ const required = ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'LICENSES/Qoder-Better-Ha
   'packages/cli/dist/index.js', 'packages/provider-adapters/dist/knowledge-server.js',
   ...['trajectory-capsule', 'evidence-request', 'evidence-response'].map(name => `packages/cli/dist/schemas/${name}.schema.json`)];
 
-for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy', 'provider-adapters', 'relay-client', 'sdk', 'secure-store', 'skill-manager', 'task-runner', 'unknown']) {
-  for (const defect of suffix === 'unknown' ? ['undeclared'] : ['missing', 'range']) {
-    test(`official pack verifier rejects CLI ${suffix} ${defect} before invoking npm`, async () => {
+for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy', 'provider-adapters', 'relay-client', 'sdk', 'secure-store', 'skill-manager', 'task-runner', 'unknown', 'preserved-evidence', 'preserved-evidence-other-cohort']) {
+  const preservedEdge = suffix.startsWith('preserved-evidence');
+  for (const defect of suffix === 'unknown' ? ['undeclared'] : preservedEdge ? ['rewritten'] : ['missing', 'range']) {
+    test(preservedEdge ? `official pack verifier rejects same-version evidence provider rewrite ${suffix.endsWith('other-cohort') ? 'in another CLI cohort' : 'before invoking npm'}`
+      : `official pack verifier rejects CLI ${suffix} ${defect} before invoking npm`, async () => {
       const parent = await realpath(tmpdir()), root = await mkdtemp(resolve(parent, 'dharma-cli-pins-'));
       try {
         for (const path of required) {
@@ -32,12 +34,16 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
         }
         for (const workspace of workspaces) {
           const manifest = JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
-          if (workspace === 'cli') {
+          if (workspace === 'cli' && !preservedEdge) {
             const name = `@dharma-ai-labs/agent-fabric-${suffix}`;
             if (defect === 'undeclared') manifest.dependencies[name] = '0.0.1';
             else if (defect === 'missing') delete manifest.dependencies[name];
             else manifest.dependencies[name] = `^${manifest.dependencies[name]}`;
           }
+          if (workspace === 'evidence-reduction' && preservedEdge) {
+            manifest.dependencies['@dharma-ai-labs/agent-fabric-provider-adapters'] = '0.1.38';
+          }
+          if (workspace === 'cli' && suffix === 'preserved-evidence-other-cohort') manifest.version = '0.2.214';
           const path = resolve(root, 'packages', workspace, 'package.json');
           await mkdir(dirname(path), {recursive: true}); await writeFile(path, JSON.stringify(manifest));
         }
@@ -49,7 +55,8 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
         await assert.rejects(execute(process.execPath, [resolve(root, 'scripts/verify.mjs')], {
           cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')},
         }), error => error.code === 1 && error.stdout === ''
-          && error.stderr.includes(suffix === 'unknown' ? 'cli_runtime_package_unknown' : `cli_runtime_package_pin_invalid:${suffix}`)
+          && error.stderr.includes(preservedEdge ? 'preserved_evidence_manifest'
+            : suffix === 'unknown' ? 'cli_runtime_package_unknown' : `cli_runtime_package_pin_invalid:${suffix}`)
           && !error.stderr.includes('MODULE_NOT_FOUND'));
       } finally {
         assert.equal(dirname(root), parent); assert.ok(root.startsWith(resolve(parent, 'dharma-cli-pins-')));

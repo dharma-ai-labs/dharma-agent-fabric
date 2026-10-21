@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { assertPreservedEvidenceProvider } from './verify-preserved-provider-edge.mjs';
+import { assertPreservedEvidenceManifest, assertPreservedEvidenceProvider, preservedEvidenceProvider } from './verify-preserved-provider-edge.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const execFileAsync = promisify(execFile);
@@ -80,7 +80,10 @@ for (const name of Object.keys(cli?.dependencies ?? {})) {
   }
 }
 const evidence = workspaceManifests.get('@dharma-ai-labs/agent-fabric-evidence-reduction');
-if (evidence?.dependencies?.[providerAdapter.name] !== providerAdapter.version) {
+if (cli.version === preservedEvidenceProvider.newCohort.cli
+  || evidence?.version === preservedEvidenceProvider.evidence.version
+  || evidence?.dependencies?.[providerAdapter.name] !== providerAdapter.version) {
+  assertPreservedEvidenceManifest(evidence);
   const evidenceRoot = resolve(root, 'packages/evidence-reduction');
   const installedRoot = resolve(evidenceRoot, 'node_modules', providerAdapter.name);
   const installedEntry = createRequire(resolve(evidenceRoot, 'package.json')).resolve(providerAdapter.name);
