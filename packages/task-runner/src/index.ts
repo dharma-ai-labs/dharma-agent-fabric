@@ -251,6 +251,8 @@ function artifactFileState(metadata: Stats): string {
 
 async function verifyRequiredArtifacts(worktree: string, artifacts: string[], assertCurrent: () => void,
   integrity?: { paths: ReadonlySet<string>; expected?: ReadonlyMap<string, string> }): Promise<Map<string, string>> {
+  // Cancellation and expiry still apply when the task requires no artifacts.
+  assertCurrent();
   const fingerprints = new Map<string, string>();
   for (const artifact of artifacts) {
     assertCurrent();
