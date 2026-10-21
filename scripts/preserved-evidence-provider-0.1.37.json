@@ -1,0 +1,31 @@
+{
+  "schema": "dharma.fixed-preserved-evidence-provider/v1",
+  "evidence": {
+    "name": "@dharma-ai-labs/agent-fabric-evidence-reduction",
+    "version": "0.2.36",
+    "sourceTree": "3dbb4b22b74326a009e389242c461d96c9097d2c",
+    "manifestSha256": "189b18c5ed9d181b115d802ca623e16a4e538da2ebcf8088444a8ac34ea16f70"
+  },
+  "provider": {
+    "name": "@dharma-ai-labs/agent-fabric-provider-adapters",
+    "version": "0.1.37",
+    "resolved": "https://registry.npmjs.org/@dharma-ai-labs/agent-fabric-provider-adapters/-/agent-fabric-provider-adapters-0.1.37.tgz",
+    "integrity": "sha512-ghm9xutl4wMXLjPUKBheSvPGoWvDXFKafyLAe19Y0ZlatBeMP1xL56SA93a/GuuuwnGfgpBb2py+kULhcrK0hA==",
+    "manifestSha256": "c0d4610a8f688bf0b343157727e663ffbfeb2a154d0a5edad152c58b91ba8c91",
+    "runtimeHashes": {
+      "dist/codexAppServerSession.js": "6ca9482eab20dedf31ec0434ec582f9d03fba4180117579b094d9fa87e934440",
+      "dist/codexAppServerTransport.js": "f0dbe03ba94ef80dfb182f90da24e87e3e5d3af2b8c4208d2ceb219d08acdb1f",
+      "dist/codexPublicContext.js": "ec95de6ccc44f43618c041e68175ace2004b429d02eeadd91ed849458089b1f4",
+      "dist/codexRepositoryContext.js": "0f81480cedcb8d7226a68653d135dc53b2b24725be670a8dffbde640c1f41476",
+      "dist/codexTurnCapture.js": "90357e5adf58846fd3c9d7572047ab181e6459ce7ceda20afc0d93902e30e8ab",
+      "dist/index.js": "08d877199425477d27839701880aeddf4c365462b6ed8fdd694e11a33de5cbac",
+      "dist/knowledge-server.js": "29cfd5b9c3e00cd777a9103a5f86d0284eee2439275cc431c40b5cf062309faa"
+    }
+  },
+  "newCohort": {
+    "cli": "0.2.213",
+    "provider": "0.1.38",
+    "taskRunner": "0.1.40",
+    "relayClient": "0.2.35"
+  }
+}
