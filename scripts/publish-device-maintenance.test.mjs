@@ -178,7 +178,8 @@ test('Linux canonical packs keep historical artifacts immutable and reject repla
           assert.notEqual(packed.integrity,item.existingArtifact.integrity);
           const changed=execFileSync('git',['diff','--name-only',item.existingArtifact.source,'HEAD','--',item.workspace],
             {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim().split('\n').filter(Boolean);
-          assert.deepEqual(changed,['packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
+          assert.deepEqual(changed,['packages/secure-store/src/index.test.ts',
+            'packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
           const {io,events,packed:originalPack}=await fixture();
           io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
           await assert.rejects(m.publishDeviceMaintenance(head,io,{publish:true}),/immutable artifact changed/);

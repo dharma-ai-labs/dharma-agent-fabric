@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
+import ts from 'typescript';
 import { secureStoreInternals } from './index.js';
 
 test('container markers use only bounded regular-file metadata, not their contents', async () => {
@@ -159,20 +162,44 @@ test('secure-store retries transient WSL interop failures', async () => {
   assert.deepEqual(result, { code: 0, stdout: 'ok', stderr: '' });
 });
 
-test('Windows store applies the selected timeout and retry profile', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-secure-store-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const attemptsPath = join(root, 'attempts');
-  const script = `require('node:fs').appendFileSync(${JSON.stringify(attemptsPath)}, 'x'); setTimeout(() => {}, 2_000)`;
-  const store = secureStoreInternals.windowsStore(undefined, {
-    command: process.execPath,
-    prefixArgs: ['-e', script, '--'],
+test('Windows store applies the selected timeout and retry profile at the invocation boundary', async () => {
+  const text = await readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
+  const ast = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true);
+  const definitions = ['windowsStore', 'assertAccount', 'withTransientWindowsRetry', 'isTransientWindowsInteropFailure']
+    .map(name => {
+      const matches = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+      assert.equal(matches.length, 1, name); return matches[0]!.getText(ast);
+    });
+  const compiled = ts.transpileModule(definitions.join('\n'), {
+    compilerOptions: {target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None}, reportDiagnostics: true,
+  });
+  assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
+  const calls: Array<{command: string; argv: string[]; input: unknown; timeoutMs: number; cwd: string}> = [];
+  const delays: number[] = [];
+  // A child can time out before reaching its own receipt write. Count actual
+  // invocations here; the separate stalled-subprocess test covers real run().
+  const windowsStore = runInNewContext(compiled.outputText + '\nwindowsStore', {
+    Error, process: {platform: 'win32'}, windowsRead: 'synthetic_read',
+    createWindowsFreshReader: () => assert.fail('unexpected fresh-reader branch'),
+    run: async (command: string, argv: string[], input: unknown, timeoutMs: number, cwd: string) => {
+      calls.push({command, argv: [...argv], input, timeoutMs, cwd});
+      return {code: null, stdout: '', stderr: `Secure-store command timed out after ${timeoutMs} ms.`, timedOut: true};
+    },
+    setTimeout: (callback: () => void, delay: number) => {delays.push(delay); callback(); return 0;},
+  }, {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as typeof secureStoreInternals.windowsStore;
+  const store = windowsStore(undefined, {
+    command: 'synthetic-bridge',
+    prefixArgs: ['synthetic-prefix'],
+    cwd: '/synthetic-bridge-cwd',
     timeoutMs: 250,
     retryAttempts: 2,
   });
 
   await assert.rejects(() => store.get('bounded-profile'), /timed out after 250 ms/);
-  assert.equal(await readFile(attemptsPath, 'utf8'), 'xx');
+  assert.deepEqual(calls, Array.from({length: 2}, () => ({command: 'synthetic-bridge',
+    argv: ['synthetic-prefix', '-NoProfile', '-NonInteractive', '-Command', '& { synthetic_read }', 'bounded-profile'],
+    input: undefined, timeoutMs: 250, cwd: '/synthetic-bridge-cwd'})));
+  assert.deepEqual(delays, [200]);
 });
 
 test('secure-store does not retry permanent failures', async () => {

@@ -10,11 +10,14 @@ import {securityRelease,securityPins,securityTextHash,securityWorkflowHash,asser
 
 const head = 'a'.repeat(40);
 const registry = 'https://registry.npmjs.org';
+const qualifiedSecuritySource = 'ae3fea735b8abec0bf160ad311e3044cf11e2244';
 let cachedSnapshot;
 function sourceSnapshot() {
   if(!cachedSnapshot) {
     const root=new URL('../',import.meta.url),read=path=>readFileSync(new URL(path,root),'utf8');
     const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim();
+    const qualified=path=>execFileSync('git',['show',qualifiedSecuritySource+':'+path],
+      {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024});
     const baseline=path=>JSON.parse(git('show',securityRelease.baseline.commit+':'+path));
     const paths=git('ls-tree','-r','--name-only',securityRelease.baseline.commit,'packages').split('\n')
       .filter(path=>/^packages\/[^/]+\/package.json$/.test(path));
@@ -29,9 +32,9 @@ function sourceSnapshot() {
       changed:[...securityRelease.allowedPaths],publisherHash,expectedPublisherHash:publisherHash,
       manifestHash:securityTextHash(read('scripts/security-recovery-release.json')),
       workflowHash:securityWorkflowHash(read('.github/workflows/publish-security-recovery.yml')),
-      testHash:securityTextHash(read('scripts/publish-security-recovery.test.mjs')),
+      testHash:securityTextHash(qualified('scripts/publish-security-recovery.test.mjs')),
       baselineManifest,manifest,baselineLock:git('show',securityRelease.baseline.commit+':package-lock.json'),
-      lock:read('package-lock.json').trim(),baselinePackageManifests:Object.fromEntries(paths.map(path=>[path,baseline(path)])),
+      lock:qualified('package-lock.json').trim(),baselinePackageManifests:Object.fromEntries(paths.map(path=>[path,baseline(path)])),
       packageManifests:Object.fromEntries(paths.map(path=>[path,baseline(path)]))};
   }
   return structuredClone(cachedSnapshot);
@@ -56,6 +59,18 @@ test('security source admission binds main, baseline, exact hashes, package mani
   const packages=structuredClone(snapshot);packages.packageManifests['packages/cli/package.json'].version='0.0.0';
   assert.throws(()=>assertSecuritySource(head,packages),/package manifest/);
   assert.deepEqual(JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')),snapshot.manifest);
+});
+
+test('historical security admission does not admit later lock or release-test candidates',()=>{
+  const snapshot=sourceSnapshot();
+  assert.doesNotThrow(()=>assertSecuritySource(head,snapshot));
+  assert.equal(snapshot.testHash,securityPins.tests);
+  const currentTests=securityTextHash(readFileSync(new URL('./publish-security-recovery.test.mjs',import.meta.url),'utf8'));
+  assert.notEqual(currentTests,snapshot.testHash);
+  assert.throws(()=>assertSecuritySource(head,{...snapshot,testHash:currentTests}),/release tests changed/);
+  const currentLock=readFileSync(new URL('../package-lock.json',import.meta.url),'utf8').trim();
+  if(currentLock!==snapshot.lock)assert.throws(()=>assertSecuritySource(head,{...snapshot,lock:currentLock}),/lock delta/);
+  assert.throws(()=>assertSecuritySource(head,{...snapshot,lock:snapshot.lock+'\nforeign'}),/lock delta/);
 });
 
 test('security publication workflow is explicit, main-only, protected, pinned and bound before installation',()=>{

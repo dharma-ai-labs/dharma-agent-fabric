@@ -104,7 +104,37 @@ test('synthetic Windows anchor diagnostics are newline-stable, fixed and fail-cl
   assert.match(script,/exit 1/);
 });
 
-test('independent Windows helpers serialize both anchor slots at the actual SID/kernel boundary', {skip: process.platform !== 'win32'}, async t => {
+function assertConcurrentAnchorOutcomes(outcomes: ReadonlyArray<{code: number | null; stdout: string; stderr: string}>) {
+  assert.equal(outcomes.length, 2);
+  const writers = outcomes.map((value, index) => ({value, index}))
+    .filter(({value}) => value.code === 0 && value.stdout === 'written');
+  assert.equal(writers.length, 1, 'exactly one contender must commit');
+  const writer = writers[0]!;
+  assert.equal(writer.value.stderr, '');
+  const other = outcomes[1 - writer.index]!;
+  // A contender can exhaust the unchanged mutex deadline, but no arbitrary
+  // helper failure or second write may stand in for a bounded refusal.
+  assert.ok(other.code === 0 && other.stdout === 'conflict' && other.stderr === ''
+    || other.code === 1 && other.stdout === '' && other.stderr === 'ANCHOR_FIXTURE_LOCK_BUSY',
+  JSON.stringify({code: other.code, stdout: other.stdout, stderr: other.stderr}));
+  return writer.index;
+}
+
+test('concurrent Windows fixture outcomes require one writer and permit only explicit conflict or bounded busy', () => {
+  const written = {code: 0, stdout: 'written', stderr: ''};
+  const conflict = {code: 0, stdout: 'conflict', stderr: ''};
+  const busy = {code: 1, stdout: '', stderr: 'ANCHOR_FIXTURE_LOCK_BUSY'};
+  assert.equal(assertConcurrentAnchorOutcomes([written, conflict]), 0);
+  assert.equal(assertConcurrentAnchorOutcomes([busy, written]), 1);
+  for (const outcomes of [
+    [written, written], [busy, busy], [conflict, conflict],
+    [written, {code: 1, stdout: '', stderr: 'ANCHOR_FIXTURE_UNCLASSIFIED'}],
+    [written, {code: 1, stdout: 'conflict', stderr: 'ANCHOR_FIXTURE_LOCK_BUSY'}],
+    [{...written, stderr: 'unexpected'}, conflict],
+  ]) assert.throws(() => assertConcurrentAnchorOutcomes(outcomes), {code: 'ERR_ASSERTION'});
+});
+
+test('independent Windows helpers preserve bounded exclusion across both anchor slots at the SID/kernel boundary', {skip: process.platform !== 'win32'}, async t => {
   const root = await mkdtemp(join(tmpdir(), 'fabric-cas-kernel-'));
   t.after(() => rm(root, {recursive: true, force: true}));
   const input = request(), script = syntheticVault(root);
@@ -112,10 +142,9 @@ test('independent Windows helpers serialize both anchor slots at the actual SID/
   const invoke = (value: EnrollmentAnchorWrite) => secureStoreInternals.run('powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', '& { ' + script + ' }'], JSON.stringify(value), 15000);
   const outcomes = await Promise.all([invoke({...input, secret: 'first'}), invoke({...input, secret: 'second'})]);
-  assert.ok(outcomes.every(value => value.code === 0), JSON.stringify(outcomes.map(value => ({code: value.code, stderr: value.stderr}))));
-  assert.deepEqual(outcomes.map(value => value.stdout).sort(), ['conflict', 'written']);
+  const writer = assertConcurrentAnchorOutcomes(outcomes);
   const preserved = await readFile(join(root, input.account), 'utf8');
-  assert.ok(['first', 'second'].includes(preserved));
+  assert.equal(preserved, ['first', 'second'][writer]);
   assert.equal((await invoke({...input, expectedCurrent: preserved, secret: 'synthetic-add-failure'})).code, 1);
   assert.equal(await readFile(join(root, input.account), 'utf8'), preserved);
   await writeFile(join(root, input.legacyAccount), 'legacy-competing');
