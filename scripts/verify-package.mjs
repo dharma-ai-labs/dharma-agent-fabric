@@ -1,8 +1,11 @@
 import { execFile } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
+import { access, lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { assertPreservedEvidenceProvider } from './verify-preserved-provider-edge.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const execFileAsync = promisify(execFile);
@@ -49,10 +52,7 @@ for (const workspace of workspaceDirectories) {
 }
 
 const providerAdapter = workspaceManifests.get('@dharma-ai-labs/agent-fabric-provider-adapters');
-for (const packageName of [
-  '@dharma-ai-labs/agent-fabric-evidence-reduction',
-  '@dharma-ai-labs/agent-fabric-task-runner',
-]) {
+for (const packageName of ['@dharma-ai-labs/agent-fabric-task-runner']) {
   const manifest = workspaceManifests.get(packageName);
   const pinnedVersion = manifest?.dependencies?.['@dharma-ai-labs/agent-fabric-provider-adapters'];
   if (pinnedVersion !== providerAdapter?.version) {
@@ -78,6 +78,44 @@ for (const name of Object.keys(cli?.dependencies ?? {})) {
   if (name.startsWith('@dharma-ai-labs/') && !workspaceManifests.has(name)) {
     throw new Error('cli_runtime_package_unknown');
   }
+}
+const evidence = workspaceManifests.get('@dharma-ai-labs/agent-fabric-evidence-reduction');
+if (evidence?.dependencies?.[providerAdapter.name] !== providerAdapter.version) {
+  const evidenceRoot = resolve(root, 'packages/evidence-reduction');
+  const installedRoot = resolve(evidenceRoot, 'node_modules', providerAdapter.name);
+  const installedEntry = createRequire(resolve(evidenceRoot, 'package.json')).resolve(providerAdapter.name);
+  if (await realpath(installedEntry) !== resolve(installedRoot, 'dist/index.js')
+    || (await lstat(installedRoot)).isSymbolicLink()) throw new Error('preserved_provider_resolution_mismatch');
+  const runtimeHashes = {};
+  let entries = 0, totalBytes = 0;
+  async function walk(relative, depth = 0) {
+    if (depth > 8) throw new Error('preserved_provider_runtime_bound');
+    for (const entry of await readdir(resolve(installedRoot, relative), {withFileTypes: true})) {
+      if (++entries > 512 || entry.isSymbolicLink()) throw new Error('preserved_provider_runtime_bound');
+      const name = relative + '/' + entry.name;
+      if (entry.isDirectory()) await walk(name, depth + 1);
+      else if (entry.isFile() && name.endsWith('.js') && !name.endsWith('.test.js')) {
+        const metadata = await lstat(resolve(installedRoot, name));
+        if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4 * 1024 * 1024 - totalBytes) {
+          throw new Error('preserved_provider_runtime_bound');
+        }
+        const bytes = await readFile(resolve(installedRoot, name)); totalBytes += bytes.length;
+        if (totalBytes > 4 * 1024 * 1024) throw new Error('preserved_provider_runtime_bound');
+        runtimeHashes[name] = createHash('sha256').update(bytes).digest('hex');
+      }
+    }
+  }
+  await walk('dist');
+  const git = async (...args) => (await execFileAsync('git', args, {cwd: root, maxBuffer: 1024 * 1024})).stdout.trim();
+  const lock = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
+  assertPreservedEvidenceProvider({cliVersion: cli.version, providerVersion: providerAdapter.version,
+    taskRunnerVersion: workspaceManifests.get('@dharma-ai-labs/agent-fabric-task-runner').version,
+    relayClientVersion: workspaceManifests.get('@dharma-ai-labs/agent-fabric-relay-client').version,
+    evidenceManifest: evidence, sourceTree: await git('rev-parse', 'HEAD:packages/evidence-reduction'),
+    worktreeChanges: await git('diff', '--name-only', 'HEAD', '--', 'packages/evidence-reduction'),
+    untracked: await git('ls-files', '--others', '--exclude-standard', '--', 'packages/evidence-reduction'),
+    lockEntry: lock.packages?.['packages/evidence-reduction/node_modules/' + providerAdapter.name],
+    installedManifest: JSON.parse(await readFile(resolve(installedRoot, 'package.json'), 'utf8')), runtimeHashes});
 }
 const localVault = workspaceManifests.get('@dharma-ai-labs/agent-fabric-local-vault');
 if (cli?.dependencies?.[localVault?.name] !== localVault?.version
