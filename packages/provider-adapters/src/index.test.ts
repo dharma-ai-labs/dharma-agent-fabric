@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -886,33 +886,53 @@ test('provider runner force-terminates a Codex wrapper that ignores SIGTERM afte
   assert.equal(result.timedOut, false);
 });
 
-test('provider runner timeout terminates descendant processes', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-tree-'));
-  const childScript = 'setInterval(()=>{},1000)';
-  const parentScript = [
-    'const {spawn}=require("node:child_process");',
-    `const child=spawn(process.execPath,["-e",${JSON.stringify(childScript)}],{stdio:"ignore"});`,
-    'process.stdout.write(String(child.pid));',
-    'setInterval(()=>{},1000);',
-  ].join('');
-  const result = await defaultProcessRunner({
-    command: process.execPath,
-    argv: ['-e', parentScript],
-    cwd: root,
-    stdin: '',
-    timeoutMs: 150,
-  });
-  assert.equal(result.timedOut, true);
-  const descendantPid = Number(result.stdout.toString('utf8'));
-  assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
-  let alive = true;
-  for (let attempt = 0; attempt < 20 && alive; attempt += 1) {
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-    try { process.kill(descendantPid, 0); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ESRCH') alive = false;
-      else throw error;
-    }
+test('provider runner timeout terminates descendant processes', async (t) => {
+  for (const startupDelay of [0, 250]) {
+    await t.test(`controlled startup delay ${startupDelay}ms`, async (childTest) => {
+      const root = await mkdtemp(join(tmpdir(), 'dharma-provider-tree-'));
+      const pidPath = join(root, 'descendant.pid');
+      childTest.after(async () => { await rm(pidPath, { force: true }); await rmdir(root); });
+      const childScript = 'setInterval(()=>{},1000)';
+      const parentScript = [
+        'const {spawn}=require("node:child_process");',
+        `setTimeout(()=>{const child=spawn(process.execPath,["-e",${JSON.stringify(childScript)}],{stdio:"ignore"});`,
+        'require("node:fs").writeFileSync(process.argv[1],String(child.pid));',
+        'process.stdout.write(String(child.pid));setInterval(()=>{},1000);',
+        `},${startupDelay});`,
+      ].join('');
+      // Keep the actual 150ms timeout pending until the fixture has a live descendant.
+      childTest.mock.timers.enable({ apis: ['setTimeout'] });
+      const running = defaultProcessRunner({ command: process.execPath, argv: ['-e', parentScript, pidPath],
+        cwd: root, stdin: '', timeoutMs: 150 });
+      let descendantPid = 0;
+      try {
+        for (let attempt = 0; attempt < 250; attempt++) {
+          try { descendantPid = Number(await readFile(pidPath, 'utf8')); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          if (Number.isInteger(descendantPid) && descendantPid > 0) break;
+          await new Promise<void>((done) => {
+            const interval = setInterval(() => { clearInterval(interval); done(); }, 20);
+          });
+        }
+        assert.ok(Number.isInteger(descendantPid) && descendantPid > 0, 'fixture did not start a descendant');
+        process.kill(descendantPid, 0);
+        childTest.mock.timers.tick(150);
+        assert.equal((await running).timedOut, true);
+      } finally {
+        childTest.mock.timers.tick(150);
+        childTest.mock.timers.reset();
+        await running;
+      }
+      let alive = true;
+      for (let attempt = 0; attempt < 20 && alive; attempt += 1) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+        try { process.kill(descendantPid, 0); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') alive = false;
+          else throw error;
+        }
+      }
+      assert.equal(alive, false, `descendant process ${descendantPid} survived timeout containment`);
+    });
   }
-  assert.equal(alive, false, `descendant process ${descendantPid} survived timeout containment`);
 });

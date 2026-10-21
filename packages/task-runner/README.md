@@ -1,5 +1,20 @@
 # `@dharma-ai-labs/agent-fabric-task-runner`
 
+Local callers may opt into adapter-boundary digest receipts with
+`executeTask({ providerQualification, ... })`. Its declared organization/task
+must match the already signed task; the option adds no execution authority or
+new acceptance gate. It is forwarded to the existing provider executor and the
+returned qualification is retained in that provider command's stored result.
+A bounded data-only report must match the declaration, signed target provider and outcome;
+extra raw fields, accessors and mismatched reports are discarded, not persisted.
+An executor report remains a report, not an independent attestation.
+A custom executor that does not report valid qualification produces an explicit
+`qualificationReceipt: null`, without converting ordinary task success into
+qualification success. Existing completed-task replay returns the original
+receipt, not a newly labelled observation. The option is not a new signed-task
+field, an independent oracle, a context-isolation guarantee or runtime evidence
+of the effective model/settings. Omission leaves legacy receipts unchanged.
+
 Signed, leased, policy-bound execution for local Agent Fabric tasks. Tasks run
 in relay-owned Git worktrees using registered command IDs and canonical
 arguments under explicit path, network, Git, budget, and Skill-pin authority.

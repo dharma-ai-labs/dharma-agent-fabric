@@ -15,6 +15,7 @@ import {
   type ActionDecisionReceipt,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { executeProviderTask } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   assertTaskWithinLocalPolicy,
   canonicalTaskActionForTask,
@@ -68,6 +69,121 @@ async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string
     input: { policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey,
       receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')) } };
 }
+
+test('optional provider qualification follows the existing task executor and stored receipt', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const task = fixture.signed();
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const qualification = {
+    organizationId: task.organizationId, taskId: task.taskId,
+    inputSha256: digest, candidateSha256: digest, oracleReceiptSha256: digest,
+    fileRootsSha256: null, skillRootsSha256: null, settingsSha256: null, contextSha256: null,
+  };
+  let calls = 0;
+  const receipt = await executeTask({ ...fixture.input, task, ...{ providerQualification: qualification },
+    providerExecutor: async (input) => {
+      calls++;
+      assert.deepEqual(Reflect.get(input, 'qualification'), qualification);
+      return executeProviderTask({ ...input, runner: async () => ({
+        exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from('synthetic result'), stderr: Buffer.alloc(0),
+      }) });
+    } });
+  assert.equal(calls, 1);
+  assert.equal(receipt.status, 'completed');
+  const qualificationReceipt = Reflect.get(receipt.commandResults[0]!, 'qualificationReceipt');
+  assert.ok(qualificationReceipt);
+  assert.deepEqual(qualificationReceipt.declared, qualification);
+  assert.equal(qualificationReceipt.invocation.runner, 'injected');
+  const stored = await fixture.input.receiptStore.get(task.taskId);
+  assert.deepEqual(Reflect.get(stored!.commandResults[0]!, 'qualificationReceipt'), qualificationReceipt);
+  const duplicate = await executeTask({ ...fixture.input, task,
+    providerQualification: { ...qualification, candidateSha256: `sha256:${'b'.repeat(64)}` },
+    providerExecutor: async () => { throw new Error('duplicate must not execute'); } });
+  assert.deepEqual(duplicate, stored);
+  assert.equal(duplicate.commandResults[0]!.stdout, '');
+});
+
+test('optional provider qualification rejects a foreign task or organization before execution', async (t) => {
+  for (const scope of ['task', 'organization']) {
+    await t.test(scope, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const task = fixture.signed();
+      const digest = `sha256:${'a'.repeat(64)}`;
+      let calls = 0;
+      await assert.rejects(executeTask({ ...fixture.input, task, ...{ providerQualification: {
+        organizationId: scope === 'organization' ? 'org_other' : task.organizationId,
+        taskId: scope === 'task' ? randomUUID() : task.taskId,
+        inputSha256: digest, candidateSha256: digest, oracleReceiptSha256: digest,
+        fileRootsSha256: null, skillRootsSha256: null, settingsSha256: null, contextSha256: null,
+      } }, providerExecutor: async () => { calls++; return fixture.providerResult; } }),
+      /Provider execution qualification scope does not match task/);
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('missing custom-executor qualification is explicit and does not add a legacy gate', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const task = fixture.signed();
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const receipt = await executeTask({ ...fixture.input, task, ...{ providerQualification: {
+    organizationId: task.organizationId, taskId: task.taskId,
+    inputSha256: digest, candidateSha256: digest, oracleReceiptSha256: digest,
+    fileRootsSha256: null, skillRootsSha256: null, settingsSha256: null, contextSha256: null,
+  } }, providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.status, 'completed');
+  assert.equal(Reflect.get(receipt.commandResults[0]!, 'qualificationReceipt'), null);
+});
+
+test('custom qualification reports cannot bypass receipt redaction or bind a different task', async (t) => {
+  for (const variant of ['raw-top-level', 'raw-invocation', 'foreign-task', 'accessor', 'foreign-provider']) {
+    await t.test(variant, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const decisionKeys = generateKeyPairSync('ed25519');
+      const signedBase = { ...fixture.unsigned, target: { ...fixture.unsigned.target, endpointId: randomUUID() },
+        requiredCapabilities: ['action_decision_receipts_v1'] as const };
+      const journaled = variant === 'accessor' || variant === 'foreign-provider';
+      const task = journaled ? fixture.signed({ ...signedBase,
+        actionDecision: embedDecision(signedBase, 'release', decisionKeys.privateKey, new Date()) }) : fixture.signed();
+      const digest = `sha256:${'a'.repeat(64)}`;
+      const qualification = { organizationId: task.organizationId, taskId: task.taskId,
+        inputSha256: digest, candidateSha256: digest, oracleReceiptSha256: digest,
+        fileRootsSha256: null, skillRootsSha256: null, settingsSha256: null, contextSha256: null };
+      let getterCalls = 0;
+      const receipt = await executeTask({ ...fixture.input, task, providerQualification: qualification,
+        ...(journaled ? { actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey } } : {}),
+        providerExecutor: async (input) => {
+          const result = await executeProviderTask({ ...input,
+            ...(variant === 'foreign-provider' ? { provider: 'claude' as const } : {}),
+            runner: async () => ({
+            exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0),
+          }) });
+          const report = result.qualificationReceipt!;
+          if (variant === 'raw-top-level') Object.assign(report, { rawSecret: 'private-receipt-canary' });
+          if (variant === 'raw-invocation') Object.assign(report.invocation, { rawArgv: ['private-receipt-canary'] });
+          if (variant === 'foreign-task') result.qualificationReceipt = { ...report,
+            declared: { ...report.declared, taskId: randomUUID() } };
+          if (variant === 'accessor') Object.defineProperty(result, 'qualificationReceipt', {
+            enumerable: true, get() { getterCalls++; return report; },
+          });
+          return result;
+        } });
+      assert.equal(receipt.status, 'completed');
+      assert.equal(Reflect.get(receipt.commandResults[0]!, 'qualificationReceipt'), null);
+      assert.equal(getterCalls, 0);
+      assert.equal(JSON.stringify(await fixture.input.receiptStore.get(task.taskId)).includes('private-receipt-canary'), false);
+      if (journaled) {
+        const journal = new FileActionExecutionJournal(resolve(fixture.input.relayStateDirectory, 'action-execution-journal'));
+        const record = await journal.get(task.taskId);
+        assert.equal(record?.state, 'receipt_recorded');
+        assert.equal(record?.receipt?.commandResults[0]?.qualificationReceipt, null);
+        const observed = { provider: variant === 'foreign-provider' ? 'claude' : 'codex', ...receipt.commandResults[0] };
+        assert.equal(record?.providerResultDigest,
+          `sha256:${createHash('sha256').update(JSON.stringify(observed)).digest('hex')}`);
+      }
+    });
+  }
+});
 
 test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
   for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {

@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { validateTaskKnowledgeScope, type TaskKnowledgeScope } from './knowledge-server.js';
+import { prepareProviderExecutionQualification, snapshotProviderExecutionQualification,
+  type ProviderExecutionQualification, type ProviderExecutionQualificationReceipt } from './executionQualification.js';
+
+export { reportedProviderExecutionQualification, snapshotProviderExecutionQualification } from './executionQualification.js';
+export type { ProviderExecutionQualification, ProviderExecutionQualificationReceipt } from './executionQualification.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +62,7 @@ export interface ProviderExecutionResult {
   stdoutSha256: string;
   stderrSha256: string;
   failureCategory?: ProviderFailureCategory | null;
+  qualificationReceipt?: ProviderExecutionQualificationReceipt;
 }
 
 export type ProviderFailureCategory = 'quota' | 'authentication' | 'model_unavailable' | 'transport' | 'timeout' | 'unknown';
@@ -258,7 +264,10 @@ export async function executeProviderTask(input: {
   actionDigest?: string;
   signal?: AbortSignal;
   runner?: ProviderProcessRunner;
+  qualification?: ProviderExecutionQualification;
 }): Promise<ProviderExecutionResult> {
+  const qualification = input.qualification === undefined ? undefined
+    : snapshotProviderExecutionQualification(input.qualification);
   if (!insideWorkspace(input.workspace, input.workspace)) throw new Error('Provider workspace is invalid.');
   if (!input.instructions.trim() || input.instructions.length > 20_000) throw new Error('Provider task instructions are invalid.');
   if (input.artifactContext !== undefined
@@ -364,7 +373,7 @@ export async function executeProviderTask(input: {
         throw new Error('Provider argument size exceeds the supported platform limit.');
       }
     }
-    const result = await runner({
+    const call: Parameters<ProviderProcessRunner>[0] = {
       command, argv, cwd: input.workspace, stdin,
       timeoutMs: Math.min(Math.max(input.timeoutSeconds, 1), 3_600) * 1_000,
       signal: input.signal,
@@ -373,7 +382,12 @@ export async function executeProviderTask(input: {
         ...(input.externalIdempotencyKey ? { DHARMA_EXTERNAL_IDEMPOTENCY_KEY: input.externalIdempotencyKey } : {}),
         ...(input.actionDigest ? { DHARMA_ACTION_DIGEST: input.actionDigest } : {}),
       },
-    });
+    };
+    const qualify = qualification ? prepareProviderExecutionQualification(qualification, call, {
+      provider: input.provider, injected: Boolean(input.runner),
+      allowedCommandArgv: input.allowedCommandArgv, allowWrites: input.allowWrites,
+    }) : undefined;
+    const result = await runner(call);
     let stderr = result.stderr.toString('utf8');
     let exitCode = result.exitCode;
     if (input.provider === 'codex' && input.taskKnowledge && exitCode === 0
@@ -405,13 +419,15 @@ export async function executeProviderTask(input: {
     }
     const stderrBuffer = Buffer.from(stderr, 'utf8');
     const stdout = result.stdout.toString('utf8');
-    return {
+    const execution: ProviderExecutionResult = {
       provider: input.provider, exitCode, signal: result.signal, timedOut: result.timedOut,
       stdout, stderr,
       stdoutSha256: `sha256:${createHash('sha256').update(result.stdout).digest('hex')}`,
       stderrSha256: `sha256:${createHash('sha256').update(stderrBuffer).digest('hex')}`,
       failureCategory: providerFailureCategory({ provider: input.provider, exitCode, timedOut: result.timedOut, stdout, stderr }),
     };
+    if (qualify) execution.qualificationReceipt = qualify(execution);
+    return execution;
   } finally {
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }

@@ -20,6 +20,10 @@ import {
 import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   executeProviderTask,
+  reportedProviderExecutionQualification,
+  snapshotProviderExecutionQualification,
+  type ProviderExecutionQualification,
+  type ProviderExecutionQualificationReceipt,
   type ProviderExecutionResult,
   type ProviderFailureCategory,
 } from '@dharma-ai-labs/agent-fabric-provider-adapters';
@@ -155,6 +159,7 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   failureCategory?: ProviderFailureCategory | null;
+  qualificationReceipt?: ProviderExecutionQualificationReceipt | null;
 }
 
 export interface TaskReceipt {
@@ -180,6 +185,7 @@ export type ProviderTaskExecutor = (input: {
   externalIdempotencyKey?: string;
   actionDigest?: string;
   signal?: AbortSignal;
+  qualification?: ProviderExecutionQualification;
 }) => Promise<ProviderExecutionResult>;
 
 export interface ActionDecisionReplayGuard {
@@ -998,11 +1004,18 @@ export async function executeTask(input: {
   receiptStore: FileTaskReceiptStore;
   signal?: AbortSignal;
   providerExecutor?: ProviderTaskExecutor;
+  providerQualification?: ProviderExecutionQualification;
   verifiedRepositoryKnowledge?: VerifiedRepositoryKnowledge;
   actionDecisions?: ActionDecisionReceiver;
   actionExecutionJournal?: FileActionExecutionJournal;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey, new Date(), input.serverPublicKeyResolver);
+  const providerQualification = input.providerQualification === undefined ? undefined
+    : snapshotProviderExecutionQualification(input.providerQualification);
+  if (providerQualification && (providerQualification.taskId !== input.task.taskId
+    || providerQualification.organizationId !== input.task.organizationId)) {
+    throw new Error('Provider execution qualification scope does not match task.');
+  }
   const taskExpiresAt = Date.parse(input.task.expiresAt);
   const remainingTaskMs = () => taskExpiresAt - Date.now();
   if (!Number.isFinite(taskExpiresAt) || remainingTaskMs() <= 0) throw new Error('Task envelope expired.');
@@ -1173,6 +1186,7 @@ export async function executeTask(input: {
         actionDigest: decisionReceipt.actionDigest,
       } : {}),
       signal: input.signal,
+      ...(providerQualification ? { qualification: providerQualification } : {}),
     };
     let providerResult: ProviderExecutionResult;
     try {
@@ -1185,8 +1199,7 @@ export async function executeTask(input: {
       }
     }
     if (remainingTaskMs() <= 0) throw new Error('Task expired during provider execution.');
-    if (executionClaimed) await journal.recordEffectObserved(input.task.taskId, providerResult);
-    commandResults.push({
+    const providerCommandResult: CommandResult = {
       commandId: `provider.${input.task.target.provider}`,
       exitCode: providerResult.exitCode,
       signal: providerResult.signal,
@@ -1196,7 +1209,13 @@ export async function executeTask(input: {
       stdoutSha256: providerResult.stdoutSha256,
       stderrSha256: providerResult.stderrSha256,
       failureCategory: providerResult.failureCategory,
-    });
+      ...(providerQualification ? {
+        qualificationReceipt: reportedProviderExecutionQualification(providerResult, providerQualification, input.task.target.provider),
+      } : {}),
+    };
+    if (executionClaimed) await journal.recordEffectObserved(input.task.taskId,
+      providerQualification ? { provider: providerResult.provider, ...providerCommandResult } : providerResult);
+    commandResults.push(providerCommandResult);
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
     await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, artifactIntegrity);
     const trackedChanges = await gitOutput(worktree, [

@@ -60,3 +60,29 @@ This adapter does not expose an HTTP transport or bearer-authentication endpoint
 These tests do not qualify an HTTP deployment, shared HTTP transport, audience
 validation or HTTP body limits. Introducing such a deployment requires separate
 transport and authorization qualification, not reuse of stdio evidence.
+
+## Optional Execution Qualification
+
+`executeProviderTask({ qualification, ... })` can return a local
+`qualificationReceipt`. The declaration contains organization/task identity and
+SHA256 pins for the input, candidate and separately held oracle receipt. Optional
+file-root, skill-root, settings and context pins are explicit hashes or `null`.
+Only exact data properties are accepted; raw configuration, paths and executable
+declarations are rejected. Declaration pins are caller claims, not independently
+verified content or permission to disclose the oracle to the executing provider.
+
+The receipt hashes the actual adapter invocation's argv, stdin, workspace,
+registered-command list and environment overrides, plus final output hashes and
+failure/timeout disposition. An explicitly configured model argument is hashed;
+the actual effective model/settings remain unverified. No user configuration is
+read to manufacture a qualification, and no setting, permission, model selection
+or provider command is changed by this option. It is not a signed attestation.
+Injected runners are labelled separately from the default process runner.
+
+Effective file/skill roots, tool-policy enforcement, fresh context and independent
+oracle custody always remain explicitly unverified. A Git worktree is not full
+context isolation. A supplied settings or custody hash does not establish those
+facts; independent qualification and custody are still required for comparisons.
+Runner rejection propagates without a fabricated completion receipt or retry.
+The schema is `schemas/provider-execution-qualification.schema.json` in the
+repository. Omission preserves the legacy result and execution behavior.
