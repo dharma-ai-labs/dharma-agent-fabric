@@ -5,7 +5,8 @@ import test from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'yaml';
 import {securityRelease,securityPins,securityTextHash,securityWorkflowHash,assertSecuritySource,
-  assertSecurityProvenance,publishSecurityRecovery,runSecurityCommand,readSecurityRegistry,securityNpmFailure} from './publish-security-recovery.mjs';
+  assertSecurityProvenance,publishSecurityRecovery,runSecurityCommand,readSecurityRegistry,securityNpmFailure,
+  assertPreservedSecurityStore,packHistoricalSecurityStore} from './publish-security-recovery.mjs';
 
 const head = 'a'.repeat(40);
 const registry = 'https://registry.npmjs.org';
@@ -44,7 +45,8 @@ test('security source admission binds main, baseline, exact hashes, package mani
   }
   assert.throws(()=>assertSecuritySource(head,{...snapshot,expectedPublisherHash:undefined}),/publisher pin/);
   for(const path of ['packages/cli/src/index.ts','packages/cli/package.json','package-lock.json',
-    '.github/workflows/publish.yml','scripts/publish-signing-upgrade.mjs']){
+    '.github/workflows/publish.yml','scripts/publish-signing-upgrade.mjs',
+    'packages/secure-store/src/index.ts','packages/secure-store/src/windowsEnrollmentAnchor.ts']){
     assert.throws(()=>assertSecuritySource(head,{...snapshot,changed:[...snapshot.changed,path]}),/source delta/);
   }
   assert.throws(()=>assertSecuritySource(head,{...snapshot,untracked:['private.env']}),/untracked/);
@@ -82,6 +84,41 @@ test('security publication workflow is explicit, main-only, protected, pinned an
   assert.ok(job.steps.some(step=>step.run==='npm run publish:security-recovery -- --expected-head "$EXPECTED_HEAD"'));
   assert.ok(job.steps.every(step=>!step['continue-on-error']));
   for(const pin of Object.values(securityPins))assert.match(pin,/^[a-f0-9]{64}$/);
+});
+
+test('security workflow cleans incremental declarations before artifact qualification',()=>{
+  const workflow=parse(readFileSync(new URL('../.github/workflows/publish-security-recovery.yml',import.meta.url),'utf8'));
+  const steps=workflow.jobs.publish.steps;
+  const install=steps.findIndex(step=>step.run==='npm ci');
+  const clean=steps.findIndex(step=>step.run==='npm run clean');
+  const check=steps.findIndex(step=>step.run==='npm run check');
+  const qualify=steps.findIndex(step=>step.name==='Qualify all eleven artifacts without publication');
+  assert.ok(clean>install,'canonical clean must follow dependency installation');
+  assert.ok(clean<check&&check<qualify,'clean build and checks must precede artifact qualification');
+  assert.equal(steps.filter(step=>step.run==='npm run clean').length,1);
+});
+
+test('historical secure-store preservation permits only the reviewed test delta and exact runtime bytes',async()=>{
+  const item=structuredClone(securityRelease.unchangedDependencies.find(value=>value.name==='@dharma-ai-labs/agent-fabric-secure-store'));
+  const runtime=Object.fromEntries(Object.keys(item.preserveOriginal.runtimeHashes).map(name=>[name,Buffer.from('synthetic:'+name)]));
+  item.preserveOriginal.runtimeHashes=Object.fromEntries(Object.entries(runtime).map(([name,bytes])=>[name,securityTextHash(bytes.toString())]));
+  const snapshot={integrity:item.integrity,sourceChanges:['packages/secure-store/src/windowsEnrollmentAnchor.test.ts'],
+    publishedManifest:{name:item.name,version:item.version},localManifest:{name:item.name,version:item.version},
+    publishedRuntime:runtime,localRuntime:runtime};
+  assert.doesNotThrow(()=>assertPreservedSecurityStore(item,snapshot));
+  assert.throws(()=>assertPreservedSecurityStore({...item,name:'foreign'},snapshot),/fixed historical/);
+  assert.throws(()=>assertPreservedSecurityStore({...item,version:'0.1.11'},snapshot),/fixed historical/);
+  await assert.rejects(packHistoricalSecurityStore({...item,workspace:'../foreign'},'','',()=>{}),/fixed historical secure-store workspace/);
+  assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,integrity:'foreign'}),/integrity/);
+  assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,sourceChanges:[]}),/source drift/);
+  assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,sourceChanges:[...snapshot.sourceChanges,'packages/secure-store/src/index.ts']}),/source drift/);
+  assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,localManifest:{...snapshot.localManifest,version:'foreign'}}),/manifest drift/);
+  assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,localRuntime:{...runtime,'dist/foreign.js':Buffer.from('foreign')}}),/runtime set drift/);
+  const missing={...runtime};delete missing['dist/windowsFreshRead.js'];
+  assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,publishedRuntime:missing}),/runtime set drift/);
+  for(const field of ['publishedRuntime','localRuntime']){
+    assert.throws(()=>assertPreservedSecurityStore(item,{...snapshot,[field]:{...runtime,'dist/index.js':Buffer.from('tampered')}}),/runtime drift/);
+  }
 });
 
 test('security provenance binds the dedicated main workflow, exact source, version and artifact subject',()=>{

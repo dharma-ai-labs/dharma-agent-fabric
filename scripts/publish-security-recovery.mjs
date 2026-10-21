@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdtempSync,readFileSync} from 'node:fs';
+import {mkdtempSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -17,10 +17,56 @@ function freeze(value) {
   return value;
 }
 export const securityRelease = freeze(JSON.parse(readFileSync(new URL('./security-recovery-release.json', import.meta.url), 'utf8')));
-export const securityPins = Object.freeze({manifest:'262d64269c96db2b6a327c072447eae8f6efd57a12ef8ac77dba7ba257426889',workflow:'813ed213fb6fae0bf9aa8cc3674b21cd68e64bd9dd58da723458e2dac9cf5549',tests:'0cc4f07315c9c4b0320c6e78291f35ae8d838aff61894dcf3dc19a8b6068591b'});
+export const securityPins = Object.freeze({manifest:'ca692b35e73020a37586242a272adf96acb2b5add6865f4c6adea10f0303705d',workflow:'2f923ca96bc8589e28463e033dfccbaebd8da6b3d40f2ff1623eb97d7accdb25',tests:'5ef2fd50f2b8e3acf83e4a29162cf722c9022308e7dcb0aea8a4ccc8a0a0bd69'});
 export const securityTextHash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
 export const securityWorkflowHash=value=>securityTextHash(value.replace(
   /^(\s*SECURITY_PUBLISHER_SHA256:) [a-f0-9]{64}\r?$/gm,'$1 <publisher-pin>'));
+
+export function assertPreservedSecurityStore(item,snapshot) {
+  assert.equal(item.name,'@dharma-ai-labs/agent-fabric-secure-store','fixed historical secure-store only');
+  assert.equal(item.version,'0.1.10','fixed historical secure-store version');
+  assert.equal(snapshot.integrity,item.integrity,'historical secure-store integrity mismatch');
+  assert.deepEqual(snapshot.sourceChanges,['packages/secure-store/src/windowsEnrollmentAnchor.test.ts'],
+    'unreviewed secure-store source drift');
+  assert.deepEqual(snapshot.sourceChanges,item.preserveOriginal.sourceChanges,'secure-store source contract drift');
+  assert.deepEqual(snapshot.publishedManifest,snapshot.localManifest,'historical secure-store manifest drift');
+  const names=['dist/index.js','dist/windowsEnrollmentAnchor.js','dist/windowsFreshRead.js'];
+  for(const record of [item.preserveOriginal.runtimeHashes,snapshot.publishedRuntime,snapshot.localRuntime]){
+    assert.deepEqual(Object.keys(record).sort(),names,'historical secure-store runtime set drift');
+  }
+  for(const name of names){
+    const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+    assert.equal(digest(snapshot.publishedRuntime[name]),item.preserveOriginal.runtimeHashes[name],'published secure-store runtime drift');
+    assert.equal(digest(snapshot.localRuntime[name]),item.preserveOriginal.runtimeHashes[name],'local secure-store runtime drift');
+  }
+}
+
+export async function packHistoricalSecurityStore(item,root,directory,git) {
+  assert.equal(item.name,'@dharma-ai-labs/agent-fabric-secure-store','fixed historical secure-store only');
+  assert.equal(item.version,'0.1.10','fixed historical secure-store version');
+  assert.equal(item.workspace,'packages/secure-store','fixed historical secure-store workspace');
+  const filename='dharma-ai-labs-agent-fabric-secure-store-0.1.10.tgz';
+  const bytes=await publicGet('https://registry.npmjs.org/@dharma-ai-labs/agent-fabric-secure-store/-/agent-fabric-secure-store-0.1.10.tgz',false);
+  assert.ok(bytes&&bytes.length<=131072,'bounded historical secure-store artifact required');
+  const integrity='sha512-'+createHash('sha512').update(bytes).digest('base64');
+  assert.equal(integrity,item.integrity,'historical secure-store integrity mismatch');
+  const file=join(directory,filename);writeFileSync(file,bytes,{mode:0o600,flag:'wx'});
+  const tar=(...args)=>execFileSync('tar',args,{timeout:15000,maxBuffer:4194304,stdio:['ignore','pipe','pipe']});
+  const entries=tar('-tzf',file).toString('utf8').trim().split(/\r?\n/);
+  assert.ok(entries.length>0&&entries.length<1000&&new Set(entries).size===entries.length,'bounded unique secure-store entries required');
+  assert.ok(entries.every(p=>p.startsWith('package/')&&!p.includes('\\')&&!p.split('/').includes('..')&&!p.includes('\0')),'unsafe secure-store entry');
+  const runtime=entries.filter(p=>p.startsWith('package/dist/')&&p.endsWith('.js')&&!p.endsWith('.test.js'));
+  const publishedRuntime=Object.fromEntries(runtime.map(p=>[p.slice(8),tar('-xOf',file,p)])),localRuntime={};
+  function walk(relative){for(const entry of readdirSync(join(root,item.workspace,relative),{withFileTypes:true})){
+    const name=relative+'/'+entry.name;assert.ok(!entry.isSymbolicLink(),'local secure-store symlink refused');
+    if(entry.isDirectory())walk(name);
+    else if(entry.isFile()&&name.endsWith('.js')&&!name.endsWith('.test.js'))localRuntime[name]=readFileSync(join(root,item.workspace,name));
+  }}walk('dist');
+  assertPreservedSecurityStore(item,{integrity,sourceChanges:git('diff','--name-only',item.source,'HEAD','--',item.workspace).split('\n').filter(Boolean),
+    publishedManifest:JSON.parse(tar('-xOf',file,'package/package.json').toString('utf8')),
+    localManifest:JSON.parse(readFileSync(join(root,item.workspace,'package.json'),'utf8')),publishedRuntime,localRuntime});
+  return{name:item.name,version:item.version,filename,integrity,preservedOriginalArtifact:true};
+}
 
 export function assertSecuritySource(head,snapshot) {
   assert.match(head??'',/^[a-f0-9]{40}$/,'exact reviewed main required');
@@ -175,7 +221,10 @@ if(process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.meta
   let directory;
   const pack=async item=>{
     directory??=mkdtempSync(join(tmpdir(),'dharma-security-release-'));
-    if(item.preserveOriginal)return packPreservedDependency(item,root,directory,{git,read:(url,json)=>publicGet(url,json)});
+    if(item.preserveOriginal){
+      if(item.name==='@dharma-ai-labs/agent-fabric-secure-store')return packHistoricalSecurityStore(item,root,directory,git);
+      return packPreservedDependency(item,root,directory,{git,read:(url,json)=>publicGet(url,json)});
+    }
     const packed=JSON.parse(npm('pack','--workspace',item.workspace,'--json','--pack-destination',directory))[0];
     assertPacked(item,packed);
     assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),

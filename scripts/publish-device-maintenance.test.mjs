@@ -161,7 +161,7 @@ test('fixed command parser refuses extra flags and defaults to no publication',a
   const {m,io,events}=await fixture();assert.equal((await m.runMaintenanceCommand(['--expected-head',head,'--admission-only'],io)).state,'source_admitted');
   assert.deepEqual(events,['source']);
 });
-test('Linux canonical packs preserve immutable artifacts or reject explicitly versioned replacements before publication',
+test('Linux canonical packs keep historical artifacts immutable and reject replacement source before publication',
   {skip:process.platform!=='linux'},async()=>{
     const m=await load(),root=new URL('../',import.meta.url),directory=mkdtempSync(join(tmpdir(),'dharma-maintenance-pack-'));
     assert.ok(process.env.npm_execpath,'normal npm test context required');
@@ -173,7 +173,17 @@ test('Linux canonical packs preserve immutable artifacts or reject explicitly ve
         const current=JSON.parse(readFileSync(new URL(item.workspace+'/package.json',root),'utf8'));
         assert.equal(packed.name,item.name);assert.equal(packed.version,current.version);
         assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),packed.integrity);
-        if(current.version===item.version){
+        if(item.name==='@dharma-ai-labs/agent-fabric-secure-store'&&current.version===item.version
+          &&packed.integrity!==item.existingArtifact.integrity){
+          assert.notEqual(packed.integrity,item.existingArtifact.integrity);
+          const changed=execFileSync('git',['diff','--name-only',item.existingArtifact.source,'HEAD','--',item.workspace],
+            {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim().split('\n').filter(Boolean);
+          assert.deepEqual(changed,['packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
+          const {io,events,packed:originalPack}=await fixture();
+          io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
+          await assert.rejects(m.publishDeviceMaintenance(head,io,{publish:true}),/immutable artifact changed/);
+          assert.equal(events.some(event=>event.startsWith('publish:')),false);
+        }else if(current.version===item.version){
           assert.equal(packed.integrity,item.existingArtifact.integrity,'immutable package bytes changed: '+item.name);
         }else{
           const historical=JSON.parse(execFileSync('git',['show','73793c2df81f6bf9c81fe276b37997fa2159c67d:'+item.workspace+'/package.json'],
