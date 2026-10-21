@@ -3,9 +3,37 @@
 Classification: public API, integration and local security-boundary reference
 under [the public documentation policy](PUBLIC_DOCUMENTATION_POLICY.md).
 
-This source-level helper is not connected to a CLI command, a live owner-host
-export, a vault or a server. The existing `capture` / `evidenceSync` commands are
-unchanged. A caller must independently qualify its binding and reader capability.
+The selector is connected to an explicit, selection-only CLI dispatch mode. It
+is not connected to a live owner-host export, a vault or a server. A caller must
+independently qualify its binding and exact reader capability. Legacy capture
+without an assignment selector or owner context remains unchanged.
+
+## Explicit CLI Dispatch
+
+An independently qualified in-process owner can call the exported
+`run(['evidence', 'capture', '--assignment-id', assignmentId], context)` or the
+`capture` alias. `AssignedCaptureCommandContext` supplies the assignment, current
+binding and exact reader separately from command-line data. It does not
+authenticate that context, create an assignment or grant source access.
+
+The ordinary CLI binary has no such owner context. Supplying only an assignment
+ID returns `capture_source_unavailable`; it cannot load a self-approved binding
+file, infer a provider home or fall through to legacy discovery. No environment
+variable, global capability, assignment file or new credential supplies this
+context. A real owner-host bridge remains a separate qualification step.
+
+The route accepts exactly one UUID assignment selector and an optional boolean
+`--json`. Duplicate selectors, extra positionals, other flags, batch capture,
+sync and other commands are refused before reader access. An owner context
+cannot be ignored by dispatching an unrelated command or borrowed through a
+bootstrap callback. The requested assignment ID must match the validated
+assignment before resolving or invoking the exact reader. A mismatch is
+classified as `capture_source_unavailable` without exposing a different source.
+
+The existing selector supplies integrity, current binding/consent, expiry and
+selected-record bounds checks. Dispatch returns only its metadata selection with
+`persisted`, `syncAllowed`, `analysisAllowed`, `learningAdmitted` and
+`nativeExecutionVerified` still false. It adds no persistence or network port.
 
 ## Implemented Boundary
 
@@ -49,11 +77,11 @@ capability, not sandboxed JavaScript; this snapshot prevents returned-data
 callbacks and mutation from changing an already checked output projection.
 
 There are deliberately no vault, pending-capsule, upload, analysis or learning
-ports. The new path cannot call `listPendingCapsuleSyncs`, drain retention work,
+ports. The explicit assignment path cannot call `listPendingCapsuleSyncs`, drain retention work,
 enqueue unrelated capsules, upload evidence or increment a learning counter.
-Tests include forbidden-effect traps. This does NOT repair or change those
-behaviors in the older CLI paths; a future integration must not wrap those
-paths and claim that this guard automatically contains their effects.
+Tests include forbidden-effect traps. This does NOT repair those behaviors in
+legacy capture or sync without an assignment selector/context. The explicit
+route never wraps either legacy operation.
 
 ## Exact Reader Requirements
 
@@ -92,8 +120,17 @@ include the earlier eighteen/fourteen, not separate additive cohorts. TypeScript
 build and normal bundled-schema copying were run locally on healthy C storage.
 No existing full suite, native retry or paid/provider workload was replayed.
 
+The CLI-wiring regressions initially failed eight cases while the legacy route
+control passed. Nine dispatch tests now cover all four providers and Windows
+and POSIX fixture paths, unavailable/mismatched capabilities, forbidden effects,
+selector validation, authority separation, current guards, withdrawal and error
+redaction, and the unchanged legacy control. A focused run of these nine tests,
+the existing twenty-two selector tests, five command-contract tests and seven
+task-caller tests passed forty-three unique tests. These are injected-port
+source tests, not real session capture or provider readiness.
+
 Independent exact-input source review precedes any merge or publication. A
-future source step can connect a qualified exact owner-host reader and then an
+future runtime integration can supply a qualified exact owner-host reader and then an
 explicitly admitted selected-capsule commit/sync contract. It must retain
 idempotency, lost-response reconciliation, conservative accounting, policy,
 analysis-consent and pause gates. Those operations are not implemented here.

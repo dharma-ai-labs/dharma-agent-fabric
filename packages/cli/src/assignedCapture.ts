@@ -39,6 +39,43 @@ export interface AssignedCaptureSelection {
   bindingMatched: true; syncAllowed: false; analysisAllowed: false; learningAdmitted: false;
   nativeExecutionVerified: false; persisted: false;
 }
+export interface AssignedCaptureCommandContext {
+  assignment: unknown;
+  binding: AssignedCaptureBinding;
+  reader?: ExactSessionReader;
+  now?: () => number;
+}
+
+export async function runAssignedCaptureCommand(input: {
+  positional: readonly string[];
+  flags: ReadonlyMap<string, string | boolean>;
+  repeated: ReadonlyMap<string, readonly (string | boolean)[]>;
+}, context?: AssignedCaptureCommandContext): Promise<{ ok: true; selection: AssignedCaptureSelection }> {
+  const { positional, flags, repeated } = input;
+  const capture = positional.length === 1 && positional[0] === 'capture'
+    || positional.length === 2 && positional[0] === 'evidence' && positional[1] === 'capture';
+  const assignmentId = flags.get('assignment-id');
+  if (!capture || typeof assignmentId !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i.test(assignmentId)
+    || [...flags.keys()].some(key => key !== 'assignment-id' && key !== 'json')
+    || flags.has('json') && flags.get('json') !== true
+    || [...repeated.values()].some(values => values.length !== 1)) {
+    refuse('capture_assignment_command_invalid');
+  }
+  if (!context) refuse('capture_source_unavailable');
+  const selection = await selectAssignedCapture({ assignment: context.assignment, binding: context.binding,
+    ...(context.now ? { now: context.now } : {}) }, {
+    async readExactSession(request) {
+      // Resolve the trusted reader only after the assignment and binding guards.
+      if (request.assignmentId !== assignmentId) refuse('capture_source_unavailable');
+      const reader = context.reader;
+      const read = reader?.readExactSession;
+      if (typeof read !== 'function') refuse('capture_source_unavailable');
+      return Reflect.apply(read, reader, [request]);
+    },
+  });
+  return { ok: true, selection };
+}
 
 const schemaId = 'https://schemas.dharma-ai.io/capture-assignment/v1';
 const targetFields: ReadonlyArray<keyof CaptureTarget> = [

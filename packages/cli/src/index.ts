@@ -40,6 +40,8 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { runAssignedCaptureCommand, type AssignedCaptureCommandContext } from './assignedCapture.js';
+export type { AssignedCaptureCommandContext } from './assignedCapture.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
@@ -9283,9 +9285,13 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   };
 }
 
-export async function run(argv: string[]): Promise<Output> {
+export async function run(argv: string[], captureContext?: AssignedCaptureCommandContext): Promise<Output> {
   const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
+  if (captureContext !== undefined || flags.has('assignment-id')) {
+    if (currentBootstrapHostScope()) throw new Error('capture_assignment_command_invalid');
+    return runAssignedCaptureCommand({ positional, flags, repeated }, captureContext);
+  }
   if (flags.has('metadata-only')) throw new Error('repository_metadata_command_invalid');
   if (command === 'repositories' && subcommand === 'metadata') {
     if (positional.length !== 2
