@@ -8,7 +8,9 @@ import ts from 'typescript';
 
 type Caller = (fabric: unknown, leaseSeconds: number) => Promise<Record<string, unknown>>;
 
-async function taskCaller(dependencies: Record<string, unknown>, removeDeviceGuard = false): Promise<Caller> {
+async function taskCaller(dependencies: Record<string, unknown>, options: {
+  removeDeviceGuard?: boolean; isolateErrorRealm?: boolean;
+} = {}): Promise<Caller> {
   const text = await readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const names = ['assertTaskWorkspacePolicy', 'assertTaskSkillPin', 'taskSkillPinFailureCode', 'executeOneTask'];
@@ -24,7 +26,7 @@ async function taskCaller(dependencies: Record<string, unknown>, removeDeviceGua
       declaration.parameters, declaration.type, declaration.body);
     const transformed = ts.transform(unexported, [context => root => {
       const visit: ts.Visitor = node => {
-        if (removeDeviceGuard && ts.isIfStatement(node) && ts.isBinaryExpression(node.expression)
+        if (options.removeDeviceGuard && ts.isIfStatement(node) && ts.isBinaryExpression(node.expression)
           && node.expression.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
           && node.expression.left.getText(source) === 'task.target.deviceId'
           && node.expression.right.getText(source) === 'config.deviceId') {
@@ -38,20 +40,25 @@ async function taskCaller(dependencies: Record<string, unknown>, removeDeviceGua
     try { return printer.printNode(ts.EmitHint.Unspecified, transformed.transformed[0]!, source); }
     finally { transformed.dispose(); }
   });
-  assert.equal(removedGuards, removeDeviceGuard ? 1 : 0);
+  assert.equal(removedGuards, options.removeDeviceGuard ? 1 : 0);
   const compiled = ts.transpileModule(definitions.join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
     reportDiagnostics: true,
   });
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   // Only these actual function bodies run. Every runtime effect port below is synthetic.
-  return runInNewContext(`${compiled.outputText}\nexecuteOneTask`, dependencies, {
+  return runInNewContext(`${compiled.outputText}\nexecuteOneTask`, {
+    ...dependencies,
+    // Injected ports and the caller share Error in production; VM isolation is a control only.
+    ...(options.isolateErrorRealm ? {} : { Error }),
+  }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;
 }
 
 function fixture() {
   const calls: string[] = [];
+  const events: Array<{ taskId: string; event: string; payload: unknown }> = [];
   const task = {
     taskId: 'task_fixture', organizationId: 'org_fixture', workspaceId: 'workspace_fixture',
     taskType: 'external_request', target: { deviceId: 'device_fixture', provider: 'claude' },
@@ -69,7 +76,9 @@ function fixture() {
     serverPublicKeyEd25519: 'synthetic_key_never_parsed' };
   const fabric = {
     pollTask: async () => { calls.push('poll'); return { task: { envelope: task } }; },
-    postTaskEvent: async (_taskId: string, event: string) => { calls.push(`event:${event}`); },
+    postTaskEvent: async (taskId: string, event: string, payload: unknown) => {
+      calls.push(`event:${event}`); events.push({ taskId, event, payload });
+    },
   };
   const intervalIds = new Set<number>();
   let nextInterval = 0;
@@ -115,7 +124,7 @@ function fixture() {
     stageSignedTaskTrajectoryRecovery: async () => { throw new Error('unexpected trajectory staging'); },
     finalizeRecoveredSignedTaskTrajectories: async () => { throw new Error('unexpected trajectory recovery'); },
   };
-  return { task, workspace, policy, config, calls, fabric, dependencies, intervalIds,
+  return { task, workspace, policy, config, calls, events, fabric, dependencies, intervalIds,
     unregister: () => { registered = false; },
     failRefresh: () => { refreshFailure = new Error('fixture policy refresh denied'); },
     setActiveSkill: (value: typeof activeSkill) => { activeSkill = value; } };
@@ -126,7 +135,7 @@ const beforeDeviceRejection = ['poll', 'registry', 'policy-refresh', 'config-rea
 
 async function assertForeignDeviceRejected(f: ReturnType<typeof fixture>, removeDeviceGuard = false) {
   f.task.target.deviceId = 'foreign_device';
-  const run = await taskCaller(f.dependencies, removeDeviceGuard);
+  const run = await taskCaller(f.dependencies, { removeDeviceGuard });
   await assert.rejects(run(f.fabric, 30), /Task target does not match this enrolled device\./);
   assert.deepEqual(f.calls, [...beforeDeviceRejection, 'activation-lock-release', 'interval-clear:1']);
   assert.equal(f.intervalIds.size, 0);
@@ -175,6 +184,47 @@ test('matching admission reaches the injected executor and outcome with both tim
     'interval-create:2', 'receipt-store', 'execute-task', 'interval-clear:2', 'outcome',
     'activation-lock-release', 'interval-clear:1']);
   assert.equal(f.intervalIds.size, 0);
+});
+
+test('executor rejection after started releases both timers and the activation lock without a false outcome', async () => {
+  const f = fixture(), failure = new Error('fixture executor rejected before a receipt');
+  f.dependencies.executeTask = async () => { f.calls.push('execute-task'); throw failure; };
+  await assert.rejects((await taskCaller(f.dependencies))(f.fabric, 30), error => error === failure);
+  assert.equal(f.intervalIds.size, 0);
+  assert.deepEqual(f.calls, [...beforeDeviceRejection, 'public-key', 'active-skill', 'event:started',
+    'interval-create:2', 'receipt-store', 'execute-task', 'interval-clear:2',
+    'activation-lock-release', 'interval-clear:1']);
+  assert.deepEqual(f.events.map(event => event.event), ['started']);
+});
+
+async function assertCoordinationTimeout(f: ReturnType<typeof fixture>, isolateErrorRealm = false) {
+  const failure = new Error('Timed out waiting for the workspace skill activation lock.');
+  f.dependencies.withWorkspaceSkillActivationLock = async () => {
+    f.calls.push('activation-lock-timeout'); throw failure;
+  };
+  await assert.rejects((await taskCaller(f.dependencies, { isolateErrorRealm }))(f.fabric, 30),
+    error => error === failure);
+  assert.equal(f.intervalIds.size, 0);
+  assert.equal(f.events.length, 1, 'coordination timeout must post one bounded failure');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.events)), [{ taskId: f.task.taskId, event: 'failed',
+    payload: { phase: 'coordination', code: 'skill_activation_lock_timeout' } }]);
+  assert.deepEqual(f.calls, ['poll', 'registry', 'policy-refresh', 'config-read',
+    'interval-create:1', 'activation-lock-timeout', 'event:failed', 'interval-clear:1']);
+}
+
+test('coordination timeout posts its actual failure classification and clears only the waiting timer', async () => {
+  await assertCoordinationTimeout(fixture());
+});
+
+test('an isolated VM Error realm is detected by the timeout-event assertion, not a missing dependency', async () => {
+  const f = fixture();
+  await assert.rejects(() => assertCoordinationTimeout(f, true), {
+    code: 'ERR_ASSERTION', message: /coordination timeout must post one bounded failure/,
+  });
+  assert.equal(f.intervalIds.size, 0);
+  assert.equal(f.calls.filter(call => call === 'activation-lock-timeout').length, 1);
+  assert.equal(f.calls.includes('execute-task'), false);
+  assert.deepEqual(f.events, []);
 });
 
 test('in-memory removal of the device guard is detected by the rejection assertion', async () => {
