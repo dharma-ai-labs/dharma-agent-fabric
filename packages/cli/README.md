@@ -391,6 +391,34 @@ Repeat `--provider` to attach only the local runtimes that should serve the
 selected repository agent. Omitting it preserves compatibility by attaching
 every installed supported provider.
 
+### Scoped registration metadata
+
+For a metadata-only check in an already permitted original device home:
+
+```bash
+dharma repositories metadata --repo "$PWD" --json
+```
+
+This reads the local registry and resolves only the selected checkout. Add
+`--workspace-id <id>` if more than one record has that exact path; unscoped or
+ambiguous requests fail closed. The allowlisted output contains recorded
+organization/workspace/binding/endpoint IDs, source fingerprint, role revision
+and source-policy generation metadata. Malformed record values are rejected
+with a fixed sanitized error; objects are never serialized as identity fields.
+These are **unverified local records**:
+readiness is `not_checked`, `sharedRepositoryReady` is `null`, and identity and
+source-fingerprint verification are false. No device configuration, signing key,
+protected store, network, relay or mutation is accessed.
+
+This distinct subcommand is not `list`, `status` or a bootstrap callback.
+Require its `repository_registry_metadata` result stage; older binaries may
+return usage instead and have not observed the registry. Never substitute an
+unknown `--metadata-only` flag on older list/status commands: they can ignore
+the flag and still evaluate protected readiness.
+Default list/status readiness checks remain unchanged and may access
+protected state. A metadata result does not authorize a new home, enrollment,
+source registration, copied identity, policy change or a denied access route.
+
 One selected source repository becomes one logical organization agent and one
 permanent branch in the organization's private Dharma control repository.
 Connecting that repository from another machine or provider adds an endpoint to

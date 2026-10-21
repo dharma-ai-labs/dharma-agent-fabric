@@ -5015,9 +5015,23 @@ export async function receiptAwareProviderCapabilities(
   });
 }
 
-async function repositoriesList(flags: Map<string, string | boolean>): Promise<Output> {
+async function repositoriesList(flags: Map<string, string | boolean>, metadataOnly = false): Promise<Output> {
+  if (metadataOnly) {
+    const allowed = new Set(['repo', 'workspace-id', 'json', 'verbose', 'diagnostic']);
+    if ([...flags.keys()].some(key => !allowed.has(key))
+      || ['json', 'verbose', 'diagnostic'].some(key => flags.has(key) && flags.get(key) !== true)) {
+      throw new Error('repository_metadata_option_invalid');
+    }
+    if (typeof flags.get('repo') !== 'string' || !String(flags.get('repo')).trim()
+      || flags.has('workspace-id') && (typeof flags.get('workspace-id') !== 'string' || !String(flags.get('workspace-id')).trim())) {
+      throw new Error('repository_metadata_scope_required');
+    }
+  }
   const verbose = flags.has('verbose') || flags.has('diagnostic');
   const items = await registry();
+  if (metadataOnly && items.some(item => !item || typeof item !== 'object' || Array.isArray(item))) {
+    throw new Error('repository_metadata_record_invalid');
+  }
   const repo = flags.get('repo');
   const workspaceId = flags.get('workspace-id');
   if (repo !== undefined && typeof repo !== 'string') throw new Error('Repository path must be a string.');
@@ -5028,6 +5042,40 @@ async function repositoriesList(flags: Map<string, string | boolean>): Promise<O
     && (workspaceId === undefined || item.workspaceId === workspaceId));
   if ((repo !== undefined || workspaceId !== undefined) && selected.length === 0) {
     throw new Error('Requested repository workspace is not registered on this device.');
+  }
+  if (metadataOnly) {
+    if (selected.length !== 1) throw new Error('repository_metadata_scope_ambiguous');
+    try {
+      const scalar = (value: unknown, pattern: RegExp, nullable = true) => {
+        if (nullable && (value === null || value === undefined)) return null;
+        if (typeof value !== 'string' || !pattern.test(value)) throw new Error('repository_metadata_record_invalid');
+        return value;
+      };
+      const item = selected[0]!;
+      const role = canonicalEndpointRole(item.repositoryRole ?? null);
+      const rawPackage: unknown = item.repositoryPackage;
+      if (rawPackage !== undefined && rawPackage !== null
+        && (typeof rawPackage !== 'object' || Array.isArray(rawPackage))) throw new Error('repository_metadata_record_invalid');
+      const repositoryPackage = rawPackage as Record<string, unknown> | null | undefined;
+      const state = repositoryPackage ? repositoryPackage.state : 'unknown';
+      if (typeof state !== 'string' || !['absent', 'accepted', 'processing', 'published', 'blocked', 'unknown'].includes(state)) {
+        throw new Error('repository_metadata_record_invalid');
+      }
+      return {
+        ok: true, stage: 'repository_registry_metadata', authority: 'unverified_local_registry',
+        readiness: 'not_checked', identityVerified: false,
+        repositories: [{
+          organizationId: scalar(item.organizationId, /^org_[A-Za-z0-9_]{1,128}$/, false),
+          workspaceId: scalar(item.workspaceId, UUID_PATTERN, false),
+          repositoryBindingId: scalar(item.repositoryBindingId, UUID_PATTERN),
+          repositoryAgentId: scalar(item.repositoryAgentId, UUID_PATTERN), endpointId: scalar(item.endpointId, UUID_PATTERN),
+          registeredSourceFingerprint: scalar(item.repositoryRemoteHash, /^sha256:[a-f0-9]{64}$/),
+          sourceFingerprintVerified: false, roleRevision: role?.revision ?? null,
+          sourcePolicyGenerationId: scalar(repositoryPackage?.sourcePolicyGenerationId, UUID_PATTERN),
+          repositoryPackageState: state, sharedRepositoryReady: null, readinessChecked: false,
+        }],
+      };
+    } catch { throw new Error('repository_metadata_record_invalid'); }
   }
   return {
     ok: true,
@@ -9238,6 +9286,14 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
 export async function run(argv: string[]): Promise<Output> {
   const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
+  if (flags.has('metadata-only')) throw new Error('repository_metadata_command_invalid');
+  if (command === 'repositories' && subcommand === 'metadata') {
+    if (positional.length !== 2
+      || [...repeated.values()].some(values => values.length !== 1) || currentBootstrapHostScope()) {
+      throw new Error('repository_metadata_command_invalid');
+    }
+    return repositoriesList(flags, true);
+  }
   const setupScope = currentBootstrapHostScope();
   if (setupScope) {
     // An admitted native callback keeps its original authority through the
