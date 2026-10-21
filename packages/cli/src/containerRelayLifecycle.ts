@@ -413,32 +413,34 @@ async function readConfiguration(options: ContainerLifecycleOptions) {
 
 /** Explicit PID1 inspection: never enters the consumer, child or write lifecycle. */
 export async function inspectOwnedContainerStartup(options: ContainerLifecycleOptions) {
-  const before = await ownedController(options, undefined, true);
-  const snapshot = async () => {
-    await privateDirectory(options);
-    const registration = await readContainerRegistration(options);
-    const control = await privateJson(options, 'container-control.json');
-    if (registration === null && control === null) return null;
-    if (!registration || !exactObject(control, ['schema', 'home', 'registrationHash', 'running'])
-      || control.schema !== 'dharma.container-relay-control/v1' || control.home !== options.home
-      || control.registrationHash !== registrationHash(options.home, registration)
-      || typeof control.running !== 'boolean') throw unavailable();
-    return { registration, running: control.running };
-  };
-  const first = await snapshot();
-  const second = await snapshot();
-  const after = await ownedController(options, undefined, true);
-  if (JSON.stringify(first) !== JSON.stringify(second)
-    || JSON.stringify(before) !== JSON.stringify(after)) throw unavailable();
-  return {
-    schema: 'dharma.container-startup-inspection/v1',
-    ok: true, stage: 'container_startup_inspection', observedAt: new Date().toISOString(),
-    state: first === null ? 'unconfigured' as const : first.running ? 'resume_requested' as const : 'paused' as const,
-    registrationHash: first ? registrationHash(options.home, first.registration) : null,
-    version: first?.registration.version ?? null,
-    ready: false, started: false, startupWrites: false, consumerStoreChecked: false,
-    requiresSeparateLifecycleAdmission: true,
-  };
+  try {
+    const before = await ownedController(options, undefined, true);
+    const snapshot = async () => {
+      await privateDirectory(options);
+      const registration = await readContainerRegistration(options);
+      const control = await privateJson(options, 'container-control.json');
+      if (registration === null && control === null) return null;
+      if (!registration || !exactObject(control, ['schema', 'home', 'registrationHash', 'running'])
+        || control.schema !== 'dharma.container-relay-control/v1' || control.home !== options.home
+        || control.registrationHash !== registrationHash(options.home, registration)
+        || typeof control.running !== 'boolean') throw unavailable();
+      return { registration, running: control.running };
+    };
+    const first = await snapshot();
+    const second = await snapshot();
+    const after = await ownedController(options, undefined, true);
+    if (JSON.stringify(first) !== JSON.stringify(second)
+      || JSON.stringify(before) !== JSON.stringify(after)) throw unavailable();
+    return {
+      schema: 'dharma.container-startup-inspection/v1',
+      ok: true, stage: 'container_startup_inspection', observedAt: new Date().toISOString(),
+      state: first === null ? 'unconfigured' as const : first.running ? 'resume_requested' as const : 'paused' as const,
+      registrationHash: first ? registrationHash(options.home, first.registration) : null,
+      version: first?.registration.version ?? null,
+      ready: false, started: false, startupWrites: false, consumerStoreChecked: false,
+      requiresSeparateLifecycleAdmission: true,
+    };
+  } catch { throw unavailable(); }
 }
 
 async function wait(milliseconds: number, signal: AbortSignal) {

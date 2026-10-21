@@ -38,6 +38,21 @@ test('inspection identity cannot take over the ordinary persistent entrypoint', 
   assert.deepEqual(await f.snapshot(), before);
 });
 
+for (const kind of ['missing-home', 'missing-relay', 'canary-path']) {
+  test(`inspection sanitizes absent private directories: ${kind}`, posix, async t => {
+    const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+    if (kind === 'missing-home') await rm(f.home, { recursive: true });
+    if (kind === 'missing-relay') await rm(join(f.home, 'relay'), { recursive: true });
+    if (kind === 'canary-path') f.options.home = join(f.root, 'CANARY_PRIVATE_PATH');
+    await assert.rejects(inspectOwnedContainerStartup(f.options), error => {
+      assert.match(String(error), /container_startup_unavailable/);
+      assert.doesNotMatch(String(error), /ENOENT|EACCES|CANARY_PRIVATE_PATH/);
+      assert.equal(String(error).includes(f.root), false);
+      return true;
+    });
+  });
+}
+
 for (const running of [false, true, null]) {
   test(`inspection reads control running=${running} without creating lifecycle state`, posix, async t => {
     const f = await fixture(running); t.after(() => rm(f.root, { recursive: true, force: true }));
