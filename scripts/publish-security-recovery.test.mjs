@@ -84,6 +84,18 @@ test('security publication workflow is explicit, main-only, protected, pinned an
   for(const pin of Object.values(securityPins))assert.match(pin,/^[a-f0-9]{64}$/);
 });
 
+test('security workflow cleans incremental declarations before artifact qualification',()=>{
+  const workflow=parse(readFileSync(new URL('../.github/workflows/publish-security-recovery.yml',import.meta.url),'utf8'));
+  const steps=workflow.jobs.publish.steps;
+  const install=steps.findIndex(step=>step.run==='npm ci');
+  const clean=steps.findIndex(step=>step.run==='npm run clean');
+  const check=steps.findIndex(step=>step.run==='npm run check');
+  const qualify=steps.findIndex(step=>step.name==='Qualify all eleven artifacts without publication');
+  assert.ok(clean>install,'canonical clean must follow dependency installation');
+  assert.ok(clean<check&&check<qualify,'clean build and checks must precede artifact qualification');
+  assert.equal(steps.filter(step=>step.run==='npm run clean').length,1);
+});
+
 test('security provenance binds the dedicated main workflow, exact source, version and artifact subject',()=>{
   const repository='https://github.com/dharma-ai-labs/dharma-agent-fabric';
   const proof=statement=>({attestations:[{bundle:{dsseEnvelope:{payload:Buffer.from(JSON.stringify(statement)).toString('base64')}}}]});

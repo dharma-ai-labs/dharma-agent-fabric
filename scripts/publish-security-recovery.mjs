@@ -17,7 +17,7 @@ function freeze(value) {
   return value;
 }
 export const securityRelease = freeze(JSON.parse(readFileSync(new URL('./security-recovery-release.json', import.meta.url), 'utf8')));
-export const securityPins = Object.freeze({manifest:'262d64269c96db2b6a327c072447eae8f6efd57a12ef8ac77dba7ba257426889',workflow:'813ed213fb6fae0bf9aa8cc3674b21cd68e64bd9dd58da723458e2dac9cf5549',tests:'0cc4f07315c9c4b0320c6e78291f35ae8d838aff61894dcf3dc19a8b6068591b'});
+export const securityPins = Object.freeze({manifest:'e9c61284c2e38f2c6218f9fa2d08b3cc5b4f2186f9fce2c60fcfc867a345494f',workflow:'2f923ca96bc8589e28463e033dfccbaebd8da6b3d40f2ff1623eb97d7accdb25',tests:'07708c25492ab209260bf7ec7a58f50e9badc87862ed045f274ca86ef0c9c20d'});
 export const securityTextHash=value=>createHash('sha256').update(value.replace(/\r\n/g,'\n')).digest('hex');
 export const securityWorkflowHash=value=>securityTextHash(value.replace(
   /^(\s*SECURITY_PUBLISHER_SHA256:) [a-f0-9]{64}\r?$/gm,'$1 <publisher-pin>'));

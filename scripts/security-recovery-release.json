@@ -33,7 +33,7 @@
       "workspace": "packages/cli",
       "name": "@dharma-ai-labs/agent-fabric",
       "version": "0.2.212",
-      "integrity": "sha512-p69IXqX+2DFm2Jnrmyx2tM0tlSiPWDxBhqyhHXVYBN1ADO1uq27vdlm4EVQgzcBpg048g62tYCyqvHhPzexVsA=="
+      "integrity": "sha512-glYZd0cUzPuHILOU4EAt+8rKNMIRrPbpwe8p8kUj8ncaSVDCBHGd1uDZka3GjVFgmBF4fP6oq/2FhjoqNgGOjw=="
     }
   ],
   "unchangedDependencies": [
