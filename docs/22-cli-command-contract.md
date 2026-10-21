@@ -79,10 +79,15 @@ dharma workspace remove <id> --preserve-vault --json
 ## Providers
 
 ```text
-dharma providers list --workspace <path-or-id> --json
-dharma providers probe <provider> --workspace <path-or-id> --json
-dharma providers smoke <provider> --workspace <path-or-id> --no-write --json
+dharma providers list --json
 ```
+
+This handler inspects local provider capabilities and protected action-decision
+receiver prerequisites. It can read enrollment/trust state and self-test the local
+execution journal; it is not a no-effect metadata-only command. It does not select
+a workspace, establish a repository-to-endpoint binding, attach an active provider
+conversation, or prove useful task delivery. `providers probe` and `providers smoke`
+are not implemented CLI commands in this release.
 
 ## Evidence
 
@@ -101,14 +106,26 @@ dharma evidence export-local <trajectory-id> --output <path> --json
 
 ```text
 dharma tasks list --json
-dharma tasks inspect <task-id> --json
-dharma tasks accept <task-id> --json
-dharma tasks reject <task-id> --reason <code> --json
-dharma tasks send <task-id> --message <text> --json
-dharma tasks cancel <task-id> --reason <text> --json
+dharma tasks dispatch --body-file <task-request.json> --confirm --json
+dharma tasks run-once --policy <approved-policy.json> --workspace-id <id> --json
 ```
 
-Server-offered tasks can auto-accept only when every authority requirement is pre-approved by local policy.
+`list` reads the selected organization's task list; listing does not accept or
+execute a task. `dispatch` submits a request through the organization API and
+requires `--confirm` after reviewing scope, cost and authority. The request file
+contains the authorized task request, not provider credentials or an enrollment
+grant. Confirmation does not replace signed task, target, policy or budget checks.
+
+`run-once` is an execution command, not a routing diagnostic. It requires the
+canonical verified policy of a locally registered workspace, can reconcile
+previously retained task trajectories, and can execute offered work. Do not run it
+merely to discover whether a provider connection works. Server-offered tasks can
+auto-accept only when every authority requirement is pre-approved by local policy.
+
+`tasks inspect`, `accept`, `reject`, `send` and `cancel` are not implemented public
+CLI handlers in this release. Do not use proposed spellings as acceptance or
+rejection controls. Authentication, task enqueue, receipt, provider execution and
+explicit integration acceptance are separate evidence states.
 
 ## Messages
 
