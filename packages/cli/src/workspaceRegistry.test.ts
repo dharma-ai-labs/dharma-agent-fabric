@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -101,7 +101,7 @@ test('diagnostic status reports registry health instead of masking corruption', 
 });
 
 test('real metadata dispatcher reads a scoped fixture registry without enrollment or creating state', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-metadata-fixture-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-metadata-fixture-')));
   const home = join(root, 'fixture-home'), repository = join(root, 'checkout');
   await mkdir(join(home, 'registry'), { recursive: true });
   await mkdir(repository);
@@ -130,7 +130,7 @@ test('real metadata dispatcher reads a scoped fixture registry without enrollmen
 });
 
 test('metadata preserves corrupt registry bytes without starting recovery or initializing identity', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-metadata-corrupt-fixture-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-metadata-corrupt-fixture-')));
   const home = join(root, 'fixture-home'), repository = join(root, 'checkout');
   await mkdir(join(home, 'registry'), { recursive: true });
   await mkdir(repository);
@@ -149,7 +149,7 @@ test('metadata preserves corrupt registry bytes without starting recovery or ini
 });
 
 test('real metadata dispatch rejects nested private fields with only a fixed sanitized error', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-metadata-shape-fixture-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dharma-metadata-shape-fixture-')));
   const home = join(root, 'fixture-home'), repository = join(root, 'checkout');
   await mkdir(join(home, 'registry'), { recursive: true });
   await mkdir(repository);

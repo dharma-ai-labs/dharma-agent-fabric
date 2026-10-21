@@ -108,6 +108,22 @@ test('exact source matching rejects prefix siblings and unregistered paths witho
   assert.deepEqual(f.calls, ['registry', 'realpath']);
 });
 
+test('metadata resolves a requested path alias against the canonical registered path without readiness', async () => {
+  const f = fixture();
+  const dependencies = { ...f.dependencies, realpath: async (path: string) => {
+    f.calls.push('realpath');
+    assert.equal(path, '/temporary-alias/product');
+    return '/source/product';
+  } };
+  const result = plain(await (await caller('repositoriesList', dependencies))(
+    flags([['repo', '/temporary-alias/product']]), true,
+  ));
+  assert.equal(result.repositories.length, 1);
+  assert.equal(result.repositories[0].workspaceId, f.row.workspaceId);
+  assert.equal(result.readiness, 'not_checked');
+  assert.deepEqual(f.calls, ['registry', 'realpath']);
+});
+
 test('ambiguous same-path records cannot disclose multiple organizations', async () => {
   const f = fixture();
   f.setRows([f.row, { ...f.row, organizationId: 'org_other', workspaceId: '77777777-7777-4777-8777-777777777777' }]);
