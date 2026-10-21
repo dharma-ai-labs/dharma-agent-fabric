@@ -117,6 +117,8 @@
     "scripts/security-recovery-release.json",
     "scripts/publish-security-recovery.mjs",
     "scripts/publish-security-recovery.test.mjs",
-    "packages/secure-store/src/windowsEnrollmentAnchor.test.ts"
+    "packages/secure-store/src/windowsEnrollmentAnchor.test.ts",
+    "scripts/publish-device-maintenance.test.mjs",
+    "scripts/publish-signing-upgrade.test.mjs"
   ]
 }

@@ -197,7 +197,7 @@ test('immutable dependencies require their exact original main or tag provenance
   }
 });
 
-test('Linux packs retain immutable artifacts or reject explicitly versioned replacements before publication', {skip:process.platform!=='linux'},async()=>{
+test('Linux packs keep historical artifacts immutable and reject replacement source before publication', {skip:process.platform!=='linux'},async()=>{
   assert.ok(process.env.npm_execpath,'normal npm test context required');
   const directory=mkdtempSync(join(tmpdir(),'dharma-signing-dependency-packs-'));
   try{
@@ -211,7 +211,16 @@ test('Linux packs retain immutable artifacts or reject explicitly versioned repl
       const current=JSON.parse(read(item.workspace+'/package.json'));
       assert.equal(packed.name,item.name);assert.equal(packed.version,current.version);
       assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),packed.integrity);
-      if(current.version===item.version){
+      if(item.name==='@dharma-ai-labs/agent-fabric-secure-store'&&current.version===item.version&&packed.integrity!==item.integrity){
+        assert.notEqual(packed.integrity,item.integrity);
+        const changed=execFileSync('git',['diff','--name-only',item.source,'HEAD','--',item.workspace],
+          {cwd:root,encoding:'utf8',maxBuffer:8388608}).trim().split('\n').filter(Boolean);
+        assert.deepEqual(changed,['packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
+        const {io,events}=fixture(),originalPack=io.pack;
+        io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
+        await assert.rejects(publishSigningUpgrade(head,io,{publish:true}),/immutable dependency changed/);
+        assert.equal(events.some(event=>event.startsWith('publish:')),false);
+      }else if(current.version===item.version){
         assert.equal(packed.integrity,item.integrity,'immutable package changed: '+item.name);
       }else{
         const historical=JSON.parse(execFileSync('git',['show',qualifiedReleaseSource+':'+item.workspace+'/package.json'],

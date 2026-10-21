@@ -24,7 +24,7 @@ jobs:
     environment: npm
     env:
       EXPECTED_HEAD: ${{ inputs.expected_head }}
-      SECURITY_PUBLISHER_SHA256: be57792972d868dd5a3137c0211f34a9cc260292940383889537e02687078b08
+      SECURITY_PUBLISHER_SHA256: 0352ff7da834dc8ebeda41b7382507bd83cd8d3e2cf102100787475d411bb116
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
