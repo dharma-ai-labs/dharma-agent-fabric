@@ -1,0 +1,86 @@
+{
+  "reference": {
+    "tools": [
+      { "name": "a_read", "confirmation": false, "outputSchema": true, "annotations": { "readOnlyHint": true, "destructiveHint": false } },
+      { "name": "b_write", "confirmation": true, "outputSchema": true, "annotations": { "readOnlyHint": false, "destructiveHint": false } }
+    ]
+  },
+  "cases": {
+    "compatible": {
+      "schema": "dharma.mcp-snapshot-manifest/v1",
+      "expected": { "identity": "dharma-agent-fabric", "version": "1.0.0" },
+      "snapshots": [
+        { "boundary": "source", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } },
+          { "name": "b_write", "confirmation": true, "annotations": { "readOnlyHint": false, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "body": { "type": "string" } } }, "outputSchema": { "type": "object" } } ] },
+        { "boundary": "host", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "b_write", "confirmation": true, "annotations": { "destructiveHint": false, "readOnlyHint": false }, "inputSchema": { "properties": { "body": { "type": "string", "description": "free text" } }, "type": "object" }, "outputSchema": { "type": "object" } },
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } } ] },
+        { "boundary": "server", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } },
+          { "name": "b_write", "confirmation": true, "annotations": { "readOnlyHint": false, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "body": { "type": "string" } } }, "outputSchema": { "type": "object" } } ] },
+        { "boundary": "submitted", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } },
+          { "name": "b_write", "confirmation": true, "annotations": { "readOnlyHint": false, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "body": { "type": "string" } } }, "outputSchema": { "type": "object" } } ] },
+        { "boundary": "released", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } },
+          { "name": "b_write", "confirmation": true, "annotations": { "readOnlyHint": false, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "body": { "type": "string" } } }, "outputSchema": { "type": "object" } } ] }
+      ]
+    },
+    "drift": {
+      "schema": "dharma.mcp-snapshot-manifest/v1",
+      "expected": { "identity": "dharma-agent-fabric", "version": "1.0.0" },
+      "snapshots": [
+        { "boundary": "source", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } },
+          { "name": "b_write", "confirmation": true, "annotations": { "readOnlyHint": false, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "body": { "type": "string" } } }, "outputSchema": { "type": "object" } } ] },
+        { "boundary": "released", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": true }, "inputSchema": { "type": "object", "properties": { "id": { "type": "integer" } }, "required": ["id"] }, "outputSchema": { "type": "object" } },
+          { "name": "b_write", "confirmation": false, "annotations": { "readOnlyHint": false, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "body": { "type": "string" } } }, "outputSchema": { "type": "object" } },
+          { "name": "c_new", "confirmation": false, "annotations": { "readOnlyHint": true }, "inputSchema": { "type": "object" }, "outputSchema": { "type": "object" } } ] },
+        { "boundary": "host", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false }, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "outputSchema": { "type": "object" } } ] }
+      ]
+    },
+    "unknown": {
+      "schema": "dharma.mcp-snapshot-manifest/v1",
+      "expected": { "identity": "dharma-agent-fabric", "version": "1.0.0" },
+      "snapshots": [
+        { "boundary": "host", "provenance": { "observed": false, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": null },
+        { "boundary": "server", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false } },
+          { "name": "b_write", "confirmation": true, "annotations": { "readOnlyHint": false, "destructiveHint": false } } ] }
+      ]
+    },
+    "invalidDuplicate": {
+      "schema": "dharma.mcp-snapshot-manifest/v1",
+      "expected": { "identity": "dharma-agent-fabric", "version": "1.0.0" },
+      "snapshots": [
+        { "boundary": "server", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [
+          { "name": "a_read", "confirmation": false, "annotations": {}, "inputSchema": { "type": "object" }, "outputSchema": { "type": "object" } },
+          { "name": "a_read", "confirmation": false, "annotations": {}, "inputSchema": { "type": "object" }, "outputSchema": { "type": "object" } },
+          { "name": "bad name!", "confirmation": false } ] },
+        { "boundary": "server", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [] },
+        { "boundary": "staging", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0" }, "tools": [] }
+      ]
+    },
+    "provenanceMismatch": {
+      "schema": "dharma.mcp-snapshot-manifest/v1",
+      "expected": { "identity": "dharma-agent-fabric", "version": "1.0.0" },
+      "snapshots": [
+        { "boundary": "submitted", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "0.9.0" }, "tools": [] },
+        { "boundary": "released", "provenance": { "observed": true, "identity": "other-app", "version": "1.0.0" }, "tools": [] },
+        { "boundary": "host", "provenance": { "observed": true }, "tools": [] }
+      ]
+    },
+    "secret": {
+      "schema": "dharma.mcp-snapshot-manifest/v1",
+      "expected": { "identity": "dharma-agent-fabric", "version": "1.0.0" },
+      "snapshots": [
+        { "boundary": "server", "provenance": { "observed": true, "identity": "dharma-agent-fabric", "version": "1.0.0", "token": "SECRET_CANARY_PROVENANCE" }, "tools": [
+          { "name": "a_read", "description": "SECRET_CANARY_DESCRIPTION", "confirmation": false, "annotations": { "readOnlyHint": true, "destructiveHint": false, "title": "SECRET_CANARY_TITLE" }, "inputSchema": { "type": "object", "properties": { "SECRET_CANARY_PROPERTY": { "type": "string", "default": "SECRET_CANARY_DEFAULT", "description": "SECRET_CANARY_NESTED" } } }, "outputSchema": { "type": "object", "examples": ["SECRET_CANARY_EXAMPLE"] } },
+          { "name": "token=SECRET_CANARY_NAME", "confirmation": false } ] }
+      ]
+    }
+  }
+}
