@@ -136,6 +136,49 @@ test('assembler does not pretend to redact allowed documentation or embedded sch
   assert.deepEqual(manifest.snapshots[0], snapshot);
 });
 
+test('overflow cannot turn invalid raw schema evidence into a compatible rewritten manifest', t => {
+  const ws = workspace(t);
+  const targetName = good.snapshots[0].tools[0].name;
+  const snapshots = good.snapshots.map(snapshot => {
+    const value = clone(snapshot);
+    value.tools.find(tool => tool.name === targetName).inputSchema = { const: 'SYNTHETIC_OVERFLOW_NUMBER' };
+    return JSON.stringify(value).replace('"SYNTHETIC_OVERFLOW_NUMBER"', '1e400');
+  });
+  const original = { ...clone(good), snapshots: snapshots.map(value => JSON.parse(value)) };
+  assert.equal(compareSnapshotManifest(original, fixtures.reference).verdict, 'invalid');
+  const args = [...expectedArgs, ...snapshots.flatMap((value, index) => ['--snapshot', ws.file(`overflow-${index}.json`, value)])];
+  const result = run(args);
+  if (result.status === 0) {
+    const rewritten = compareSnapshotManifest(JSON.parse(result.stdout), fixtures.reference);
+    assert.fail(`Invalid numeric evidence was rewritten; comparator verdict became ${rewritten.verdict}`);
+  }
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, 'snapshot_assembly_invalid\n');
+});
+
+test('non-finite JSON numbers are rejected recursively, including arrays and ignored documentation', t => {
+  const ws = workspace(t);
+  for (const [index, schema] of [
+    { enum: ['SYNTHETIC_OVERFLOW_NUMBER'] },
+    { type: 'object', properties: { x: { const: 'SYNTHETIC_OVERFLOW_NUMBER' } } },
+    { type: 'string', examples: [{ nested: ['SYNTHETIC_OVERFLOW_NUMBER'] }] },
+  ].entries()) {
+    const snapshot = clone(good.snapshots[0]);
+    snapshot.tools[0].outputSchema = schema;
+    const raw = JSON.stringify(snapshot).replace('"SYNTHETIC_OVERFLOW_NUMBER"', '-1e400');
+    rejected([...expectedArgs, '--snapshot', ws.file(`nested-overflow-${index}.json`, raw)], 'snapshot_assembly_invalid');
+  }
+});
+
+test('large finite numbers and overflow-looking strings retain their actual JSON values', t => {
+  const snapshot = clone(good.snapshots[0]);
+  snapshot.tools[0].inputSchema = { const: 1e300, examples: ['1e400', '-1e400'] };
+  const { manifest } = assembled(['--snapshot', workspace(t).file('finite.json', snapshot)]);
+  assert.deepEqual(manifest.snapshots[0], snapshot);
+});
+
 test('malformed JSON, invalid UTF-8, directories and missing files have fixed non-echoing diagnostics', t => {
   const ws = workspace(t);
   const malformed = ws.file('PRIVATE_PATH_CANARY.json', '{"PRIVATE_VALUE_CANARY":');

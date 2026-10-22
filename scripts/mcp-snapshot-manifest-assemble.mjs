@@ -35,7 +35,12 @@ export function assembleSnapshotManifest(expected, snapshots) {
   if (!validator()(manifest)) fail('snapshot_assembly_invalid');
   // Duplicates and mismatches intentionally remain for the comparator to
   // diagnose. No missing boundary, metadata, schema or observation is invented.
-  const output = `${JSON.stringify(manifest)}\n`;
+  const output = `${JSON.stringify(manifest, (_key, value) => {
+    // JSON.parse accepts overflow as Infinity; JSON.stringify would silently
+    // replace it with null, changing opaque schema evidence before comparison.
+    if (typeof value === 'number' && !Number.isFinite(value)) fail('snapshot_assembly_invalid');
+    return value;
+  })}\n`;
   if (Buffer.byteLength(output) > MAX_BYTES) fail('snapshot_assembly_too_large');
   return output;
 }
