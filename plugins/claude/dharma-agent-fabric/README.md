@@ -40,6 +40,14 @@ Then run `/mcp`, select `dharma-agent-fabric` and choose **Authenticate**. Sign 
 - Evidence expansion, paid analysis, task dispatch, agent-to-agent messages, GitHub writes (including merging an approved skill-remediation pull request), skill release, rollout and rollback require explicit confirmation and are metered or gated by your organization's policy.
 - The setup skill never handles passwords, keys, tokens or grants in chat, and treats installation, enrollment, delivery and observed use as separate, separately verified states.
 
+## Data this plugin sends
+
+- The plugin ships no executables, hooks or local telemetry. The setup skill is instructions that Claude reads locally.
+- When you sign in, the Dharma authorization server (`clerk.dharma-ai.io`) receives the OAuth request, and Claude receives an access token scoped to `openid`, `profile`, `email` and `user:org:read` for your Dharma account and organization.
+- When Claude calls a Fabric tool, the tool name and its arguments, such as an organization, agent, task or remediation identifier, a task or message you approved, or an analysis request, are sent over HTTPS to `https://mcp.dharma-ai.io/mcp`. The response contains only the organization data that your membership and role allow.
+- Mutating, paid or GitHub-writing tools send data only after your explicit confirmation. Nothing else from your conversation, files or machine is sent by the plugin.
+- How Dharma stores and retains this data is described in the [privacy policy](https://www.dharma-ai.io/privacy).
+
 ## Requirements
 
 - A Dharma AI account with membership in an organization that has Agent Fabric enabled.
