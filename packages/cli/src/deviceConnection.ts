@@ -40,7 +40,7 @@ export async function assertInstallationContinuity(config: Pick<DeviceConfig, 'i
   }
   let marker: {schema?: unknown; installationId?: unknown};
   try {marker = JSON.parse(bytes) as typeof marker;} catch {throw new Error('connection_installation_corrupt');}
-  if (!marker || marker.schema !== 'dharma.installation-identity/v1'
+  if (!marker || marker.schema !== 'dharma.installation-identity/v1' || typeof marker.installationId !== 'string'
     || marker.installationId !== config.installationId) throw new Error('connection_installation_mismatch');
 }
 

@@ -326,6 +326,50 @@ for (const legacy of [false, true]) {
   });
 }
 
+for (const markerId of [undefined, null, '']) {
+  test(`legacy pending login rejects a present marker with ${String(markerId)} installation ID`, async t => {
+    const f = await pendingLoginFixture(t);
+    const {installationId: _installationId, ...legacy} = f.pending;
+    const pendingBefore = JSON.stringify(legacy);
+    await writeFile(f.pendingPath, pendingBefore);
+    const path = join(f.home, 'installation.json');
+    const markerBefore = JSON.stringify({schema: 'dharma.installation-identity/v1', installationId: markerId});
+    await writeFile(path, markerBefore);
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['resume', true]])), /connection_installation_mismatch/);
+    assert.deepEqual(f.polls, []);
+    assert.deepEqual(f.effects, []);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), pendingBefore);
+    assert.equal(await readFile(path, 'utf8'), markerBefore);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  });
+}
+
+test('legacy pending login rejects a schema-only marker appearing during polling', async t => {
+  const f = await pendingLoginFixture(t);
+  const {installationId: _installationId, ...legacy} = f.pending;
+  const pendingBefore = JSON.stringify(legacy);
+  await writeFile(f.pendingPath, pendingBefore);
+  const path = join(f.home, 'installation.json');
+  await rm(path);
+  const markerBefore = JSON.stringify({schema: 'dharma.installation-identity/v1'});
+  const poll = f.deps.pollEnrollment as (input: unknown) => Promise<unknown>;
+  f.deps.pollEnrollment = async (input: unknown) => {
+    await writeFile(path, markerBefore);
+    return poll(input);
+  };
+  let released = false;
+  f.deps.acquirePidLock = async () => async () => {released = true;};
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), /connection_installation_mismatch/);
+  assert.equal(released, true);
+  assert.equal(f.polls.length, 1);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.pendingPath, 'utf8'), pendingBefore);
+  assert.equal(await readFile(path, 'utf8'), markerBefore);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
 async function bootstrapFixture(t: {after(fn: () => Promise<void>): void}) {
   const f = await fixture(t);
   const server = generateKeyPairSync('ed25519');
