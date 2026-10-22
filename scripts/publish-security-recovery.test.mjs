@@ -58,7 +58,9 @@ test('security source admission binds main, baseline, exact hashes, package mani
   assert.throws(()=>assertSecuritySource(head,{...snapshot,lock:snapshot.lock+'foreign'}),/lock delta/);
   const packages=structuredClone(snapshot);packages.packageManifests['packages/cli/package.json'].version='0.0.0';
   assert.throws(()=>assertSecuritySource(head,packages),/package manifest/);
-  assert.deepEqual(JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')),snapshot.manifest);
+  const currentManifest=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+  assert.notDeepEqual(currentManifest,snapshot.manifest);
+  assert.throws(()=>assertSecuritySource(head,{...snapshot,manifest:currentManifest}),/root manifest/);
 });
 
 test('historical security admission does not admit later lock or release-test candidates',()=>{

@@ -18,8 +18,12 @@ on:
         description: Publish only the exact reviewed device-trust maintenance cohort from main
         type: boolean
         default: false
+      artifacts_only:
+        description: Qualify and retain the four reviewed execution-cohort artifacts without publication
+        type: boolean
+        default: false
       expected_head:
-        description: Exact reviewed main SHA (required for onboarding-only publication)
+        description: Exact reviewed main SHA for bounded publication or artifacts-only qualification
         type: string
         default: ""
 
@@ -39,7 +43,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "22.22.0"
+          node-version: ${{ inputs.artifacts_only && '22.22.3' || '22.22.0' }}
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm install --global npm@11.5.1
@@ -48,16 +52,20 @@ jobs:
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
           CONTRACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.contracts_only || false }}
           DEVICE_MAINTENANCE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.device_maintenance_only || false }}
+          ARTIFACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.artifacts_only || false }}
           MAINTENANCE_PUBLISHER_SHA256: 4ac232f94c46eaee923df9ac44ad6ea33e2c6337e448c54bebb6f74076c83a8b
           EXPECTED_HEAD: ${{ inputs.expected_head }}
         run: |
           selected_scopes=0
-          for selected in "$ONBOARDING_ONLY" "$CONTRACTS_ONLY" "$DEVICE_MAINTENANCE_ONLY"; do
+          for selected in "$ONBOARDING_ONLY" "$CONTRACTS_ONLY" "$DEVICE_MAINTENANCE_ONLY" "$ARTIFACTS_ONLY"; do
             if [ "$selected" = "true" ]; then selected_scopes=$((selected_scopes + 1)); fi
           done
           if [ "$selected_scopes" -gt 1 ]; then
             echo "Choose exactly one bounded release scope." >&2
             exit 1
+          fi
+          if [ "$ARTIFACTS_ONLY" = "true" ]; then
+            node scripts/qualify-artifacts-only.mjs --expected-head "$EXPECTED_HEAD" --admission-only
           fi
           if [ "$CONTRACTS_ONLY" = "true" ]; then
             node scripts/publish-recovery-contracts.mjs --expected-head "$EXPECTED_HEAD" --admission-only
@@ -68,8 +76,17 @@ jobs:
           fi
       - run: npm ci
       - run: npm run check
+      - name: Qualify execution artifacts without publication
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts_only
+        env:
+          ARTIFACTS_ONLY: ${{ inputs.artifacts_only }}
+          ONBOARDING_ONLY: ${{ inputs.onboarding_only }}
+          CONTRACTS_ONLY: ${{ inputs.contracts_only }}
+          DEVICE_MAINTENANCE_ONLY: ${{ inputs.device_maintenance_only }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+        run: node scripts/qualify-artifacts-only.mjs --expected-head "$EXPECTED_HEAD"
       - name: Build release artifacts
-        if: "!(github.event_name == 'workflow_dispatch' && inputs.contracts_only)"
+        if: "!(github.event_name == 'workflow_dispatch' && (inputs.contracts_only || inputs.artifacts_only))"
         run: |
           mkdir -p release
           npm pack --workspace packages/cli --pack-destination release
@@ -82,7 +99,19 @@ jobs:
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: release/*
+      - name: Retain qualified execution artifacts
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts_only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: execution-qualification-${{ github.sha }}-${{ github.run_id }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
       - name: Publish public workspaces
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.artifacts_only)"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           ONBOARDING_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.onboarding_only || false }}
@@ -166,12 +195,12 @@ jobs:
             fi
           done
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.artifacts_only)
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --generate-notes
   publish-python:
-    if: vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only || inputs.device_maintenance_only))
+    if: vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only || inputs.device_maintenance_only || inputs.artifacts_only))
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -30,10 +30,10 @@ async function snapshot(){
     baselineManifest:JSON.parse(git('show',baseline+':package.json')),manifest,
     baselineLock:git('show',baseline+':package-lock.json'),lock:git('show',baseline+':package-lock.json'),
     baselineManifests:manifests,manifests:structuredClone(manifests),
-    workflowHash:m.maintenanceWorkflowHash(readFileSync(new URL('../.github/workflows/publish.yml',import.meta.url),'utf8')),
+    workflowHash:m.maintenanceWorkflowHash(git('show','73793c2df81f6bf9c81fe276b37997fa2159c67d:.github/workflows/publish.yml')+'\n'),
     expectedPublisherHash:hash(readFileSync(new URL('./publish-device-maintenance.mjs',import.meta.url),'utf8')),
     publisherHash:hash(readFileSync(new URL('./publish-device-maintenance.mjs',import.meta.url),'utf8')),
-    workflowTestHash:hash(readFileSync(new URL('./publish-workflow.test.mjs',import.meta.url),'utf8')),
+    workflowTestHash:hash(git('show','73793c2df81f6bf9c81fe276b37997fa2159c67d:scripts/publish-workflow.test.mjs')+'\n'),
     releaseTestHash:hash(git('show','73793c2df81f6bf9c81fe276b37997fa2159c67d:scripts/publish-device-maintenance.test.mjs')+'\n')};
 }
 async function fixture(){
@@ -79,6 +79,10 @@ test('historical CLI210 admission refuses current runtime manifests and changed 
     [path,JSON.parse(readFileSync(new URL(path,root),'utf8'))]));
   assert.notDeepEqual(current,s.baselineManifests);
   assert.throws(()=>m.assertMaintenanceSource(head,{...s,manifests:current}),/package manifest/);
+  assert.throws(()=>m.assertMaintenanceSource(head,{...s,
+    workflowHash:m.maintenanceWorkflowHash(readFileSync(new URL('../.github/workflows/publish.yml',import.meta.url),'utf8'))}),/publisher workflow/);
+  assert.throws(()=>m.assertMaintenanceSource(head,{...s,
+    workflowTestHash:hash(readFileSync(new URL('./publish-workflow.test.mjs',import.meta.url),'utf8'))}),/workflow tests/);
 });
 test('admission binds executed publisher bytes to the independently pinned workflow value',async()=>{
   const m=await load(),s=await snapshot();
