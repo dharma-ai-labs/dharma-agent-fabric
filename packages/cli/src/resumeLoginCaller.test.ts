@@ -188,6 +188,70 @@ test('two first-login callers serialize enrollment and the second reuses its app
   assert.deepEqual(results.map(result => result?.status).sort(), ['approved', 'resumed']);
 });
 
+async function pendingLoginFixture(t: {after(fn: () => Promise<void>): void}) {
+  const f = await fixture(t);
+  await rm(f.configPath);
+  const pending = {
+    hqUrl: 'https://pending.example', organizationId: f.config.organizationId,
+    installationId: f.config.installationId, name: f.config.deviceName,
+    platform: f.config.platform, publicKeyEd25519: f.config.publicKeyEd25519,
+    deviceCode: 'synthetic-pending-code', verificationUri: 'https://pending.example/approve',
+    browserCode: 'synthetic-browser-code', expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const pendingPath = join(f.home, 'pending.json');
+  const pendingBytes = JSON.stringify(pending);
+  await writeFile(pendingPath, pendingBytes, {mode: 0o600});
+  f.deps.portalUrl = await caller('portalUrl', {});
+  const polls: unknown[] = [];
+  f.deps.pollEnrollment = async (input: unknown) => {
+    polls.push(input);
+    return {status: 'approved', deviceId: f.config.deviceId,
+      relayUrl: f.config.relayUrl, serverPublicKeyEd25519: f.config.serverPublicKeyEd25519};
+  };
+  return {...f, pending, pendingPath, pendingBytes, polls};
+}
+
+test('pending login rejects a changed organization or portal before polling or accepting enrollment', async t => {
+  for (const [key, value] of [
+    ['organization-id', 'org_other'], ['portal-url', 'https://other.example'], ['hq-url', 'https://other.example'],
+  ]) {
+    const f = await pendingLoginFixture(t);
+    const installation = await readFile(join(f.home, 'installation.json'), 'utf8');
+    let released = false;
+    f.deps.acquirePidLock = async () => async () => {released = true;};
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map<string, string | boolean>([['resume', true], [key!, value!]])),
+      /connection_scope_mismatch/);
+    assert.equal(released, true);
+    assert.deepEqual(f.polls, []);
+    assert.deepEqual(f.effects, []);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+    assert.equal(await readFile(join(f.home, 'installation.json'), 'utf8'), installation);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  }
+});
+
+test('pending login keeps its saved scope when options are omitted or explicitly match', async t => {
+  for (const supplied of [false, true]) {
+    const f = await pendingLoginFixture(t);
+    const flags = new Map<string, string | boolean>([['resume', true]]);
+    if (supplied) {
+      flags.set('organization-id', f.pending.organizationId);
+      flags.set('portal-url', f.pending.hqUrl + '/');
+    }
+    const login = await caller('login', f.deps);
+    const result = await login(flags);
+    assert.equal(result?.status, 'approved');
+    assert.equal(result?.organizationId, f.pending.organizationId);
+    assert.equal(f.polls.length, 1);
+    assert.equal((f.polls[0] as {hqUrl: string}).hqUrl, f.pending.hqUrl);
+    assert.deepEqual(f.effects, ['anchor-write']);
+    const saved = JSON.parse(await readFile(f.configPath, 'utf8'));
+    assert.equal(saved.hqUrl, f.pending.hqUrl);
+    assert.equal(saved.organizationId, f.pending.organizationId);
+  }
+});
+
 async function bootstrapFixture(t: {after(fn: () => Promise<void>): void}) {
   const f = await fixture(t);
   const server = generateKeyPairSync('ed25519');
