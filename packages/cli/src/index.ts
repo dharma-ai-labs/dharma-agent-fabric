@@ -5161,7 +5161,8 @@ export function canonicalEndpointRole(value: unknown): WorkspaceRecord['reposito
 
 async function bindRepositoryAgent(fabric: AgentFabricClient, item: WorkspaceRecord,
   joinExistingBindingId?: string): Promise<WorkspaceRecord> {
-  const remote = await gitValue(item.path, ['config', '--get', 'remote.origin.url']);
+  const remote = item.accessMode === 'knowledge_only'
+    ? null : await gitValue(item.path, ['config', '--get', 'remote.origin.url']);
   const currentIdentity = item.repositoryIdentityVersion === 'normalized-v1'
     ? item.repositoryRemoteHash
     : remote ? sourceRepositoryFingerprint(remote).fingerprint : item.repositoryRemoteHash;
@@ -5922,14 +5923,7 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
     await mkdir(resolve(workspace, '.dharma'), { recursive: true, mode: 0o700 });
     await writeJsonAtomic(markerPath, expectedMarker);
   }
-  if (!await gitValue(workspace, ['rev-parse', '--verify', 'HEAD'])) {
-    const template = resolve(workspace, '.dharma', 'empty-git-template');
-    await mkdir(template, { recursive: true, mode: 0o700 });
-    await execFileAsync('git', ['-c', `init.templateDir=${template}`, 'init', '--initial-branch=main', workspace]);
-    await execFileAsync('git', ['-C', workspace, '-c', 'user.name=Dharma Agent Fabric',
-      '-c', 'user.email=agent-fabric@localhost', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${template}`,
-      'commit', '--allow-empty', '-m', 'Initialize isolated knowledge workspace']);
-  }
+  // This managed directory holds inherited knowledge, not a source checkout.
   const workspaceId = workspaceIdForDevice({ organizationId: config.organizationId,
     deviceId: config.deviceId, path: workspace });
   let item = selectDeviceWorkspace(await registry(), { organizationId: config.organizationId,
