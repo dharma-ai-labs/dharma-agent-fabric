@@ -4317,6 +4317,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         String(flags.get('organization-id') || pending.organizationId),
         normalizeHqUrl(portalUrl(flags, pending.hqUrl)));
       await assertEnrollmentHomeCompatible(pending.hqUrl, pending.organizationId);
+      await assertInstallationContinuity(pending, installationIdentityPath());
     } else {
       const hqUrl = normalizeHqUrl(portalUrl(flags));
       const organizationId = required(flags, 'organization-id');
@@ -4365,6 +4366,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
           if (!verification.ok) throw new Error(`Enrollment signing keyset was rejected: ${verification.reason}.`);
           config.serverSigningKeyset = candidate;
         }
+        await assertInstallationContinuity(pending, installationIdentityPath());
         await saveDeviceConfig(configPath(), config);
         await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
         if (config.connectionMode) await saveDeviceConnectionPreference({configPath: configPath(), config,

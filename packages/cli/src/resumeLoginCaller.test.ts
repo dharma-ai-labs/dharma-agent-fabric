@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
@@ -250,6 +250,124 @@ test('pending login keeps its saved scope when options are omitted or explicitly
     assert.equal(saved.hqUrl, f.pending.hqUrl);
     assert.equal(saved.organizationId, f.pending.organizationId);
   }
+});
+
+for (const state of ['missing', 'foreign', 'corrupt', 'schema', 'unreadable'] as const) {
+  test(`pending login rejects a ${state} installation marker before polling`, async t => {
+    const f = await pendingLoginFixture(t);
+    const path = join(f.home, 'installation.json');
+    if (state === 'missing' || state === 'unreadable') await rm(path);
+    if (state === 'unreadable') await mkdir(path);
+    if (state === 'foreign') await writeFile(path, JSON.stringify({schema: 'dharma.installation-identity/v1',
+      installationId: '33333333-3333-4333-8333-333333333333'}));
+    if (state === 'corrupt') await writeFile(path, '{broken');
+    if (state === 'schema') await writeFile(path, JSON.stringify({schema: 'wrong', installationId: f.pending.installationId}));
+    const before = state === 'missing' || state === 'unreadable' ? undefined : await readFile(path, 'utf8');
+    let released = false;
+    f.deps.acquirePidLock = async () => async () => {released = true;};
+    const login = await caller('login', f.deps);
+    const error = state === 'corrupt' ? 'corrupt' : state === 'foreign' || state === 'schema' ? 'mismatch' : 'unavailable';
+    await assert.rejects(login(new Map([['resume', true]])), new RegExp(`connection_installation_${error}`));
+    assert.equal(released, true);
+    assert.deepEqual(f.polls, []);
+    assert.deepEqual(f.effects, []);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+    if (before !== undefined) assert.equal(await readFile(path, 'utf8'), before);
+    else await assert.rejects(readFile(path), {code: state === 'missing' ? 'ENOENT' : 'EISDIR'});
+  });
+}
+
+test('legacy pending login remains resumable only without an installation marker', async t => {
+  const f = await pendingLoginFixture(t);
+  const {installationId: _installationId, ...legacy} = f.pending;
+  await writeFile(f.pendingPath, JSON.stringify(legacy));
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), /connection_installation_mismatch/);
+  assert.deepEqual(f.polls, []);
+  assert.deepEqual(f.effects, []);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  await rm(join(f.home, 'installation.json'));
+  const result = await login(new Map([['resume', true]]));
+  assert.equal(result?.status, 'approved');
+  assert.equal(f.polls.length, 1);
+  assert.deepEqual(f.effects, ['anchor-write']);
+  assert.equal(JSON.parse(await readFile(f.configPath, 'utf8')).installationId, undefined);
+  await assert.rejects(readFile(join(f.home, 'installation.json')), {code: 'ENOENT'});
+});
+
+for (const legacy of [false, true]) {
+  test(`pending login rechecks ${legacy ? 'legacy' : 'current'} installation continuity after approval polling`, async t => {
+    const f = await pendingLoginFixture(t);
+    const path = join(f.home, 'installation.json');
+    if (legacy) {
+      const {installationId: _installationId, ...pending} = f.pending;
+      await writeFile(f.pendingPath, JSON.stringify(pending));
+      await rm(path);
+    }
+    const pendingBefore = await readFile(f.pendingPath, 'utf8');
+    const poll = f.deps.pollEnrollment as (input: unknown) => Promise<unknown>;
+    const changed = JSON.stringify({schema: 'dharma.installation-identity/v1',
+      installationId: '33333333-3333-4333-8333-333333333333'});
+    f.deps.pollEnrollment = async (input: unknown) => {
+      await writeFile(path, changed);
+      return poll(input);
+    };
+    let released = false;
+    f.deps.acquirePidLock = async () => async () => {released = true;};
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['resume', true]])), /connection_installation_mismatch/);
+    assert.equal(released, true);
+    assert.equal(f.polls.length, 1);
+    assert.deepEqual(f.effects, []);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), pendingBefore);
+    assert.equal(await readFile(path, 'utf8'), changed);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  });
+}
+
+for (const markerId of [undefined, null, '']) {
+  test(`legacy pending login rejects a present marker with ${String(markerId)} installation ID`, async t => {
+    const f = await pendingLoginFixture(t);
+    const {installationId: _installationId, ...legacy} = f.pending;
+    const pendingBefore = JSON.stringify(legacy);
+    await writeFile(f.pendingPath, pendingBefore);
+    const path = join(f.home, 'installation.json');
+    const markerBefore = JSON.stringify({schema: 'dharma.installation-identity/v1', installationId: markerId});
+    await writeFile(path, markerBefore);
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['resume', true]])), /connection_installation_mismatch/);
+    assert.deepEqual(f.polls, []);
+    assert.deepEqual(f.effects, []);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), pendingBefore);
+    assert.equal(await readFile(path, 'utf8'), markerBefore);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  });
+}
+
+test('legacy pending login rejects a schema-only marker appearing during polling', async t => {
+  const f = await pendingLoginFixture(t);
+  const {installationId: _installationId, ...legacy} = f.pending;
+  const pendingBefore = JSON.stringify(legacy);
+  await writeFile(f.pendingPath, pendingBefore);
+  const path = join(f.home, 'installation.json');
+  await rm(path);
+  const markerBefore = JSON.stringify({schema: 'dharma.installation-identity/v1'});
+  const poll = f.deps.pollEnrollment as (input: unknown) => Promise<unknown>;
+  f.deps.pollEnrollment = async (input: unknown) => {
+    await writeFile(path, markerBefore);
+    return poll(input);
+  };
+  let released = false;
+  f.deps.acquirePidLock = async () => async () => {released = true;};
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), /connection_installation_mismatch/);
+  assert.equal(released, true);
+  assert.equal(f.polls.length, 1);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.pendingPath, 'utf8'), pendingBefore);
+  assert.equal(await readFile(path, 'utf8'), markerBefore);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
 });
 
 async function bootstrapFixture(t: {after(fn: () => Promise<void>): void}) {
