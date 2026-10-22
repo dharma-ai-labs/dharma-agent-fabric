@@ -117,10 +117,15 @@ test('contracts-only source admission precedes every generic artifact/attestatio
   assert.ok(admission>=0);
   assert.match(steps[admission].run,/--expected-head "\$EXPECTED_HEAD" --admission-only/);
   assert.match(steps[admission].run,/ONBOARDING_ONLY.*true.*CONTRACTS_ONLY.*true/s);
-  for(const name of ['Build release artifacts','Attest release artifacts']){
+  for(const [name,condition] of [
+    ['Build release artifacts',"!(github.event_name == 'workflow_dispatch' && (inputs.contracts_only || inputs.artifacts_only))"],
+    ['Attest release artifacts',"!(github.event_name == 'workflow_dispatch' && inputs.contracts_only)"],
+    ['Qualify execution artifacts without publication',"github.event_name == 'workflow_dispatch' && inputs.artifacts_only"],
+    ['Retain qualified execution artifacts',"github.event_name == 'workflow_dispatch' && inputs.artifacts_only"],
+  ]){
     const index=steps.findIndex(item=>item.name===name);
     assert.ok(admission<index);
-    assert.equal(steps[index].if,"!(github.event_name == 'workflow_dispatch' && inputs.contracts_only)");
+    assert.equal(steps[index].if,condition);
   }
   assert.ok(admission<steps.findIndex(item=>item.run==='npm ci'));
 });

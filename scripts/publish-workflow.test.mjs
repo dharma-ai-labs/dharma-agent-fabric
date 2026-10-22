@@ -24,7 +24,7 @@ test('bounded mode invokes the reviewed exact-package allowlist rather than the 
 
 test('bounded manual publication cannot invoke Python publication', () => {
   assert.equal(workflow.jobs['publish-python'].if,
-    "vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only || inputs.device_maintenance_only))");
+    "vars.PYPI_PUBLISH_ENABLED == 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.onboarding_only || inputs.contracts_only || inputs.device_maintenance_only || inputs.artifacts_only))");
 });
 
 test('maintenance publication is separate, opt-in, main-only and admitted before dependency installation',()=>{
@@ -53,7 +53,7 @@ test('workflow verifies the independent publisher hash before executing it at bo
 
 test('manual main publication does not try to publish a main GitHub release tag', () => {
   const release = publish.steps.find((item) => item.name === 'Publish GitHub Release');
-  assert.equal(release.if, "startsWith(github.ref, 'refs/tags/')");
+  assert.equal(release.if, "startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.artifacts_only)");
   assert.match(release.run, /--verify-tag/);
 });
 

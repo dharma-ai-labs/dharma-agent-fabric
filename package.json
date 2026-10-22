@@ -25,7 +25,7 @@
     "smoke:secure-store": "node scripts/smoke-secure-store.mjs",
     "test": "npm run schema:validate && npm run build && npm run test:unit",
     "test:unit": "node scripts/run-workspace-tests.mjs",
-    "pack:verify": "node --test scripts/publish-workflow.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs scripts/publish-recovery-contracts.test.mjs scripts/publish-device-maintenance.test.mjs scripts/publish-signing-upgrade.test.mjs scripts/publish-security-recovery.test.mjs && node scripts/verify-package.mjs",
+    "pack:verify": "node --test scripts/publish-workflow.test.mjs scripts/qualify-artifacts-only.test.mjs scripts/publish-onboarding-release.test.mjs scripts/verify-package-pins.test.mjs scripts/publish-recovery-contracts.test.mjs scripts/publish-device-maintenance.test.mjs scripts/publish-signing-upgrade.test.mjs scripts/publish-security-recovery.test.mjs && node scripts/verify-package.mjs",
     "publish:onboarding": "node scripts/publish-onboarding-release.mjs",
     "publish:recovery-contracts": "node scripts/publish-recovery-contracts.mjs",
     "publish:device-maintenance": "node scripts/publish-device-maintenance.mjs",
