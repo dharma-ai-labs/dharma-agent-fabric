@@ -1,0 +1,27 @@
+{
+  "name": "dharma-agent-fabric",
+  "version": "1.0.3",
+  "description": "Your agents, learning together. Connect Claude to Dharma Agent Fabric to inspect and operate your organization's authorized agents, tasks, evidence and shared skills, and set up role-bounded team-agent onboarding.",
+  "author": {
+    "name": "Dharma AI Labs, Inc",
+    "email": "nikita@dharma-ai.io",
+    "url": "https://www.dharma-ai.io"
+  },
+  "homepage": "https://dharma-ai.io/",
+  "repository": "https://github.com/dharma-ai-labs/dharma-agent-fabric",
+  "license": "MIT",
+  "icon": "./assets/logo.png",
+  "documentationUrl": "https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/plugins/claude/dharma-agent-fabric#readme",
+  "supportUrl": "https://www.dharma-ai.io/docs/agent-fabric-support",
+  "privacyPolicyUrl": "https://www.dharma-ai.io/privacy",
+  "termsOfServiceUrl": "https://dharma-ai.io/terms",
+  "keywords": [
+    "agent-fabric",
+    "agent-orchestration",
+    "agent-evaluation",
+    "shared-knowledge",
+    "skill-remediation",
+    "a2a",
+    "mcp"
+  ]
+}

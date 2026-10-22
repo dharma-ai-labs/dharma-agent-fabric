@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dharma-agent-fabric": {
+      "type": "http",
+      "url": "https://mcp.dharma-ai.io/mcp"
+    }
+  }
+}

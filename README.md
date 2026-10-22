@@ -155,6 +155,22 @@ The plugin connects to the OAuth-protected MCP resource at
 explicit confirmation; organization membership and the underlying platform API
 capabilities remain authoritative.
 
+## Claude Code plugin
+
+The Claude plugin in `plugins/claude/dharma-agent-fabric` packages the same
+remote MCP server with the `dharma-agent-fabric-setup` skill submitted in OpenAI
+plugin version 1.0.3. Install it from this repository's marketplace:
+
+```bash
+claude plugin marketplace add dharma-ai-labs/dharma-agent-fabric
+claude plugin install dharma-agent-fabric@dharma-ai-labs
+```
+
+Then run `/mcp` in Claude Code and authenticate `dharma-agent-fabric`. The
+server uses standard MCP OAuth with dynamic client registration and PKCE, so no
+API key is needed. Validate changes with
+`claude plugin validate --profile directory --strict plugins/claude/dharma-agent-fabric`.
+
 ## Development
 
 ```bash
