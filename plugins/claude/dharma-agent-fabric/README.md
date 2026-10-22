@@ -46,6 +46,7 @@ Then run `/mcp`, select `dharma-agent-fabric` and choose **Authenticate**. Sign 
 - When you sign in, the Dharma authorization server (`clerk.dharma-ai.io`) receives the OAuth request, and Claude receives an access token scoped to `openid`, `profile`, `email` and `user:org:read` for your Dharma account and organization.
 - When Claude calls a Fabric tool, the tool name and its arguments, such as an organization, agent, task or remediation identifier, a task or message you approved, or an analysis request, are sent over HTTPS to `https://mcp.dharma-ai.io/mcp`. The response contains only the organization data that your membership and role allow.
 - Mutating, paid or GitHub-writing tools send data only after your explicit confirmation. Nothing else from your conversation, files or machine is sent by the plugin.
+- Separately from the connector, the setup skill can guide Claude, with your approval, to install the official Dharma CLI from the npm registry (`npm install --global @dharma-ai-labs/agent-fabric`) and complete a browser sign-in at `www.dharma-ai.io`. The CLI then exchanges enrollment, task and skill data with Dharma's platform (`www.dharma-ai.io`, `api.dharma-ai.io`) under its own enrollment and your organization's policy.
 - How Dharma stores and retains this data is described in the [privacy policy](https://www.dharma-ai.io/privacy).
 
 ## Requirements
