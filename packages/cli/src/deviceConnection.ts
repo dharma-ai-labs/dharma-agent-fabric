@@ -31,7 +31,7 @@ export function assertConnectionScope(config: Pick<DeviceConfig, 'organizationId
   if (config.hqUrl !== hqUrl) throw new Error('connection_scope_mismatch: this DHARMA_HOME is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME.');
 }
 
-export async function assertInstallationContinuity(config: DeviceConfig, path: string) {
+export async function assertInstallationContinuity(config: Pick<DeviceConfig, 'installationId'>, path: string) {
   let bytes: string;
   try {bytes = await readFile(path, 'utf8');}
   catch (error) {
