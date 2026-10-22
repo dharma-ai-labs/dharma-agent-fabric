@@ -8571,6 +8571,9 @@ export async function prepareSkillUpdate(input: {
   if (bundle.operation === 'install' && !materializedInline && !repositoryDelivery) {
     if (!sources.singleSource) throw new Error('Multi-source skill bundles require signed inline files for every skill.');
     if (input.automatic) throw new Error('Automatic preparation requires bounded inline files or an authenticated complete repository package.');
+    if (workspace.accessMode === 'knowledge_only') {
+      throw new Error('Knowledge-only preparation requires bounded inline files or an authenticated complete repository package.');
+    }
     await rm(sourceRoot, { recursive: true, force: true });
     assertCurrent();
     await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
