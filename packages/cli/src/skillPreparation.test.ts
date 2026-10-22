@@ -147,3 +147,68 @@ for (const scenario of ['success', 'foreign selector', 'tampered tree', 'stop af
     }
   });
 }
+
+for (const scenario of ['knowledge inline', 'knowledge missing content', 'source missing content', 'automatic missing content'] as const) {
+  test(`explicit knowledge preparation without Git: ${scenario}`, async () => {
+    const f = await fixture();
+    const previous = { home: process.env.DHARMA_HOME, codex: process.env.CODEX_HOME,
+      path: Object.entries(process.env).filter(([key]) => key.toLowerCase() === 'path') };
+    process.env.DHARMA_HOME = f.home;
+    process.env.CODEX_HOME = join(f.home, 'isolated-codex');
+    const emptyBin = join(f.home, 'empty-bin');
+    await mkdir(emptyBin);
+    for (const [key] of previous.path) delete process.env[key];
+    process.env.PATH = emptyBin;
+    try {
+      const baseline = new Map(f.values);
+      const registryPath = join(f.home, 'registry', 'workspaces.json');
+      const rows = JSON.parse(await readFile(registryPath, 'utf8'));
+      if (scenario.startsWith('knowledge')) rows[0].accessMode = 'knowledge_only';
+      await writeFile(registryPath, JSON.stringify(rows));
+      const bundle = structuredClone(f.bundle);
+      if (scenario !== 'knowledge inline') {
+        delete bundle.skills[0]!.files;
+        const { signature: _signature, bundleHash: _hash, ...unsigned } = bundle;
+        bundle.bundleHash = calculateBundleHash(unsigned);
+        const { signature: _unused, ...signed } = bundle;
+        bundle.signature = signCanonicalObject(signed, f.keys.privateKey);
+      }
+      let polls = 0;
+      const fabric = { pollSkill: async () => {
+        polls++;
+        return { ok: true, organizationId: 'org_test', rollout: { id: 'rollout', bundle } };
+      }, signedGet: async () => { throw new Error('Unexpected package transport.'); } } as unknown as AgentFabricClient;
+      const operation = () => prepareSkillUpdate({ workspaceId: WORKSPACE, provider: 'codex',
+        policyPath: f.policyPath, fabric, store: f.store,
+        automatic: scenario === 'automatic missing content' });
+      if (scenario === 'knowledge inline') {
+        const prepared = await operation();
+        assert.ok(prepared);
+        assert.equal(prepared.workspace.accessMode, 'knowledge_only');
+        assert.equal(await readFile(join(prepared.sourceRoot, 'skills/verifier/SKILL.md'), 'utf8'), f.text);
+        prepared.assertCurrent();
+        await rm(prepared.sourceRoot, { recursive: true });
+      } else if (scenario === 'knowledge missing content') {
+        await assert.rejects(operation(), /Knowledge-only preparation requires bounded inline files or an authenticated complete repository package\./);
+      } else if (scenario === 'automatic missing content') {
+        await assert.rejects(operation(), /Automatic preparation requires bounded inline files/);
+      } else {
+        await assert.rejects(operation(), (error: NodeJS.ErrnoException) =>
+          error.code === 'ENOENT' && error.syscall === 'spawn git');
+      }
+      assert.equal(polls, 1);
+      assert.deepEqual(f.values, baseline);
+      assert.deepEqual(await readdir(join(f.home, 'relay', 'skill-sources')).catch(error => {
+        if (error.code === 'ENOENT') return []; throw error;
+      }), []);
+      await assert.rejects(stat(join(f.home, 'work', '.git')), { code: 'ENOENT' });
+      assert.equal(await readFile(registryPath, 'utf8'), JSON.stringify(rows));
+    } finally {
+      if (previous.home === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous.home;
+      if (previous.codex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous.codex;
+      for (const key of Object.keys(process.env)) if (key.toLowerCase() === 'path') delete process.env[key];
+      for (const [key, value] of previous.path) process.env[key] = value;
+      await rm(f.home, { recursive: true, force: true });
+    }
+  });
+}
