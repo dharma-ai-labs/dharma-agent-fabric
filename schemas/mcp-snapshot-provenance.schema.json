@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/mcp-snapshot-input-integrity/v1",
+  "title": "MCP Snapshot Input Integrity Sidecar",
+  "description": "Optional unsigned local precondition for the offline snapshot assembler: one ordered sha256/byte-length entry per supplied --snapshot file, checked against the exact raw bytes that are parsed. A match is structural byte integrity only. It carries no path, identity, version, issuer, signer, time, observation, consent, permission or authenticity claim and never upgrades comparator evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "inputs"],
+  "properties": {
+    "schema": { "const": "dharma.mcp-snapshot-input-integrity/v1" },
+    "inputs": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sha256", "bytes"],
+        "properties": {
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0, "maximum": 1048576 }
+        }
+      }
+    }
+  }
+}
