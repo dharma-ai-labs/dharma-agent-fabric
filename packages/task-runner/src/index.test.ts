@@ -1010,6 +1010,68 @@ test('provider changes outside signed write paths fail even when untracked or co
   assert.match(committed.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
 });
 
+test('acceptance commands cannot expand signed write scope or run a later command after a violation', async (t) => {
+  for (const variant of ['untracked', 'tracked', 'committed', 'receipt-required'] as const) {
+    await t.test(variant, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const forbiddenPath = 'private-scope-canary.txt';
+      await writeFile(resolve(fixture.workspace, forbiddenPath), 'original');
+      assert.equal(spawnSync('git', ['add', forbiddenPath], { cwd: fixture.workspace }).status, 0);
+      assert.equal(spawnSync('git', ['commit', '-qm', 'protected fixture'], { cwd: fixture.workspace }).status, 0);
+      const target = variant === 'untracked' || variant === 'receipt-required' ? 'untracked-scope-canary.txt' : forbiddenPath;
+      const script = `require('node:fs').writeFileSync(${JSON.stringify(target)}, 'private-content-canary');`
+        + (variant === 'committed'
+          ? `const cp=require('node:child_process');for(const args of [['add',${JSON.stringify(target)}],['commit','-qm','validation change']]){if(cp.spawnSync('git',args).status!==0)process.exit(2);}`
+          : '');
+      fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e', script], timeoutSeconds: 5 };
+      fixture.policy.tasks.allowedCommands.next = { argv: [process.execPath, '-e',
+        'const fs=require("node:fs");fs.mkdirSync("reports",{recursive:true});fs.writeFileSync("reports/next.txt","must not run");'], timeoutSeconds: 5 };
+      fixture.unsigned.authority.commands.push({ commandId: 'verify' }, { commandId: 'next' });
+      fixture.unsigned.acceptance.commands.push({ commandId: 'verify' }, { commandId: 'next' });
+      const decisionKeys = generateKeyPairSync('ed25519');
+      const base = { ...fixture.unsigned, target: { ...fixture.unsigned.target, endpointId: randomUUID() },
+        requiredCapabilities: ['action_decision_receipts_v1'] as const };
+      const task = variant === 'receipt-required' ? fixture.signed({ ...base,
+        actionDecision: embedDecision(base, 'release', decisionKeys.privateKey, new Date()) }) : fixture.signed();
+      const receipt = await executeTask({ ...fixture.input, task,
+        ...(variant === 'receipt-required' ? { actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey } } : {}),
+        providerExecutor: async () => fixture.providerResult });
+      assert.equal(receipt.status, 'failed');
+      assert.equal(receipt.commandResults[1]?.commandId, 'verify');
+      assert.equal(receipt.commandResults[1]?.exitCode, 0);
+      assert.equal(receipt.commandResults.some(result => result.commandId === 'next'), false);
+      assert.match(receipt.commandResults.at(-1)?.stderr || '', /Acceptance command changed a path outside the signed task authority/);
+      await assert.rejects(readFile(resolve(receipt.worktree, 'reports/next.txt')), { code: 'ENOENT' });
+      const stored = await fixture.input.receiptStore.get(task.taskId);
+      assert.equal(stored?.status, 'failed');
+      assert.equal(JSON.stringify(stored).includes('scope-canary'), false);
+      assert.equal(JSON.stringify(stored).includes('private-content-canary'), false);
+      if (variant === 'receipt-required') assert.equal(receipt.actionAcknowledgement?.disposition, 'unknown');
+      const replay = await executeTask({ ...fixture.input, task,
+        providerExecutor: async () => { throw new Error('A failed receipt must not re-execute.'); } });
+      assert.deepEqual(replay, stored);
+    });
+  }
+});
+
+test('acceptance commands preserve authorized outputs and read-only tasks', async (t) => {
+  for (const variant of ['authorized', 'read-only'] as const) {
+    await t.test(variant, async (child) => {
+      const fixture = await requiredArtifactFixture(child, variant === 'authorized' ? ['reports/result.json'] : []);
+      if (variant === 'read-only') fixture.unsigned.authority.writePaths = [];
+      const script = variant === 'authorized'
+        ? 'const fs=require("node:fs");fs.mkdirSync("reports",{recursive:true});fs.writeFileSync("reports/result.json","{}");'
+        : 'process.stdout.write("read-only validation");';
+      fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e', script], timeoutSeconds: 5 };
+      fixture.unsigned.authority.commands.push({ commandId: 'verify' });
+      fixture.unsigned.acceptance.commands.push({ commandId: 'verify' });
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+      assert.equal(receipt.status, 'completed');
+      assert.equal(receipt.commandResults[1]?.exitCode, 0);
+    });
+  }
+});
+
 test('A2A task instructions carry bounded signed state and evidence context', () => {
   const task = {
     taskType: 'a2a_handoff',

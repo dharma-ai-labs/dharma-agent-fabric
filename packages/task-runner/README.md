@@ -88,6 +88,12 @@ after acceptance commands. Ignored files do not gain write authority from being
 required artifacts. Write-authorized outputs still use final presence checks.
 Git path inventories must be complete and NUL-terminated; exceeding the bounded
 capture limit fails closed rather than authorizing a partial inventory.
+The same signed write-path check runs after the provider and after each
+acceptance command, including committed and untracked changes. A command's
+registration does not expand path authority. A violation prevents subsequent
+acceptance commands and successful completion; a released action retains an
+`unknown` acknowledgement. Read-only required-file integrity is also checked
+between commands, not only at the end.
 
 This is a final-state completion check, not an OS sandbox, immutable artifact
 snapshot, quality grader or proof of external effects. The integrity checks do not prevent all
