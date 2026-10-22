@@ -26,7 +26,7 @@ export function connectionPreference(flags: ConnectionFlags): DeviceConfig['conn
   return flags.has('unattended') ? 'resume' : flags.has('no-unattended') ? 'manual' : undefined;
 }
 
-export function assertConnectionScope(config: DeviceConfig, organizationId: string, hqUrl: string) {
+export function assertConnectionScope(config: Pick<DeviceConfig, 'organizationId' | 'hqUrl'>, organizationId: string, hqUrl: string) {
   if (config.organizationId !== organizationId) throw new Error('connection_scope_mismatch: this DHARMA_HOME is enrolled to a different organization. Use a separate DHARMA_HOME.');
   if (config.hqUrl !== hqUrl) throw new Error('connection_scope_mismatch: this DHARMA_HOME is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME.');
 }

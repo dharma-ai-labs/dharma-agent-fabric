@@ -4313,6 +4313,9 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
         || pending.connectionMode !== undefined && pending.connectionMode !== 'manual' && pending.connectionMode !== 'resume') {
         throw new Error('connection_pending_state_invalid');
       }
+      assertConnectionScope({organizationId: pending.organizationId, hqUrl: normalizeHqUrl(pending.hqUrl)},
+        String(flags.get('organization-id') || pending.organizationId),
+        normalizeHqUrl(portalUrl(flags, pending.hqUrl)));
       await assertEnrollmentHomeCompatible(pending.hqUrl, pending.organizationId);
     } else {
       const hqUrl = normalizeHqUrl(portalUrl(flags));
