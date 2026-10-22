@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { compareSnapshotManifest, referenceFromCatalog } from './mcp-catalog-drift.mjs';
+
+// No arguments: unchanged static catalog verification. Opt-in offline mode:
+// --snapshot-manifest <file.json> compares explicitly supplied snapshots.
+const args = process.argv.slice(2);
+let snapshotManifestPath = null;
+if (args.length > 0) {
+  if (args.length !== 2 || args[0] !== '--snapshot-manifest' || !/\.json$/i.test(args[1])) {
+    process.stderr.write('Usage: verify-mcp-catalog.mjs [--snapshot-manifest <manifest.json>]\n');
+    process.exit(2);
+  }
+  snapshotManifestPath = resolve(args[1]);
+}
 
 const expectedTools = [
   'fabric_get_identity',
@@ -87,4 +100,19 @@ for (const name of removedSpeculativeTools) {
 assert.ok(catalog.forbiddenTools.includes('run_arbitrary_shell'));
 assert.ok(catalog.forbiddenTools.includes('retrieve_secret'));
 
-process.stdout.write(`${JSON.stringify({ ok: true, toolCount: actualTools.length, confirmationCount: confirmationTools.size })}\n`);
+if (snapshotManifestPath === null) {
+  process.stdout.write(`${JSON.stringify({ ok: true, toolCount: actualTools.length, confirmationCount: confirmationTools.size })}\n`);
+} else {
+  let manifest;
+  try {
+    const info = await stat(snapshotManifestPath);
+    if (!info.isFile() || info.size > 1024 * 1024) throw new Error('size');
+    manifest = JSON.parse(await readFile(snapshotManifestPath, 'utf8'));
+  } catch {
+    process.stderr.write('snapshot_manifest_unreadable\n');
+    process.exit(2);
+  }
+  const receipt = compareSnapshotManifest(manifest, referenceFromCatalog(catalog));
+  process.stdout.write(`${JSON.stringify(receipt)}\n`);
+  process.exitCode = receipt.verdict === 'compatible' ? 0 : 1;
+}
