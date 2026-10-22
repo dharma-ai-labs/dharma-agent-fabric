@@ -71,6 +71,22 @@ export function assertWindowsSkillPreparationAcl(value: unknown): void {
   }
 }
 
+function windowsPreparationAclFailure(operation: 'verified' | 'established',
+  phase: 'command' | 'output' | 'policy', error: unknown): Error {
+  let category = phase === 'output' ? 'invalid-output' : phase === 'policy' ? 'acl-rejected' : 'unknown-process-failure';
+  if (phase === 'command' && error && typeof error === 'object') {
+    const failure = error as { code?: unknown; killed?: unknown };
+    if (failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') category = 'output-limit';
+    else if (failure.code === 'ABORT_ERR') category = 'process-aborted';
+    else if (failure.killed === true) category = 'process-terminated';
+    else if (failure.code === 'ENOENT') category = 'spawn-unavailable';
+    else if (failure.code === 'EACCES' || failure.code === 'EPERM') category = 'spawn-denied';
+    else if (typeof failure.code === 'number' && Number.isSafeInteger(failure.code)) category = 'command-failed';
+  }
+  // Never attach the process error: its command, output, and path may be private.
+  return new Error(`Windows preparation private access could not be ${operation} (${category}).`);
+}
+
 export async function assertPrivatePath(path: string, stat: Awaited<ReturnType<typeof lstat>>): Promise<void> {
   if (process.platform !== 'win32') {
     const getuid = process.getuid;
@@ -80,13 +96,17 @@ export async function assertPrivatePath(path: string, stat: Awaited<ReturnType<t
     }
     return;
   }
+  let phase: 'command' | 'output' | 'policy' = 'command';
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ACL_SCRIPT], {
       windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536,
       env: powershellEnvironment(path),
     });
-    assertWindowsSkillPreparationAcl(JSON.parse(stdout.replace(/^\uFEFF/, '')));
-  } catch { throw new Error('Windows preparation private access could not be verified.'); }
+    phase = 'output';
+    const acl: unknown = JSON.parse(stdout.replace(/^\uFEFF/, ''));
+    phase = 'policy';
+    assertWindowsSkillPreparationAcl(acl);
+  } catch (error) { throw windowsPreparationAclFailure('verified', phase, error); }
 }
 
 async function hardenWindowsPrivateDirectory(path: string): Promise<void> {
@@ -95,7 +115,7 @@ async function hardenWindowsPrivateDirectory(path: string): Promise<void> {
     await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', PRIVATE_DIRECTORY_ACL_SCRIPT], {
       windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536, env: powershellEnvironment(path),
     });
-  } catch { throw new Error('Windows preparation private access could not be established.'); }
+  } catch (error) { throw windowsPreparationAclFailure('established', 'command', error); }
 }
 
 function canonicalExistingHome(path: string): string {
