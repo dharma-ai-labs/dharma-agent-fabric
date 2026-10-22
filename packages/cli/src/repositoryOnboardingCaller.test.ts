@@ -294,8 +294,8 @@ test('joining an existing package registers only a managed knowledge endpoint', 
     readFile: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
     readdir: async () => [],
     writeJsonAtomic: async () => { calls.push('marker'); },
-    gitValue: async () => null,
-    execFileAsync: async (_bin: string, args: string[]) => { calls.push(args.includes('init') ? 'managed_git_init' : 'managed_empty_commit'); },
+    gitValue: async () => { throw new Error('knowledge join must not invoke Git'); },
+    execFileAsync: async () => { throw new Error('knowledge join must not spawn a process'); },
     workspaceIdForDevice: () => '33333333-3333-4333-8333-333333333333',
     selectDeviceWorkspace: () => item,
     registry: async () => item ? [item] : [],
@@ -339,7 +339,7 @@ test('joining an existing package registers only a managed knowledge endpoint', 
   assert.equal(result.accessMode, 'knowledge_only');
   assert.equal(result.sharedRepositoryReady, true);
   assert.equal((result.firstLearningEvidence as Record<string, unknown>).state, 'shared_package_inherited');
-  assert.deepEqual(calls.slice(0, 5), ['marker', 'managed_git_init', 'managed_empty_commit', 'registry', 'policy']);
+  assert.deepEqual(calls.slice(0, 4), ['marker', 'registry', 'policy', 'bind_existing']);
   assert.ok(calls.includes('bind_existing'));
   assert.ok(calls.indexOf('bind_existing') < calls.indexOf('join_connection'));
   assert.ok(calls.indexOf('join_connection') < calls.indexOf('native_bootstrap'));

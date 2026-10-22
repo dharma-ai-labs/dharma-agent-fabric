@@ -18,7 +18,8 @@ jobs:
   validate:
     name: Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows estimate: install 7m06s + validation 12m44s + overhead 43s = 20m33s.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +49,9 @@ jobs:
 
       - name: Run package validation
         run: npm run check
+
+      - name: Verify CI budget and coverage
+        run: node --test scripts/ci-budget.test.mjs
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
