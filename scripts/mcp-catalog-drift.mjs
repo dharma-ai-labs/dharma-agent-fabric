@@ -7,6 +7,8 @@
 // validated tool names: no descriptions, defaults, examples, schema property
 // names, provenance extras or invalid names are echoed.
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 
 export const BOUNDARIES = Object.freeze(['source', 'host', 'server', 'submitted', 'released']);
 export const MANIFEST_SCHEMA = 'dharma.mcp-snapshot-manifest/v1';
@@ -14,7 +16,26 @@ export const RECEIPT_SCHEMA = 'dharma.mcp-snapshot-compatibility-receipt/v1';
 const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const MAX_TOOLS = 1000;
 const MAX_DEPTH = 32;
+const MCP_SCHEMA_DIALECTS = new Set(['https://json-schema.org/draft/2020-12/schema',
+  'https://json-schema.org/draft/2020-12/schema#']);
 const SEVERITY = { compatible: 0, unknown: 1, incompatible: 2, invalid: 3 };
+const require = createRequire(import.meta.url);
+let contracts;
+
+function snapshotContracts() {
+  if (contracts) return contracts;
+  // Lazy loading preserves the no-argument verifier's standalone static mode.
+  const Ajv2020 = require('ajv/dist/2020.js').default;
+  const formatsModule = require('ajv-formats');
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  (formatsModule.default ?? formatsModule)(ajv);
+  const load = name => JSON.parse(readFileSync(new URL(`../schemas/${name}.schema.json`, import.meta.url), 'utf8'));
+  contracts = Object.freeze({
+    manifest: ajv.compile(load('mcp-snapshot-manifest')),
+    receipt: ajv.compile(load('mcp-snapshot-compatibility-receipt')),
+  });
+  return contracts;
+}
 
 const isPlain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -50,7 +71,7 @@ function readAnnotations(value) {
 // and constraint values participate in the digest but are never output.
 const SCHEMA_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array', 'null']);
 const DOCUMENTATION_KEYWORDS = new Set(['description', 'title', 'default', 'examples', '$comment', 'deprecated',
-  'readOnly', 'writeOnly', '$schema', '$id']);
+  'readOnly', 'writeOnly', '$id']);
 const NUMBER_KEYWORDS = new Set(['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf']);
 const COUNT_KEYWORDS = new Set(['minLength', 'maxLength', 'minItems', 'maxItems', 'minProperties', 'maxProperties']);
 const STRING_KEYWORDS = new Set(['pattern', 'format']);
@@ -63,11 +84,28 @@ function compiles(pattern, flags) {
 }
 const malformed = () => new SchemaIssue('malformed');
 
+function canonicalJsonValue(value, depth) {
+  if (depth > MAX_DEPTH) throw malformed();
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map(item => canonicalJsonValue(item, depth + 1));
+  if (isPlain(value)) return Object.fromEntries(Object.keys(value).sort()
+    .map(key => [key, canonicalJsonValue(value[key], depth + 1)]));
+  throw malformed();
+}
+
 function canonicalSchema(schema, depth = 0) {
   if (depth > MAX_DEPTH || !isPlain(schema)) throw malformed();
+  // MCP defaults to 2020-12. Other or embedded-resource dialects need semantics
+  // this bounded comparator does not implement; they cannot normalize to equal.
+  if (Object.hasOwn(schema, '$schema')) {
+    if (typeof schema.$schema !== 'string') throw malformed();
+    if (depth !== 0 || !MCP_SCHEMA_DIALECTS.has(schema.$schema)) throw new SchemaIssue('unsupported');
+  }
   const out = {};
   for (const key of Object.keys(schema).sort()) {
     const value = schema[key];
+    if (key === '$schema') continue; // Validated above against the fixed MCP default.
     if (DOCUMENTATION_KEYWORDS.has(key)) continue;
     if (key === 'type') {
       // Scalar known type, or a non-empty array of unique known types.
@@ -90,10 +128,12 @@ function canonicalSchema(schema, depth = 0) {
     } else if (key === 'additionalProperties') {
       out.additionalProperties = typeof value === 'boolean' ? value : canonicalSchema(value, depth + 1);
     } else if (key === 'enum') {
-      if (!Array.isArray(value)) throw malformed();
-      out.enum = value.map(item => JSON.stringify(item)).sort();
+      if (!Array.isArray(value) || value.length === 0) throw malformed();
+      const members = value.map(item => JSON.stringify(canonicalJsonValue(item, depth + 1)));
+      if (new Set(members).size !== members.length) throw malformed();
+      out.enum = members.sort();
     } else if (key === 'const') {
-      out.const = JSON.stringify(value);
+      out.const = JSON.stringify(canonicalJsonValue(value, depth + 1));
     } else if (key === 'uniqueItems') {
       if (typeof value !== 'boolean') throw malformed();
       out.uniqueItems = value;
@@ -222,6 +262,8 @@ function finalize(result) {
 }
 
 export function compareSnapshotManifest(manifest, reference) {
+  const validate = snapshotContracts();
+  const manifestConforms = isPlain(manifest) && validate.manifest(manifest);
   const referenceTools = Array.isArray(reference?.tools) ? reference.tools.filter(tool => TOOL_NAME.test(tool?.name ?? '')) : [];
   const manifestErrors = [];
   const supplied = new Map();
@@ -263,9 +305,14 @@ export function compareSnapshotManifest(manifest, reference) {
     }
     return finalize(evaluate(occurrences[0], expected, referenceTools, sourceSchemas));
   });
+  // Keep existing specific envelope diagnostics rather than adding a redundant
+  // generic code; a contract violation must still force an invalid verdict.
+  if (!manifestConforms && manifestErrors.length === 0) manifestErrors.push('manifest_malformed');
   const errors = sorted(manifestErrors);
   let verdict = errors.length ? 'invalid' : 'compatible';
   for (const item of boundaries) verdict = worst(verdict, item.status);
-  return { schema: RECEIPT_SCHEMA, verdict, executionProven: false, referenceToolCount: referenceTools.length,
+  const receipt = { schema: RECEIPT_SCHEMA, verdict, executionProven: false, referenceToolCount: referenceTools.length,
     manifestErrors: errors, boundaries };
+  if (!validate.receipt(receipt)) throw new Error('snapshot_receipt_contract_invalid');
+  return receipt;
 }

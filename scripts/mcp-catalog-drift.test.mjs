@@ -180,6 +180,123 @@ test('residual F1: the real verifier consumer rejects Docs examples and accepts 
   }
 });
 
+test('constraint JSON values ignore recursive object-key order but preserve array order', () => {
+  const left = { a: { nested: [{ x: 1, y: 2 }, 3] }, b: true };
+  const reordered = { b: true, a: { nested: [{ y: 2, x: 1 }, 3] } };
+  for (const keyword of ['const', 'enum']) {
+    const manifest = mutateAll((tool, snapshot) => {
+      const value = snapshot.boundary === 'released' ? reordered : left;
+      tool.inputSchema = { [keyword]: keyword === 'enum' ? [value, null] : value };
+    });
+    assert.equal(compareSnapshotManifest(manifest, reference).verdict, 'compatible', keyword);
+    const released = manifest.snapshots.find(snapshot => snapshot.boundary === 'released');
+    const tool = released.tools.find(item => item.name === 'a_read');
+    const changed = { a: { nested: [3, { x: 1, y: 2 }] }, b: true };
+    tool.inputSchema = { [keyword]: keyword === 'enum' ? [changed, null] : changed };
+    assert.equal(compareSnapshotManifest(manifest, reference).verdict, 'incompatible', `${keyword} array order`);
+  }
+});
+
+test('constraint JSON values are depth-bounded and enum members must be nonempty and unique', () => {
+  let deep = null;
+  for (let index = 0; index < 40; index++) deep = { nested: deep };
+  for (const schema of [{ enum: [] }, { enum: [{ a: 1, b: 2 }, { b: 2, a: 1 }] }, { const: deep }]) {
+    const manifest = mutateAll(tool => { tool.inputSchema = structuredClone(schema); });
+    assert.equal(compareSnapshotManifest(manifest, reference).verdict, 'invalid');
+  }
+});
+
+test('explicit 2020-12 declarations match the bounded MCP default dialect', () => {
+  const manifest = mutateAll((tool, snapshot) => {
+    if (snapshot.boundary !== 'source') {
+      tool.inputSchema.$schema = 'https://json-schema.org/draft/2020-12/schema';
+      tool.outputSchema.$schema = 'https://json-schema.org/draft/2020-12/schema#';
+    }
+  });
+  assert.equal(compareSnapshotManifest(manifest, reference).verdict, 'compatible');
+});
+
+test('unsupported and changed dialects are unknown instead of silently erasing const semantics', () => {
+  for (const dialect of ['http://json-schema.org/draft-04/schema#',
+    'http://json-schema.org/draft-07/schema#', 'https://example.test/PRIVATE_DIALECT_CANARY']) {
+    const manifest = mutateAll((tool, snapshot) => {
+      tool.inputSchema = { $schema: snapshot.boundary === 'released' ? dialect
+        : 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object', properties: { id: { const: 'approved' } } };
+    });
+    const receipt = compareSnapshotManifest(manifest, reference);
+    assert.equal(receipt.verdict, 'unknown', dialect);
+    assert.ok(byBoundary(receipt, 'released').reasons.includes('schema_unsupported'));
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_DIALECT_CANARY/);
+  }
+  const originalReviewExample = mutateAll((tool, snapshot) => {
+    tool.inputSchema = { $schema: snapshot.boundary === 'released'
+      ? 'http://json-schema.org/draft-04/schema#' : 'http://json-schema.org/draft-07/schema#',
+    type: 'object', properties: { id: { const: 'approved' } } };
+  });
+  assert.equal(compareSnapshotManifest(originalReviewExample, reference).verdict, 'unknown');
+});
+
+test('malformed dialect declarations are invalid and embedded resource dialects remain unsupported', () => {
+  for (const value of [42, null, {}, []]) {
+    const manifest = mutateAll(tool => { tool.inputSchema.$schema = value; });
+    assert.equal(compareSnapshotManifest(manifest, reference).verdict, 'invalid');
+  }
+  const nested = mutateAll(tool => {
+    tool.inputSchema.properties.id = { $id: 'https://example.test/embedded',
+      $schema: 'http://json-schema.org/draft-04/schema#', const: 'approved' };
+  });
+  assert.equal(compareSnapshotManifest(nested, reference).verdict, 'unknown');
+});
+
+test('real verifier accepts canonical JSON values and rejects unsupported dialect semantics', () => {
+  const manifest = catalogManifest();
+  for (const snapshot of manifest.snapshots) {
+    snapshot.tools[0].inputSchema = { const: snapshot.boundary === 'released'
+      ? { b: [2, { y: 4, x: 3 }], a: 1 } : { a: 1, b: [2, { x: 3, y: 4 }] } };
+  }
+  const compatible = runVerifier(manifest);
+  assert.equal(compatible.status, 0, compatible.stderr);
+  assert.equal(JSON.parse(compatible.stdout).verdict, 'compatible');
+  for (const snapshot of manifest.snapshots) {
+    snapshot.tools[0].inputSchema = { $schema: snapshot.boundary === 'released'
+      ? 'http://json-schema.org/draft-04/schema#' : 'http://json-schema.org/draft-07/schema#',
+    type: 'object', properties: { id: { const: 'approved' } } };
+  }
+  const unsupported = runVerifier(manifest);
+  assert.equal(unsupported.status, 1, unsupported.stderr);
+  assert.equal(JSON.parse(unsupported.stdout).verdict, 'unknown');
+});
+
+test('runtime input contract rejects malformed envelopes without echoing them and preserves partial unknown evidence', () => {
+  for (const mutate of [
+    manifest => { manifest.credentials = 'PRIVATE_RUNTIME_CONTRACT_CANARY'; },
+    manifest => { manifest.expected.extra = 'PRIVATE_RUNTIME_CONTRACT_CANARY'; },
+    manifest => { manifest.snapshots[0].provenance.observed = 'yes'; },
+  ]) {
+    const manifest = clone(cases.compatible);
+    mutate(manifest);
+    const receipt = compareSnapshotManifest(manifest, reference);
+    assert.equal(receipt.verdict, 'invalid');
+    assert.ok(receipt.manifestErrors.includes('manifest_malformed'));
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_RUNTIME_CONTRACT_CANARY/);
+  }
+  const partial = clone(cases.compatible);
+  partial.snapshots = partial.snapshots.slice(0, 1);
+  assert.equal(compareSnapshotManifest(partial, reference).verdict, 'unknown');
+});
+
+test('real verifier enforces the manifest contract while retaining parser-safe invalid receipts', () => {
+  const manifest = catalogManifest();
+  manifest.credentials = 'PRIVATE_RUNTIME_CONTRACT_CANARY';
+  const child = runVerifier(manifest);
+  assert.equal(child.status, 1, child.stderr);
+  const receipt = JSON.parse(child.stdout);
+  assert.equal(receipt.verdict, 'invalid');
+  assert.ok(receipt.manifestErrors.includes('manifest_malformed'));
+  assert.doesNotMatch(child.stdout, /PRIVATE_RUNTIME_CONTRACT_CANARY/);
+});
+
 test('all five observed matching boundaries are compatible, ignoring description and key order', () => {
   const receipt = compareSnapshotManifest(clone(cases.compatible), reference);
   assert.deepEqual([...BOUNDARIES], ['source', 'host', 'server', 'submitted', 'released']);

@@ -112,7 +112,13 @@ if (snapshotManifestPath === null) {
     process.stderr.write('snapshot_manifest_unreadable\n');
     process.exit(2);
   }
-  const receipt = compareSnapshotManifest(manifest, referenceFromCatalog(catalog));
+  let receipt;
+  try {
+    receipt = compareSnapshotManifest(manifest, referenceFromCatalog(catalog));
+  } catch {
+    process.stderr.write('snapshot_comparison_unavailable\n');
+    process.exit(2);
+  }
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
   process.exitCode = receipt.verdict === 'compatible' ? 0 : 1;
 }

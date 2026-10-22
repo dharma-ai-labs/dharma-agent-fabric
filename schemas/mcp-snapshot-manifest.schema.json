@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1",
+  "title": "MCP Tool Snapshot Manifest",
+  "description": "Unsigned offline input to the MCP catalog snapshot comparator. Snapshots are optional per boundary: a partial or empty list is structurally valid and every boundary not supplied is reported UNKNOWN. Duplicate boundaries, duplicate tool names and identity/version mismatches are semantic checks reported INVALID by the comparator, not structural errors here. Embedded tool inputSchema/outputSchema values are opaque JSON Schema evidence and are not constrained by this contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "expected", "snapshots"],
+  "properties": {
+    "schema": { "const": "dharma.mcp-snapshot-manifest/v1" },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "version"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/nonBlank" },
+        "version": { "$ref": "#/$defs/nonBlank" }
+      }
+    },
+    "snapshots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/snapshot" }
+    }
+  },
+  "$defs": {
+    "nonBlank": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "\\S"
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boundary", "provenance", "tools"],
+      "properties": {
+        "boundary": { "enum": ["source", "host", "server", "submitted", "released"] },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["observed", "identity", "version"],
+          "properties": {
+            "observed": { "type": "boolean" },
+            "identity": { "$ref": "#/$defs/nonBlank" },
+            "version": { "$ref": "#/$defs/nonBlank" }
+          }
+        },
+        "tools": {
+          "description": "null records that the tool list was not captured at this boundary (UNKNOWN).",
+          "anyOf": [
+            { "type": "null" },
+            { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/tool" } }
+          ]
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "confirmation": { "type": "boolean" },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": { "type": "string" },
+            "destructiveHint": { "type": "boolean" },
+            "idempotentHint": { "type": "boolean" },
+            "openWorldHint": { "type": "boolean" },
+            "readOnlyHint": { "type": "boolean" }
+          }
+        },
+        "inputSchema": { "$ref": "#/$defs/embeddedSchema" },
+        "outputSchema": { "$ref": "#/$defs/embeddedSchema" }
+      }
+    },
+    "embeddedSchema": {
+      "description": "Any JSON Schema document (object or boolean form). Content is evidence for the comparator and is deliberately unconstrained here.",
+      "anyOf": [
+        { "type": "object" },
+        { "type": "boolean" }
+      ]
+    }
+  }
+}

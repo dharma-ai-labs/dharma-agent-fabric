@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/mcp-snapshot-compatibility-receipt/v1",
+  "title": "MCP Tool Snapshot Compatibility Receipt",
+  "description": "Unsigned offline receipt emitted by scripts/mcp-catalog-drift.mjs. It carries only fixed codes, boundary names and validated tool names. Names and counts never prove execution; it grants no release or signing authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "verdict", "executionProven", "referenceToolCount", "manifestErrors", "boundaries"],
+  "properties": {
+    "schema": { "const": "dharma.mcp-snapshot-compatibility-receipt/v1" },
+    "verdict": { "$ref": "#/$defs/status" },
+    "executionProven": { "const": false },
+    "referenceToolCount": { "type": "integer", "minimum": 0 },
+    "manifestErrors": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": ["manifest_malformed", "manifest_schema_unsupported", "expected_provenance_missing", "snapshots_malformed",
+          "snapshot_malformed", "unsupported_boundary", "duplicate_boundary"]
+      }
+    },
+    "boundaries": {
+      "description": "Exactly one result per boundary, in fixed order.",
+      "type": "array",
+      "minItems": 5,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/boundaryResult" }, { "type": "object", "properties": { "boundary": { "const": "source" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/boundaryResult" }, { "type": "object", "properties": { "boundary": { "const": "host" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/boundaryResult" }, { "type": "object", "properties": { "boundary": { "const": "server" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/boundaryResult" }, { "type": "object", "properties": { "boundary": { "const": "submitted" } } }] },
+        { "allOf": [{ "$ref": "#/$defs/boundaryResult" }, { "type": "object", "properties": { "boundary": { "const": "released" } } }] }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "status": { "enum": ["compatible", "unknown", "incompatible", "invalid"] },
+    "boundary": { "enum": ["source", "host", "server", "submitted", "released"] },
+    "toolName": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$" },
+    "toolNames": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/toolName" }
+    },
+    "boundaryResult": {
+      "oneOf": [
+        { "$ref": "#/$defs/notSupplied" },
+        { "$ref": "#/$defs/evaluated" }
+      ]
+    },
+    "notSupplied": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boundary", "status", "reasons"],
+      "properties": {
+        "boundary": { "$ref": "#/$defs/boundary" },
+        "status": { "const": "unknown" },
+        "reasons": { "const": ["not_supplied"] }
+      }
+    },
+    "evaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boundary", "status", "reasons", "invalidToolNameCount", "missingTools", "extraTools", "tools"],
+      "properties": {
+        "boundary": { "$ref": "#/$defs/boundary" },
+        "status": { "$ref": "#/$defs/status" },
+        "reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": ["provenance_incomplete", "identity_mismatch", "version_mismatch", "unobserved", "tools_missing",
+              "tools_malformed", "tools_too_many", "tool_malformed", "invalid_tool_name", "duplicate_tool", "missing_tools",
+              "extra_tools", "confirmation_mismatch", "confirmation_evidence_missing", "annotation_evidence_missing",
+              "annotation_malformed", "annotation_unknown_field", "annotation_mismatch", "schema_evidence_missing",
+              "schema_malformed", "schema_unsupported", "schema_reference_missing", "schema_mismatch", "duplicate_boundary"]
+          }
+        },
+        "invalidToolNameCount": { "type": "integer", "minimum": 0 },
+        "missingTools": { "$ref": "#/$defs/toolNames" },
+        "extraTools": { "$ref": "#/$defs/toolNames" },
+        "tools": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/toolResult" }
+        }
+      }
+    },
+    "toolResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "confirmation", "annotationDifferences", "annotations", "inputSchema", "outputSchema"],
+      "properties": {
+        "name": { "$ref": "#/$defs/toolName" },
+        "confirmation": { "enum": ["equal", "different", "unknown"] },
+        "annotationDifferences": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["destructiveHint", "idempotentHint", "openWorldHint", "readOnlyHint"] }
+        },
+        "annotations": { "enum": ["equal", "different", "unknown"] },
+        "inputSchema": { "$ref": "#/$defs/schemaStatus" },
+        "outputSchema": { "$ref": "#/$defs/schemaStatus" }
+      }
+    },
+    "schemaStatus": { "enum": ["equal", "different", "unknown", "invalid"] }
+  }
+}
