@@ -29,6 +29,39 @@ function child(script: string, ...args: string[]) {
 }
 const moduleUrl = new URL('./enrollmentAnchorLock.js', import.meta.url).href;
 
+async function waitReadyPid(path: string, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let value: string | undefined;
+    try {value = await readFile(path, 'utf8');}
+    catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
+    if (Date.now() > deadline) throw Error('child readiness timeout');
+    if (value !== undefined && /^[1-9][0-9]{0,9}$/.test(value) && Number(value) <= 0xffffffff) return value;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+  }
+}
+
+test('PID readiness never accepts an empty or invalid published file', async () => {
+  for (const value of ['', 'not-a-pid', '0', '1\n', '4294967296']) {
+    const f = await fixture(), ready = resolve(f.root, 'ready');
+    try {
+      await writeFile(ready, value);
+      await assert.rejects(waitReadyPid(ready, 40), /child readiness timeout/);
+      assert.equal(await readFile(ready, 'utf8'), value);
+    } finally {await f.cleanup();}
+  }
+});
+
+test('PID readiness returns only the complete atomically published positive PID', async () => {
+  const f = await fixture(), ready = resolve(f.root, 'ready'), candidate = ready + '.pending';
+  try {
+    await writeFile(candidate, String(process.pid));
+    await rename(candidate, ready);
+    assert.equal(await waitReadyPid(ready), String(process.pid));
+    assert.deepEqual(await readdir(f.root), ['ready']);
+  } finally {await f.cleanup();}
+});
+
 test('anchor lock excludes independent processes and releases only its own inode', async () => {
   const f = await fixture(), trace = resolve(f.root, 'trace');
   try {
@@ -176,10 +209,11 @@ test('a replacement process cannot publish during stale primary inspection and r
   const f = await fixture(), releaseOld = resolve(f.root, 'release-old'), releaseNew = resolve(f.root, 'release-new');
   const readyOld = resolve(f.root, 'old-ready'), readyNew = resolve(f.root, 'new-ready');
   const script = `import {acquireEnrollmentAnchorLock} from ${JSON.stringify(moduleUrl)};
-    import {readFile,writeFile} from 'node:fs/promises';
+    import {readFile,writeFile,rename} from 'node:fs/promises';
     const [path,ready,releasePath]=process.argv.slice(1);
     const release=await acquireEnrollmentAnchorLock(path);
-    await writeFile(ready,String(process.pid));
+    await writeFile(ready+'.pending',String(process.pid),{flag:'wx'});
+    await rename(ready+'.pending',ready);
     const deadline=Date.now()+10000;
     try {
       while(true) {
@@ -188,20 +222,12 @@ test('a replacement process cannot publish during stale primary inspection and r
         await new Promise(resolve=>setTimeout(resolve,10));
       }
     } finally {await release();}`;
-  const waitReady = async (path: string) => {
-    const deadline = Date.now() + 10000;
-    for (;;) {
-      try {return await readFile(path, 'utf8');}
-      catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() > deadline) throw error;}
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
-    }
-  };
   const oldOwner = child(script, f.path, readyOld, releaseOld);
   let newOwner: Promise<void> | undefined, interleaved = false, inspectionTime = 0;
   let timerFailure: unknown;
   let releaseInspector: (() => Promise<void>) | undefined;
   try {
-    await waitReady(readyOld);
+    await waitReadyPid(readyOld);
     const source = await readFile(fileURLToPath(new URL('../src/enrollmentAnchorLock.ts', import.meta.url)), 'utf8');
     const ast = ts.createSourceFile('lock.ts', source, ts.ScriptTarget.Latest, true);
     const node = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'acquireEnrollmentAnchorLock')!;
@@ -216,7 +242,7 @@ test('a replacement process cannot publish during stale primary inspection and r
       // because unrelated test/compiler load consumed its wall-clock budget.
       process, Date: {now: () => inspectionTime}, setTimeout: (callback: () => void, delay: number) => {
         if (interleaved && delay === 25) {
-          void waitReady(readyNew).then(() => {inspectionTime = 1500; callback();}, error => {
+          void waitReadyPid(readyNew).then(() => {inspectionTime = 1500; callback();}, error => {
             timerFailure = error; inspectionTime = 1500; callback();
           }); return;
         }
@@ -236,7 +262,7 @@ test('a replacement process cannot publish during stale primary inspection and r
       }}) as typeof acquireEnrollmentAnchorLock;
     await assert.rejects(async () => {releaseInspector = await acquire(f.path, undefined, 1500);}, /connection_anchor_busy/);
     if (timerFailure) throw timerFailure;
-    const replacementPid = await waitReady(readyNew);
+    const replacementPid = await waitReadyPid(readyNew);
     assert.equal(await readFile(f.path, 'utf8'), replacementPid + '\n');
     assert.equal(interleaved, true);
     assert.equal((await readdir(f.root)).some(path => path.includes('.dead.')), false);
