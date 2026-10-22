@@ -370,6 +370,187 @@ test('legacy pending login rejects a schema-only marker appearing during polling
   await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
 });
 
+async function firstEnrollmentFixture(t: {after(fn: () => Promise<void>): void}) {
+  const f = await fixture(t);
+  await rm(f.configPath);
+  await rm(join(f.home, 'installation.json'));
+  f.deps.rm = rm;
+  f.deps.portalUrl = await caller('portalUrl', {});
+  f.deps.loadOrCreateInstallationId = async () => {
+    await writeFile(join(f.home, 'installation.json'), JSON.stringify({schema: 'dharma.installation-identity/v1',
+      installationId: f.config.installationId}));
+    return f.config.installationId;
+  };
+  const flags = new Map<string, string | boolean>([['organization-id', f.config.organizationId],
+    ['portal-url', f.config.hqUrl], ['no-wait', true]]);
+  return {...f, flags, pendingPath: join(f.home, 'pending.json')};
+}
+
+for (const [label, verificationUri, expiresInSeconds] of [
+  ['foreign origin', 'https://other.example/approve', 60],
+  ['plaintext', 'http://hq.example/approve', 60],
+  ['userinfo', 'https://private-user:private-password@hq.example/approve', 60],
+  ['javascript', 'javascript:private-canary', 60],
+  ['malformed URL', 'private-invalid-url', 60],
+  ['zero TTL', 'https://hq.example/approve', 0],
+  ['negative TTL', 'https://hq.example/approve', -1],
+  ['NaN TTL', 'https://hq.example/approve', NaN],
+  ['infinite TTL', 'https://hq.example/approve', Infinity],
+  ['overflow TTL', 'https://hq.example/approve', Number.MAX_VALUE],
+] as const) {
+  test(`first enrollment rejects ${label} approval before browser or pending writes`, async t => {
+    const f = await firstEnrollmentFixture(t);
+    let polls = 0, released = false;
+    f.deps.acquirePidLock = async () => async () => {released = true;};
+    f.deps.beginEnrollment = async () => {
+      f.effects.push('enrollment');
+      return {deviceCode: 'synthetic', browserCode: 'synthetic', verificationUri, expiresInSeconds};
+    };
+    f.deps.pollEnrollment = async () => {polls++; throw Error('unexpected_poll');};
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(f.flags), error => {
+      assert.equal((error as Error).message, 'connection_enrollment_approval_invalid');
+      assert.doesNotMatch((error as Error).message, /private-/);
+      return true;
+    });
+    assert.equal(released, true);
+    assert.equal(polls, 0);
+    assert.deepEqual(f.effects, ['key-create-path', 'enrollment']);
+    await assert.rejects(readFile(f.pendingPath), {code: 'ENOENT'});
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+    assert.equal(JSON.parse(await readFile(join(f.home, 'installation.json'), 'utf8')).installationId,
+      f.config.installationId);
+  });
+}
+
+test('first enrollment uses bounded no-redirect transport and preserves caller cancellation', async t => {
+  const f = await firstEnrollmentFixture(t);
+  const budgets: number[] = [], requests: RequestInit[] = [];
+  f.deps.AbortSignal = {timeout: (ms: number) => {budgets.push(ms); return AbortSignal.timeout(ms);},
+    any: AbortSignal.any.bind(AbortSignal)};
+  f.deps.fetch = async (_url: unknown, init: RequestInit) => {requests.push(init); return new Response('{}');};
+  const controller = new AbortController();
+  f.deps.beginEnrollment = async (input: {fetcher?: typeof fetch}) => {
+    assert.equal(typeof input.fetcher, 'function');
+    await input.fetcher!('https://hq.example/api/v1/agent-fabric/enrollments',
+      {method: 'POST', headers: {'idempotency-key': 'synthetic'}, body: '{}', signal: controller.signal});
+    return {deviceCode: 'synthetic', browserCode: 'synthetic', verificationUri: 'https://hq.example/approve', expiresInSeconds: 60};
+  };
+  const login = await caller('login', f.deps);
+  const result = await login(f.flags);
+  assert.equal(result?.status, 'pending');
+  assert.deepEqual(budgets, [30_000]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]!.redirect, 'error');
+  assert.equal(requests[0]!.method, 'POST');
+  assert.deepEqual(requests[0]!.headers, {'idempotency-key': 'synthetic'});
+  assert.equal(requests[0]!.body, '{}');
+  assert.equal(requests[0]!.signal?.aborted, false);
+  controller.abort();
+  assert.equal(requests[0]!.signal?.aborted, true);
+  assert.deepEqual(f.effects, ['key-create-path', 'browser']);
+  assert.equal(JSON.parse(await readFile(f.pendingPath, 'utf8')).verificationUri, 'https://hq.example/approve');
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
+for (const remaining of [5000, 60_000]) {
+  test(`pending enrollment transport uses the remaining deadline capped at 30 seconds (${remaining}ms)`, async t => {
+    const f = await pendingLoginFixture(t);
+    const now = Date.parse(f.pending.expiresAt) - remaining;
+    f.deps.Date = class extends Date {static now() {return now;}};
+    const budgets: number[] = [], requests: RequestInit[] = [];
+    f.deps.AbortSignal = {timeout: (ms: number) => {budgets.push(ms); return AbortSignal.timeout(ms);},
+      any: AbortSignal.any.bind(AbortSignal)};
+    f.deps.fetch = async (_url: unknown, init: RequestInit) => {requests.push(init); return new Response('{}');};
+    f.deps.pollEnrollment = async (input: {fetcher?: typeof fetch}) => {
+      assert.equal(typeof input.fetcher, 'function');
+      await input.fetcher!('https://pending.example/api/v1/agent-fabric/enrollments/synthetic');
+      return {status: 'pending'};
+    };
+    const login = await caller('login', f.deps);
+    const result = await login(new Map([['resume', true], ['no-wait', true]]));
+    assert.equal(result?.status, 'pending');
+    assert.deepEqual(budgets, [Math.min(30_000, remaining)]);
+    assert.equal(requests[0]!.redirect, 'error');
+    assert.equal(requests[0]!.signal?.aborted, false);
+    assert.deepEqual(f.effects, []);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  });
+}
+
+test('a late approval response preserves pending state instead of saving enrollment after expiry', async t => {
+  const f = await pendingLoginFixture(t);
+  let now = Date.parse(f.pending.expiresAt) - 1, released = false;
+  f.deps.Date = class extends Date {static now() {return now;}};
+  f.deps.acquirePidLock = async () => async () => {released = true;};
+  const poll = f.deps.pollEnrollment as (input: unknown) => Promise<unknown>;
+  f.deps.pollEnrollment = async (input: unknown) => {now++; return poll(input);};
+  const installationBefore = await readFile(join(f.home, 'installation.json'), 'utf8');
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), /Enrollment timed out/);
+  assert.equal(released, true);
+  assert.equal(f.polls.length, 1);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+  assert.equal(await readFile(join(f.home, 'installation.json'), 'utf8'), installationBefore);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
+test('an expired pending transport refuses a deferred fetch before any network effect', async t => {
+  const f = await pendingLoginFixture(t);
+  let now = Date.parse(f.pending.expiresAt) - 1, requests = 0;
+  f.deps.Date = class extends Date {static now() {return now;}};
+  f.deps.fetch = async () => {requests++; return new Response('{}');};
+  f.deps.pollEnrollment = async (input: {fetcher?: typeof fetch}) => {
+    assert.equal(typeof input.fetcher, 'function');
+    now++;
+    await input.fetcher!('https://pending.example/api/v1/agent-fabric/enrollments/synthetic');
+    return {status: 'pending'};
+  };
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), /connection_pending_approval_expired/);
+  assert.equal(requests, 0);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
+test('an aborted enrollment poll preserves the existing journal and releases the caller lock', async t => {
+  const f = await pendingLoginFixture(t);
+  let released = false;
+  f.deps.acquirePidLock = async () => async () => {released = true;};
+  f.deps.fetch = async () => {throw new DOMException('synthetic timeout', 'TimeoutError');};
+  f.deps.pollEnrollment = async (input: {fetcher?: typeof fetch}) => {
+    assert.equal(typeof input.fetcher, 'function');
+    return input.fetcher!('https://pending.example/api/v1/agent-fabric/enrollments/synthetic');
+  };
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), {name: 'TimeoutError'});
+  assert.equal(released, true);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
+test('pending approval expiring during the final marker read cannot begin configuration writes', async t => {
+  const f = await pendingLoginFixture(t);
+  let now = Date.parse(f.pending.expiresAt) - 1, checks = 0;
+  f.deps.Date = class extends Date {static now() {return now;}};
+  const check = f.deps.assertInstallationContinuity as typeof assertInstallationContinuity;
+  f.deps.assertInstallationContinuity = async (...args: Parameters<typeof assertInstallationContinuity>) => {
+    await check(...args);
+    if (++checks === 2) now++;
+  };
+  const login = await caller('login', f.deps);
+  await assert.rejects(login(new Map([['resume', true]])), /Enrollment timed out/);
+  assert.equal(checks, 2);
+  assert.equal(f.polls.length, 1);
+  assert.deepEqual(f.effects, []);
+  assert.equal(await readFile(f.pendingPath, 'utf8'), f.pendingBytes);
+  await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+});
+
 async function bootstrapFixture(t: {after(fn: () => Promise<void>): void}) {
   const f = await fixture(t);
   const server = generateKeyPairSync('ed25519');
