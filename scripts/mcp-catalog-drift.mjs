@@ -1,4 +1,4 @@
-// Offline MCP tool snapshot compatibility comparator (DIA-1285).
+// Offline MCP tool snapshot compatibility comparator.
 //
 // Compares explicitly supplied snapshots at five evidence boundaries against
 // the public catalog reference. Names and counts never prove execution.
