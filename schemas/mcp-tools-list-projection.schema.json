@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/mcp-tools-list-projection/v1",
+  "title": "MCP tools/list Result Projection",
+  "description": "Output of scripts/mcp-tools-list-project.mjs: either a closed tool fragment usable as one manifest v1 snapshot's tools array, or a fixed rejection code. It carries no provenance, identity, version, observation, confirmation, consent or release claim. Allowed documentation and opaque schema content is retained verbatim; this is not a secret sanitizer.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/ready" },
+    { "$ref": "#/$defs/rejected" }
+  ],
+  "$defs": {
+    "inputResult": {
+      "description": "Already decoded JSON tools/list result only. Unknown metadata is allowed here for fixed-count dropping; it is not emitted. No acquisition or completeness is attested.",
+      "type": "object",
+      "required": ["tools"],
+      "properties": {
+        "tools": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/inputTool" } },
+        "nextCursor": false,
+        "jsonrpc": false,
+        "result": false,
+        "error": false
+      },
+      "additionalProperties": true
+    },
+    "inputTool": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1#/$defs/tool/properties/name" },
+        "title": { "$ref": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1#/$defs/tool/properties/title" },
+        "description": { "$ref": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1#/$defs/tool/properties/description" },
+        "inputSchema": { "$ref": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1#/$defs/embeddedSchema" },
+        "outputSchema": { "$ref": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1#/$defs/embeddedSchema" },
+        "annotations": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "readOnlyHint": { "type": "boolean" },
+            "destructiveHint": { "type": "boolean" },
+            "idempotentHint": { "type": "boolean" },
+            "openWorldHint": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ready": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "status", "tools", "counts"],
+      "properties": {
+        "schema": { "const": "dharma.mcp-tools-list-projection/v1" },
+        "status": { "const": "ready" },
+        "tools": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "allOf": [{ "$ref": "https://schemas.dharma-ai.io/mcp-snapshot-manifest/v1#/$defs/tool" }],
+            "not": { "type": "object", "required": ["confirmation"] }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tools", "droppedResultKeys", "droppedToolKeys", "droppedAnnotationKeys"],
+          "properties": {
+            "tools": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "droppedResultKeys": { "type": "integer", "minimum": 0 },
+            "droppedToolKeys": { "type": "integer", "minimum": 0 },
+            "droppedAnnotationKeys": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "rejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "status", "code"],
+      "properties": {
+        "schema": { "const": "dharma.mcp-tools-list-projection/v1" },
+        "status": { "const": "rejected" },
+        "code": {
+          "enum": ["input_not_json", "input_too_deep", "input_too_large", "result_not_object", "envelope_not_result",
+            "tools_missing", "tools_not_array", "incomplete_pagination", "tools_too_many", "tool_malformed",
+            "output_too_large"]
+        }
+      }
+    }
+  }
+}
