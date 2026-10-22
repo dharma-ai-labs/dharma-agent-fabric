@@ -430,6 +430,21 @@ async function gitOutput(repository: string, argv: string[]) {
   return result.stdout;
 }
 
+async function assertTaskWriteScope(worktree: string, startingCommit: string, writePaths: string[],
+  actor: 'Provider' | 'Acceptance command'): Promise<void> {
+  const trackedChanges = await gitOutput(worktree, [
+    'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
+  ]);
+  const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard']);
+  if ((trackedChanges && !trackedChanges.endsWith('\0')) || (untrackedChanges && !untrackedChanges.endsWith('\0'))) {
+    throw new Error('Git path output was incomplete.');
+  }
+  const changedPaths = [...trackedChanges.split('\0'), ...untrackedChanges.split('\0')].filter(Boolean);
+  if (changedPaths.some(path => !pathWithinPolicy(path, writePaths))) {
+    throw new Error(`${actor} changed a path outside the signed task authority.`);
+  }
+}
+
 export function verifyTaskEnvelope(
   task: TaskEnvelope,
   publicKey: KeyObject,
@@ -1218,20 +1233,7 @@ export async function executeTask(input: {
     commandResults.push(providerCommandResult);
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
     await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, artifactIntegrity);
-    const trackedChanges = await gitOutput(worktree, [
-      'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
-    ]);
-    const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard']);
-    if ((trackedChanges && !trackedChanges.endsWith('\0')) || (untrackedChanges && !untrackedChanges.endsWith('\0'))) {
-      throw new Error('Git path output was incomplete.');
-    }
-    const changedPaths = [...trackedChanges.split('\0'), ...untrackedChanges.split('\0')].filter(Boolean);
-    if (changedPaths.length > 0) {
-      const writes = input.task.authority.writePaths;
-      if (writes.length === 0 || changedPaths.some((path) => !pathWithinPolicy(path, writes))) {
-        throw new Error('Provider changed a path outside the signed task authority.');
-      }
-    }
+    await assertTaskWriteScope(worktree, startingCommit, input.task.authority.writePaths, 'Provider');
     for (const { commandId } of input.task.acceptance.commands) {
       if (status !== 'completed') break;
       if (input.signal?.aborted) { status = 'cancelled'; break; }
@@ -1259,6 +1261,9 @@ export async function executeTask(input: {
       });
       if (remainingTaskMs() <= 0) throw new Error('Task expired during acceptance verification.');
       commandResults.push({ commandId, ...result });
+      await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, artifactIntegrity);
+      await assertTaskWriteScope(worktree, startingCommit, input.task.authority.writePaths, 'Acceptance command');
+      assertArtifactCurrent();
       if (receiptRequired && commandId === input.task.acceptance.externalEffectReceiptCommandId
         && decisionReceipt) {
         externalEffectReceipt = parseExternalEffectReceipt(result.stdout, {
