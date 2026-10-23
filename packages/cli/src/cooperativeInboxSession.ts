@@ -4,13 +4,12 @@ import { canonicalize, inspectSessionQuestionForBinding, sha256, type SessionBin
 import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
+import { snapshotCooperativeSessionAnswer, type CooperativeSessionAnswer } from './cooperativeSessionSubmission.js';
+
+export type { CooperativeSessionAnswer } from './cooperativeSessionSubmission.js';
 
 export interface CooperativeSessionContext {
   provider: 'codex'; sessionId: string; workspaceRoot: string; active: boolean;
-}
-
-export interface CooperativeSessionAnswer {
-  questionId: string; taskId: string; nonce: string; offerHash: string; attemptId: string; answer: string;
 }
 
 // The embedding agent owns this callback. No provider transport, external resume,
@@ -100,11 +99,7 @@ export async function openCooperativeInboxSession(input: {
     try {
       let submitted: CooperativeSessionAnswer | undefined;
       if (submission !== undefined) {
-        if (!submission || Object.keys(submission).sort().join(',') !== 'answer,attemptId,nonce,offerHash,questionId,taskId'
-          || Object.values(submission).some(value => typeof value !== 'string')) {
-          throw new Error('cooperative_session_submission_invalid');
-        }
-        submitted = {...submission};
+        submitted = snapshotCooperativeSessionAnswer(submission);
       }
       await requireOwner();
       if (submitted) {
