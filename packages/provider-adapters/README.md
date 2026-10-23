@@ -48,6 +48,16 @@ counter, a replay evaluation, canary approval or a signed learning release.
 
 Licensed under MIT.
 
+## Bounded Session File Reads
+
+Local JSONL readers fill each selected byte range using the file handle's actual
+`bytesRead` count before decoding UTF-8. A short read advances within the same
+range; a read error is not retried, and zero progress before the selected range
+is complete fails with `provider_session_source_changed`. The descriptor closes
+on success and failure. This does not make file contents atomic or qualify source
+identity, consent, native execution, or a new exact-source reader. Existing byte
+limits, head/tail selection and partial-coverage rules remain unchanged.
+
 ## Task Knowledge Transport
 
 The task-local knowledge server uses MCP SDK server 2.3.0 over stdio, with a fresh
