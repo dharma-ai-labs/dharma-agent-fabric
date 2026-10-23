@@ -32,6 +32,7 @@ function fixture() {
   const calls: Array<{ route: string; body: Record<string, unknown> }> = [];
   let afterSend: (() => void) | undefined;
   let duringContent: (() => void) | undefined;
+  let duringOwner: (() => void) | undefined;
   const transport = { async signedPost(route: string, input: unknown) {
     const body = input as Record<string, unknown>;
     calls.push({ route, body }); afterSend?.();
@@ -50,13 +51,56 @@ function fixture() {
     return { ok: true, organizationId: scope.organizationId, result, correlationId: uuid(90) };
   } };
   const channel = createProviderSessionChannel({ transport, scope, mode: 'bridge_owned', expectedRevision: 0,
-    assertOwner: async () => held, now: () => time,
+    assertOwner: async () => {duringOwner?.(); return held;}, now: () => time,
     verifier: { resolvePublicKey: () => publicKey }, authorizeContent: async () => { duringContent?.(); return permitted; } });
   return { channel, calls, setHeld: (value: boolean) => { held = value; },
     setTime: (value: Date) => { time = value; }, setResponse: (value: unknown) => { responseOverride = value; },
     onSend: (fn: () => void) => { afterSend = fn; }, onContent: (fn: () => void) => { duringContent = fn; },
-    setPermitted: (value: boolean) => { permitted = value; } };
+    setPermitted: (value: boolean) => { permitted = value; }, onOwner: (fn: () => void) => {duringOwner = fn;} };
 }
+
+for (const boundary of ['content', 'last_owner'] as const) {
+  test(`per-offer reply deadline is enforced after ${boundary} wait without changing the wire contract`, async () => {
+    const f = fixture(); await f.channel.attach();
+    const deadline = new Date(now.getTime() + 10_000).toISOString(); let checks = 0;
+    if (boundary === 'content') f.onContent(() => f.setTime(new Date(now.getTime() + 11_000)));
+    else f.onOwner(() => {if (++checks === 3) f.setTime(new Date(now.getTime() + 11_000));});
+    await assert.rejects(f.channel.reply({questionId: uuid(10), taskId: uuid(11), outcome: 'answered',
+      answer: 'Use the signed catalog.', failureCode: null}, {expiresAt: deadline}), /channel_deadline/);
+    assert.equal(f.calls.filter(x => x.body.action === 'reply').length, 0);
+  });
+}
+
+test('an unexpired per-offer deadline does not add fields to the signed reply payload', async () => {
+  const f = fixture(); await f.channel.attach();
+  assert.equal((await f.channel.reply({questionId: uuid(10), taskId: uuid(11), outcome: 'answered',
+    answer: 'Use the signed catalog.', failureCode: null}, {expiresAt: new Date(now.getTime() + 10_000).toISOString()})).state, 'answered');
+  assert.equal(f.calls.filter(x => x.body.action === 'reply').length, 1);
+  assert.equal(f.calls.at(-1)?.body.expiresAt, undefined);
+});
+
+test('a reply deadline is snapshotted before a serial queue wait and cannot be extended by caller mutation', async () => {
+  const f = fixture(); await f.channel.attach();
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  f.onSend(entered);
+  f.setResponse(async (body: Record<string, unknown>) => {
+    await blocked;
+    return {ok: true, organizationId: scope.organizationId, correlationId: uuid(90), registration: {
+      bindingId: scope.bindingId, workspaceId: scope.workspaceId, endpointId: scope.endpointId,
+      repositoryBindingId: scope.repositoryBindingId, membershipId: scope.membershipId, deviceId: scope.deviceId,
+      provider: 'codex', mode: 'bridge_owned', revision: Number(body.expectedRevision) + 1,
+      state: 'attached', leaseUntil: '2026-09-26T05:01:00.000Z', replay: false}};
+  });
+  const heartbeat = f.channel.heartbeat(); await started;
+  const context = {expiresAt: new Date(now.getTime() + 10_000).toISOString()};
+  const queued = f.channel.reply({questionId: uuid(10), taskId: uuid(11), outcome: 'answered',
+    answer: 'Use the signed catalog.', failureCode: null}, context);
+  context.expiresAt = scope.expiresAt; f.setTime(new Date(now.getTime() + 11_000)); release();
+  await heartbeat; await assert.rejects(queued, /channel_deadline/);
+  assert.equal(f.calls.filter(x => x.body.action === 'reply').length, 0);
+});
 
 test('async expiry lookup cannot carry stale ownership into a signed request', async () => {
   let held = true, sends = 0;

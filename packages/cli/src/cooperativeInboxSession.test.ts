@@ -5,7 +5,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { signCanonicalObject, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, signCanonicalObject, validateContract, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { openCooperativeInboxSession } from './cooperativeInboxSession.js';
 import { openCodexBoundSession } from './codexBoundSession.js';
@@ -88,6 +88,8 @@ async function fixture(owner: 'cooperative_session' | 'dharma_bridge' = 'coopera
     setFail: (action: string | null) => { fail = action; }, onAction: (fn: typeof after) => { after = fn; },
     setDisclosure: (value: boolean) => { disclosed = value; }, setReservation: (value: boolean) => { reserved = value; },
     reserves: () => reserveCalls,
+    remoteAnswer: () => answer,
+    setRemoteAnswer: (value: string) => {state = 'answered'; answer = value;},
   };
 }
 
@@ -391,7 +393,7 @@ test('a preexisting immutable offer blocks unrelated queued work without exposin
   } finally {await owner.close(); f.vault.close();}
 });
 
-test('an actual consumer process crash retains the accepted offer and the dead-owner successor cannot replay it', async () => {
+for (const phase of ['inline', 'handed_off'] as const) test(`an actual ${phase} process crash retains the accepted offer without successor replay`, async () => {
   const f = await fixture(); f.vault.close();
   const source = `
     import {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
@@ -416,7 +418,7 @@ test('an actual consumer process crash retains the accepted offer and the dead-o
         throw new Error('Unexpected synthetic transport action');
       }}
     });
-    await owner.runNext(async () => {process.exit(77);});
+    ${phase === 'handed_off' ? 'await owner.checkpoint(); process.exit(77);' : 'await owner.runNext(async () => {process.exit(77);});'}
     throw new Error('Crash fixture did not reach the consumer callback');
   `;
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', source],
@@ -425,6 +427,8 @@ test('an actual consumer process crash retains the accepted offer and the dead-o
   const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
   const successor = await openCooperativeInboxSession({...f.input, vault: reopened});
   try {
+    if (phase === 'handed_off') assert.equal(reopened.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity,
+      f.question.questionId)?.state, 'handed_off');
     assert.equal((await successor.runNext(async () => {throw new Error('must not recompute');})).state, 'offer_recovery_required');
     assert.equal(f.reserves(), 0); assert.equal(f.used.size, 0);
     assert.deepEqual(f.actions, ['inspect', 'attach']);
@@ -455,4 +459,275 @@ test('a failed encrypted checkpoint write cannot reach acceptance, replay consum
     assert.equal(f.actions.includes('accept'), false); assert.equal(f.actions.includes('reply'), false);
     assert.equal(f.used.size, 0); assert.equal(f.reserves(), 1);
   } finally {await owner.close(); f.vault.close();}
+});
+
+interface SplitCheckpoint {
+  state: string; offer: SessionQuestion; offerHash: string; attemptId: string;
+}
+interface SplitAnswer {
+  questionId: string; taskId: string; nonce: string; offerHash: string; attemptId: string; answer: string;
+}
+function splitConsumer(owner: unknown) {
+  const split = owner as {checkpoint(): Promise<SplitCheckpoint>; submitAnswer(value: SplitAnswer): Promise<{state: string}>};
+  assert.equal(typeof split.checkpoint, 'function', 'actual consumer must expose checkpoint without invoking an answer callback');
+  assert.equal(typeof split.submitAnswer, 'function', 'actual consumer must expose a separate later submission');
+  return split;
+}
+function splitAnswer(checkpoint: SplitCheckpoint): SplitAnswer {
+  return {questionId: checkpoint.offer.questionId, taskId: checkpoint.offer.taskId, nonce: checkpoint.offer.nonce,
+    offerHash: checkpoint.offerHash, attemptId: checkpoint.attemptId, answer: 'Use the signed catalog.'};
+}
+
+test('checkpoint durably hands off the immutable offer without computing or posting an answer', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+    assert.equal(checkpoint.state, 'handed_off'); assert.deepEqual(checkpoint.offer, f.question);
+    assert.throws(() => {checkpoint.offer.authority.readPaths.push('.');}, TypeError);
+    assert.deepEqual(f.actions, ['inspect', 'attach', 'inbox', 'accept']);
+    assert.equal(f.reserves(), 1); assert.equal(f.used.size, 1);
+    assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'answered');
+    assert.equal(f.actions.filter(x => x === 'reply').length, 1);
+    assert.deepEqual(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('handed-off checkpoint retains the same exclusive lease and does not disclose or reserve twice', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner); await split.checkpoint();
+    await assert.rejects(openCooperativeInboxSession(f.input), /lease_unavailable/);
+    const actions = f.actions.length, repeated = await split.checkpoint();
+    assert.equal(repeated.state, 'checkpoint_pending');
+    assert.equal(JSON.stringify(repeated).includes(f.question.question), false);
+    assert.equal(f.actions.length, actions); assert.equal(f.reserves(), 1);
+    await assert.rejects(owner.runNext(async () => {throw new Error('must not compute');}), /handoff_pending/);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+for (const field of ['questionId', 'taskId', 'nonce', 'offerHash', 'attemptId', 'nativeSessionId', 'workspaceRoot', 'provider'] as const) {
+  test(`later submission rejects mismatched or extra ${field} before reply`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+      const answer = {...splitAnswer(checkpoint), [field]: field === 'offerHash' ? `sha256:${'0'.repeat(64)}` : uuid(99)};
+      await assert.rejects(split.submitAnswer(answer), /submission_(invalid|mismatch)/);
+      assert.equal(f.actions.includes('reply'), false);
+      assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
+for (const change of ['session', 'workspace', 'inactive'] as const) {
+  test(`later submission refuses lost ${change} ownership and retains the durable handoff`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+      f.setContext({...f.getContext()!, ...(change === 'session' ? {sessionId: uuid(99)}
+        : change === 'workspace' ? {workspaceRoot: resolve(f.root, 'other')} : {active: false})});
+      await assert.rejects(split.submitAnswer(splitAnswer(checkpoint)), /owner_lost/);
+      assert.equal(f.actions.includes('reply'), false);
+      assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
+test('expired split-phase work cannot post an answer or erase its offer', async t => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+    t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.question.expiresAt) + 1});
+    await assert.rejects(split.submitAnswer(splitAnswer(checkpoint)), /expired|submission_mismatch/);
+    assert.equal(f.actions.includes('reply'), false);
+    assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('a closed handoff cannot be answered by a reopened consumer or re-admitted as new work', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  let checkpoint: SplitCheckpoint;
+  try {checkpoint = await splitConsumer(owner).checkpoint();}
+  finally {await owner.close(); f.vault.close();}
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
+  const next = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    const split = splitConsumer(next), before = f.actions.length;
+    await assert.rejects(split.submitAnswer(splitAnswer(checkpoint!)), /submission_mismatch/);
+    assert.equal(f.actions.length, before); assert.equal(f.reserves(), 1);
+  } finally {await next.close(); reopened.close();}
+});
+
+test('a lost split-phase reply ACK recovers the v2 completion without another reservation or computation', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint(); f.setFail('reply');
+    assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'reply_pending');
+    const pending = f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity)[0];
+    assert.ok(pending);
+    const completion = JSON.parse((await f.vault.getBlob(pending.completionHash)).toString('utf8'));
+    assert.equal(completion.schema, 'dharma.provider-session-completion/v2');
+    assert.equal(completion.offerHash, checkpoint.offerHash); assert.equal(completion.nonce, f.question.nonce);
+    assert.equal(completion.attemptId, checkpoint.attemptId); assert.equal(completion.nativeSessionId, f.binding.sessionId);
+    const schema = 'https://schemas.dharma-ai.io/provider-session-completion/v2', schemas = resolve(import.meta.dirname, 'schemas');
+    assert.equal((await validateContract(schemas, schema, completion)).ok, true);
+    for (const invalid of [{...completion, offerHash: 'invalid'}, {...completion, attemptId: 'invalid'},
+      {...completion, nativeSessionId: 'line\nbreak'}, {...completion, nativeAuthority: true}]) {
+      assert.equal((await validateContract(schemas, schema, invalid)).ok, false);
+    }
+  } finally {await owner.close(); f.vault.close();}
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey}); f.setFail(null);
+  const next = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    assert.equal((await next.runNext(async () => {throw new Error('must not recompute');})).state, 'reply_reconciled');
+    assert.equal(f.reserves(), 1); assert.equal(f.used.size, 1);
+    assert.deepEqual(reopened.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+  } finally {await next.close(); reopened.close();}
+});
+
+test('a duplicate later answer cannot submit twice after successful settlement', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint(), answer = splitAnswer(checkpoint);
+    assert.equal((await split.submitAnswer(answer)).state, 'answered');
+    await assert.rejects(split.submitAnswer(answer), /submission_mismatch/);
+    assert.equal(f.actions.filter(x => x === 'reply').length, 1); assert.equal(f.reserves(), 1);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('submission snapshots its answer before the asynchronous current-owner check', async () => {
+  const f = await fixture(); let pause = false, release!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const owner = await openCooperativeInboxSession({...f.input, currentSession: async () => {
+    if (pause) await gate; return f.getContext();
+  }});
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint(), answer = splitAnswer(checkpoint);
+    pause = true; const submission = split.submitAnswer(answer); answer.answer = 'Changed after invocation.';
+    release(); assert.equal((await submission).state, 'answered');
+    assert.equal(f.remoteAnswer(), 'Use the signed catalog.');
+  } finally {release(); await owner.close(); f.vault.close();}
+});
+
+test('expiry during durable reply staging suppresses disclosure and retains both records', async t => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+    const original = f.vault.stageProviderSessionReply.bind(f.vault);
+    f.vault.stageProviderSessionReply = async (...args) => {
+      const hash = await original(...args);
+      t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.question.expiresAt) + 1}); return hash;
+    };
+    await assert.rejects(split.submitAnswer(splitAnswer(checkpoint)), /expired/);
+    assert.equal(f.actions.includes('reply'), false);
+    assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+    assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+for (const field of ['taskId', 'nonce', 'attemptId', 'nativeSessionId', 'workspaceRootHash', 'offerHash'] as const) {
+  test(`v2 durable recovery rejects mismatched ${field} before a read or upload`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint(); f.setFail('reply');
+      const original = f.vault.stageProviderSessionReply.bind(f.vault);
+      f.vault.stageProviderSessionReply = async (binding, identity, question, bytes) => {
+        const value = JSON.parse(Buffer.from(bytes).toString('utf8'));
+        value[field] = field.endsWith('Hash') ? `sha256:${'0'.repeat(64)}` : uuid(99);
+        return original(binding, identity, question, Buffer.from(canonicalize(value)));
+      };
+      assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'reply_pending');
+    } finally {await owner.close(); f.vault.close();}
+    const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey}); f.setFail(null);
+    const next = await openCooperativeInboxSession({...f.input, vault: reopened});
+    try {
+      const actions = f.actions.length;
+      await assert.rejects(next.runNext(async () => {throw new Error('must not compute');}), /handoff_mismatch/);
+      assert.equal(f.actions.length, actions); assert.equal(f.reserves(), 1);
+      assert.equal(reopened.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+    } finally {await next.close(); reopened.close();}
+  });
+}
+
+test('v2 recovery cannot re-upload accepted work after its signed expiry', async t => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint(); f.setFail('reply');
+    assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'reply_pending');
+  } finally {await owner.close(); f.vault.close();}
+  t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.question.expiresAt) + 1}); f.setFail(null);
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
+  const next = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    const before = f.actions.filter(x => x === 'reply').length;
+    assert.equal((await next.runNext(async () => {throw new Error('must not compute');})).state, 'reply_pending');
+    assert.equal(f.actions.filter(x => x === 'reply').length, before);
+    assert.equal(reopened.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+  } finally {await next.close(); reopened.close();}
+});
+
+test('split-phase handoff and later submission use the actual scoped asynchronous vault facade', async () => {
+  const f = await fixture(); f.vault.close(); const controller = new AbortController();
+  const vault = await LocalVault.open({root: f.root, masterKey: f.masterKey},
+    {signal: controller.signal, current: async () => !controller.signal.aborted});
+  const owner = await openCooperativeInboxSession({...f.input, vault});
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+    assert.equal((await vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, checkpoint.offer.questionId))?.state, 'handed_off');
+    assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'answered');
+    assert.deepEqual(await vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+  } finally {await owner.close(); controller.abort(); await vault.close();}
+});
+
+for (const boundary of ['read', 'answer_authorization'] as const) {
+  test(`v2 recovery cannot disclose an answer when signed expiry passes during ${boundary}`, async t => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint(); f.setFail('reply');
+      assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'reply_pending');
+    } finally {await owner.close(); f.vault.close();}
+    const expire = () => t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.question.expiresAt) + 1});
+    if (boundary === 'read') f.onAction(action => {if (action === 'read') expire();});
+    const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey}); f.setFail(null);
+    const next = await openCooperativeInboxSession({...f.input, vault: reopened,
+      authorizeContent: async (_content, kind) => {if (boundary === 'answer_authorization' && kind === 'answer') expire(); return true;}});
+    try {
+      const before = f.actions.filter(x => x === 'reply').length;
+      assert.equal((await next.runNext(async () => {throw new Error('must not compute');})).state, 'reply_pending');
+      assert.equal(f.actions.filter(x => x === 'reply').length, before);
+      assert.equal(reopened.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+      assert.equal(reopened.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+    } finally {await next.close(); reopened.close();}
+  });
+}
+
+test('a new split-phase answer cannot cross signed expiry during asynchronous disclosure authorization', async t => {
+  const f = await fixture();
+  const owner = await openCooperativeInboxSession({...f.input, authorizeContent: async (_content, kind) => {
+    if (kind === 'answer') t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.question.expiresAt) + 1});
+    return true;
+  }});
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+    assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'reply_pending');
+    assert.equal(f.actions.includes('reply'), false);
+    assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('an authoritative matching answered receipt after expiry reconciles without re-upload', async t => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    const split = splitConsumer(owner), checkpoint = await split.checkpoint(); f.setFail('reply');
+    assert.equal((await split.submitAnswer(splitAnswer(checkpoint))).state, 'reply_pending');
+  } finally {await owner.close(); f.vault.close();}
+  f.setFail(null); f.setRemoteAnswer('Use the signed catalog.');
+  t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.question.expiresAt) + 1});
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
+  const next = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    const before = f.actions.filter(x => x === 'reply').length;
+    assert.equal((await next.runNext(async () => {throw new Error('must not compute');})).state, 'reply_reconciled');
+    assert.equal(f.actions.filter(x => x === 'reply').length, before);
+    assert.deepEqual(reopened.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+  } finally {await next.close(); reopened.close();}
 });

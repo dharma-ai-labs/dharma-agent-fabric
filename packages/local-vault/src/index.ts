@@ -85,6 +85,11 @@ export type ProviderSessionOfferCheckpoint = {
 // Storage verifies this key's signature but does not establish signer admission.
 export interface ProviderSessionOfferVerificationKey { version: string; publicKeyPem: string }
 
+export interface ProviderSessionOfferHandoff {
+  state: 'handed_off' | 'settled'; questionId: string; offerHash: string;
+  attemptId: string; bindingFingerprint: string; handedOffAt: string;
+}
+
 interface ProviderSessionOfferRow {
   offer_hash: string; settled_reply_hash: string | null;
 }
@@ -604,6 +609,16 @@ export class LocalVault {
         on provider_session_offer_checkpoints(offer_hash);
       create index if not exists provider_session_offer_reply_pin
         on provider_session_offer_checkpoints(settled_reply_hash) where settled_reply_hash is not null;
+      create table if not exists provider_session_offer_handoffs (
+        binding_id text not null,
+        question_id text not null,
+        attempt_id text not null,
+        binding_fingerprint text not null,
+        handed_off_at text not null,
+        primary key (binding_id, question_id),
+        foreign key (binding_id, question_id)
+          references provider_session_offer_checkpoints(binding_id, question_id)
+      );
       create table if not exists provider_session_reply_dispositions (
         binding_id text not null,
         question_id text not null,
@@ -872,6 +887,52 @@ export class LocalVault {
       from provider_session_offer_checkpoints where binding_id = ? and settled_reply_hash is null
       order by created_at, question_id limit 1`).all(bindingId) as Array<{questionId: string; offerHash: string}>;
     return rows.map(row => ({questionId: row.questionId, offerHash: row.offerHash}));
+  }
+
+  // This durable transition records delivery under the owning consumer's lease.
+  // It does not grant native execution or reacquisition after a process restart.
+  handoffProviderSessionOfferCheckpoint(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, offerHash: string, attemptId: string): ProviderSessionOfferHandoff {
+    const binding = this.#offerCheckpointBinding(bindingId, identity);
+    if (!providerOfferId.test(questionId) || !providerOfferId.test(attemptId) || !setupDigest.test(offerHash)) {
+      throw new Error('provider_session_handoff_invalid');
+    }
+    const offer = this.#offerCheckpointRow(bindingId, questionId);
+    if (!offer || offer.offer_hash !== offerHash || offer.settled_reply_hash !== null
+      || this.#database.prepare('select 1 from provider_session_replies where binding_id = ? and question_id = ?')
+        .get(bindingId, questionId)) {
+      throw new Error('provider_session_handoff_conflict');
+    }
+    const fingerprint = sha256(canonicalize(binding));
+    this.#database.prepare(`insert into provider_session_offer_handoffs
+      (binding_id, question_id, attempt_id, binding_fingerprint, handed_off_at)
+      values (?, ?, ?, ?, ?) on conflict do nothing`
+    ).run(bindingId, questionId, attemptId, fingerprint, new Date().toISOString());
+    const stored = this.readProviderSessionOfferHandoff(bindingId, identity, questionId);
+    if (!stored || stored.attemptId !== attemptId || stored.offerHash !== offerHash) {
+      throw new Error('provider_session_handoff_conflict');
+    }
+    return stored;
+  }
+
+  readProviderSessionOfferHandoff(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string): ProviderSessionOfferHandoff | null {
+    const binding = this.#offerCheckpointBinding(bindingId, identity);
+    if (!providerOfferId.test(questionId)) throw new Error('provider_session_handoff_invalid');
+    const row = this.#database.prepare(`select h.attempt_id, h.binding_fingerprint, h.handed_off_at,
+      o.offer_hash, o.settled_reply_hash from provider_session_offer_handoffs h
+      join provider_session_offer_checkpoints o using (binding_id, question_id)
+      where h.binding_id = ? and h.question_id = ?`
+    ).get(bindingId, questionId) as {attempt_id: string; binding_fingerprint: string;
+      handed_off_at: string; offer_hash: string; settled_reply_hash: string | null} | undefined;
+    if (!row) return null;
+    if (row.binding_fingerprint !== sha256(canonicalize(binding))) {
+      throw new Error('provider_session_handoff_binding_changed');
+    }
+    if (row.settled_reply_hash !== null) this.#requireOfferReplyAcknowledgment(bindingId, questionId, row.settled_reply_hash);
+    return {state: row.settled_reply_hash === null ? 'handed_off' : 'settled', questionId,
+      offerHash: row.offer_hash, attemptId: row.attempt_id,
+      bindingFingerprint: row.binding_fingerprint, handedOffAt: row.handed_off_at};
   }
 
   settleProviderSessionOfferCheckpoint(bindingId: string, identity: LocalProviderSessionIdentity,

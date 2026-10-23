@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
-import { sha256, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, inspectSessionQuestionForBinding, sha256, validateContract,
+  type SessionQuestion, type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { createProviderSessionChannel } from './providerSessionChannel.js';
 import { NamedPeerContentAuthorizationError } from './namedPeerContentAuthorization.js';
@@ -10,11 +11,17 @@ interface Completion {
   questionId: string; taskId: string; bindingId: string; targetEndpointId: string; answer: string; answerHash: string;
 }
 
+interface SplitCompletion extends Omit<Completion, 'schema'> {
+  schema: 'dharma.provider-session-completion/v2'; offerHash: string; nonce: string;
+  attemptId: string; nativeSessionId: string; workspaceRootHash: string; createdAt: string; expiresAt: string;
+}
+
 // Reconcile one durable result before admitting more provider work. This function
 // has no provider transport or budget API, so upload recovery cannot rerun a turn.
 export async function reconcileProviderSessionReply(input: {
   vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   channel: Pick<ReturnType<typeof createProviderSessionChannel>, 'read' | 'reply'>;
+  verifier?: SessionQuestionVerifier;
 }) {
   const pending = (await input.vault.listProviderSessionReplies(input.bindingId, input.identity))[0];
   if (!pending) return null;
@@ -23,10 +30,11 @@ export async function reconcileProviderSessionReply(input: {
   let value: unknown;
   try { value = JSON.parse(bytes.toString('utf8')); }
   catch { throw new Error('provider_session_completion_invalid'); }
+  const version = (value as {schema?: unknown} | null)?.schema === 'dharma.provider-session-completion/v2' ? 'v2' : 'v1';
   const contract = await validateContract(resolve(import.meta.dirname, 'schemas'),
-    'https://schemas.dharma-ai.io/provider-session-completion/v1', value);
+    `https://schemas.dharma-ai.io/provider-session-completion/${version}`, value);
   if (!contract.ok) throw new Error('provider_session_completion_invalid');
-  const completion = value as Completion;
+  const completion = value as Completion | SplitCompletion;
   const binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
   if (!binding
     || completion.bindingId !== input.bindingId || completion.questionId !== pending.questionId
@@ -35,19 +43,40 @@ export async function reconcileProviderSessionReply(input: {
     || completion.targetEndpointId !== input.identity.endpointId || completion.answerHash !== sha256(completion.answer)) {
     throw new Error('provider_session_completion_scope_mismatch');
   }
+  let replyExpiresAt: string | undefined;
+  if (completion.schema === 'dharma.provider-session-completion/v2') {
+    const handoff = await input.vault.readProviderSessionOfferHandoff(input.bindingId, input.identity, completion.questionId);
+    let offer: SessionQuestion;
+    try {
+      const offerBytes = await input.vault.getBlob(completion.offerHash);
+      if (!input.verifier || offerBytes.length > 16384 || sha256(offerBytes) !== completion.offerHash) throw new Error();
+      offer = JSON.parse(offerBytes.toString('utf8')) as SessionQuestion;
+      if (canonicalize(offer) !== offerBytes.toString('utf8')
+        || !inspectSessionQuestionForBinding(offer, binding, input.verifier, new Date(offer.createdAt)).ok
+        || handoff?.state !== 'handed_off' || handoff.offerHash !== completion.offerHash
+        || handoff.attemptId !== completion.attemptId || offer.questionId !== completion.questionId
+        || offer.taskId !== completion.taskId || offer.nonce !== completion.nonce
+        || completion.nativeSessionId !== binding.sessionId || completion.workspaceRootHash !== sha256(binding.workspaceRoot)
+        || Date.parse(completion.expiresAt) !== Math.min(Date.parse(offer.expiresAt), Date.parse(binding.expiresAt))
+        || Date.parse(completion.createdAt) >= Date.parse(completion.expiresAt)) throw new Error();
+    } catch {throw new Error('provider_session_completion_handoff_mismatch');}
+    replyExpiresAt = completion.expiresAt;
+  }
   let observed: Awaited<ReturnType<typeof input.channel.read>>;
   try {
     observed = await input.channel.read(completion.questionId, completion.taskId, completion.bindingId);
-    if (observed.state === 'accepted') {
+    if (observed.state === 'accepted' && (!replyExpiresAt || Date.now() < Date.parse(replyExpiresAt))) {
       await input.channel.reply({ questionId: completion.questionId, taskId: completion.taskId,
-        outcome: 'answered', answer: completion.answer, failureCode: null });
+        outcome: 'answered', answer: completion.answer, failureCode: null },
+      replyExpiresAt ? {expiresAt: replyExpiresAt} : undefined);
       observed = await input.channel.read(completion.questionId, completion.taskId, completion.bindingId);
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : '';
     const reasonCode = reason === 'provider_session_channel_input' ? 'content_or_contract_blocked' as const
       : reason === 'provider_session_channel_response' ? 'receipt_invalid' as const
-        : reason === 'provider_session_channel_uncertain' ? 'delivery_unconfirmed' as const : null;
+        : reason === 'provider_session_channel_uncertain' ? 'delivery_unconfirmed' as const
+          : reason === 'provider_session_channel_deadline' ? 'signed_deadline_expired' as const : null;
     if (!reasonCode) throw error;
     return { state: 'reply_pending' as const, questionId: completion.questionId, taskId: completion.taskId,
       completionHash: pending.completionHash, reasonCode,
@@ -65,7 +94,9 @@ export async function reconcileProviderSessionReply(input: {
   if (observed.state !== 'answered' || observed.answer !== completion.answer || !observed.replyReceiptHash) {
     return { state: 'reply_pending' as const, questionId: completion.questionId, taskId: completion.taskId,
       completionHash: pending.completionHash,
-      reasonCode: observed.state === 'answered' ? 'answer_conflict' as const : 'remote_not_answered' as const };
+      reasonCode: observed.state === 'answered' ? 'answer_conflict' as const
+        : observed.state === 'accepted' && replyExpiresAt && Date.now() >= Date.parse(replyExpiresAt)
+          ? 'signed_deadline_expired' as const : 'remote_not_answered' as const };
   }
   const offer = binding.owner === 'cooperative_session'
     ? (await input.vault.listProviderSessionOfferCheckpoints(input.bindingId, input.identity))
