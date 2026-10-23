@@ -478,6 +478,146 @@ function splitAnswer(checkpoint: SplitCheckpoint): SplitAnswer {
     offerHash: checkpoint.offerHash, attemptId: checkpoint.attemptId, answer: 'Use the signed catalog.'};
 }
 
+type DispatchContext = {signal?: AbortSignal; expiresAt?: string};
+function cancellableConsumer(owner: unknown) {
+  return owner as {
+    checkpoint(context?: DispatchContext): Promise<SplitCheckpoint>;
+    submitAnswer(value: SplitAnswer, context?: DispatchContext): Promise<{state: string}>;
+    runNext(answer: (offer: SessionQuestion) => Promise<string>, context?: DispatchContext): Promise<{state: string}>;
+  };
+}
+
+for (const method of ['checkpoint', 'runNext'] as const) {
+  test(`${method} refuses cancelled admission before inbox, reservation or durable work`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input), controller = new AbortController();
+    controller.abort(new Error('synthetic-private-cancellation-reason'));
+    try {
+      const consumer = cancellableConsumer(owner);
+      const pending = method === 'checkpoint' ? consumer.checkpoint({signal: controller.signal})
+        : consumer.runNext(async () => {throw new Error('must not compute');}, {signal: controller.signal});
+      await assert.rejects(pending, {message: 'provider_session_channel_cancelled'});
+      assert.deepEqual(f.actions, ['inspect', 'attach']); assert.equal(f.reserves(), 0); assert.equal(f.used.size, 0);
+      assert.deepEqual(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
+test('checkpoint refuses an expired caller deadline before protected effects', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  try {
+    await assert.rejects(cancellableConsumer(owner).checkpoint({expiresAt: new Date(0).toISOString()}),
+      {message: 'provider_session_channel_deadline'});
+    assert.deepEqual(f.actions, ['inspect', 'attach']); assert.equal(f.reserves(), 0);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+for (const interruption of ['cancelled', 'deadline'] as const) {
+  test(`checkpoint retains call-time ${interruption} context across the first owner await`, async () => {
+    const f = await fixture(), controller = new AbortController();
+    let waiting = false, entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => {entered = resolve;});
+    const gate = new Promise<void>(resolve => {release = resolve;});
+    const owner = await openCooperativeInboxSession({...f.input, currentSession: async () => {
+      if (waiting) {entered(); await gate;}
+      return f.getContext();
+    }});
+    waiting = true;
+    const deadline = Date.now() + 100;
+    const context: DispatchContext = interruption === 'cancelled' ? {signal: controller.signal}
+      : {expiresAt: new Date(deadline).toISOString()};
+    const pending = cancellableConsumer(owner).checkpoint(context);
+    const rejected = assert.rejects(pending, {message: `provider_session_channel_${interruption}`});
+    try {
+      await started;
+      if (interruption === 'cancelled') {controller.abort(); context.signal = new AbortController().signal;}
+      else {context.expiresAt = f.binding.expiresAt; await new Promise(resolve => setTimeout(resolve, Math.max(0, deadline - Date.now() + 10)));}
+      release(); await rejected;
+      assert.deepEqual(f.actions, ['inspect', 'attach']); assert.equal(f.reserves(), 0);
+    } finally {release(); await pending.catch(() => undefined); await owner.close(); f.vault.close();}
+  });
+}
+
+for (const boundary of ['content', 'budget', 'offer_stage', 'accept', 'consume', 'handoff'] as const) {
+  test(`checkpoint cancellation at ${boundary} fences later effects and retains crossed durable evidence`, async () => {
+    const f = await fixture(), controller = new AbortController();
+    const input = {...f.input};
+    if (boundary === 'content') input.authorizeContent = async () => {controller.abort(); return true;};
+    if (boundary === 'budget') input.budget = {reserve: async () => {await f.input.budget.reserve(); controller.abort(); return true;}};
+    if (boundary === 'offer_stage') {
+      const stage = f.vault.stageProviderSessionOfferCheckpoint.bind(f.vault);
+      f.vault.stageProviderSessionOfferCheckpoint = async (...args) => {const hash = stage(...args); controller.abort(); return hash;};
+    }
+    if (boundary === 'accept') f.onAction(action => {if (action === 'accept') controller.abort();});
+    if (boundary === 'consume') input.verifier = {...f.input.verifier,
+      consume: async id => {const result = await f.input.verifier.consume(id); controller.abort(); return result;}};
+    if (boundary === 'handoff') {
+      const handoff = f.vault.handoffProviderSessionOfferCheckpoint.bind(f.vault);
+      f.vault.handoffProviderSessionOfferCheckpoint = (...args) => {const result = handoff(...args); controller.abort(); return result;};
+    }
+    const owner = await openCooperativeInboxSession(input);
+    try {
+      await assert.rejects(cancellableConsumer(owner).checkpoint({signal: controller.signal}),
+        {message: boundary === 'accept' ? 'provider_session_channel_uncertain' : 'provider_session_channel_cancelled'});
+      assert.equal(f.actions.includes('reply'), false);
+      assert.equal(f.actions.includes('accept'), ['accept', 'consume', 'handoff'].includes(boundary));
+      assert.equal(f.used.size, ['consume', 'handoff'].includes(boundary) ? 1 : 0);
+      const crossed = ['offer_stage', 'accept', 'consume', 'handoff'].includes(boundary);
+      assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, crossed ? 1 : 0);
+      assert.equal(f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, f.question.questionId)?.state,
+        boundary === 'handoff' ? 'handed_off' : undefined);
+      if (crossed) {
+        await owner.close();
+        const successor = await openCooperativeInboxSession(f.input), before = [...f.actions], reservations = f.reserves();
+        try {
+          assert.equal((await successor.checkpoint()).state, 'offer_recovery_required');
+          assert.deepEqual(f.actions, before); assert.equal(f.reserves(), reservations);
+        } finally {await successor.close();}
+      }
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
+test('cancelling an inline callback withholds its answer without posting a synthetic failure', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input), controller = new AbortController();
+  try {
+    await assert.rejects(cancellableConsumer(owner).runNext(async () => {
+      controller.abort(); throw new Error('synthetic-private-handler-error');
+    }, {signal: controller.signal}), {message: 'provider_session_channel_cancelled'});
+    assert.equal(f.actions.includes('reply'), false); assert.equal(f.used.size, 1);
+    assert.deepEqual(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity), []);
+    assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('cancellation after durable answer staging returns pending without reply or acknowledgement', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input), controller = new AbortController();
+  try {
+    const consumer = cancellableConsumer(owner), checkpoint = await consumer.checkpoint();
+    const stage = f.vault.stageProviderSessionReply.bind(f.vault);
+    f.vault.stageProviderSessionReply = async (...args) => {const hash = stage(...args); controller.abort(); return hash;};
+    assert.equal((await consumer.submitAnswer(splitAnswer(checkpoint), {signal: controller.signal})).state, 'reply_pending');
+    assert.equal(f.actions.includes('reply'), false);
+    assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+    assert.equal(f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, f.question.questionId)?.state, 'handed_off');
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('cancelled recovery reads cannot authorize resending or settling a durable answer', async () => {
+  const f = await fixture(), first = await openCooperativeInboxSession(f.input);
+  f.setFail('reply');
+  assert.equal((await first.runNext(async () => 'Use the signed catalog.')).state, 'reply_pending');
+  await first.close(); f.setFail(null);
+  const owner = await openCooperativeInboxSession(f.input), controller = new AbortController();
+  const replies = f.actions.filter(action => action === 'reply').length;
+  f.onAction(action => {if (action === 'read') controller.abort();});
+  try {
+    assert.equal((await cancellableConsumer(owner).checkpoint({signal: controller.signal})).state, 'reply_pending');
+    assert.equal(f.actions.filter(action => action === 'reply').length, replies);
+    assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+    assert.equal(f.reserves(), 1); assert.equal(f.used.size, 1);
+  } finally {await owner.close(); f.vault.close();}
+});
+
 for (const field of ['questionId', 'taskId', 'nonce', 'offerHash', 'attemptId', 'answer'] as const) {
   test(`later submission rejects accessor ${field} without invoking caller code or posting a reply`, async () => {
     const f = await fixture(), owner = await openCooperativeInboxSession(f.input);

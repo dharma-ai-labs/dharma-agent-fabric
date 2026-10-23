@@ -4,6 +4,8 @@ import { canonicalize, inspectSessionQuestionForBinding, sha256, validateContrac
 import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { createProviderSessionChannel } from './providerSessionChannel.js';
 import { NamedPeerContentAuthorizationError } from './namedPeerContentAuthorization.js';
+import { providerSessionDispatchDeadline, requireProviderSessionDispatch, snapshotProviderSessionDispatchContext,
+  type ProviderSessionDispatchContext } from './providerSessionDispatchContext.js';
 
 interface Completion {
   schema: 'dharma.provider-session-completion/v1'; organizationId: string; repositoryBindingId: string;
@@ -22,8 +24,12 @@ export async function reconcileProviderSessionReply(input: {
   vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   channel: Pick<ReturnType<typeof createProviderSessionChannel>, 'read' | 'reply'>;
   verifier?: SessionQuestionVerifier;
+  context?: ProviderSessionDispatchContext;
 }) {
+  const context = snapshotProviderSessionDispatchContext(input.context);
+  requireProviderSessionDispatch(context);
   const pending = (await input.vault.listProviderSessionReplies(input.bindingId, input.identity))[0];
+  requireProviderSessionDispatch(context);
   if (!pending) return null;
   const bytes = await input.vault.getBlob(pending.completionHash);
   if (bytes.length > 16384) throw new Error('provider_session_completion_invalid');
@@ -64,19 +70,24 @@ export async function reconcileProviderSessionReply(input: {
   }
   let observed: Awaited<ReturnType<typeof input.channel.read>>;
   try {
-    observed = await input.channel.read(completion.questionId, completion.taskId, completion.bindingId);
+    requireProviderSessionDispatch(context);
+    observed = await input.channel.read(completion.questionId, completion.taskId, completion.bindingId, context);
+    requireProviderSessionDispatch(context);
     if (observed.state === 'accepted' && (!replyExpiresAt || Date.now() < Date.parse(replyExpiresAt))) {
       await input.channel.reply({ questionId: completion.questionId, taskId: completion.taskId,
         outcome: 'answered', answer: completion.answer, failureCode: null },
-      replyExpiresAt ? {expiresAt: replyExpiresAt} : undefined);
-      observed = await input.channel.read(completion.questionId, completion.taskId, completion.bindingId);
+      replyExpiresAt ? providerSessionDispatchDeadline(context, replyExpiresAt) : context);
+      requireProviderSessionDispatch(context);
+      observed = await input.channel.read(completion.questionId, completion.taskId, completion.bindingId, context);
+      requireProviderSessionDispatch(context);
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : '';
     const reasonCode = reason === 'provider_session_channel_input' ? 'content_or_contract_blocked' as const
       : reason === 'provider_session_channel_response' ? 'receipt_invalid' as const
         : reason === 'provider_session_channel_uncertain' ? 'delivery_unconfirmed' as const
-          : reason === 'provider_session_channel_deadline' ? 'signed_deadline_expired' as const : null;
+          : reason === 'provider_session_channel_deadline' ? 'signed_deadline_expired' as const
+            : reason === 'provider_session_channel_cancelled' ? 'dispatch_cancelled' as const : null;
     if (!reasonCode) throw error;
     return { state: 'reply_pending' as const, questionId: completion.questionId, taskId: completion.taskId,
       completionHash: pending.completionHash, reasonCode,
@@ -102,9 +113,11 @@ export async function reconcileProviderSessionReply(input: {
     ? (await input.vault.listProviderSessionOfferCheckpoints(input.bindingId, input.identity))
       .find(item => item.questionId === completion.questionId) : undefined;
   if (offer) {
+    requireProviderSessionDispatch(context);
     await input.vault.acknowledgeProviderSessionOfferReply(input.bindingId, input.identity,
       completion.questionId, offer.offerHash, pending.completionHash);
   } else {
+    requireProviderSessionDispatch(context);
     await input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, completion.questionId, pending.completionHash);
   }
   return { state: 'reply_reconciled' as const, questionId: completion.questionId, taskId: completion.taskId,
