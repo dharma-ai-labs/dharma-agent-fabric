@@ -187,3 +187,35 @@ test('legacy CLI capture remains on its existing route when no assignment capabi
   assert.deepEqual(JSON.parse(JSON.stringify(await d.run(['capture', '--workspace', '/fixture']))), { legacy: true });
   assert.deepEqual(d.effects, ['legacy_capture']);
 });
+
+test('assigned CLI context accessors are rejected without callbacks or ambient effects', async () => {
+  for (const field of ['assignment', 'binding', 'now'] as const) {
+    const f = fixture(), d = await dispatcher(); let callbacks = 0;
+    Object.defineProperty(f.context, field, {enumerable: true, get() {callbacks++; throw new Error('PRIVATE_CONTEXT_CANARY');}});
+    await assert.rejects(() => d.run(['capture', '--assignment-id', id('1')], f.context),
+      {message: 'capture_assignment_invalid'});
+    assert.equal(callbacks, 0); assert.equal(f.reads(), 0); assert.deepEqual(d.effects, []);
+  }
+});
+
+test('assigned CLI reader slot stays lazy and descriptor-safe after authorization', async () => {
+  for (const tampered of [false, true]) {
+    const f = fixture(), d = await dispatcher(); let callbacks = 0;
+    if (tampered) f.assignment.source.maximumBytes++;
+    Object.defineProperty(f.context, 'reader', {enumerable: true, get() {callbacks++; throw new Error('PRIVATE_READER_CANARY');}});
+    await assert.rejects(() => d.run(['capture', '--assignment-id', id('1')], f.context),
+      {message: tampered ? 'capture_assignment_integrity_mismatch' : 'capture_source_unavailable'});
+    assert.equal(callbacks, 0); assert.equal(f.reads(), 0); assert.deepEqual(d.effects, []);
+  }
+});
+
+test('assigned CLI rejects Proxy and revoked contexts without running traps or ambient routes', async () => {
+  const f = fixture(), d = await dispatcher(); let callbacks = 0;
+  const fail = (): never => {callbacks++; throw new Error('PRIVATE_CONTEXT_PROXY_CANARY');};
+  const proxy = new Proxy(f.context, {get: fail, getPrototypeOf: fail, ownKeys: fail, getOwnPropertyDescriptor: fail});
+  const revoked = Proxy.revocable(f.context, {}); revoked.revoke();
+  for (const context of [proxy, revoked.proxy]) {
+    await assert.rejects(() => d.run(['capture', '--assignment-id', id('1')], context), {message: 'capture_assignment_invalid'});
+    assert.equal(callbacks, 0); assert.equal(f.reads(), 0); assert.deepEqual(d.effects, []);
+  }
+});

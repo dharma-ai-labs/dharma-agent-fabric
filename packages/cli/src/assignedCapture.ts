@@ -1,4 +1,5 @@
 import { posix, resolve, win32 } from 'node:path';
+import { types } from 'node:util';
 import { canonicalize, sha256, validateContract, type ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 
@@ -63,17 +64,7 @@ export async function runAssignedCaptureCommand(input: {
     refuse('capture_assignment_command_invalid');
   }
   if (!context) refuse('capture_source_unavailable');
-  const selection = await selectAssignedCapture({ assignment: context.assignment, binding: context.binding,
-    ...(context.now ? { now: context.now } : {}) }, {
-    async readExactSession(request) {
-      // Resolve the trusted reader only after the assignment and binding guards.
-      if (request.assignmentId !== assignmentId) refuse('capture_source_unavailable');
-      const reader = context.reader;
-      const read = reader?.readExactSession;
-      if (typeof read !== 'function') refuse('capture_source_unavailable');
-      return Reflect.apply(read, reader, [request]);
-    },
-  });
+  const selection = await selectCapture(context, undefined, assignmentId);
   return { ok: true, selection };
 }
 
@@ -103,18 +94,22 @@ function assertWindow(value: CaptureAssignment, now: number) {
     || since > until || until > now) refuse('capture_assignment_window_invalid');
 }
 function assertBinding(value: CaptureAssignment, binding: AssignedCaptureBinding) {
-  if (!binding || binding.active !== true || binding.consentActive !== true
-    || binding.organizationId !== value.organizationId
-    || targetFields.some(key => binding.target?.[key] !== value.target[key])
-    || policyFields.some(key => binding.policy?.[key] !== value.policy[key])) {
+  const current = snapshotData(binding, 'capture_assignment_binding_mismatch') as AssignedCaptureBinding;
+  if (!current || current.active !== true || current.consentActive !== true
+    || current.organizationId !== value.organizationId
+    || targetFields.some(key => current.target?.[key] !== value.target[key])
+    || policyFields.some(key => current.policy?.[key] !== value.policy[key])) {
     refuse('capture_assignment_binding_mismatch');
   }
-  if (binding.approvedAssignmentHash !== value.integrity.sha256) refuse('capture_assignment_integrity_mismatch');
-  if (!Array.isArray(binding.allowedSourceLocators)
-    || !binding.allowedSourceLocators.includes(value.source.locator)) refuse('capture_assignment_source_not_allowed');
+  if (current.approvedAssignmentHash !== value.integrity.sha256) refuse('capture_assignment_integrity_mismatch');
+  if (!Array.isArray(current.allowedSourceLocators)
+    || !current.allowedSourceLocators.includes(value.source.locator)) refuse('capture_assignment_source_not_allowed');
 }
 
-function snapshotReaderData(value: unknown): unknown {
+const assignmentDataLimits = {nodes: 512, depth: 8, arrayLength: 128};
+const readerDataLimits = {nodes: 1_000_000, depth: 64, arrayLength: 100_000};
+
+function snapshotData(value: unknown, code: string, limits = readerDataLimits): unknown {
   const active = new Set<object>(), finished = new Set<object>();
   const stack: Array<{ value: unknown; depth: number; exit?: boolean }> = [{ value, depth: 0 }];
   let nodes = 0;
@@ -122,39 +117,92 @@ function snapshotReaderData(value: unknown): unknown {
     while (stack.length) {
       const item = stack.pop()!, current = item.value;
       if (item.exit) { active.delete(current as object); finished.add(current as object); continue; }
-      if (++nodes > 1_000_000 || item.depth > 64) refuse('capture_selected_source_mismatch');
+      if (++nodes > limits.nodes || item.depth > limits.depth) refuse(code);
       if (current === null || typeof current === 'string' || typeof current === 'boolean') continue;
       if (typeof current === 'number' && Number.isFinite(current)) continue;
-      if (typeof current !== 'object' || active.has(current)) refuse('capture_selected_source_mismatch');
-      if (finished.has(current)) refuse('capture_selected_source_mismatch');
+      if (typeof current !== 'object' || types.isProxy(current) || active.has(current)) refuse(code);
+      if (finished.has(current)) refuse(code);
       const array = Array.isArray(current), prototype = Object.getPrototypeOf(current);
       if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) {
-        refuse('capture_selected_source_mismatch');
+        refuse(code);
       }
+      const keys = Reflect.ownKeys(current);
+      if (keys.length > limits.nodes - nodes + 1) refuse(code);
       const descriptors = Object.getOwnPropertyDescriptors(current);
-      if (array && descriptors.length!.value > 100_000) refuse('capture_selected_source_mismatch');
+      if (array && (descriptors.length!.value > limits.arrayLength
+        || keys.length !== descriptors.length!.value + 1)) refuse(code);
       active.add(current); stack.push({ value: current, depth: item.depth, exit: true });
-      for (const key of Reflect.ownKeys(descriptors)) {
-        if (typeof key !== 'string') refuse('capture_selected_source_mismatch');
+      for (const key of keys) {
+        if (typeof key !== 'string') refuse(code);
         const descriptor = descriptors[key]!;
-        if ('get' in descriptor || 'set' in descriptor) refuse('capture_selected_source_mismatch');
+        if ('get' in descriptor || 'set' in descriptor) refuse(code);
         if (array && key === 'length') continue;
-        if (!descriptor.enumerable) refuse('capture_selected_source_mismatch');
+        if (array && (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= descriptors.length!.value)) refuse(code);
+        if (!descriptor.enumerable) refuse(code);
         stack.push({ value: descriptor.value, depth: item.depth + 1 });
       }
     }
     // Only JSON-tree data reaches this copy. Shared references are refused so
     // later serialization cannot amplify a small graph exponentially.
     return structuredClone(value);
-  } catch { return refuse('capture_selected_source_mismatch'); }
+  } catch { return refuse(code); }
+}
+
+function captureControls(input: unknown, command: boolean) {
+  if (!input || typeof input !== 'object' || types.isProxy(input)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) refuse('capture_assignment_invalid');
+  const fields = Object.getOwnPropertyDescriptors(input);
+  for (const key of Reflect.ownKeys(fields)) {
+    if (typeof key !== 'string' || !['assignment', 'binding', 'now', ...(command ? ['reader'] : [])].includes(key)) {
+      refuse('capture_assignment_invalid');
+    }
+    // The command reader slot is deliberately resolved only after authorization.
+    if (key !== 'reader' && (!fields[key]!.enumerable || !Object.hasOwn(fields[key]!, 'value'))) {
+      refuse('capture_assignment_invalid');
+    }
+  }
+  if (!fields.assignment || !fields.binding) refuse('capture_assignment_invalid');
+  const now = fields.now?.value ?? Date.now;
+  if (typeof now !== 'function' || types.isProxy(now)) refuse('capture_assignment_invalid');
+  const binding = fields.binding.value as AssignedCaptureBinding;
+  return {assignment: snapshotData(fields.assignment.value, 'capture_assignment_invalid', assignmentDataLimits),
+    binding,
+    now: () => {try {return Reflect.apply(now, undefined, []) as number;} catch {return refuse('capture_assignment_window_invalid');}},
+    requireBindingReference() {
+      const live = Object.getOwnPropertyDescriptor(input, 'binding');
+      if (!live?.enumerable || !Object.hasOwn(live, 'value') || live.value !== binding) {
+        refuse('capture_assignment_binding_mismatch');
+      }
+    }};
+}
+
+function exactReaderMethod(reader: unknown): ExactSessionReader['readExactSession'] {
+  let owner = reader;
+  for (let depth = 0; depth < 32 && owner !== null; depth++) {
+    if (!owner || typeof owner !== 'object' || types.isProxy(owner)) refuse('capture_source_unavailable');
+    const method = Object.getOwnPropertyDescriptor(owner, 'readExactSession');
+    if (method) {
+      if (!Object.hasOwn(method, 'value') || typeof method.value !== 'function' || types.isProxy(method.value)) {
+        refuse('capture_source_unavailable');
+      }
+      return method.value as ExactSessionReader['readExactSession'];
+    }
+    owner = Object.getPrototypeOf(owner);
+  }
+  return refuse('capture_source_unavailable');
 }
 
 export async function selectAssignedCapture(input: {
   assignment: unknown; binding: AssignedCaptureBinding; now?: () => number;
 }, reader?: ExactSessionReader): Promise<AssignedCaptureSelection> {
-  let candidate: unknown;
-  try { candidate = structuredClone(input.assignment); }
-  catch { return refuse('capture_assignment_invalid'); }
+  return selectCapture(input, reader);
+}
+
+async function selectCapture(input: {
+  assignment: unknown; binding: AssignedCaptureBinding; now?: () => number;
+}, reader?: ExactSessionReader, commandAssignmentId?: string): Promise<AssignedCaptureSelection> {
+  const controls = captureControls(input, commandAssignmentId !== undefined);
+  const candidate = controls.assignment;
   let valid: boolean;
   try {
     valid = (await validateContract(resolve(import.meta.dirname, 'schemas'), schemaId, candidate)).ok;
@@ -165,21 +213,28 @@ export async function selectAssignedCapture(input: {
     || assignment.source.maximumRecordBytes > assignment.source.maximumBytes) refuse('capture_assignment_invalid');
   const digest = assignmentHash(assignment);
   if (digest !== assignment.integrity.sha256) refuse('capture_assignment_integrity_mismatch');
-  const now = input.now ?? Date.now;
+  const now = controls.now;
+  const requireBinding = () => {controls.requireBindingReference(); assertBinding(assignment, controls.binding);};
   assertWindow(assignment, now());
-  assertBinding(assignment, input.binding);
-  if (!reader || typeof reader.readExactSession !== 'function') refuse('capture_source_unavailable');
+  requireBinding();
+  if (commandAssignmentId !== undefined) {
+    if (assignment.assignmentId !== commandAssignmentId) refuse('capture_source_unavailable');
+    const slot = Object.getOwnPropertyDescriptor(input, 'reader');
+    if (!slot?.enumerable || !Object.hasOwn(slot, 'value')) refuse('capture_source_unavailable');
+    reader = slot.value as ExactSessionReader;
+  }
+  const read = exactReaderMethod(reader);
 
   // Do not delegate to capture(), broad discover(), or pending-retention sync.
   // Only an independently qualified, exact-source owner bridge may fill this port.
   const request = Object.freeze({ assignmentId: assignment.assignmentId, organizationId: assignment.organizationId,
     target: Object.freeze({ ...assignment.target }), source: Object.freeze({ ...assignment.source }) });
   let response: unknown;
-  try { response = await reader.readExactSession(request); }
+  try { response = await Reflect.apply(read, reader, [request]); }
   catch { return refuse('capture_source_unavailable'); }
-  const captured = snapshotReaderData(response) as Awaited<ReturnType<ExactSessionReader['readExactSession']>>;
+  const captured = snapshotData(response, 'capture_selected_source_mismatch') as Awaited<ReturnType<ExactSessionReader['readExactSession']>>;
   assertWindow(assignment, now());
-  assertBinding(assignment, input.binding);
+  requireBinding();
   const session = captured?.session;
   const since = Date.parse(assignment.source.since), until = Date.parse(assignment.source.until);
   const start = Date.parse(session?.startedAt), end = Date.parse(session?.endedAt);
@@ -207,7 +262,7 @@ export async function selectAssignedCapture(input: {
     }
   }
   assertWindow(assignment, now());
-  assertBinding(assignment, input.binding);
+  requireBinding();
   return { schema: 'dharma.assigned-capture-selection/v1', assignmentId: assignment.assignmentId,
     organizationId: assignment.organizationId, assignmentHash: digest,
     provider: assignment.target.provider, sessionId: assignment.target.sessionId,

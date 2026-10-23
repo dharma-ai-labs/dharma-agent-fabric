@@ -52,8 +52,13 @@ that authority. This module checks equality and integrity; it does not
 authenticate or enroll the binding. Its success says `bindingMatched`, never
 verified native execution or accepted learning.
 
-The input assignment is snapshotted and validated against the fixed bundled
-schema. Missing/malformed/tampered/expired scope, changed policy or consent,
+The input assignment is snapshotted by data descriptors before the first await
+and validated against the fixed bundled schema. Accessors, Proxies (including
+revoked Proxies), hidden/symbol properties and custom prototypes cannot execute
+callbacks or disappear during normalization. Assignment structure is bounded
+to depth8, 512 values and array length128; the current assignment schema has no
+array-valued fields. These smaller assignment limits do not restrict a binding's
+source allowlist. Missing/malformed/tampered/expired scope, changed policy or consent,
 foreign repository/session/identity and disallowed locator fail before the
 exact-source reader is called. Paths must already be canonical; this module
 does not resolve aliases, fold case, inspect a filesystem or choose a home root.
@@ -66,8 +71,18 @@ The return value contains scoped selection metadata and hashes, not raw records
 or source paths. Current binding/consent and expiry are checked after the read
 and again before returning the result.
 
+Selection/context controls are read by descriptors, including the explicitly
+trusted clock callback. Live binding data is rechecked at every existing guard;
+replacing its original reference does not replace the authorized capability.
+Reader resolution stays after authorization. An own or prototype data method is
+captured once with its original receiver; method/reader accessors and Proxies
+are refused. This is not qualification of that reader or permission to access a
+source. JavaScript Promise assimilation inside the trusted reader callback is
+outside the returned-data snapshot boundary.
+
 Reader responses are detached into a plain-data snapshot before validation or
-record serialization. Accessors, executable values, custom prototypes, cycles
+record serialization. Proxies are rejected before reflection, and arrays must
+be dense without extra properties. Accessors, executable values, custom prototypes, cycles
 and unsupported data fail with a fixed error, without invoking data getters or
 `toJSON` callbacks. Repeated object identities are also refused: source data must
 be a JSON tree, not a shared graph that serialization can expand exponentially.

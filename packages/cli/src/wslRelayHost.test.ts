@@ -12,6 +12,53 @@ import {resolveWslRelayContext} from './wslRelayHost.js';
 import {validateContract} from '@dharma-ai-labs/agent-fabric-contracts';
 import {prepareCodexBootstrapHost, runCodexBootstrapHostScope} from './bootstrapHostScope.js';
 
+type PowerShellFixtureLaunch = (file: string, args: string[], options: {
+  input?: string; encoding: 'utf8'; timeout: number; windowsHide: boolean; maxBuffer: number;
+}) => {error?: Error; status: number | null; stdout: string; stderr: string};
+
+function runPowerShellFixture(script: string, input?: string, launch: PowerShellFixtureLaunch = spawnSync): string {
+  // Cold CI fixture hosts need a separate budget; production interop stays at 15s.
+  const result = launch('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64')], {
+    ...(input === undefined ? {} : {input}), encoding: 'utf8', timeout: 60_000, windowsHide: true, maxBuffer: 16_384,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
+test('PowerShell fixtures launch once with a bounded hidden test-only startup budget', () => {
+  let calls = 0;
+  const stdout = runPowerShellFixture('synthetic parser or mocked scheduler fixture', '{"fixture":true}', (file, args, options) => {
+    calls++;
+    assert.equal(file, 'powershell.exe');
+    assert.deepEqual(args.slice(0, 4), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand']);
+    assert.equal(Buffer.from(args[4]!, 'base64').toString('utf16le'), 'synthetic parser or mocked scheduler fixture');
+    assert.deepEqual(options, {input: '{"fixture":true}', encoding: 'utf8', timeout: 60_000, windowsHide: true, maxBuffer: 16_384});
+    return {status: 0, stdout: 'fixture-result', stderr: ''};
+  });
+  assert.equal(stdout, 'fixture-result'); assert.equal(calls, 1);
+});
+
+test('PowerShell fixture startup errors and timeouts fail explicitly without retry', () => {
+  for (const code of ['ETIMEDOUT', 'ENOENT']) {
+    let calls = 0;
+    assert.throws(() => runPowerShellFixture('synthetic', undefined, () => {
+      calls++; return {error: Object.assign(new Error('synthetic fixture startup failure'), {code}),
+        status: null, stdout: '', stderr: ''};
+    }), {code: 'ERR_ASSERTION'});
+    assert.equal(calls, 1);
+  }
+});
+
+test('PowerShell fixture nonzero exit never becomes a successful scheduler result', () => {
+  let calls = 0;
+  assert.throws(() => runPowerShellFixture('synthetic', undefined, () => {
+    calls++; return {status: 1, stdout: 'absent', stderr: 'synthetic refusal'};
+  }), {code: 'ERR_ASSERTION'});
+  assert.equal(calls, 1);
+});
+
 test('real WSL Windows launch uses a fixed Windows cwd rather than the Linux caller directory', async () => {
   const source = await readFile(new URL('../src/wslRelayHost.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('wslRelayHost.ts', source, ts.ScriptTarget.Latest, true);
@@ -155,10 +202,8 @@ test('optional WSL task lookup distinguishes exact absence from a failed schedul
       const script = `function Get-ScheduledTask { throw [System.Management.Automation.ErrorRecord]::new(`
         + `[Exception]::new('synthetic'), '${id}', [System.Management.Automation.ErrorCategory]::ObjectNotFound, $null) }; `
         + `try { ${query}; if($null -eq $task){[Console]::Out.Write('absent')} } catch {[Console]::Out.Write('failed')} `;
-      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-        Buffer.from(script, 'utf16le').toString('base64')], {encoding: 'utf8', timeout: 15000, windowsHide: true});
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(result.stdout, id.startsWith('CmdletizationQuery_NotFound,') ? 'absent' : 'failed');
+      const stdout = runPowerShellFixture(script);
+      assert.equal(stdout, id.startsWith('CmdletizationQuery_NotFound,') ? 'absent' : 'failed');
     }
   }
 });
@@ -219,9 +264,8 @@ test('the actual WSL guard validates the persisted SID rather than a normalized 
       + `$task.Triggers[0].UserId=$current.Name; ${guard}; `
       + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned')}catch{[Console]::Out.Write('refused');`
       + `if(!${rejected?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
-    const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
-      {input:JSON.stringify(taskFixture),encoding:'utf8',timeout:15000,windowsHide:true});
-    assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,rejected?'refused':'owned',result.stderr);
+    const stdout=runPowerShellFixture(script,JSON.stringify(taskFixture));
+    assert.equal(stdout,rejected?'refused':'owned');
   }
 });
 
@@ -358,9 +402,6 @@ test('generated WSL host commands pass the actual Windows PowerShell parser with
     + `[System.Management.Automation.Language.Parser]::ParseInput($item,[ref]$tokens,[ref]$errors)|Out-Null; `
     + `if ($errors.Count -gt 0) {[Console]::Error.Write('generated_wsl_host_parse_error');exit 1}}; `
     + `[Console]::Out.Write($items.Count)`;
-  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(script, 'utf16le').toString('base64')], {input: JSON.stringify(f.scripts), encoding: 'utf8', timeout: 15000, windowsHide: true, maxBuffer: 16384});
-  assert.equal(result.error, undefined);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(Number(result.stdout), f.scripts.length);
+  const stdout = runPowerShellFixture(script, JSON.stringify(f.scripts));
+  assert.equal(Number(stdout), f.scripts.length);
 });
