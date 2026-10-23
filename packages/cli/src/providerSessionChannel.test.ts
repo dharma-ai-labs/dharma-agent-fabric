@@ -113,6 +113,109 @@ test('async expiry lookup cannot carry stale ownership into a signed request', a
   assert.equal(sends, 0);
 });
 
+async function blockedHeartbeat() {
+  const f = fixture(); await f.channel.attach();
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  f.setResponse(async (body: Record<string, unknown>) => {
+    const envelope = {ok: true, organizationId: scope.organizationId, correlationId: uuid(90)};
+    if (body.action === 'heartbeat') {
+      entered(); await gate;
+      return {...envelope, registration: {bindingId: scope.bindingId, workspaceId: scope.workspaceId,
+        endpointId: scope.endpointId, repositoryBindingId: scope.repositoryBindingId,
+        membershipId: scope.membershipId, deviceId: scope.deviceId, provider: 'codex', mode: 'bridge_owned',
+        revision: Number(body.expectedRevision) + 1, state: 'attached', leaseUntil: '2026-09-26T05:01:00.000Z', replay: false}};
+    }
+    return {...envelope, result: {questionId: body.questionId || uuid(10), taskId: uuid(11),
+      targetBindingId: body.targetBindingId || scope.bindingId,
+      state: body.action === 'reply' ? body.outcome : 'queued', replay: false}};
+  });
+  const heartbeat = f.channel.heartbeat(); await started;
+  return {...f, unblock: async () => {release(); await heartbeat;}};
+}
+
+test('queued ask keeps the call-time target and question despite caller mutation', async () => {
+  const f = await blockedHeartbeat();
+  const request = {targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+    question: 'Which signed catalog applies?', maximumProviderCostCents: 25};
+  const pending = f.channel.ask(request);
+  request.targetBindingId = uuid(21); request.question = 'A different queued question.';
+  await f.unblock();
+  const result = await pending;
+  assert.equal(result.targetBindingId, uuid(20));
+  assert.equal(f.calls.at(-1)?.body.targetBindingId, uuid(20));
+  assert.equal(f.calls.at(-1)?.body.question, 'Which signed catalog applies?');
+});
+
+test('queued reply keeps the call-time question and answer despite caller mutation', async () => {
+  const f = await blockedHeartbeat();
+  const request = {questionId: uuid(10), taskId: uuid(11), outcome: 'answered' as const,
+    answer: 'Use the signed catalog.', failureCode: null};
+  const pending = f.channel.reply(request);
+  request.questionId = uuid(30); request.answer = 'A different queued answer.';
+  await f.unblock();
+  assert.equal((await pending).questionId, uuid(10));
+  assert.equal(f.calls.at(-1)?.body.questionId, uuid(10));
+  assert.equal(f.calls.at(-1)?.body.answer, 'Use the signed catalog.');
+});
+
+test('ask acknowledgment compares the snapshot after caller mutation during content authorization', async () => {
+  const f = fixture(); await f.channel.attach();
+  const request = {targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+    question: 'Which signed catalog applies?', maximumProviderCostCents: 25};
+  f.onContent(() => {request.taskId = uuid(50);});
+  assert.equal((await f.channel.ask(request)).taskId, uuid(11));
+  assert.equal(f.calls.at(-1)?.body.taskId, uuid(11));
+});
+
+test('reply acknowledgment compares the snapshot after caller mutation during content authorization', async () => {
+  const f = fixture(); await f.channel.attach();
+  const request = {questionId: uuid(10), taskId: uuid(11), outcome: 'answered' as const,
+    answer: 'Use the signed catalog.', failureCode: null};
+  f.onContent(() => {request.questionId = uuid(50);});
+  assert.equal((await f.channel.reply(request)).questionId, uuid(10));
+  assert.equal(f.calls.at(-1)?.body.questionId, uuid(10));
+});
+
+for (const action of ['ask', 'read'] as const) {
+  test(`queued ${action} cannot replace its cancelled call-time signal`, async () => {
+    const f = await blockedHeartbeat(), original = new AbortController();
+    const context = {signal: original.signal};
+    const pending = action === 'ask'
+      ? f.channel.ask({targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+        question: 'Which signed catalog applies?', maximumProviderCostCents: 25}, context)
+      : f.channel.read(uuid(10), uuid(11), uuid(20), context);
+    const rejected = assert.rejects(pending, /provider_session_channel_cancelled/);
+    original.abort(); context.signal = new AbortController().signal;
+    await f.unblock(); await rejected;
+    assert.equal(f.calls.filter(call => call.body.action === action).length, 0);
+  });
+  test(`${action} keeps its cancellation signal across an asynchronous admission wait`, async () => {
+    const f = fixture(), original = new AbortController(); await f.channel.attach();
+    const context = {signal: original.signal};
+    const cancel = () => {original.abort(); context.signal = new AbortController().signal;};
+    if (action === 'ask') f.onContent(cancel); else f.onOwner(cancel);
+    const pending = action === 'ask'
+      ? f.channel.ask({targetBindingId: uuid(20), taskId: uuid(11), category: 'architecture',
+        question: 'Which signed catalog applies?', maximumProviderCostCents: 25}, context)
+      : f.channel.read(uuid(10), uuid(11), uuid(20), context);
+    await assert.rejects(pending, /provider_session_channel_cancelled/);
+    assert.equal(f.calls.filter(call => call.body.action === action).length, 0);
+  });
+}
+
+test('snapshot validation rejects malformed ask/reply asynchronously without invoking getters', async () => {
+  const f = fixture(); let getters = 0;
+  const malformed = {get questionId() {getters++; return uuid(10);}};
+  let ask!: Promise<unknown>, reply!: Promise<unknown>;
+  assert.doesNotThrow(() => {ask = f.channel.ask(malformed as unknown as Parameters<typeof f.channel.ask>[0]);});
+  assert.doesNotThrow(() => {reply = f.channel.reply(malformed as unknown as Parameters<typeof f.channel.reply>[0]);});
+  await assert.rejects(ask, /provider_session_channel_input/);
+  await assert.rejects(reply, /provider_session_channel_input/);
+  assert.equal(getters, 0); assert.equal(f.calls.length, 0);
+});
+
 test('failed async expiry lookup emits only a typed owner refusal with no signed request', async () => {
   let sends = 0;
   const channel = createProviderSessionChannel({scope, mode: 'bridge_owned', expectedRevision: 0,
