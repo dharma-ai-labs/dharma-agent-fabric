@@ -4315,7 +4315,11 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
       try {pending = JSON.parse(await readFile(pendingEnrollmentPath(), 'utf8')) as PendingEnrollment;}
       catch {throw new Error('connection_pending_state_unavailable');}
       if (!pending || typeof pending.hqUrl !== 'string' || typeof pending.organizationId !== 'string'
-        || typeof pending.deviceCode !== 'string' || typeof pending.verificationUri !== 'string'
+        || typeof pending.deviceCode !== 'string' || !pending.deviceCode
+        || typeof pending.name !== 'string' || !pending.name.trim()
+        || !['windows', 'wsl', 'macos', 'linux'].includes(pending.platform)
+        || typeof pending.publicKeyEd25519 !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(pending.publicKeyEd25519)
+        || typeof pending.verificationUri !== 'string'
         || !Number.isFinite(Date.parse(pending.expiresAt))
         || pending.connectionMode !== undefined && pending.connectionMode !== 'manual' && pending.connectionMode !== 'resume') {
         throw new Error('connection_pending_state_invalid');
