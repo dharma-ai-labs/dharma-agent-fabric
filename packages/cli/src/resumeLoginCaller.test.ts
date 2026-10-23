@@ -211,6 +211,46 @@ async function pendingLoginFixture(t: {after(fn: () => Promise<void>): void}) {
   return {...f, pending, pendingPath, pendingBytes, polls};
 }
 
+for (const [field, value] of [
+  ['publicKeyEd25519', 'not-an-ed25519-key'],
+  ['publicKeyEd25519', null],
+  ['name', null],
+  ['platform', 'not-a-platform'],
+  ['deviceCode', ''],
+] as const) {
+  test(`pending login rejects malformed ${field}=${JSON.stringify(value)} before polling`, async t => {
+    const f = await pendingLoginFixture(t);
+    const bytes = JSON.stringify({...f.pending, [field]: value});
+    await writeFile(f.pendingPath, bytes);
+    const installation = await readFile(join(f.home, 'installation.json'), 'utf8');
+    let released = false;
+    f.deps.acquirePidLock = async () => async () => {released = true;};
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['resume', true]])), /connection_pending_state_invalid/);
+    assert.equal(released, true);
+    assert.equal(f.polls.length, 0);
+    assert.equal(f.effects.length, 0);
+    assert.equal(await readFile(f.pendingPath, 'utf8'), bytes);
+    assert.equal(await readFile(join(f.home, 'installation.json'), 'utf8'), installation);
+    await assert.rejects(readFile(f.configPath), {code: 'ENOENT'});
+  });
+}
+
+for (const platform of ['windows', 'wsl', 'macos', 'linux'] as const) {
+  test(`pending login retains a valid ${platform} journal through approval`, async t => {
+    const f = await pendingLoginFixture(t);
+    await writeFile(f.pendingPath, JSON.stringify({...f.pending, platform}));
+    const login = await caller('login', f.deps);
+    assert.equal((await login(new Map([['resume', true]])))?.status, 'approved');
+    assert.equal(f.polls.length, 1);
+    assert.deepEqual(f.effects, ['anchor-write']);
+    const saved = JSON.parse(await readFile(f.configPath, 'utf8'));
+    assert.equal(saved.platform, platform);
+    assert.equal(saved.publicKeyEd25519, f.pending.publicKeyEd25519);
+    assert.equal(saved.deviceName, f.pending.name);
+  });
+}
+
 test('pending login rejects a changed organization or portal before polling or accepting enrollment', async t => {
   for (const [key, value] of [
     ['organization-id', 'org_other'], ['portal-url', 'https://other.example'], ['hq-url', 'https://other.example'],
