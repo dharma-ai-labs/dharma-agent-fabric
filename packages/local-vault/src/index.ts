@@ -1026,6 +1026,21 @@ export class LocalVault {
     `).run(new Date().toISOString(), bindingId, questionId, completionHash);
   }
 
+  acknowledgeProviderSessionOfferReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, offerHash: string, completionHash: string): void {
+    // No acknowledged-but-unsettled crash gap: both records commit together.
+    // The caller must first reconcile the actual signed channel acknowledgment.
+    this.#database.exec('begin immediate');
+    try {
+      this.acknowledgeProviderSessionReply(bindingId, identity, questionId, completionHash);
+      this.settleProviderSessionOfferCheckpoint(bindingId, identity, questionId, offerHash, completionHash);
+      this.#database.exec('commit');
+    } catch (error) {
+      try {this.#databaseHandle.exec('rollback');} catch {}
+      throw error;
+    }
+  }
+
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
     this.#assertOpen();
     const source = await this.#effect(() => stat(sourcePath));

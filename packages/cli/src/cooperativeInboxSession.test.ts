@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { signCanonicalObject, type SessionQuestion } from '@dharma-ai-labs/agent-fabric-contracts';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import { openCooperativeInboxSession } from './cooperativeInboxSession.js';
 import { openCodexBoundSession } from './codexBoundSession.js';
@@ -219,6 +220,7 @@ test('lost answer acknowledgement is recovered from the vault without another ha
     assert.equal((await successor.runNext(async () => { handlers++; throw new Error('must not rerun'); })).state, 'reply_reconciled');
     assert.equal(handlers, 1); assert.equal(f.reserves(), 1);
     assert.equal(reopened.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 0);
+    assert.equal(reopened.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 0);
   } finally { await successor.close(); reopened.close(); }
 });
 
@@ -313,4 +315,144 @@ test('secret answers stay encrypted locally and are never transmitted', async ()
     assert.equal(result.state, 'reply_pending'); assert.equal(f.actions.includes('reply'), false);
     assert.equal(JSON.stringify(result).includes('synthetic-do-not-disclose'), false);
   } finally { await owner.close(); f.vault.close(); }
+});
+
+test('the actual consumer journals the immutable signed offer before acceptance or computation', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  let atAccept = false;
+  f.onAction(action => {
+    if (action !== 'accept') return;
+    const entries = f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity);
+    assert.equal(entries.length, 1); assert.equal(entries[0]?.questionId, f.question.questionId);
+    atAccept = true;
+  });
+  try {
+    assert.equal((await owner.runNext(async offer => {
+      assert.equal(atAccept, true);
+      const stored = await f.vault.readProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity,
+        offer.questionId, {version: offer.signerKeyVersion, publicKeyPem: publicKey.export({type: 'spki', format: 'pem'}).toString()});
+      assert.equal(stored?.state, 'recovery_required');
+      assert.deepEqual(stored?.question, offer);
+      return 'Use the approved catalog.';
+    })).state, 'answered');
+    assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 0);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('uncertain acceptance survives vault reopen without another accept, reservation or computation', async () => {
+  const f = await fixture(); f.setFail('accept');
+  const owner = await openCooperativeInboxSession(f.input);
+  try {
+    await assert.rejects(owner.runNext(async () => {throw new Error('must not execute');}), /uncertain/);
+  } finally {await owner.close(); f.vault.close();}
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
+  f.setFail(null);
+  const successor = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    const before = f.actions.length;
+    const result = await successor.runNext(async () => {throw new Error('must not execute');});
+    assert.equal('questionId' in result && result.questionId, f.question.questionId);
+    assert.equal(result.state, 'offer_recovery_required');
+    assert.deepEqual(f.actions.slice(before), []);
+    assert.equal(f.reserves(), 1); assert.equal(f.used.size, 0);
+    assert.equal(JSON.stringify(result).includes(f.question.question), false);
+  } finally {await successor.close(); reopened.close();}
+});
+
+test('lost owner after accepted computation remains recovery-required even if the remote inbox is empty', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input), context = f.getContext();
+  let handlers = 0;
+  try {
+    await assert.rejects(owner.runNext(async () => {
+      handlers++; f.setContext(null); return 'This uncommitted answer must not escape.';
+    }), /owner_lost/);
+  } finally {await owner.close(); f.vault.close();}
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey}); f.setContext(context);
+  const successor = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    assert.equal((await successor.runNext(async () => {handlers++; return 'Do not repeat.';})).state, 'offer_recovery_required');
+    assert.equal(handlers, 1); assert.equal(f.reserves(), 1); assert.equal(f.used.size, 1);
+    assert.equal(f.actions.filter(action => action === 'inbox').length, 1);
+    assert.equal(f.actions.includes('reply'), false);
+  } finally {await successor.close(); reopened.close();}
+});
+
+test('a preexisting immutable offer blocks unrelated queued work without exposing its contents', async () => {
+  const f = await fixture();
+  await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, f.question as SessionQuestion,
+    {version: 'test-key', publicKeyPem: publicKey.export({type: 'spki', format: 'pem'}).toString()});
+  const owner = await openCooperativeInboxSession(f.input);
+  try {
+    const result = await owner.runNext(async () => {throw new Error('must not execute');});
+    assert.equal(result.state, 'offer_recovery_required');
+    assert.equal(f.reserves(), 0); assert.equal(f.used.size, 0);
+    assert.deepEqual(f.actions, ['inspect', 'attach']);
+    assert.equal(JSON.stringify(result).includes(f.question.question), false);
+  } finally {await owner.close(); f.vault.close();}
+});
+
+test('an actual consumer process crash retains the accepted offer and the dead-owner successor cannot replay it', async () => {
+  const f = await fixture(); f.vault.close();
+  const source = `
+    import {LocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
+    import {createPublicKey} from 'node:crypto';
+    const {openCooperativeInboxSession} = await import(${JSON.stringify(new URL('./cooperativeInboxSession.js', import.meta.url).href)});
+    const binding = ${JSON.stringify(f.binding)}, identity = ${JSON.stringify(f.identity)};
+    const {organizationId, ...registeredIdentity} = identity;
+    const offer = ${JSON.stringify(f.question)}, publicKey = createPublicKey(${JSON.stringify(publicKey.export({type: 'spki', format: 'pem'}).toString())});
+    const vault = await LocalVault.open({root: ${JSON.stringify(f.root)}, masterKey: Buffer.from(${JSON.stringify(f.masterKey.toString('base64'))}, 'base64')});
+    const owner = await openCooperativeInboxSession({vault, bindingId: binding.bindingId, identity,
+      currentSession: async () => ({provider: 'codex', sessionId: binding.sessionId, workspaceRoot: binding.workspaceRoot, active: true}),
+      verifier: {resolvePublicKey: () => publicKey, consume: async () => true},
+      authorizeContent: async () => true, budget: {reserve: async () => true},
+      channelTransport: {signedPost: async (route, body) => {
+        const envelope = {ok: true, organizationId: identity.organizationId, correlationId: ${JSON.stringify(uuid(90))}};
+        if (body.action === 'inspect') return {...envelope, registration: null};
+        if (body.action === 'attach') return {...envelope, registration: {...registeredIdentity, bindingId: binding.bindingId,
+          mode: 'cooperative', revision: 1, state: 'attached', leaseUntil: new Date(Date.now()+60000).toISOString(), replay: false}};
+        if (body.action === 'inbox') return {...envelope, result: {offers: [offer]}};
+        if (body.action === 'accept') return {...envelope, result: {questionId: offer.questionId, taskId: offer.taskId,
+          targetBindingId: binding.bindingId, state: 'accepted', replay: false}};
+        throw new Error('Unexpected synthetic transport action');
+      }}
+    });
+    await owner.runNext(async () => {process.exit(77);});
+    throw new Error('Crash fixture did not reach the consumer callback');
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', source],
+    {cwd: resolve(import.meta.dirname, '../../..'), encoding: 'utf8', timeout: 30000});
+  assert.equal(child.status, 77, child.stderr);
+  const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
+  const successor = await openCooperativeInboxSession({...f.input, vault: reopened});
+  try {
+    assert.equal((await successor.runNext(async () => {throw new Error('must not recompute');})).state, 'offer_recovery_required');
+    assert.equal(f.reserves(), 0); assert.equal(f.used.size, 0);
+    assert.deepEqual(f.actions, ['inspect', 'attach']);
+  } finally {await successor.close(); reopened.close();}
+});
+
+test('the scoped vault facade persists and atomically settles the actual consumer offer', async () => {
+  const f = await fixture(); f.vault.close();
+  const controller = new AbortController();
+  const vault = await LocalVault.open({root: f.root, masterKey: f.masterKey},
+    {signal: controller.signal, current: async () => !controller.signal.aborted});
+  const owner = await openCooperativeInboxSession({...f.input, vault});
+  try {
+    assert.equal((await owner.runNext(async offer => {
+      assert.equal((await vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity))[0]?.questionId, offer.questionId);
+      return 'Use the pinned catalog.';
+    })).state, 'answered');
+    assert.deepEqual(await vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+    assert.deepEqual(await vault.listProviderSessionReplies(f.binding.bindingId, f.identity), []);
+  } finally {await owner.close(); controller.abort(); await vault.close();}
+});
+
+test('a failed encrypted checkpoint write cannot reach acceptance, replay consumption or computation', async () => {
+  const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+  f.vault.stageProviderSessionOfferCheckpoint = async () => {throw new Error('synthetic durable write unconfirmed');};
+  try {
+    await assert.rejects(owner.runNext(async () => {throw new Error('must not execute');}), /durable write unconfirmed/);
+    assert.equal(f.actions.includes('accept'), false); assert.equal(f.actions.includes('reply'), false);
+    assert.equal(f.used.size, 0); assert.equal(f.reserves(), 1);
+  } finally {await owner.close(); f.vault.close();}
 });

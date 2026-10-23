@@ -98,6 +98,14 @@ export async function openCooperativeInboxSession(input: {
           identity: input.identity, channel });
         await requireOwner();
         if (recovered) { if (recovered.state === 'reply_pending') stop(); return recovered; }
+        const pending = (await input.vault.listProviderSessionOfferCheckpoints(input.bindingId, input.identity))[0];
+        await requireOwner();
+        if (pending) {
+          // Acceptance/computation may have crossed the crash boundary. The
+          // encrypted offer is evidence for reconciliation, never a replay grant.
+          stop();
+          return {state: 'offer_recovery_required' as const, ...pending};
+        }
         const offer = (await channel.inbox())[0];
         if (!offer) return { state: 'idle' as const };
         Object.freeze(offer.authority.readPaths); Object.freeze(offer.authority);
@@ -113,6 +121,13 @@ export async function openCooperativeInboxSession(input: {
           maximumCostCents: offer.authority.maximumProviderCostCents });
         await requireOwner();
         if (!reserved) return { state: 'budget_denied' as const, questionId: offer.questionId, taskId: offer.taskId };
+        requireOffer(offer);
+        const key = input.verifier.resolvePublicKey(offer.signerKeyVersion);
+        if (!key || key.type !== 'public') throw new Error('cooperative_session_signer_untrusted');
+        const offerHash = await input.vault.stageProviderSessionOfferCheckpoint(input.bindingId, input.identity, offer, {
+          version: offer.signerKeyVersion, publicKeyPem: key.export({type: 'spki', format: 'pem'}).toString(),
+        });
+        await requireOwner();
         requireOffer(offer);
         await channel.accept(offer.questionId, offer.taskId);
         await requireOwner();
@@ -146,7 +161,8 @@ export async function openCooperativeInboxSession(input: {
         try {
           const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
             outcome: 'answered', answer, failureCode: null });
-          await input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, offer.questionId, completionHash);
+          await input.vault.acknowledgeProviderSessionOfferReply(input.bindingId, input.identity,
+            offer.questionId, offerHash, completionHash);
           return { ...receipt, completionHash };
         } catch {
           stop();

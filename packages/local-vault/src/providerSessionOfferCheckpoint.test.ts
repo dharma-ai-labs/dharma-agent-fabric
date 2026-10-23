@@ -86,6 +86,52 @@ test('settlement requires the exact acknowledged durable reply, then never rewin
   await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, f.sign({...f.unsigned, questionId: uuid(20)}), f.verifier);
 });
 
+test('atomic offer acknowledgment and settlement survive reopen and are idempotent', async t => {
+  const f = await fixture(t), question = f.sign();
+  const offerHash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  const completionHash = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity, question.questionId,
+    Buffer.from('synthetic acknowledged completion'));
+  f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity, question.questionId, offerHash, completionHash);
+  f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity, question.questionId, offerHash, completionHash);
+  await f.reopen();
+  assert.deepEqual(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity), []);
+  assert.deepEqual(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+  assert.equal((await f.vault.readProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity,
+    question.questionId, f.verifier))?.state, 'settled');
+});
+
+test('an atomic settlement conflict rolls back acknowledgment and retains both pending records', async t => {
+  const f = await fixture(t), question = f.sign();
+  const offerHash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  const completionHash = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity, question.questionId,
+    Buffer.from('synthetic retained completion'));
+  assert.throws(() => f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity,
+    question.questionId, `sha256:${'0'.repeat(64)}`, completionHash), /offer_conflict/);
+  await f.reopen();
+  assert.deepEqual(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity), [{questionId: question.questionId, completionHash}]);
+  assert.deepEqual(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), [{questionId: question.questionId, offerHash}]);
+  f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity, question.questionId, offerHash, completionHash);
+  assert.deepEqual(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), []);
+});
+
+test('atomic acknowledgment rejects foreign identity, revoked binding and absent offers without losing a reply', async t => {
+  const f = await fixture(t), question = f.sign();
+  const offerHash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  const completionHash = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity, question.questionId,
+    Buffer.from('synthetic scoped completion'));
+  for (const field of Object.keys(f.identity)) {
+    const identity = {...f.identity, [field]: field === 'provider' ? 'claude' : field === 'organizationId' ? 'org_foreign' : uuid(99)};
+    assert.throws(() => f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, identity as typeof f.identity,
+      question.questionId, offerHash, completionHash), /scope_mismatch/);
+  }
+  assert.throws(() => f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity,
+    uuid(99), offerHash, completionHash), /reply_conflict/);
+  assert.equal(f.vault.listProviderSessionReplies(f.binding.bindingId, f.identity).length, 1);
+  f.vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+  assert.throws(() => f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity,
+    question.questionId, offerHash, completionHash), /binding_unavailable/);
+});
+
 test('all enrolled scope fields reject foreign access before returning encrypted content', async t => {
   const f = await fixture(t), question = f.sign();
   const hash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
@@ -205,6 +251,7 @@ test('scoped vault withdrawal fences all new checkpoint methods', async t => {
     await assert.rejects(scoped.readProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, f.verifier), /scope/);
     await assert.rejects(scoped.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity), /scope/);
     await assert.rejects(scoped.settleProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, hash), /scope/);
+    await assert.rejects(scoped.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity, question.questionId, hash, hash), /scope/);
   } finally { await scoped.close(); }
 });
 

@@ -27,7 +27,8 @@ export async function reconcileProviderSessionReply(input: {
     'https://schemas.dharma-ai.io/provider-session-completion/v1', value);
   if (!contract.ok) throw new Error('provider_session_completion_invalid');
   const completion = value as Completion;
-  if (!await input.vault.getProviderSessionBinding(input.bindingId, input.identity)
+  const binding = await input.vault.getProviderSessionBinding(input.bindingId, input.identity);
+  if (!binding
     || completion.bindingId !== input.bindingId || completion.questionId !== pending.questionId
     || ['organizationId', 'repositoryBindingId', 'membershipId', 'deviceId', 'workspaceId', 'endpointId']
       .some(key => completion[key as keyof Completion] !== input.identity[key as keyof LocalProviderSessionIdentity])
@@ -66,7 +67,15 @@ export async function reconcileProviderSessionReply(input: {
       completionHash: pending.completionHash,
       reasonCode: observed.state === 'answered' ? 'answer_conflict' as const : 'remote_not_answered' as const };
   }
-  await input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, completion.questionId, pending.completionHash);
+  const offer = binding.owner === 'cooperative_session'
+    ? (await input.vault.listProviderSessionOfferCheckpoints(input.bindingId, input.identity))
+      .find(item => item.questionId === completion.questionId) : undefined;
+  if (offer) {
+    await input.vault.acknowledgeProviderSessionOfferReply(input.bindingId, input.identity,
+      completion.questionId, offer.offerHash, pending.completionHash);
+  } else {
+    await input.vault.acknowledgeProviderSessionReply(input.bindingId, input.identity, completion.questionId, pending.completionHash);
+  }
   return { state: 'reply_reconciled' as const, questionId: completion.questionId, taskId: completion.taskId,
     completionHash: pending.completionHash, replyReceiptHash: observed.replyReceiptHash, correlationId: observed.correlationId };
 }
