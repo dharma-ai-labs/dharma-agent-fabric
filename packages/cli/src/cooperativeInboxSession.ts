@@ -5,6 +5,8 @@ import type { LocalProviderSessionIdentity, LocalVault, ScopedLocalVault } from 
 import { createProviderSessionChannel } from './providerSessionChannel.js';
 import { reconcileProviderSessionReply } from './providerSessionReplyRecovery.js';
 import { snapshotCooperativeSessionAnswer, type CooperativeSessionAnswer } from './cooperativeSessionSubmission.js';
+import { providerSessionDispatchDeadline, requireProviderSessionDispatch, snapshotProviderSessionDispatchContext,
+  type ProviderSessionDispatchContext } from './providerSessionDispatchContext.js';
 
 export type { CooperativeSessionAnswer } from './cooperativeSessionSubmission.js';
 
@@ -48,6 +50,11 @@ export async function openCooperativeInboxSession(input: {
   async function requireOwner() {
     if (!await assertOwner()) throw new Error('cooperative_session_owner_lost');
   }
+  async function requireActiveOwner(context?: Readonly<ProviderSessionDispatchContext>) {
+    requireProviderSessionDispatch(context);
+    await requireOwner();
+    requireProviderSessionDispatch(context);
+  }
   const scope: SessionBindingScope = {
     organizationId: binding.organizationId, repositoryBindingId: binding.repositoryBindingId,
     workspaceId: binding.workspaceId, endpointId: binding.endpointId, membershipId: binding.membershipId,
@@ -90,18 +97,20 @@ export async function openCooperativeInboxSession(input: {
     }
     return { serverDetached, consumerClosed: true as const };
   }
-  async function drive(answerInCurrentSession?: (offer: SessionQuestion) => Promise<string>, submission?: CooperativeSessionAnswer) {
+  async function drive(answerInCurrentSession?: (offer: SessionQuestion) => Promise<string>, submission?: CooperativeSessionAnswer,
+    context?: ProviderSessionDispatchContext) {
     if (stopped) throw new Error('cooperative_session_unavailable');
     if (running) throw new Error('cooperative_session_busy');
     if (handedOff && answerInCurrentSession) throw new Error('cooperative_session_handoff_pending');
     running = true;
     activeRun = new Promise<void>(resolve => { settle = resolve; });
     try {
+      const admission = snapshotProviderSessionDispatchContext(context);
       let submitted: CooperativeSessionAnswer | undefined;
       if (submission !== undefined) {
         submitted = snapshotCooperativeSessionAnswer(submission);
       }
-      await requireOwner();
+      await requireActiveOwner(admission);
       if (submitted) {
         const held = handedOff;
         if (!held || submitted.questionId !== held.offer.questionId || submitted.taskId !== held.offer.taskId
@@ -112,42 +121,44 @@ export async function openCooperativeInboxSession(input: {
         const durable = await input.vault.readProviderSessionOfferCheckpoint(input.bindingId, input.identity,
           submitted.questionId, {version: held.offer.signerKeyVersion,
             publicKeyPem: key.export({type: 'spki', format: 'pem'}).toString()});
+        await requireActiveOwner(admission);
         const handoff = await input.vault.readProviderSessionOfferHandoff(input.bindingId, input.identity, submitted.questionId);
-        await requireOwner(); requireOffer(held.offer);
+        await requireActiveOwner(admission); requireOffer(held.offer);
         if (durable?.state !== 'recovery_required' || durable.offerHash !== held.offerHash
           || canonicalize(durable.question) !== canonicalize(held.offer)
           || handoff?.state !== 'handed_off' || handoff.attemptId !== held.attemptId
           || handoff.offerHash !== held.offerHash) throw new Error('cooperative_session_submission_mismatch');
-        return await complete(held.offer, held.offerHash, submitted.answer, held.attemptId);
+        return await complete(held.offer, held.offerHash, submitted.answer, admission, held.attemptId);
       }
       if (handedOff) return {state: 'checkpoint_pending' as const, questionId: handedOff.offer.questionId,
         taskId: handedOff.offer.taskId, offerHash: handedOff.offerHash, attemptId: handedOff.attemptId};
       const recovered = await reconcileProviderSessionReply({ vault: input.vault, bindingId: input.bindingId,
-        identity: input.identity, channel, verifier: input.verifier });
-      await requireOwner();
-      if (recovered) { if (recovered.state === 'reply_pending') stop(); return recovered; }
+        identity: input.identity, channel, verifier: input.verifier, context: admission });
+      if (recovered?.state === 'reply_pending') {stop(); return recovered;}
+      await requireActiveOwner(admission);
+      if (recovered) return recovered;
       const pending = (await input.vault.listProviderSessionOfferCheckpoints(input.bindingId, input.identity))[0];
-      await requireOwner();
+      await requireActiveOwner(admission);
       if (pending) {
         // Acceptance/computation may have crossed the crash boundary. The
         // encrypted offer is evidence for reconciliation, never a replay grant.
         stop();
         return {state: 'offer_recovery_required' as const, ...pending};
       }
-      const offer = (await channel.inbox())[0];
+      const offer = (await channel.inbox(admission))[0];
       if (!offer) return { state: 'idle' as const };
       Object.freeze(offer.authority.readPaths); Object.freeze(offer.authority);
       Object.freeze(offer.source); Object.freeze(offer.target); Object.freeze(offer);
-      await requireOwner();
+      await requireActiveOwner(admission);
       // Content authorization and reserved cost must precede acceptance and the
       // durable replay claim. Delivery cannot authorize broader chat actions.
       if (!await input.authorizeContent(offer.question, 'question')) {
         throw new Error('cooperative_session_content_denied');
       }
-      await requireOwner();
+      await requireActiveOwner(admission);
       const reserved = await input.budget.reserve({ questionId: offer.questionId,
         maximumCostCents: offer.authority.maximumProviderCostCents });
-      await requireOwner();
+      await requireActiveOwner(admission);
       if (!reserved) return { state: 'budget_denied' as const, questionId: offer.questionId, taskId: offer.taskId };
       requireOffer(offer);
       const key = input.verifier.resolvePublicKey(offer.signerKeyVersion);
@@ -155,39 +166,40 @@ export async function openCooperativeInboxSession(input: {
       const offerHash = await input.vault.stageProviderSessionOfferCheckpoint(input.bindingId, input.identity, offer, {
         version: offer.signerKeyVersion, publicKeyPem: key.export({type: 'spki', format: 'pem'}).toString(),
       });
-      await requireOwner();
+      await requireActiveOwner(admission);
       requireOffer(offer);
-      await channel.accept(offer.questionId, offer.taskId);
-      await requireOwner();
+      await channel.accept(offer.questionId, offer.taskId, providerSessionDispatchDeadline(admission, offer.expiresAt));
+      await requireActiveOwner(admission);
       if (!await input.verifier.consume(offer.questionId)) throw new Error('cooperative_session_replayed');
-      await requireOwner();
+      await requireActiveOwner(admission);
       requireOffer(offer);
       if (!answerInCurrentSession) {
         const attemptId = randomUUID();
         await input.vault.handoffProviderSessionOfferCheckpoint(input.bindingId, input.identity,
           offer.questionId, offerHash, attemptId);
-        await requireOwner(); requireOffer(offer);
+        await requireActiveOwner(admission); requireOffer(offer);
         handedOff = {offer, offerHash, attemptId};
         return Object.freeze({state: 'handed_off' as const, offer, offerHash, attemptId});
       }
       let answer: string;
       try { answer = await answerInCurrentSession(offer); }
       catch {
-        await requireOwner(); requireOffer(offer);
+        await requireActiveOwner(admission); requireOffer(offer);
         try {
           return await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
-            outcome: 'failed', answer: '', failureCode: 'execution_failed' }, {expiresAt: offer.expiresAt});
+            outcome: 'failed', answer: '', failureCode: 'execution_failed' }, providerSessionDispatchDeadline(admission, offer.expiresAt));
         } catch { throw new Error('cooperative_session_failure_delivery_unconfirmed'); }
       }
-      return await complete(offer, offerHash, answer);
+      return await complete(offer, offerHash, answer, admission);
     } catch (error) { stop(); throw error; }
     finally {
       running = false; settle?.(); settle = null; activeRun = null;
       if (stopped) await release();
     }
   }
-  async function complete(offer: SessionQuestion, offerHash: string, answer: string, attemptId?: string) {
-    await requireOwner(); requireOffer(offer);
+  async function complete(offer: SessionQuestion, offerHash: string, answer: string,
+    context?: Readonly<ProviderSessionDispatchContext>, attemptId?: string) {
+    await requireActiveOwner(context); requireOffer(offer);
     if (typeof answer !== 'string' || answer.trim().length === 0 || answer.length > 2000
       || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(answer)) {
       throw new Error('cooperative_session_answer_invalid');
@@ -205,18 +217,24 @@ export async function openCooperativeInboxSession(input: {
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Math.min(Date.parse(offer.expiresAt), Date.parse(binding!.expiresAt))).toISOString()} : {}),
       }), 'utf8'));
+    // Staging is durable. Interruption cannot erase it or authorize a blind retry.
+    try {requireProviderSessionDispatch(context);} catch {
+      stop();
+      return {state: 'reply_pending' as const, questionId: offer.questionId, taskId: offer.taskId, completionHash};
+    }
     await requireOwner();
     requireOffer(offer);
     if (attemptId) {
       const current = await input.vault.readProviderSessionOfferHandoff(input.bindingId, input.identity, offer.questionId);
-      await requireOwner(); requireOffer(offer);
+      await requireActiveOwner(context); requireOffer(offer);
       if (current?.state !== 'handed_off' || current.attemptId !== attemptId || current.offerHash !== offerHash) {
         throw new Error('cooperative_session_submission_mismatch');
       }
     }
     try {
       const receipt = await channel.reply({ questionId: offer.questionId, taskId: offer.taskId,
-        outcome: 'answered', answer, failureCode: null }, {expiresAt: offer.expiresAt});
+        outcome: 'answered', answer, failureCode: null }, providerSessionDispatchDeadline(context, offer.expiresAt));
+      requireProviderSessionDispatch(context);
       await input.vault.acknowledgeProviderSessionOfferReply(input.bindingId, input.identity,
         offer.questionId, offerHash, completionHash);
       handedOff = null;
@@ -227,14 +245,14 @@ export async function openCooperativeInboxSession(input: {
     }
   }
   return {close, retire,
-    checkpoint: () => drive(),
-    submitAnswer: async (submission: CooperativeSessionAnswer) => {
+    checkpoint: (context?: ProviderSessionDispatchContext) => drive(undefined, undefined, context),
+    submitAnswer: async (submission: CooperativeSessionAnswer, context?: ProviderSessionDispatchContext) => {
       if (!submission) throw new Error('cooperative_session_submission_invalid');
-      return drive(undefined, submission);
+      return drive(undefined, submission, context);
     },
-    runNext: async (answerInCurrentSession: (offer: SessionQuestion) => Promise<string>) => {
+    runNext: async (answerInCurrentSession: (offer: SessionQuestion) => Promise<string>, context?: ProviderSessionDispatchContext) => {
       if (typeof answerInCurrentSession !== 'function') throw new Error('cooperative_session_handler_invalid');
-      return drive(answerInCurrentSession);
+      return drive(answerInCurrentSession, undefined, context);
     },
   };
 }

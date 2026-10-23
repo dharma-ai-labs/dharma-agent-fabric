@@ -1,6 +1,8 @@
 import { types } from 'node:util';
 import { inspectSessionQuestionForBinding, type SessionBindingScope, type SessionQuestion,
   type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
+import { requireProviderSessionDispatch, snapshotProviderSessionDispatchContext,
+  type ProviderSessionDispatchContext } from './providerSessionDispatchContext.js';
 
 type Mode = 'bridge_owned' | 'cooperative';
 type FailureCode = 'provider_unavailable' | 'budget_denied' | 'validation_failed' | 'execution_failed';
@@ -10,7 +12,7 @@ type Registration = { bindingId: string; workspaceId: string; endpointId: string
 type Acknowledgement = { questionId: string; taskId: string; targetBindingId: string;
   state: 'queued' | 'accepted' | 'answered' | 'failed'; replay: boolean; correlationId: string };
 type Reply = { questionId: string; taskId: string; outcome: 'answered' | 'failed'; answer: string; failureCode: FailureCode | null };
-type DispatchContext = { signal?: AbortSignal; expiresAt?: string };
+type DispatchContext = Readonly<ProviderSessionDispatchContext>;
 type Observation = { questionId: string; taskId: string; targetBindingId: string;
   state: 'preparing' | 'queued' | 'accepted' | 'answered' | 'failed' | 'expired' | 'unavailable';
   answer: string | null; failureCode: FailureCode | null; replyReceiptHash: string | null; correlationId: string };
@@ -113,13 +115,12 @@ export function createProviderSessionChannel(input: {
     }
   }
   function admitted(context?: DispatchContext) {
-    if (context?.signal?.aborted) throw new Error('provider_session_channel_cancelled');
-    if (context?.expiresAt !== undefined) {
-      const deadline = Date.parse(context.expiresAt), time = now().getTime();
-      if (!Number.isFinite(deadline) || !Number.isFinite(time) || time >= deadline) {
-        throw new Error('provider_session_channel_deadline');
-      }
-    }
+    requireProviderSessionDispatch(context, now().getTime());
+  }
+  function interrupted(context?: DispatchContext) {
+    // After sending, a request deadline is not a remote cancellation contract.
+    try {requireProviderSessionDispatch(context && {signal: context.signal});} catch {return true;}
+    return false;
   }
   async function post(route: string, body: Record<string, unknown>, field: 'registration' | 'result', context?: DispatchContext) {
     fact(Buffer.byteLength(JSON.stringify(body), 'utf8') <= 3500, 'input');
@@ -129,9 +130,9 @@ export function createProviderSessionChannel(input: {
     let response: unknown;
     try { response = await input.transport.signedPost(route, body); }
     catch { closed = true; throw new Error('provider_session_channel_uncertain'); }
-    if (context?.signal?.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
+    if (interrupted(context)) { closed = true; throw new Error('provider_session_channel_uncertain'); }
     await owner();
-    if (context?.signal?.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
+    if (interrupted(context)) { closed = true; throw new Error('provider_session_channel_uncertain'); }
     try {
       safeWire(response);
       const envelope = record(response, ['ok', 'organizationId', field, 'correlationId'], 'response');
@@ -186,7 +187,9 @@ export function createProviderSessionChannel(input: {
     await owner(true);
     admitted(context);
     const result = await post('/agent-fabric/provider-session-questions', { ...base, action, ...additional }, 'result', context);
-    await owner(true); return result;
+    await owner(true);
+    if (interrupted(context)) {closed = true; throw new Error('provider_session_channel_uncertain');}
+    return result;
   }
   async function content(value: string, kind: 'question' | 'answer') {
     fact(await input.authorizeContent(value, kind), 'input'); await owner(true);
@@ -205,8 +208,8 @@ export function createProviderSessionChannel(input: {
     attach: () => operation(() => register('attach')),
     heartbeat: () => operation(() => register('heartbeat')),
     detach: () => operation(() => register('detach')),
-    inbox: () => operation(async () => {
-      const result = record(await question('inbox'), ['offers'], 'response');
+    inbox: (context?: ProviderSessionDispatchContext) => snapshotOperation(() => snapshotProviderSessionDispatchContext(context), async admission => {
+      const result = record(await question('inbox', {}, admission), ['offers'], 'response');
       fact(Array.isArray(result.offers) && result.offers.length <= 5, 'response');
       const offers: SessionQuestion[] = [], seen = new Set<string>();
       for (const candidate of result.offers) {
@@ -214,13 +217,14 @@ export function createProviderSessionChannel(input: {
         fact(inspected.ok, 'response'); const offer = candidate as SessionQuestion;
         text(offer.question, 'response');
         await content(offer.question, 'question');
+        admitted(admission);
         fact(!seen.has(offer.questionId), 'response'); seen.add(offer.questionId); offers.push(offer);
       }
       return offers;
     }),
-    ask: (request: { targetBindingId: string; taskId: string; category: string; question: string; maximumProviderCostCents: number }, context?: { signal: AbortSignal }) => snapshotOperation(() => ({
+    ask: (request: { targetBindingId: string; taskId: string; category: string; question: string; maximumProviderCostCents: number }, context?: ProviderSessionDispatchContext) => snapshotOperation(() => ({
       value: record(request, ['targetBindingId', 'taskId', 'category', 'question', 'maximumProviderCostCents'], 'input'),
-      admission: context ? {signal: context.signal} : undefined,
+      admission: snapshotProviderSessionDispatchContext(context),
     }), async ({value, admission}) => {
       admitted(admission);
       fact(identifier(value.targetBindingId) && identifier(value.taskId) && value.targetBindingId !== scope.bindingId
@@ -231,15 +235,17 @@ export function createProviderSessionChannel(input: {
       admitted(admission);
       return acknowledgement(await question('ask', value, admission), { taskId: String(value.taskId), targetBindingId: String(value.targetBindingId), state: 'queued' });
     }),
-    accept: (questionId: string, taskId: string) => operation(async () => {
+    accept: (questionId: string, taskId: string, context?: ProviderSessionDispatchContext) => snapshotOperation(
+      () => snapshotProviderSessionDispatchContext(context), async admission => {
+      admitted(admission);
       fact(identifier(questionId) && identifier(taskId), 'input');
-      return acknowledgement(await question('accept', { questionId }), { questionId, taskId, targetBindingId: scope.bindingId, state: 'accepted' });
+      return acknowledgement(await question('accept', { questionId }, admission), { questionId, taskId, targetBindingId: scope.bindingId, state: 'accepted' });
     }),
-    reply: (request: Reply, context?: { expiresAt: string }) => snapshotOperation(() => ({
+    reply: (request: Reply, context?: ProviderSessionDispatchContext) => snapshotOperation(() => ({
       value: record(request, ['questionId', 'taskId', 'outcome', 'answer', 'failureCode'], 'input'),
       // The owning protocol derives this deadline from the immutable signed offer.
       // Keep it off the wire and snapshot it before waiting behind another call.
-      deadline: context ? {expiresAt: context.expiresAt} : undefined,
+      deadline: snapshotProviderSessionDispatchContext(context),
     }), async ({value, deadline}) => {
       admitted(deadline);
       fact(identifier(value.questionId) && identifier(value.taskId), 'input');
@@ -250,8 +256,8 @@ export function createProviderSessionChannel(input: {
       return acknowledgement(await question('reply', payload, deadline), { questionId: String(value.questionId), taskId: String(taskId),
         targetBindingId: scope.bindingId, state: String(value.outcome) });
     }),
-    read: (questionId: string, taskId: string, targetBindingId: string, context?: { signal: AbortSignal }) => snapshotOperation(
-      () => context ? {signal: context.signal} : undefined, async admission => {
+    read: (questionId: string, taskId: string, targetBindingId: string, context?: ProviderSessionDispatchContext) => snapshotOperation(
+      () => snapshotProviderSessionDispatchContext(context), async admission => {
       admitted(admission);
       fact([questionId, taskId, targetBindingId].every(identifier), 'input');
       const value = record(await question('read', { questionId }, admission), ['questionId', 'taskId', 'targetBindingId',
