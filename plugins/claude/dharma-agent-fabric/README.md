@@ -14,6 +14,37 @@ Dharma Agent Fabric brings your organization's agents together to share knowledg
 | --- | --- |
 | MCP server `dharma-agent-fabric` | Remote MCP server at `https://mcp.dharma-ai.io/mcp` (streamable HTTP, OAuth). Read your organization's identity, agents, devices, tasks, trajectories, failures, evaluations, skills and usage; with explicit confirmation, dispatch tasks and agent-to-agent messages, run analyses and evaluations, and stage, release, roll out or roll back skill remediations. |
 | Skill `dharma-agent-fabric-setup` | Set up or recover an authorized Fabric client, establish its actual organization and assigned role, and connect qualified shared knowledge and role-bounded factory work. |
+| Skill `dharma-agent-fabric` | Operate already-authorized trajectory, task, agent-to-agent, evaluation and signed-skill workflows after setup. Its operational source and nine references are shared with the Codex plugin. |
+
+### Intended skill routing
+
+For onboarding or recovery, prefer `dharma-agent-fabric-setup` to establish the actual client, organization, assigned role and qualified connection.
+After setup, use `dharma-agent-fabric` for the admitted operational workflow.
+The descriptions overlap on connection-related requests; automatic skill triggers are not guaranteed to be exclusive. This is intended handoff and precedence, not evidence of which skill a client selected or loaded.
+
+### Source parity
+
+The authored operational skill is `plugins/dharma-agent-fabric/skills/dharma-agent-fabric`.
+`npm run plugin:skills:generate` renders its ten enumerated files into this plugin;
+it does not install anything. The setup skill remains a separate, unchanged tree.
+`npm run plugin:skills:generate -- --dry-run` reports the exact proposed paths and
+before/after hashes without creating directories or overwriting files.
+`npm run plugin:skills:check` checks the complete file set, inline local reference
+paths, LF-normalized SHA256 parity and independent route-version increments
+against the Git baseline. Raw-byte equality is reported separately. Only these
+twenty common-file paths receive the LF Git policy.
+Manual publication checks require a nonzero immutable `GITHUB_SHA` matching the
+checkout; this validates that selected payload, not its change since a prior release.
+PR and push checks retain their separate base/before content-version comparison.
+
+This source candidate is Claude/Grok `1.0.5`; Codex remains `0.1.0`. A later change
+to shared content requires each affected route's own version increment, not
+synchronized version numbers. A source change does not alter a previously
+reviewed or submitted bundle. Publisher review, strict client validation,
+installation and publication are separate and are not established by this check.
+Static plugin content is not a signed organization skill bundle, activation,
+authenticated task use or loaded-context rollback. Neither a file hash nor an
+identifier echo proves those states.
 
 ## Install
 
@@ -37,7 +68,7 @@ grok plugin install dharma-agent-fabric --trust
 
 ### Grok Bot and grok.com (custom connector)
 
-Grok chat surfaces use the remote MCP server directly, without this plugin's setup skill. In Connectors, choose **New Connector** → **Custom**, enter `https://mcp.dharma-ai.io/mcp`, then authenticate with your Dharma account. On Business and Enterprise workspaces an administrator may need to provision the connector first.
+Grok chat surfaces use the remote MCP server directly and carry neither bundled skill (`dharma-agent-fabric-setup` nor `dharma-agent-fabric`) through that connector alone. Do not infer either skill's delivery, activation or use without separately evidenced installation. In Connectors, choose **New Connector** → **Custom**, enter `https://mcp.dharma-ai.io/mcp`, then authenticate with your Dharma account. On Business and Enterprise workspaces an administrator may need to provision the connector first.
 
 ### Find your organization ID
 
@@ -59,11 +90,12 @@ Fabric tools take your organization ID (`org_...`) as `organizationId`, and no t
 
 ## Data this plugin sends
 
-- The plugin ships no executables, hooks or local telemetry. The setup skill is instructions that your agent client reads locally.
+- The plugin ships no executables, hooks or local telemetry. Both skills are instructions and references that your agent client reads locally; their presence alone does not transmit data.
 - When you sign in, the Dharma authorization server (`clerk.dharma-ai.io`) receives the OAuth request, and your client receives an access token scoped to `openid`, `profile`, `email` and `user:org:read` for your Dharma account and organization.
 - When your client calls a Fabric tool, the tool name and its arguments, such as an organization, agent, task or remediation identifier, a task or message you approved, or an analysis request, are sent over HTTPS to `https://mcp.dharma-ai.io/mcp`. The response contains only the organization data that your membership and role allow.
 - Mutating, paid or GitHub-writing tools send data only after your explicit confirmation. Nothing else from your conversation, files or machine is sent by the plugin.
 - Separately from the connector, the setup skill can guide your agent, with your approval, to install the official Dharma CLI from the npm registry (`npm install --global @dharma-ai-labs/agent-fabric`) and complete a browser sign-in at `www.dharma-ai.io`. The CLI then exchanges enrollment, task and skill data with Dharma's platform (`www.dharma-ai.io`, `api.dharma-ai.io`) under its own enrollment and your organization's policy.
+- The operational skill describes approved local trajectory preview/sync, task dispatch and results, agent-to-agent messages, BYOK/managed billing checks, evaluation and signed-skill rollout/rollback. Invoking these workflows can send their scoped task/message text, filtered evidence, skill metadata and usage to the existing Fabric services under the relevant CLI/device or connector authority. Local provider credentials stay local; model execution and paid analysis have separate policy and cost gates. Adding this skill does not authorize collection, synchronization, dispatch or rollout. Route-specific directory disclosure answers require separate review before any new submission.
 - How Dharma stores and retains this data is described in the [privacy policy](https://www.dharma-ai.io/privacy).
 
 ## Requirements

@@ -20,6 +20,6 @@
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.16",
     "@modelcontextprotocol/server": "2.3.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   }
 }

@@ -44,7 +44,9 @@
     "proof:relay": "node scripts/proof-live-relay.mjs",
     "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
     "public:content:check": "node scripts/check-public-content.mjs",
-    "check": "npm run public:content:check && npm run vendor:verify && npm test && npm run pack:verify && npm run pack:setup-readiness && npm run mcp:catalog:verify && npm run openapi:verify"
+    "plugin:skills:generate": "node scripts/plugin-skill-parity.mjs --write",
+    "plugin:skills:check": "node --test scripts/plugin-skill-parity.test.mjs && node scripts/plugin-skill-parity.mjs",
+    "check": "npm run public:content:check && npm run plugin:skills:check && npm run vendor:verify && npm test && npm run pack:verify && npm run pack:setup-readiness && npm run mcp:catalog:verify && npm run openapi:verify"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",
@@ -54,5 +56,8 @@
     "ajv-formats": "^3.0.1",
     "typescript": "^5.8.3",
     "yaml": "^2.8.1"
+  },
+  "overrides": {
+    "zod": "4.6.6"
   }
 }
