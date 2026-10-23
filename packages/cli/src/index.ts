@@ -4261,6 +4261,13 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     // A competing first caller may have completed while this caller waited.
     if (await readDeviceConfig()) return await login(flags);
     if (!flags.has('resume')) await assertUnenrolledHome([`${configPath()}.connection.json`, installationIdentityPath(), pendingEnrollmentPath(), workspaceRegistryPath()]);
+    const enrollmentFetcher = (deadline?: number): typeof fetch => (url, init) => {
+      const remaining = deadline === undefined ? 30_000 : Math.min(30_000, deadline - Date.now());
+      if (remaining <= 0) throw new Error('connection_pending_approval_expired');
+      const timeout = AbortSignal.timeout(remaining);
+      return fetch(url, {...init, redirect: 'error',
+        signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout});
+    };
     type PendingEnrollment = {
       hqUrl: string;
       organizationId: string;
@@ -4326,12 +4333,22 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
       const devicePlatform = await platform();
       const installationId = await loadOrCreateInstallationId();
       const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId, installationId });
-      const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519, idempotencyKey: installationId });
+      const enrollment = await beginEnrollment({ hqUrl, organizationId, name, platform: devicePlatform,
+        publicKeyEd25519: identity.publicKeyEd25519, idempotencyKey: installationId, fetcher: enrollmentFetcher() });
+      let approvalUrl: URL;
+      try {approvalUrl = new URL(enrollment.verificationUri);}
+      catch {throw new Error('connection_enrollment_approval_invalid');}
+      const expiresAt = Date.now() + enrollment.expiresInSeconds * 1_000;
+      if (approvalUrl.origin !== hqUrl || approvalUrl.username || approvalUrl.password
+        || !Number.isFinite(enrollment.expiresInSeconds) || enrollment.expiresInSeconds <= 0
+        || !Number.isFinite(new Date(expiresAt).getTime())) {
+        throw new Error('connection_enrollment_approval_invalid');
+      }
       pending = {
         hqUrl, organizationId, installationId, name, platform: devicePlatform, publicKeyEd25519: identity.publicKeyEd25519,
         deviceCode: enrollment.deviceCode, verificationUri: enrollment.verificationUri,
         browserCode: enrollment.browserCode,
-        expiresAt: new Date(Date.now() + enrollment.expiresInSeconds * 1_000).toISOString(),
+        expiresAt: new Date(expiresAt).toISOString(),
         ...(preference ? {connectionMode: preference} : {}),
       };
       await mkdir(dharmaHome(), { recursive: true, mode: 0o700 });
@@ -4344,7 +4361,9 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
     }
     const deadline = Date.parse(pending.expiresAt);
     while (Date.now() < deadline) {
-      const result = await pollEnrollment({ hqUrl: pending.hqUrl, deviceCode: pending.deviceCode });
+      const result = await pollEnrollment({ hqUrl: pending.hqUrl, deviceCode: pending.deviceCode,
+        fetcher: enrollmentFetcher(deadline) });
+      if (Date.now() >= deadline) break;
       if (result.status === 'approved') {
         if (typeof result.deviceId !== 'string' || typeof result.relayUrl !== 'string' || typeof result.serverPublicKeyEd25519 !== 'string') {
           throw new Error('Enrollment was approved but the relay or server signing key is not configured.');
@@ -4367,6 +4386,7 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
           config.serverSigningKeyset = candidate;
         }
         await assertInstallationContinuity(pending, installationIdentityPath());
+        if (Date.now() >= deadline) break;
         await saveDeviceConfig(configPath(), config);
         await saveDeviceEnrollmentAnchor({ config, hostScope: currentBootstrapHostScope() });
         if (config.connectionMode) await saveDeviceConnectionPreference({configPath: configPath(), config,
