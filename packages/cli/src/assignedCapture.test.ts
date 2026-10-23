@@ -255,3 +255,134 @@ test('a tiny shared DAG is rejected before amplification without allocating an e
   f.session.records[0]!.native = graph;
   await assert.rejects(() => f.run(), /capture_selected_source_mismatch/);
 });
+
+test('assignment accessors are refused before callbacks or exact-source access', async () => {
+  for (const nested of [false, true]) {
+    const f = fixture(); let callbacks = 0;
+    const target = nested ? f.assignment.target : f.assignment;
+    const field = nested ? 'sessionId' : 'target';
+    Object.defineProperty(target, field, {enumerable: true, get() {callbacks++; throw new Error('PRIVATE_ASSIGNMENT_CANARY');}});
+    await assert.rejects(() => f.run(), {message: 'capture_assignment_invalid'});
+    assert.equal(callbacks, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('assignment hidden symbol and custom-prototype data cannot disappear during cloning', async () => {
+  for (const variant of ['hidden', 'symbol', 'prototype'] as const) {
+    const f = fixture();
+    if (variant === 'hidden') Object.defineProperty(f.assignment, 'extra', {value: 'PRIVATE_CANARY', enumerable: false});
+    if (variant === 'symbol') Object.defineProperty(f.assignment, Symbol('extra'), {value: true});
+    if (variant === 'prototype') Object.setPrototypeOf(f.assignment.target, {inherited: true});
+    await assert.rejects(() => f.run(), {message: 'capture_assignment_invalid'});
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test('selection input controls use data descriptors rather than invoking accessors', async () => {
+  for (const field of ['assignment', 'binding', 'now'] as const) {
+    const f = fixture(); let callbacks = 0;
+    const input = {assignment: f.assignment, binding: f.binding, now: () => now};
+    Object.defineProperty(input, field, {enumerable: true, get() {callbacks++; throw new Error('PRIVATE_CONTROL_CANARY');}});
+    await assert.rejects(() => selectAssignedCapture(input, f.reader), {message: 'capture_assignment_invalid'});
+    assert.equal(callbacks, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('live binding data rejects accessors and Proxies without callbacks or reads', async () => {
+  for (const variant of ['root-getter', 'nested-getter', 'proxy', 'revoked'] as const) {
+    const f = fixture(); let callbacks = 0;
+    const fail = (): never => {callbacks++; throw new Error('PRIVATE_BINDING_CANARY');};
+    let binding = f.binding;
+    if (variant === 'root-getter') Object.defineProperty(binding, 'consentActive', {enumerable: true, get: fail});
+    if (variant === 'nested-getter') Object.defineProperty(binding.target, 'deviceId', {enumerable: true, get: fail});
+    if (variant === 'proxy') binding = new Proxy(binding, {get: fail, getPrototypeOf: fail, ownKeys: fail, getOwnPropertyDescriptor: fail});
+    if (variant === 'revoked') {const proxy = Proxy.revocable(binding, {}); proxy.revoke(); binding = proxy.proxy;}
+    await assert.rejects(() => selectAssignedCapture({assignment: f.assignment, binding, now: () => now}, f.reader),
+      {message: 'capture_assignment_binding_mismatch'});
+    assert.equal(callbacks, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('exact-reader control accessors and Proxies cannot execute during source resolution', async () => {
+  for (const variant of ['getter', 'proxy', 'revoked', 'prototype-proxy', 'method-proxy'] as const) {
+    const f = fixture(); let callbacks = 0;
+    const fail = (): never => {callbacks++; throw new Error('PRIVATE_READER_CANARY');};
+    let reader = f.reader;
+    if (variant === 'getter') Object.defineProperty(reader, 'readExactSession', {enumerable: true, get: fail});
+    if (variant === 'proxy') reader = new Proxy(reader, {get: fail, getPrototypeOf: fail, ownKeys: fail, getOwnPropertyDescriptor: fail});
+    if (variant === 'revoked') {const proxy = Proxy.revocable(reader, {}); proxy.revoke(); reader = proxy.proxy;}
+    if (variant === 'prototype-proxy') reader = Object.create(new Proxy({}, {get: fail, getPrototypeOf: fail, getOwnPropertyDescriptor: fail}));
+    if (variant === 'method-proxy') reader = {readExactSession: new Proxy(f.reader.readExactSession, {apply: fail})};
+    await assert.rejects(() => selectAssignedCapture({assignment: f.assignment, binding: f.binding, now: () => now}, reader),
+      {message: 'capture_source_unavailable'});
+    assert.equal(callbacks, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('binding-reference replacement cannot replace the originally authorized capability', async () => {
+  const f = fixture(), input = {assignment: f.assignment, binding: f.binding, now: () => now};
+  f.reader.readExactSession = async request => {
+    f.calls.push(request); input.binding = structuredClone(f.binding);
+    return {session: f.session, sourceSha256: f.assignment.source.sha256, sourceBytes: 1024};
+  };
+  await assert.rejects(() => selectAssignedCapture(input, f.reader), {message: 'capture_assignment_binding_mismatch'});
+  assert.equal(f.calls.length, 1);
+});
+
+test('prototype data-method readers retain their original receiver and live consent still revokes', async () => {
+  for (const revoke of [false, true]) {
+    const f = fixture(); let calls = 0;
+    class Reader {
+      marker = 'original-receiver';
+      async readExactSession() {
+        assert.equal(this.marker, 'original-receiver'); calls++;
+        if (revoke) f.binding.consentActive = false;
+        return {session: f.session, sourceSha256: f.assignment.source.sha256, sourceBytes: 1024};
+      }
+    }
+    const operation = selectAssignedCapture({assignment: f.assignment, binding: f.binding, now: () => now}, new Reader());
+    if (revoke) await assert.rejects(() => operation, {message: 'capture_assignment_binding_mismatch'});
+    else assert.equal((await operation).persisted, false);
+    assert.equal(calls, 1);
+  }
+});
+
+test('existing larger exact-source allowlists are not narrowed by assignment snapshot limits', async () => {
+  const f = fixture();
+  f.binding.allowedSourceLocators = [...Array.from({length: 256}, (_, index) => `/export/other-${index}.jsonl`), f.assignment.source.locator];
+  assert.equal((await f.run()).recordCount, 1); assert.equal(f.calls.length, 1);
+});
+
+test('assignment and trusted clock are captured before the first validation await', async () => {
+  const f = fixture(); let callbacks = 0;
+  const input = {assignment: f.assignment, binding: f.binding, now: () => now};
+  const operation = selectAssignedCapture(input, f.reader);
+  Object.defineProperty(input, 'now', {enumerable: true, get() {callbacks++; throw new Error('PRIVATE_LATE_CLOCK_CANARY');}});
+  f.assignment.target.workspacePath = '/unrelated/changed';
+  const result = await operation;
+  assert.equal(result.persisted, false); assert.equal(callbacks, 0); assert.equal(f.calls.length, 1);
+});
+
+test('later binding accessors and private clock failures stay fixed and fail before a source call', async () => {
+  for (const clockThrows of [false, true]) {
+    const f = fixture(); let callbacks = 0;
+    await assert.rejects(() => selectAssignedCapture({assignment: f.assignment, binding: f.binding, now: () => {
+      if (clockThrows) throw new Error('PRIVATE_CLOCK_CANARY');
+      Object.defineProperty(f.binding, 'consentActive', {enumerable: true, get() {callbacks++; throw new Error('PRIVATE_LIVE_BINDING_CANARY');}});
+      return now;
+    }}, f.reader), {message: clockThrows ? 'capture_assignment_window_invalid' : 'capture_assignment_binding_mismatch'});
+    assert.equal(callbacks, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
+test('selection input Proxy and revoked Proxy are rejected without invoking traps', async () => {
+  const f = fixture(); let callbacks = 0;
+  const fail = (): never => {callbacks++; throw new Error('PRIVATE_INPUT_CANARY');};
+  const input = {assignment: f.assignment, binding: f.binding, now: () => now};
+  const proxy = new Proxy(input, {get: fail, getPrototypeOf: fail, ownKeys: fail, getOwnPropertyDescriptor: fail});
+  const revoked = Proxy.revocable(input, {}); revoked.revoke();
+  for (const value of [proxy, revoked.proxy]) {
+    await assert.rejects(() => selectAssignedCapture(value, f.reader), {message: 'capture_assignment_invalid'});
+    assert.equal(callbacks, 0); assert.equal(f.calls.length, 0);
+  }
+});
