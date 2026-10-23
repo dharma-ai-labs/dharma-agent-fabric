@@ -1,11 +1,13 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, createPublicKey, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, lstatSync, renameSync, unlinkSync } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { types } from 'node:util';
-import { canonicalize, sha256, type SessionBindingScope } from '@dharma-ai-labs/agent-fabric-contracts';
+import { canonicalize, sha256, inspectSessionQuestionForBinding, validateSessionQuestionContract,
+  type SessionBindingScope, type SessionQuestion,
+  type SessionQuestionVerifier } from '@dharma-ai-labs/agent-fabric-contracts';
 import { trajectoryCapsuleHash } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness, type LocalCodexSetupReadinessReceipt} from './setupReadiness.js';
@@ -73,6 +75,20 @@ export interface ProviderSessionRecoveryDeclaration extends LocalProviderSession
 export type LocalProviderSessionIdentity = Pick<SessionBindingScope,
   'organizationId' | 'repositoryBindingId' | 'workspaceId' | 'endpointId'
   | 'membershipId' | 'deviceId' | 'provider'>;
+
+export type ProviderSessionOfferCheckpoint = {
+  questionId: string; offerHash: string;
+} & ({ state: 'recovery_required'; question: SessionQuestion }
+  | { state: 'expired' | 'settled'; question: null });
+
+// Resolved by the owning protocol's admitted-key policy, never from MCP arguments.
+// Storage verifies this key's signature but does not establish signer admission.
+export interface ProviderSessionOfferVerificationKey { version: string; publicKeyPem: string }
+
+interface ProviderSessionOfferRow {
+  offer_hash: string; settled_reply_hash: string | null;
+}
+const providerOfferId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
 
 export interface LocalProviderSessionLease {
   assertHeld(): Promise<boolean>;
@@ -574,6 +590,20 @@ export class LocalVault {
         acknowledged_at text,
         primary key (binding_id, question_id)
       );
+      create table if not exists provider_session_offer_checkpoints (
+        binding_id text not null references provider_session_bindings(binding_id),
+        question_id text not null,
+        offer_hash text not null references blobs(content_id),
+        created_at text not null,
+        settled_reply_hash text references blobs(content_id),
+        primary key (binding_id, question_id)
+      );
+      create unique index if not exists provider_session_one_unsettled_offer
+        on provider_session_offer_checkpoints(binding_id) where settled_reply_hash is null;
+      create index if not exists provider_session_offer_blob_pin
+        on provider_session_offer_checkpoints(offer_hash);
+      create index if not exists provider_session_offer_reply_pin
+        on provider_session_offer_checkpoints(settled_reply_hash) where settled_reply_hash is not null;
       create table if not exists provider_session_reply_dispositions (
         binding_id text not null,
         question_id text not null,
@@ -759,6 +789,147 @@ export class LocalVault {
     return row ? { descriptorHash: row.descriptorHash, receiptHash: row.receiptHash } : null;
   }
 
+  async stageProviderSessionOfferCheckpoint(bindingId: string, identity: LocalProviderSessionIdentity,
+    question: SessionQuestion, verificationKey: ProviderSessionOfferVerificationKey): Promise<string> {
+    const expected = {...identity}, binding = this.#offerCheckpointBinding(bindingId, expected);
+    const verifier = this.#offerCheckpointVerifier(verificationKey);
+    // Persist the existing signed envelope, not a new admission or execution grant.
+    // Snapshot before async IO so caller mutation cannot change the stored offer.
+    let plaintext: Buffer, snapshot: SessionQuestion;
+    try {
+      plaintext = Buffer.from(canonicalize(question), 'utf8');
+      if (plaintext.byteLength < 1 || plaintext.byteLength > 16384) throw new Error();
+      snapshot = JSON.parse(plaintext.toString('utf8')) as SessionQuestion;
+      if (!inspectSessionQuestionForBinding(snapshot, binding, verifier).ok) throw new Error();
+    } catch { throw new Error('provider_session_offer_invalid'); }
+    const hash = sha256(plaintext), prior = this.#offerCheckpointRow(bindingId, snapshot.questionId);
+    if (prior) {
+      if (prior.offer_hash !== hash) throw new Error('provider_session_offer_conflict');
+      if (prior.settled_reply_hash !== null) throw new Error('provider_session_offer_settled');
+      return hash;
+    }
+    if (this.#database.prepare(`select 1 from provider_session_offer_checkpoints
+      where binding_id = ? and settled_reply_hash is null`).get(bindingId)) {
+      throw new Error('provider_session_offer_busy');
+    }
+    const stored = await this.putBlob(plaintext, 'provider-session-offer-checkpoint');
+    const current = this.#offerCheckpointBinding(bindingId, expected);
+    let stillValid = false;
+    try { stillValid = inspectSessionQuestionForBinding(snapshot, current, verifier).ok; }
+    catch { /* A verifier diagnostic must not expose private caller content. */ }
+    if (current.sessionId !== binding.sessionId || current.workspaceRoot !== binding.workspaceRoot || !stillValid) {
+      throw new Error('provider_session_offer_invalid');
+    }
+    this.#database.prepare(`
+      insert into provider_session_offer_checkpoints(binding_id, question_id, offer_hash, created_at)
+      select ?, ?, ?, ? where exists (
+        select 1 from provider_session_bindings where binding_id = ? and revoked_at is null
+      ) on conflict do nothing
+    `).run(bindingId, snapshot.questionId, stored, new Date().toISOString(), bindingId);
+    this.#offerCheckpointBinding(bindingId, expected);
+    const row = this.#offerCheckpointRow(bindingId, snapshot.questionId);
+    if (!row) throw new Error('provider_session_offer_busy');
+    if (row.offer_hash !== hash) throw new Error('provider_session_offer_conflict');
+    if (row.settled_reply_hash !== null) throw new Error('provider_session_offer_settled');
+    return stored;
+  }
+
+  async readProviderSessionOfferCheckpoint(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, verificationKey: ProviderSessionOfferVerificationKey): Promise<ProviderSessionOfferCheckpoint | null> {
+    const expected = {...identity}, binding = this.#offerCheckpointBinding(bindingId, expected);
+    const verifier = this.#offerCheckpointVerifier(verificationKey);
+    if (!providerOfferId.test(questionId)) throw new Error('provider_session_offer_invalid');
+    const row = this.#offerCheckpointRow(bindingId, questionId);
+    if (!row) return null;
+    const bytes = await this.getBlob(row.offer_hash);
+    const current = this.#offerCheckpointBinding(bindingId, expected);
+    let question: SessionQuestion;
+    try {
+      question = JSON.parse(bytes.toString('utf8')) as SessionQuestion;
+      if (bytes.byteLength > 16384 || sha256(bytes) !== row.offer_hash
+        || !validateSessionQuestionContract(question).ok || question.questionId !== questionId
+        || canonicalize(question) !== bytes.toString('utf8')
+        || current.sessionId !== binding.sessionId || current.workspaceRoot !== binding.workspaceRoot
+        || !inspectSessionQuestionForBinding(question, current, verifier, new Date(question.createdAt)).ok) {
+        throw new Error();
+      }
+    } catch { throw new Error('provider_session_offer_integrity_failed'); }
+    const metadata = {questionId, offerHash: row.offer_hash};
+    const latest = this.#offerCheckpointRow(bindingId, questionId);
+    if (!latest || latest.offer_hash !== row.offer_hash) throw new Error('provider_session_offer_integrity_failed');
+    if (latest.settled_reply_hash !== null) {
+      this.#requireOfferReplyAcknowledgment(bindingId, questionId, latest.settled_reply_hash);
+      return {...metadata, state: 'settled', question: null};
+    }
+    if (Date.now() >= Date.parse(question.expiresAt)) return {...metadata, state: 'expired', question: null};
+    return {...metadata, state: 'recovery_required', question};
+  }
+
+  listProviderSessionOfferCheckpoints(bindingId: string, identity: LocalProviderSessionIdentity):
+    Array<{questionId: string; offerHash: string}> {
+    this.#offerCheckpointBinding(bindingId, identity);
+    const rows = this.#database.prepare(`select question_id as questionId, offer_hash as offerHash
+      from provider_session_offer_checkpoints where binding_id = ? and settled_reply_hash is null
+      order by created_at, question_id limit 1`).all(bindingId) as Array<{questionId: string; offerHash: string}>;
+    return rows.map(row => ({questionId: row.questionId, offerHash: row.offerHash}));
+  }
+
+  settleProviderSessionOfferCheckpoint(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, offerHash: string, completionHash: string): void {
+    this.#offerCheckpointBinding(bindingId, identity);
+    if (!providerOfferId.test(questionId) || !setupDigest.test(offerHash) || !setupDigest.test(completionHash)) {
+      throw new Error('provider_session_offer_invalid');
+    }
+    const row = this.#offerCheckpointRow(bindingId, questionId);
+    if (!row || row.offer_hash !== offerHash
+      || (row.settled_reply_hash !== null && row.settled_reply_hash !== completionHash)) {
+      throw new Error('provider_session_offer_conflict');
+    }
+    this.#requireOfferReplyAcknowledgment(bindingId, questionId, completionHash);
+    const updated = this.#database.prepare(`update provider_session_offer_checkpoints
+      set settled_reply_hash = coalesce(settled_reply_hash, ?)
+      where binding_id = ? and question_id = ? and offer_hash = ?
+        and (settled_reply_hash is null or settled_reply_hash = ?)
+        and exists (select 1 from provider_session_bindings where binding_id = ? and revoked_at is null)
+    `).run(completionHash, bindingId, questionId, offerHash, completionHash, bindingId);
+    if (Number(updated.changes) !== 1) throw new Error('provider_session_offer_conflict');
+  }
+
+  #offerCheckpointBinding(bindingId: string, identity: LocalProviderSessionIdentity): LocalProviderSessionBinding {
+    if (!providerOfferId.test(bindingId)) throw new Error('provider_session_offer_invalid');
+    const binding = this.getProviderSessionBinding(bindingId, identity);
+    if (!binding || binding.owner !== 'cooperative_session' || Date.now() >= Date.parse(binding.expiresAt)) {
+      throw new Error('provider_session_binding_unavailable');
+    }
+    return binding;
+  }
+
+  #offerCheckpointVerifier(value: ProviderSessionOfferVerificationKey): Pick<SessionQuestionVerifier, 'resolvePublicKey'> {
+    try {
+      if (!value || Object.keys(value).sort().join(',') !== 'publicKeyPem,version'
+        || typeof value.version !== 'string' || value.version.length < 1 || value.version.length > 1024
+        || /[\u0000-\u001f\u007f]/.test(value.version) || typeof value.publicKeyPem !== 'string'
+        || value.publicKeyPem.length > 16384
+        || !/^-----BEGIN PUBLIC KEY-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END PUBLIC KEY-----(?:\r?\n)?$/.test(value.publicKeyPem)) throw new Error();
+      const version = value.version, key = createPublicKey(value.publicKeyPem);
+      return {resolvePublicKey: requested => requested === version ? key : null};
+    } catch { throw new Error('provider_session_offer_invalid'); }
+  }
+
+  #offerCheckpointRow(bindingId: string, questionId: string): ProviderSessionOfferRow | undefined {
+    return this.#database.prepare(`select offer_hash, settled_reply_hash
+      from provider_session_offer_checkpoints where binding_id = ? and question_id = ?`
+    ).get(bindingId, questionId) as ProviderSessionOfferRow | undefined;
+  }
+
+  #requireOfferReplyAcknowledgment(bindingId: string, questionId: string, completionHash: string): void {
+    if (!this.#database.prepare(`select 1 from provider_session_replies r
+      where r.binding_id = ? and r.question_id = ? and r.blob_content_id = ? and r.acknowledged_at is not null
+        and not exists (select 1 from provider_session_reply_dispositions d
+          where d.binding_id = r.binding_id and d.question_id = r.question_id)`
+    ).get(bindingId, questionId, completionHash)) throw new Error('provider_session_offer_reply_unconfirmed');
+  }
+
   async stageProviderSessionReply(bindingId: string, identity: LocalProviderSessionIdentity,
     questionId: string, plaintext: Uint8Array): Promise<string> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(questionId)
@@ -853,6 +1024,21 @@ export class LocalVault {
       update provider_session_replies set acknowledged_at = coalesce(acknowledged_at, ?)
       where binding_id = ? and question_id = ? and blob_content_id = ?
     `).run(new Date().toISOString(), bindingId, questionId, completionHash);
+  }
+
+  acknowledgeProviderSessionOfferReply(bindingId: string, identity: LocalProviderSessionIdentity,
+    questionId: string, offerHash: string, completionHash: string): void {
+    // No acknowledged-but-unsettled crash gap: both records commit together.
+    // The caller must first reconcile the actual signed channel acknowledgment.
+    this.#database.exec('begin immediate');
+    try {
+      this.acknowledgeProviderSessionReply(bindingId, identity, questionId, completionHash);
+      this.settleProviderSessionOfferCheckpoint(bindingId, identity, questionId, offerHash, completionHash);
+      this.#database.exec('commit');
+    } catch (error) {
+      try {this.#databaseHandle.exec('rollback');} catch {}
+      throw error;
+    }
   }
 
   async putFile(sourcePath: string, kind: string): Promise<{ contentId: string; bytes: number }> {
@@ -1824,13 +2010,16 @@ export class LocalVault {
           and not exists (
             select 1 from capsules where capsules.blob_content_id = blobs.content_id
           )
+          and not exists (
+            select 1 from provider_session_offer_checkpoints o
+            where o.offer_hash = blobs.content_id or o.settled_reply_hash = blobs.content_id
+          )
         order by created_at asc, content_id asc
         limit ?
       `).all(cutoff, limit) as Array<{ content_id: string }>;
       if (expired.length === 0) break;
       examined += expired.length;
-      await this.#expireRawEvidenceBatch(expired.map((row) => row.content_id), now.toISOString());
-      deleted += expired.length;
+      deleted += await this.#expireRawEvidenceBatch(expired.map((row) => row.content_id), now.toISOString());
     }
     return { examined, deleted, cutoff };
   }
@@ -1857,13 +2046,17 @@ export class LocalVault {
     return processIsAlive(pid);
   }
 
-  async #expireRawEvidenceBatch(contentIds: string[], createdAt: string): Promise<void> {
+  async #expireRawEvidenceBatch(contentIds: string[], createdAt: string): Promise<number> {
     const quarantined: Array<{ original: string; quarantine: string }> = [];
     const createdCapsuleIds = new Set<string>();
-    let committed = false;
+    let committed = false, deleted = 0;
     this.#database.exec('begin immediate');
     try {
       for (const contentId of contentIds) {
+        // A checkpoint may have pinned a raw-kind dedup blob since selection.
+        // Recheck under the write transaction before moving its encrypted file.
+        if (this.#database.prepare(`select 1 from provider_session_offer_checkpoints
+          where offer_hash = ? or settled_reply_hash = ? limit 1`).get(contentId, contentId)) continue;
         const original = this.#blobPath(contentId);
         const quarantine = `${original}.expired-${process.pid}-${randomBytes(4).toString('hex')}`;
         await this.#effect(async () => {
@@ -1929,12 +2122,18 @@ export class LocalVault {
             and not exists (
               select 1 from capsules where capsules.blob_content_id = blobs.content_id
             )
+            and not exists (
+              select 1 from provider_session_offer_checkpoints o
+              where o.offer_hash = blobs.content_id or o.settled_reply_hash = blobs.content_id
+            )
         `).run(contentId);
         if (result.changes !== 1) throw new Error('Raw evidence changed during retention enforcement.');
+        deleted++;
       }
       this.#database.exec('commit');
       committed = true;
       for (const entry of quarantined) await this.#effect(() => rm(entry.quarantine, { force: true }));
+      return deleted;
     } catch (error) {
       if (!committed) {
         try { this.#databaseHandle.exec('rollback'); }
