@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {dirname, resolve} from 'node:path';
 import {promisify} from 'node:util';
 import test from 'node:test';
-import {assertPreservedEvidenceProvider, preservedEvidenceProvider} from './verify-preserved-provider-edge.mjs';
+import {assertPreservedEvidenceManifest, assertPreservedEvidenceProvider, preservedEvidenceProvider} from './verify-preserved-provider-edge.mjs';
 
 const execute = promisify(execFile), sourceRoot = resolve(import.meta.dirname, '..');
 const baseline = process.env.DHARMA_PACK_VERIFIER_BASELINE_SHA;
@@ -65,6 +65,26 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
     });
   }
 }
+
+test('patched Zod resolution preserves the immutable evidence/provider artifact edge', async () => {
+  const root = JSON.parse(await readFile(resolve(sourceRoot, 'package.json'), 'utf8'));
+  const lock = JSON.parse(await readFile(resolve(sourceRoot, 'package-lock.json'), 'utf8'));
+  const evidence = JSON.parse(await readFile(resolve(sourceRoot, 'packages/evidence-reduction/package.json'), 'utf8'));
+  assertPreservedEvidenceManifest(evidence);
+  const provider = preservedEvidenceProvider.provider;
+  assert.equal(evidence.dependencies[provider.name], provider.version);
+  const artifact = lock.packages['packages/evidence-reduction/node_modules/' + provider.name];
+  for (const key of ['version', 'resolved', 'integrity']) assert.equal(artifact?.[key], provider[key]);
+  assert.notEqual(artifact?.link, true);
+  assert.equal(root.overrides?.zod, '4.6.6');
+  const copies = Object.entries(lock.packages).filter(([path]) => /(^|\/)node_modules\/zod$/.test(path));
+  assert.ok(copies.length > 0);
+  for (const [, copy] of copies) {
+    assert.equal(copy.version, '4.6.6');
+    assert.equal(copy.resolved, 'https://registry.npmjs.org/zod/-/zod-4.6.6.tgz');
+    assert.equal(copy.integrity, 'sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==');
+  }
+});
 
 test('one fixed preserved evidence/provider artifact edge is qualified without changing its manifest', async () => {
   const expected = preservedEvidenceProvider;
