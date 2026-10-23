@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/finite-learning-study/v1",
+  "title": "Finite Local Learning Study Accounting Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "studyId", "identity", "admissionReceiptHash", "predecessorHash", "batchSize", "maxWindows", "expiresAt", "maximumCents", "phaseCaps"],
+  "properties": {
+    "schema": { "const": "dharma.finite-learning-study/v1" },
+    "studyId": { "$ref": "#/$defs/id" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organizationId", "agentId", "endpointId", "deviceId", "workspaceId", "provider", "localAgentId"],
+      "properties": {
+        "organizationId": { "$ref": "#/$defs/id" },
+        "agentId": { "$ref": "#/$defs/id" },
+        "endpointId": { "$ref": "#/$defs/id" },
+        "deviceId": { "$ref": "#/$defs/id" },
+        "workspaceId": { "$ref": "#/$defs/id" },
+        "provider": { "$ref": "#/$defs/id" },
+        "localAgentId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "admissionReceiptHash": { "$ref": "#/$defs/hash" },
+    "predecessorHash": { "$ref": "#/$defs/hash" },
+    "batchSize": { "const": 100 },
+    "maxWindows": { "const": 1 },
+    "expiresAt": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
+    "maximumCents": { "$ref": "#/$defs/cents" },
+    "phaseCaps": {
+      "type": "object", "additionalProperties": false, "minProperties": 1,
+      "properties": {
+        "analysis": { "$ref": "#/$defs/cents" },
+        "manual_candidate": { "$ref": "#/$defs/cents" },
+        "api_candidate": { "$ref": "#/$defs/cents" },
+        "baseline_evaluation": { "$ref": "#/$defs/cents" },
+        "manual_evaluation": { "$ref": "#/$defs/cents" },
+        "api_evaluation": { "$ref": "#/$defs/cents" }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$" },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "cents": { "type": "integer", "minimum": 1, "maximum": 10000 }
+  }
+}
