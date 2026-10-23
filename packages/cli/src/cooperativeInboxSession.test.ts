@@ -478,6 +478,59 @@ function splitAnswer(checkpoint: SplitCheckpoint): SplitAnswer {
     offerHash: checkpoint.offerHash, attemptId: checkpoint.attemptId, answer: 'Use the signed catalog.'};
 }
 
+for (const field of ['questionId', 'taskId', 'nonce', 'offerHash', 'attemptId', 'answer'] as const) {
+  test(`later submission rejects accessor ${field} without invoking caller code or posting a reply`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint(), answer = splitAnswer(checkpoint);
+      const original = answer[field], actions = [...f.actions];
+      let reads = 0;
+      Object.defineProperty(answer, field, {enumerable: true, get() {reads++; return original;}});
+      await assert.rejects(split.submitAnswer(answer), {message: 'cooperative_session_submission_invalid'});
+      assert.equal(reads, 0); assert.deepEqual(f.actions, actions);
+      assert.equal(f.reserves(), 1); assert.equal(f.used.size, 1);
+      assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
+for (const shape of ['custom prototype', 'null prototype', 'array', 'symbol', 'hidden extra', 'hidden required'] as const) {
+  test(`later submission rejects ${shape} DTOs without losing the durable handoff`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint(), answer = splitAnswer(checkpoint);
+      const actions = [...f.actions];
+      if (shape === 'custom prototype') Object.setPrototypeOf(answer, {inheritedControl: 'not-authority'});
+      if (shape === 'null prototype') Object.setPrototypeOf(answer, null);
+      if (shape === 'array') Object.setPrototypeOf(answer, Array.prototype);
+      if (shape === 'symbol') Object.defineProperty(answer, Symbol('extra'), {value: 'not-authority'});
+      if (shape === 'hidden extra') Object.defineProperty(answer, 'extra', {value: 'not-authority'});
+      if (shape === 'hidden required') Object.defineProperty(answer, 'answer', {value: answer.answer, enumerable: false});
+      await assert.rejects(split.submitAnswer(answer), {message: 'cooperative_session_submission_invalid'});
+      assert.deepEqual(f.actions, actions);
+      assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
+for (const shape of ['throwing accessor', 'proxy', 'revoked proxy'] as const) {
+  test(`later submission sanitizes ${shape} before caller callbacks or protected effects`, async () => {
+    const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
+    try {
+      const split = splitConsumer(owner), checkpoint = await split.checkpoint();
+      let answer = splitAnswer(checkpoint), callbacks = 0;
+      const actions = [...f.actions], diagnostic = 'synthetic-private-diagnostic-must-not-escape';
+      if (shape === 'throwing accessor') Object.defineProperty(answer, 'answer', {enumerable: true,
+        get() {callbacks++; throw new Error(diagnostic);}});
+      if (shape === 'proxy') answer = new Proxy(answer, {ownKeys() {callbacks++; throw new Error(diagnostic);}});
+      if (shape === 'revoked proxy') {const proxy = Proxy.revocable(answer, {}); answer = proxy.proxy; proxy.revoke();}
+      await assert.rejects(split.submitAnswer(answer), {message: 'cooperative_session_submission_invalid'});
+      assert.equal(callbacks, 0); assert.deepEqual(f.actions, actions);
+      assert.equal(f.vault.listProviderSessionOfferCheckpoints(f.binding.bindingId, f.identity).length, 1);
+    } finally {await owner.close(); f.vault.close();}
+  });
+}
+
 test('checkpoint durably hands off the immutable offer without computing or posting an answer', async () => {
   const f = await fixture(), owner = await openCooperativeInboxSession(f.input);
   try {
