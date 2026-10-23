@@ -89,6 +89,12 @@ export function createProviderSessionChannel(input: {
     });
     serial = result.then(() => undefined, () => undefined); return result;
   }
+  function snapshotOperation<T, Result>(capture: () => T, run: (snapshot: T) => Promise<Result>): Promise<Result> {
+    // Capture caller-owned inputs before the serial queue; preserve Promise rejection for invalid input.
+    let snapshot: T;
+    try {snapshot = capture();} catch (error) {return Promise.reject(error);}
+    return operation(() => run(snapshot));
+  }
   async function owner(live = false) {
     if (closed) throw new Error('provider_session_channel_closed');
     let held = false, expiresAt: string | null = null;
@@ -212,41 +218,43 @@ export function createProviderSessionChannel(input: {
       }
       return offers;
     }),
-    ask: (request: { targetBindingId: string; taskId: string; category: string; question: string; maximumProviderCostCents: number }, context?: { signal: AbortSignal }) => operation(async () => {
-      admitted(context);
-      const value = record(request, ['targetBindingId', 'taskId', 'category', 'question', 'maximumProviderCostCents'], 'input');
+    ask: (request: { targetBindingId: string; taskId: string; category: string; question: string; maximumProviderCostCents: number }, context?: { signal: AbortSignal }) => snapshotOperation(() => ({
+      value: record(request, ['targetBindingId', 'taskId', 'category', 'question', 'maximumProviderCostCents'], 'input'),
+      admission: context ? {signal: context.signal} : undefined,
+    }), async ({value, admission}) => {
+      admitted(admission);
       fact(identifier(value.targetBindingId) && identifier(value.taskId) && value.targetBindingId !== scope.bindingId
         && typeof value.category === 'string' && value.category.length <= 64 && CATEGORY.test(value.category)
         && Number.isInteger(value.maximumProviderCostCents) && value.maximumProviderCostCents >= 0
         && value.maximumProviderCostCents <= scope.maximumProviderCostCents, 'input');
       await content(text(value.question, 'input'), 'question');
-      admitted(context);
-      return acknowledgement(await question('ask', value, context), { taskId: request.taskId, targetBindingId: request.targetBindingId, state: 'queued' });
+      admitted(admission);
+      return acknowledgement(await question('ask', value, admission), { taskId: String(value.taskId), targetBindingId: String(value.targetBindingId), state: 'queued' });
     }),
     accept: (questionId: string, taskId: string) => operation(async () => {
       fact(identifier(questionId) && identifier(taskId), 'input');
       return acknowledgement(await question('accept', { questionId }), { questionId, taskId, targetBindingId: scope.bindingId, state: 'accepted' });
     }),
-    reply: (request: Reply, context?: { expiresAt: string }) => {
+    reply: (request: Reply, context?: { expiresAt: string }) => snapshotOperation(() => ({
+      value: record(request, ['questionId', 'taskId', 'outcome', 'answer', 'failureCode'], 'input'),
       // The owning protocol derives this deadline from the immutable signed offer.
       // Keep it off the wire and snapshot it before waiting behind another call.
-      const deadline = context ? {expiresAt: context.expiresAt} : undefined;
-      return operation(async () => {
-        admitted(deadline);
-        const value = record(request, ['questionId', 'taskId', 'outcome', 'answer', 'failureCode'], 'input');
-        fact(identifier(value.questionId) && identifier(value.taskId), 'input');
-        if (value.outcome === 'answered') {
-          fact(value.failureCode === null, 'input'); await content(text(value.answer, 'input', true), 'answer');
-        } else fact(value.outcome === 'failed' && value.answer === '' && FAILURE.includes(value.failureCode), 'input');
-        const { taskId, ...payload } = value;
-        return acknowledgement(await question('reply', payload, deadline), { questionId: request.questionId, taskId: String(taskId),
-          targetBindingId: scope.bindingId, state: request.outcome });
-      });
-    },
-    read: (questionId: string, taskId: string, targetBindingId: string, context?: { signal: AbortSignal }) => operation(async () => {
-      admitted(context);
+      deadline: context ? {expiresAt: context.expiresAt} : undefined,
+    }), async ({value, deadline}) => {
+      admitted(deadline);
+      fact(identifier(value.questionId) && identifier(value.taskId), 'input');
+      if (value.outcome === 'answered') {
+        fact(value.failureCode === null, 'input'); await content(text(value.answer, 'input', true), 'answer');
+      } else fact(value.outcome === 'failed' && value.answer === '' && FAILURE.includes(value.failureCode), 'input');
+      const { taskId, ...payload } = value;
+      return acknowledgement(await question('reply', payload, deadline), { questionId: String(value.questionId), taskId: String(taskId),
+        targetBindingId: scope.bindingId, state: String(value.outcome) });
+    }),
+    read: (questionId: string, taskId: string, targetBindingId: string, context?: { signal: AbortSignal }) => snapshotOperation(
+      () => context ? {signal: context.signal} : undefined, async admission => {
+      admitted(admission);
       fact([questionId, taskId, targetBindingId].every(identifier), 'input');
-      const value = record(await question('read', { questionId }, context), ['questionId', 'taskId', 'targetBindingId',
+      const value = record(await question('read', { questionId }, admission), ['questionId', 'taskId', 'targetBindingId',
         'state', 'answer', 'failureCode', 'replyReceiptHash'], 'response');
       fact(value.questionId === questionId && value.taskId === taskId && value.targetBindingId === targetBindingId
         && ['preparing', 'queued', 'accepted', 'answered', 'failed', 'expired', 'unavailable'].includes(value.state), 'response');
