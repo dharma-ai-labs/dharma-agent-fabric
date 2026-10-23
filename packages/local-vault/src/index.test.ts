@@ -218,10 +218,15 @@ for (const afterRename of [false, true]) {
     const source = `
       import * as fs from 'node:fs';
       import { mock } from 'node:test';
-      mock.module('node:fs', { namedExports: { ...fs, renameSync: (from, to) => {
+      const renameSync = (from, to) => {
         ${afterRename ? 'fs.renameSync(from, to);' : ''}
         process.exit(77);
-      } } });
+      };
+      // Node24's CJS namespace aliases are not independent named exports.
+      const namedExports = Object.fromEntries(Object.entries(fs)
+        .filter(([name]) => name !== 'default' && name !== 'module.exports'));
+      mock.module('node:fs', { defaultExport: { ...fs.default, renameSync },
+        namedExports: { ...namedExports, renameSync } });
       const { LocalVault } = await import(${JSON.stringify(new URL('./index.js', import.meta.url).href)});
       const vault = await LocalVault.open({ root: ${JSON.stringify(root)}, masterKey: Buffer.from('${key.toString('hex')}', 'hex') });
       await vault.putBlob(Buffer.from('synthetic crashed evidence'), 'raw-provider-turn');
