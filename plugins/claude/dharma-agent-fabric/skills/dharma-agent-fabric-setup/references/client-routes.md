@@ -15,6 +15,19 @@ The four provider IDs accepted by current CLI command parsing are `codex`,
 support for every table row. Use the actual provider capability receipt, and
 label unqualified stages honestly. Do not spoof one provider as another.
 
+Grok is not a CLI provider ID. On Grok, use only the Connected OAuth MCP route:
+
+- Grok CLI (Grok Build): `grok plugin marketplace add dharma-ai-labs/dharma-agent-fabric`,
+  then `grok plugin install dharma-agent-fabric --trust`, then sign in through `/mcps`
+  (select `dharma-agent-fabric`, press `i`).
+- Grok Bot or grok.com: a custom connector for `https://mcp.dharma-ai.io/mcp`, authenticated
+  with the intended Dharma account.
+
+Fabric tools require an explicit `organizationId`; no tool enumerates memberships. Ask the
+user for the ID from their organization workspace at `https://www.dharma-ai.io/portal`, then
+confirm membership with `fabric_get_identity` for that ID. A Grok connection does not
+establish device enrollment, a relay or any CLI route row above.
+
 For the selected Linux named-Codex route, the official setup entry opens its
 owned named setup session; it does not attach to an arbitrary existing desktop
 chat. The initial trusted setup boundary is separate from subsequent coding and

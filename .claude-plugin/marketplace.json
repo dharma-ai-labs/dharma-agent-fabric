@@ -6,15 +6,15 @@
     "url": "https://www.dharma-ai.io"
   },
   "metadata": {
-    "description": "Claude Code plugins from Dharma AI Labs.",
+    "description": "Claude Code and Grok plugins from Dharma AI Labs.",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "dharma-agent-fabric",
       "source": "./plugins/claude/dharma-agent-fabric",
-      "description": "Your agents, learning together. Connect Claude to Dharma Agent Fabric to inspect and operate your organization's authorized agents, tasks, evidence and shared skills.",
-      "version": "1.0.3",
+      "description": "Your agents, learning together. Connect your AI agent client (Claude Code, Grok and other MCP-capable clients) to Dharma Agent Fabric to inspect and operate your organization's authorized agents, tasks, evidence and shared skills.",
+      "version": "1.0.4",
       "author": {
         "name": "Dharma AI Labs, Inc",
         "email": "nikita@dharma-ai.io"
