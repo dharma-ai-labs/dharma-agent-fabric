@@ -10,6 +10,7 @@ type Registration = { bindingId: string; workspaceId: string; endpointId: string
 type Acknowledgement = { questionId: string; taskId: string; targetBindingId: string;
   state: 'queued' | 'accepted' | 'answered' | 'failed'; replay: boolean; correlationId: string };
 type Reply = { questionId: string; taskId: string; outcome: 'answered' | 'failed'; answer: string; failureCode: FailureCode | null };
+type DispatchContext = { signal?: AbortSignal; expiresAt?: string };
 type Observation = { questionId: string; taskId: string; targetBindingId: string;
   state: 'preparing' | 'queued' | 'accepted' | 'answered' | 'failed' | 'expired' | 'unavailable';
   answer: string | null; failureCode: FailureCode | null; replyReceiptHash: string | null; correlationId: string };
@@ -105,10 +106,16 @@ export function createProviderSessionChannel(input: {
       throw new Error('provider_session_channel_unavailable');
     }
   }
-  function admitted(context?: { signal: AbortSignal }) {
-    if (context?.signal.aborted) throw new Error('provider_session_channel_cancelled');
+  function admitted(context?: DispatchContext) {
+    if (context?.signal?.aborted) throw new Error('provider_session_channel_cancelled');
+    if (context?.expiresAt !== undefined) {
+      const deadline = Date.parse(context.expiresAt), time = now().getTime();
+      if (!Number.isFinite(deadline) || !Number.isFinite(time) || time >= deadline) {
+        throw new Error('provider_session_channel_deadline');
+      }
+    }
   }
-  async function post(route: string, body: Record<string, unknown>, field: 'registration' | 'result', context?: { signal: AbortSignal }) {
+  async function post(route: string, body: Record<string, unknown>, field: 'registration' | 'result', context?: DispatchContext) {
     fact(Buffer.byteLength(JSON.stringify(body), 'utf8') <= 3500, 'input');
     admitted(context);
     await owner();
@@ -116,9 +123,9 @@ export function createProviderSessionChannel(input: {
     let response: unknown;
     try { response = await input.transport.signedPost(route, body); }
     catch { closed = true; throw new Error('provider_session_channel_uncertain'); }
-    if (context?.signal.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
+    if (context?.signal?.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
     await owner();
-    if (context?.signal.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
+    if (context?.signal?.aborted) { closed = true; throw new Error('provider_session_channel_uncertain'); }
     try {
       safeWire(response);
       const envelope = record(response, ['ok', 'organizationId', field, 'correlationId'], 'response');
@@ -168,7 +175,7 @@ export function createProviderSessionChannel(input: {
       && typeof result.replay === 'boolean', 'response');
     return { ...result, correlationId } as Acknowledgement;
   }
-  async function question(action: string, additional: Record<string, unknown> = {}, context?: { signal: AbortSignal }) {
+  async function question(action: string, additional: Record<string, unknown> = {}, context?: DispatchContext) {
     admitted(context);
     await owner(true);
     admitted(context);
@@ -220,16 +227,22 @@ export function createProviderSessionChannel(input: {
       fact(identifier(questionId) && identifier(taskId), 'input');
       return acknowledgement(await question('accept', { questionId }), { questionId, taskId, targetBindingId: scope.bindingId, state: 'accepted' });
     }),
-    reply: (request: Reply) => operation(async () => {
-      const value = record(request, ['questionId', 'taskId', 'outcome', 'answer', 'failureCode'], 'input');
-      fact(identifier(value.questionId) && identifier(value.taskId), 'input');
-      if (value.outcome === 'answered') {
-        fact(value.failureCode === null, 'input'); await content(text(value.answer, 'input', true), 'answer');
-      } else fact(value.outcome === 'failed' && value.answer === '' && FAILURE.includes(value.failureCode), 'input');
-      const { taskId, ...payload } = value;
-      return acknowledgement(await question('reply', payload), { questionId: request.questionId, taskId: String(taskId),
-        targetBindingId: scope.bindingId, state: request.outcome });
-    }),
+    reply: (request: Reply, context?: { expiresAt: string }) => {
+      // The owning protocol derives this deadline from the immutable signed offer.
+      // Keep it off the wire and snapshot it before waiting behind another call.
+      const deadline = context ? {expiresAt: context.expiresAt} : undefined;
+      return operation(async () => {
+        admitted(deadline);
+        const value = record(request, ['questionId', 'taskId', 'outcome', 'answer', 'failureCode'], 'input');
+        fact(identifier(value.questionId) && identifier(value.taskId), 'input');
+        if (value.outcome === 'answered') {
+          fact(value.failureCode === null, 'input'); await content(text(value.answer, 'input', true), 'answer');
+        } else fact(value.outcome === 'failed' && value.answer === '' && FAILURE.includes(value.failureCode), 'input');
+        const { taskId, ...payload } = value;
+        return acknowledgement(await question('reply', payload, deadline), { questionId: request.questionId, taskId: String(taskId),
+          targetBindingId: scope.bindingId, state: request.outcome });
+      });
+    },
     read: (questionId: string, taskId: string, targetBindingId: string, context?: { signal: AbortSignal }) => operation(async () => {
       admitted(context);
       fact([questionId, taskId, targetBindingId].every(identifier), 'input');

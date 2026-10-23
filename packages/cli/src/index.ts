@@ -156,7 +156,7 @@ import {parseLocalCodexSetupReadiness, type LocalCodexSetupReadiness} from '@dha
 import type {LocalVault, LocalCodexSetupSessionRequest, ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
 import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFiles.js';
 
-export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
+export { openCooperativeInboxSession, type CooperativeSessionContext, type CooperativeSessionAnswer } from './cooperativeInboxSession.js';
 export { runOriginalSessionInboxOnce, type OriginalSessionContext, type OriginalSessionRuntimeHost,
   type OriginalSessionHostInput, type OriginalSessionHostResult } from './originalSessionHost.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';

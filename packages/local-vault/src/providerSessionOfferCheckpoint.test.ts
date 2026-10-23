@@ -56,6 +56,55 @@ test('durable signed offer survives reopen as recovery-required, never execution
   for (const path of files) assert.equal((await readFile(path)).includes(Buffer.from(question.question)), false);
 });
 
+test('a distinct durable handoff survives reopen without retaining raw native session or workspace metadata', async t => {
+  const f = await fixture(t), question = f.sign(), attemptId = uuid(30);
+  const hash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  const handoff = f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, attemptId);
+  assert.equal(handoff.state, 'handed_off'); assert.equal(handoff.attemptId, attemptId);
+  assert.equal(handoff.bindingFingerprint, `sha256:${(await import('node:crypto')).createHash('sha256').update(canonicalize(f.binding)).digest('hex')}`);
+  assert.deepEqual(f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, attemptId), handoff);
+  await f.reopen();
+  assert.deepEqual(f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, question.questionId), handoff);
+  assert.equal((await readFile(join(f.root, 'vault.sqlite'))).includes(Buffer.from(f.binding.sessionId)), false);
+  assert.equal((await readFile(join(f.root, 'vault.sqlite'))).includes(Buffer.from(f.binding.workspaceRoot)), false);
+});
+
+test('handoff attempt and offer pins are immutable and cannot overwrite a different prior attempt', async t => {
+  const f = await fixture(t), question = f.sign(), attemptId = uuid(30);
+  const hash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  const handoff = f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, attemptId);
+  assert.throws(() => f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, uuid(31)), /handoff_conflict/);
+  assert.throws(() => f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, `sha256:${'0'.repeat(64)}`, attemptId), /handoff_conflict/);
+  assert.throws(() => f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, uuid(99), hash, attemptId), /handoff_conflict/);
+  assert.deepEqual(f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, question.questionId), handoff);
+});
+
+test('handoff metadata is scoped to the exact identity, revocation and binding expiry', async t => {
+  const f = await fixture(t), question = f.sign();
+  const hash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, uuid(30));
+  for (const field of Object.keys(f.identity)) {
+    const foreign = {...f.identity, [field]: field === 'provider' ? 'claude' : field === 'organizationId' ? 'org_other' : uuid(99)};
+    assert.throws(() => f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, foreign as typeof f.identity, question.questionId), /scope_mismatch/);
+  }
+  t.mock.timers.enable({apis: ['Date'], now: Date.parse(f.binding.expiresAt) + 1});
+  assert.throws(() => f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, question.questionId), /binding_unavailable/);
+  t.mock.timers.reset();
+  f.vault.revokeProviderSessionBinding(f.binding.bindingId, f.identity);
+  assert.throws(() => f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, question.questionId), /binding_unavailable/);
+});
+
+test('handoff cannot be created over an existing completion and remains historical after atomic settlement', async t => {
+  const f = await fixture(t), question = f.sign();
+  const hash = await f.vault.stageProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question, f.verifier);
+  const handoff = f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, uuid(30));
+  const reply = await f.vault.stageProviderSessionReply(f.binding.bindingId, f.identity, question.questionId, Buffer.from('completion'));
+  assert.throws(() => f.vault.handoffProviderSessionOfferCheckpoint(f.binding.bindingId, f.identity, question.questionId, hash, uuid(30)), /handoff_conflict/);
+  f.vault.acknowledgeProviderSessionOfferReply(f.binding.bindingId, f.identity, question.questionId, hash, reply);
+  await f.reopen();
+  assert.deepEqual(f.vault.readProviderSessionOfferHandoff(f.binding.bindingId, f.identity, question.questionId), {...handoff, state: 'settled'});
+});
+
 test('one unsettled question per binding; duplicate immutable offer is idempotent', async t => {
   const f = await fixture(t), first = f.sign(), second = f.sign({...f.unsigned, questionId: uuid(20)});
   const results = await Promise.allSettled([
