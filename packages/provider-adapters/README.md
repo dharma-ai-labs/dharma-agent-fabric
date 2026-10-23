@@ -61,6 +61,28 @@ These tests do not qualify an HTTP deployment, shared HTTP transport, audience
 validation or HTTP body limits. Introducing such a deployment requires separate
 transport and authorization qualification, not reuse of stdio evidence.
 
+## Cooperative Session Factory
+
+`createCooperativeSessionMcpServer(consumer)` exposes two strict tools:
+`cooperative_checkpoint` and `cooperative_submit_answer`. The embedding owner
+must inject and retain one consumer. The factory does not open a native session,
+select an identity, register installed tools, or take over consumer cleanup.
+Closing the SDK server does not close or retire the consumer.
+
+Checkpoint results distinguish a signed-offer handoff from metadata-only pending
+and recovery states. Answer submission requires the six offer/attempt-bound fields
+and validates the returned question/task correlation. Contract/hash validation is
+not signature authorization or proof of an original provider's cross-call lease.
+Cancellation after consumer invocation, malformed results, and uncertain failures
+close this adapter to further dispatch; they do not undo effects or permit replay.
+The owner must reconcile retained state before constructing any replacement.
+
+This is a source factory, not production/native composition or qualification.
+Transport authentication, authorization, original-session enforcement, disclosure
+policy, budget and release gates remain with the embedding owner. Raw diagnostics
+are not returned. SDK argument errors remain protocol-layer errors; successful
+domain states and fixed domain errors use the advertised structured-result schema.
+
 ## Optional Execution Qualification
 
 `executeProviderTask({ qualification, ... })` can return a local

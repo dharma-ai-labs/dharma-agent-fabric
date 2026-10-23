@@ -12,6 +12,8 @@ import { prepareProviderExecutionQualification, snapshotProviderExecutionQualifi
 
 export { reportedProviderExecutionQualification, snapshotProviderExecutionQualification } from './executionQualification.js';
 export type { ProviderExecutionQualification, ProviderExecutionQualificationReceipt } from './executionQualification.js';
+export { createCooperativeSessionMcpServer } from './cooperative-session-server.js';
+export type { CooperativeSessionMcpAnswer, CooperativeSessionMcpConsumer } from './cooperative-session-server.js';
 
 const execFileAsync = promisify(execFile);
 

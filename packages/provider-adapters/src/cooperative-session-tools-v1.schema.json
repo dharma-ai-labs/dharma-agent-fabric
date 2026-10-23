@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/cooperative-session-tool-result/v1",
+  "title": "Owner-injected cooperative session tool inputs and results",
+  "$ref": "#/$defs/result",
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "hash": { "type": "string", "minLength": 71, "maxLength": 71, "pattern": "^sha256:[0-9a-f]{64}$" },
+    "schema": { "const": "dharma.cooperative-session-tool-result/v1" },
+    "checkpointInput": { "type": "object", "additionalProperties": false, "properties": {} },
+    "submitInput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["questionId", "taskId", "nonce", "offerHash", "attemptId", "answer"],
+      "properties": {
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" },
+        "nonce": { "$ref": "#/$defs/uuid" }, "offerHash": { "$ref": "#/$defs/hash" },
+        "attemptId": { "$ref": "#/$defs/uuid" },
+        "answer": { "type": "string", "minLength": 1, "maxLength": 2000,
+          "allOf": [{ "pattern": "\\S" }, { "pattern": "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]*$" }] }
+      }
+    },
+    "reasonCode": { "enum": ["content_or_contract_blocked", "receipt_invalid", "delivery_unconfirmed", "signed_deadline_expired", "dispatch_cancelled", "answer_conflict", "remote_not_answered"] },
+    "blocker": { "enum": ["text_contract_invalid", "foreign_policy", "private_local_path", "excluded_path", "redaction_required", "metadata_only", "source_authority_unavailable", "source_subtree_not_authorized", "authority_unavailable"] },
+    "idle": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "idle" } }
+    },
+    "budgetDenied": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "taskId"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "budget_denied" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" } }
+    },
+    "handedOff": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "offer", "offerHash", "attemptId"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "handed_off" },
+        "offer": { "$ref": "https://schemas.dharma-ai.io/session-question/v1" },
+        "offerHash": { "$ref": "#/$defs/hash" }, "attemptId": { "$ref": "#/$defs/uuid" } }
+    },
+    "checkpointPending": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "taskId", "offerHash", "attemptId"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "checkpoint_pending" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" },
+        "offerHash": { "$ref": "#/$defs/hash" }, "attemptId": { "$ref": "#/$defs/uuid" } }
+    },
+    "offerRecovery": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "offerHash"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "offer_recovery_required" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "offerHash": { "$ref": "#/$defs/hash" } }
+    },
+    "replyPending": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "taskId", "completionHash"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "reply_pending" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" },
+        "completionHash": { "$ref": "#/$defs/hash" }, "reasonCode": { "$ref": "#/$defs/reasonCode" }, "blocker": { "$ref": "#/$defs/blocker" } }
+    },
+    "replyReconciled": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "taskId", "completionHash", "replyReceiptHash", "correlationId"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "reply_reconciled" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" },
+        "completionHash": { "$ref": "#/$defs/hash" }, "replyReceiptHash": { "$ref": "#/$defs/hash" }, "correlationId": { "$ref": "#/$defs/uuid" } }
+    },
+    "replyQuarantined": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "taskId", "completionHash", "dispositionHash", "reasonCode", "delivered"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "reply_quarantined" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" },
+        "completionHash": { "$ref": "#/$defs/hash" }, "dispositionHash": { "$ref": "#/$defs/hash" },
+        "reasonCode": { "const": "question_expired" }, "delivered": { "const": false } }
+    },
+    "answered": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "questionId", "taskId", "targetBindingId", "replay", "correlationId", "completionHash"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "answered" },
+        "questionId": { "$ref": "#/$defs/uuid" }, "taskId": { "$ref": "#/$defs/uuid" },
+        "targetBindingId": { "$ref": "#/$defs/uuid" }, "correlationId": { "$ref": "#/$defs/uuid" },
+        "replay": { "type": "boolean" }, "completionHash": { "$ref": "#/$defs/hash" } }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["schema", "state", "code"],
+      "properties": { "schema": { "$ref": "#/$defs/schema" }, "state": { "const": "error" },
+        "code": { "enum": ["unavailable", "busy", "cancelled", "input_invalid", "submission_invalid", "submission_mismatch", "owner_lost", "signer_untrusted", "answer_invalid", "content_blocked", "receipt_invalid", "deadline", "delivery_unconfirmed", "operation_unconfirmed"] } }
+    },
+    "result": { "oneOf": [
+      { "$ref": "#/$defs/idle" }, { "$ref": "#/$defs/budgetDenied" }, { "$ref": "#/$defs/handedOff" },
+      { "$ref": "#/$defs/checkpointPending" }, { "$ref": "#/$defs/offerRecovery" }, { "$ref": "#/$defs/replyPending" },
+      { "$ref": "#/$defs/replyReconciled" }, { "$ref": "#/$defs/replyQuarantined" }, { "$ref": "#/$defs/answered" }, { "$ref": "#/$defs/error" }
+    ] }
+  }
+}
