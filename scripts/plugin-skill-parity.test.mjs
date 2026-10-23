@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
 import { resolve, dirname, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -216,3 +217,89 @@ test('an arbitrary Git baseline argument is rejected before Git can be invoked',
     assert.throws(() => readGitBaseline(repository, invalid), /^Error: plugin_skill_baseline_invalid$/);
   }
 });
+
+test('review regression: generation dry-run reports drift without overwriting destination bytes', () => fixture(({ root, put }) => {
+  const path = `${generated}/references/a2a.md`;
+  put(path, '# Existing destination\n');
+  const before = readFileSync(resolve(root, path));
+  const report = generatePluginSkills(root, { dryRun: true });
+  assert.deepEqual(readFileSync(resolve(root, path)), before);
+  assert.equal(report.dryRun, true);
+  assert.equal(report.writtenFiles, 0);
+  assert.equal(report.plannedFiles, 1);
+  assert.equal(report.writes[0].path, path);
+  assert.match(report.writes[0].beforeSha256, /^[a-f0-9]{64}$/);
+  assert.match(report.writes[0].afterSha256, /^[a-f0-9]{64}$/);
+  assert.notEqual(report.writes[0].beforeSha256, report.writes[0].afterSha256);
+  const written = generatePluginSkills(root);
+  assert.deepEqual(written.writes, report.writes);
+  assert.equal(written.writtenFiles, 1);
+  assert.deepEqual(readFileSync(resolve(root, path)), readFileSync(resolve(root, canonical, 'references/a2a.md')));
+}));
+
+test('review regression: a dry-run with an absent destination creates no directories or files', () => fixture(({ root }) => {
+  rmSync(resolve(root, generated), { recursive: true });
+  const report = generatePluginSkills(root, { dryRun: true });
+  assert.equal(existsSync(resolve(root, generated)), false);
+  assert.equal(report.plannedFiles, 10);
+  assert.equal(report.writtenFiles, 0);
+  assert.ok(report.writes.every(item => item.beforeSha256 === null && item.path.startsWith(generated + '/')));
+}));
+
+test('review regression: manual publication selects only its explicit nonzero immutable event commit', () => {
+  const sha = 'a'.repeat(40);
+  assert.equal(selectEventBaseline('workflow_dispatch', {}, sha), sha);
+  for (const invalid of [undefined, '', '0'.repeat(40), 'A'.repeat(40), 'a'.repeat(39), 'HEAD']) {
+    assert.throws(() => selectEventBaseline('workflow_dispatch', {}, invalid), /^Error: plugin_skill_baseline_invalid$/);
+  }
+  assert.throws(() => selectEventBaseline('schedule', {}, sha), /^Error: plugin_skill_baseline_invalid$/);
+});
+
+test('review regression: npm generation dry-run arguments produce a read-only machine-readable plan', () => {
+  const before = files.map(path => readFileSync(resolve(repository, generated, path)));
+  for (const args of [['--write', '--dry-run'], ['--dry-run'], ['--dry-run', '--write']]) {
+    const result = spawnSync(process.execPath, [resolve(repository, 'scripts/plugin-skill-parity.mjs'), ...args],
+      { cwd: repository, encoding: 'utf8', timeout: 30_000, windowsHide: true });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.dryRun, true);
+    assert.equal(report.writtenFiles, 0);
+    assert.ok(Array.isArray(report.writes));
+  }
+  for (const args of [['--write', '--write'], ['--dry-run', '--dry-run'], ['--write', '--base', 'a'.repeat(40)]]) {
+    const result = spawnSync(process.execPath, [resolve(repository, 'scripts/plugin-skill-parity.mjs'), ...args],
+      { cwd: repository, encoding: 'utf8', timeout: 30_000, windowsHide: true });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr.trim(), 'plugin_skill_arguments_invalid');
+  }
+  for (const [index, path] of files.entries()) assert.deepEqual(readFileSync(resolve(repository, generated, path)), before[index]);
+});
+
+function manualCheck(root, sha) {
+  const eventPath = resolve(root, 'workflow-dispatch.json');
+  writeFileSync(eventPath, JSON.stringify({ ref: 'main', inputs: {} }));
+  return spawnSync(process.execPath, [resolve(repository, 'scripts/plugin-skill-parity.mjs')], {
+    cwd: repository, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+    env: { ...process.env, GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_EVENT_PATH: eventPath, GITHUB_SHA: sha },
+  });
+}
+
+test('review regression: actual manual publication command checks the selected checkout commit', () => fixture(({ root }) => {
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+  assert.equal(head.status, 0);
+  const sha = head.stdout.trim();
+  const result = manualCheck(root, sha);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).baselineCommit, sha);
+}));
+
+test('review regression: a manual event cannot qualify a different checked-out source commit', () => fixture(({ root }) => {
+  const result = manualCheck(root, 'a'.repeat(40));
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr.trim(), 'plugin_skill_baseline_invalid');
+}));

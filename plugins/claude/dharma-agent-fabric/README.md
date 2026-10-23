@@ -21,10 +21,15 @@ Dharma Agent Fabric brings your organization's agents together to share knowledg
 The authored operational skill is `plugins/dharma-agent-fabric/skills/dharma-agent-fabric`.
 `npm run plugin:skills:generate` renders its ten enumerated files into this plugin;
 it does not install anything. The setup skill remains a separate, unchanged tree.
+`npm run plugin:skills:generate -- --dry-run` reports the exact proposed paths and
+before/after hashes without creating directories or overwriting files.
 `npm run plugin:skills:check` checks the complete file set, inline local reference
 paths, LF-normalized SHA256 parity and independent route-version increments
 against the Git baseline. Raw-byte equality is reported separately. Only these
 twenty common-file paths receive the LF Git policy.
+Manual publication checks require a nonzero immutable `GITHUB_SHA` matching the
+checkout; this validates that selected payload, not its change since a prior release.
+PR and push checks retain their separate base/before content-version comparison.
 
 This source candidate is Claude/Grok `1.0.5`; Codex remains `0.1.0`. A later change
 to shared content requires each affected route's own version increment, not

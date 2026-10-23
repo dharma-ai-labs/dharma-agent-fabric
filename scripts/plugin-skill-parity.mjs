@@ -144,12 +144,15 @@ export function verifyPluginSkills(root, baseline) {
   return { ok: true, fileCount: commonFiles.length, rawByteParity: commonFiles.every(path => raw[0][path].equals(raw[1][path])), routes: reports };
 }
 
-export function generatePluginSkills(root) {
+export function generatePluginSkills(root, { dryRun = false } = {}) {
+  if (typeof dryRun !== 'boolean') fail('arguments_invalid');
   const source = normalized(tree(root, routes[0].common));
   checkReferences(source);
   const target = tree(root, routes[1].common, true);
   const plan = commonFiles.filter(path => !target[path]?.equals(Buffer.from(source[path], 'utf8')));
-  for (const path of plan) {
+  const writes = plan.map(path => ({ path: `${routes[1].common}/${path}`,
+    beforeSha256: target[path] ? digest(target[path]) : null, afterSha256: digest(source[path]) }));
+  for (const path of dryRun ? [] : plan) {
     const relative = `${routes[1].common}/${path}`;
     const parent = dirname(resolve(root, relative));
     safePath(root, relative, true);
@@ -157,7 +160,8 @@ export function generatePluginSkills(root) {
     safePath(root, relative, true);
     writeFileSync(resolve(root, relative), source[path], { flag: target[path] ? 'w' : 'wx' });
   }
-  return { ok: true, writtenFiles: plan.length, normalizedSha256: contentHash(source) };
+  return { ok: true, dryRun, plannedFiles: plan.length, writtenFiles: dryRun ? 0 : plan.length,
+    writes, normalizedSha256: contentHash(source) };
 }
 
 function git(root, args) {
@@ -182,8 +186,9 @@ export function readGitBaseline(root, sha) {
   }));
 }
 
-export function selectEventBaseline(eventName, event) {
-  const sha = eventName === 'pull_request' ? event?.pull_request?.base?.sha : eventName === 'push' ? event?.before : undefined;
+export function selectEventBaseline(eventName, event, dispatchedSha) {
+  const sha = eventName === 'pull_request' ? event?.pull_request?.base?.sha
+    : eventName === 'push' ? event?.before : eventName === 'workflow_dispatch' ? dispatchedSha : undefined;
   if (typeof sha !== 'string' || !commitPattern.test(sha)) fail('baseline_invalid');
   if (/^0+$/.test(sha)) { if (eventName === 'push') return null; fail('baseline_invalid'); }
   return sha;
@@ -192,7 +197,10 @@ export function selectEventBaseline(eventName, event) {
 function main() {
   const root = resolve(import.meta.dirname, '..');
   const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === '--write') return generatePluginSkills(root);
+  if (args.includes('--write') || args.includes('--dry-run')) {
+    if (new Set(args).size !== args.length || args.some(arg => !['--write', '--dry-run'].includes(arg))) fail('arguments_invalid');
+    return generatePluginSkills(root, { dryRun: args.includes('--dry-run') });
+  }
   let base;
   if (args.length === 2 && args[0] === '--base' && commitPattern.test(args[1])) base = args[1];
   else if (args.length) fail('arguments_invalid');
@@ -200,7 +208,10 @@ function main() {
     if (!process.env.GITHUB_EVENT_PATH) fail('baseline_invalid');
     let event;
     try { event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')); } catch { fail('baseline_invalid'); }
-    base = selectEventBaseline(process.env.GITHUB_EVENT_NAME, event);
+    base = selectEventBaseline(process.env.GITHUB_EVENT_NAME, event, process.env.GITHUB_SHA);
+    // Manual publication validates the selected immutable checkout, not an invented previous release.
+    if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch'
+      && base !== git(root, ['rev-parse', 'HEAD']).toString('utf8').trim()) fail('baseline_invalid');
     if (!base) base = git(root, ['merge-base', 'HEAD', 'origin/main']).toString('utf8').trim();
   } else base = git(root, ['rev-parse', 'HEAD']).toString('utf8').trim();
   return { ...verifyPluginSkills(root, readGitBaseline(root, base)), baselineCommit: base };
