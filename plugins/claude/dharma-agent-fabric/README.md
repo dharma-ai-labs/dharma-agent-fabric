@@ -16,6 +16,12 @@ Dharma Agent Fabric brings your organization's agents together to share knowledg
 | Skill `dharma-agent-fabric-setup` | Set up or recover an authorized Fabric client, establish its actual organization and assigned role, and connect qualified shared knowledge and role-bounded factory work. |
 | Skill `dharma-agent-fabric` | Operate already-authorized trajectory, task, agent-to-agent, evaluation and signed-skill workflows after setup. Its operational source and nine references are shared with the Codex plugin. |
 
+### Intended skill routing
+
+For onboarding or recovery, prefer `dharma-agent-fabric-setup` to establish the actual client, organization, assigned role and qualified connection.
+After setup, use `dharma-agent-fabric` for the admitted operational workflow.
+The descriptions overlap on connection-related requests; automatic skill triggers are not guaranteed to be exclusive. This is intended handoff and precedence, not evidence of which skill a client selected or loaded.
+
 ### Source parity
 
 The authored operational skill is `plugins/dharma-agent-fabric/skills/dharma-agent-fabric`.
@@ -62,7 +68,7 @@ grok plugin install dharma-agent-fabric --trust
 
 ### Grok Bot and grok.com (custom connector)
 
-Grok chat surfaces use the remote MCP server directly, without this plugin's setup skill. In Connectors, choose **New Connector** → **Custom**, enter `https://mcp.dharma-ai.io/mcp`, then authenticate with your Dharma account. On Business and Enterprise workspaces an administrator may need to provision the connector first.
+Grok chat surfaces use the remote MCP server directly and carry neither bundled skill (`dharma-agent-fabric-setup` nor `dharma-agent-fabric`) through that connector alone. Do not infer either skill's delivery, activation or use without separately evidenced installation. In Connectors, choose **New Connector** → **Custom**, enter `https://mcp.dharma-ai.io/mcp`, then authenticate with your Dharma account. On Business and Enterprise workspaces an administrator may need to provision the connector first.
 
 ### Find your organization ID
 

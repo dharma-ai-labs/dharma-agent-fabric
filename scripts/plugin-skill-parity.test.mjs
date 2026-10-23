@@ -303,3 +303,19 @@ test('review regression: a manual event cannot qualify a different checked-out s
   assert.equal(result.status, 1);
   assert.equal(result.stderr.trim(), 'plugin_skill_baseline_invalid');
 }));
+
+test('publisher qualification: direct chat does not inherit either bundled skill', () => {
+  const readme = readFileSync(resolve(repository, 'plugins/claude/dharma-agent-fabric/README.md'), 'utf8');
+  const directChat = readme.split('### Grok Bot and grok.com (custom connector)')[1].split('### Find your organization ID')[0];
+  assert.match(directChat, /neither bundled skill/);
+  assert.ok(directChat.includes('`dharma-agent-fabric-setup`'));
+  assert.ok(directChat.includes('`dharma-agent-fabric`'));
+  assert.match(directChat, /separately evidenced installation/);
+});
+
+test('publisher qualification: intended routing does not certify exclusive automatic triggers', () => {
+  const readme = readFileSync(resolve(repository, 'plugins/claude/dharma-agent-fabric/README.md'), 'utf8');
+  assert.match(readme, /For onboarding or recovery, prefer `dharma-agent-fabric-setup`/);
+  assert.match(readme, /After setup, use `dharma-agent-fabric`/);
+  assert.match(readme, /automatic skill triggers are not guaranteed to be exclusive/);
+});
