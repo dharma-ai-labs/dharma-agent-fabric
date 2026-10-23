@@ -157,6 +157,8 @@ import type {LocalVault, LocalCodexSetupSessionRequest, ScopedLocalVault} from '
 import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFiles.js';
 
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
+export { runOriginalSessionInboxOnce, type OriginalSessionContext, type OriginalSessionRuntimeHost,
+  type OriginalSessionHostInput, type OriginalSessionHostResult } from './originalSessionHost.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
