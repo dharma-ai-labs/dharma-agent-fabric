@@ -141,6 +141,17 @@ if (validateAgentEvent({ ...hermesAgentEvent, provider: 'unregistered-provider' 
 }
 
 const runtimeTaskSchema = JSON.parse(await readFile(resolve(root, 'packages/contracts/src/task-envelope.schema.json'), 'utf8'));
+const canonicalQuestion = JSON.parse(await readFile(resolve(root, 'packages/contracts/src/session-question.schema.json'), 'utf8'));
+const runtimeQuestion = JSON.parse(await readFile(resolve(root, 'packages/provider-adapters/src/session-question.schema.json'), 'utf8'));
+if (JSON.stringify(runtimeQuestion) !== JSON.stringify(canonicalQuestion)) {
+  throw new Error('Runtime signed question schema is out of sync with the canonical contract.');
+}
+ajv.addSchema(canonicalQuestion);
+const runtimeCooperativeTools = JSON.parse(await readFile(resolve(root, 'packages/provider-adapters/src/cooperative-session-tools-v1.schema.json'), 'utf8'));
+const canonicalCooperativeTools = JSON.parse(await readFile(resolve(schemaDir, 'cooperative-session-tools-v1.schema.json'), 'utf8'));
+if (JSON.stringify(runtimeCooperativeTools) !== JSON.stringify(canonicalCooperativeTools)) {
+  throw new Error('Runtime cooperative tool schema is out of sync with the canonical schema.');
+}
 const canonicalTaskSchema = JSON.parse(await readFile(resolve(schemaDir, 'task-envelope.schema.json'), 'utf8'));
 if (JSON.stringify(runtimeTaskSchema) !== JSON.stringify(canonicalTaskSchema)) {
   throw new Error('Runtime task-envelope schema copy is out of sync with the canonical schema.');
