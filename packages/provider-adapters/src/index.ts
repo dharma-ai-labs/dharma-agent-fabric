@@ -731,17 +731,26 @@ async function boundedJsonlLines(
 ): Promise<{ lines: string[]; tailOffset: number | null }> {
   const handle = await open(path, 'r');
   try {
+    async function readRange(position: number, length: number): Promise<Buffer> {
+      const buffer = Buffer.alloc(length);
+      let offset = 0;
+      while (offset < length) {
+        const {bytesRead} = await handle.read(buffer, offset, length - offset, position + offset);
+        if (!Number.isSafeInteger(bytesRead) || bytesRead < 1 || bytesRead > length - offset) {
+          throw new Error('provider_session_source_changed');
+        }
+        offset += bytesRead;
+      }
+      return buffer;
+    }
     if (size <= maximumBytes) {
-      const buffer = Buffer.alloc(size);
-      await handle.read(buffer, 0, size, 0);
+      const buffer = await readRange(0, size);
       return { lines: buffer.toString('utf8').split(/\r?\n/).filter(Boolean), tailOffset: null };
     }
     const headSize = Math.min(1_048_576, Math.floor(maximumBytes / 2));
     const tailSize = maximumBytes - headSize;
-    const head = Buffer.alloc(headSize);
-    const tail = Buffer.alloc(tailSize);
-    await handle.read(head, 0, headSize, 0);
-    await handle.read(tail, 0, tailSize, size - tailSize);
+    const head = await readRange(0, headSize);
+    const tail = await readRange(size - tailSize, tailSize);
     const headLines = head.toString('utf8').split(/\r?\n/);
     headLines.pop();
     const tailLines = tail.toString('utf8').split(/\r?\n/);
