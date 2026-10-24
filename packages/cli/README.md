@@ -244,7 +244,7 @@ readiness receipt after the supported grant-free resume.
 ## Inspect repository worker failures
 
 The relay records sanitized per-repository worker failure stages and categories.
-From the enrolled checkout, inspect `repositoryRelays[].lastFailure` in
+From the enrolled checkout, inspect `repositoryRelays.repositories[].lastFailure` in
 `dharma status --diagnostic`. A receipt is
 bound to the organization, device, workspace and observed relay PID-file state;
 foreign, stale or superseded failures are not treated as current.
