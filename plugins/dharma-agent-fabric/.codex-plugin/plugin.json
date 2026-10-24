@@ -1,6 +1,6 @@
 {
   "name": "dharma-agent-fabric",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect local coding agents to organization-wide trajectory evaluation, bounded task orchestration, A2A communication, and signed Skill remediation.",
   "author": {
     "name": "Dharma AI Labs",

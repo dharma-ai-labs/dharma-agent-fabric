@@ -31,36 +31,39 @@ they are not fallback instructions for the portal-selected named-Codex route.
 
 ## Install
 
-Use the published package or approved source build:
+Use the published package at the exact version the portal selects, never
+`latest`, or an approved source build:
 
 ```text
-npm install --global @dharma-ai-labs/agent-fabric
+npm install --global @dharma-ai-labs/agent-fabric@<version-from-your-portal-prompt>
 dharma --version
 ```
 
 ## Enroll the device
 
 ```text
-dharma login
-dharma device status --json
+dharma login --portal-url https://www.dharma-ai.io --organization-id <organization-id>
+dharma status --verbose
 ```
 
-The CLI opens OAuth device authorization, generates a device key locally, and stores the private key in the operating-system keychain.
+The CLI opens OAuth device authorization, generates a device key locally, and stores the private key in the operating-system keychain. `dharma status` reads only local state: `enrolled: true` means a device configuration exists in this `DHARMA_HOME`, not that the device is approved or bound to a workspace. `--verbose` adds the `home`, `organizationId` and `deviceId` it read. There is no `device` command.
 
 ## Register a workspace
 
 ```text
-dharma workspace add . --organization <organization-id> --json
-dharma providers list --workspace . --json
+dharma workspace add . --organization-id <organization-id>
+dharma workspace sync <workspace-id> --policy-revision <revision> --apply
+dharma providers list
 ```
+
+`workspace add` records the checkout only in the local registry. `workspace sync --apply` registers it with Dharma, binds it to its repository agent and applies the signed policy to `.dharma/approved-policy.json`. Without `--apply` it only plans.
 
 Windows and WSL are separate devices. Register the repository in the environment where the provider and session evidence actually live. Avoid registering the same provider sessions from both environments.
 
 ## Confirm policy
 
 ```text
-dharma policy show --workspace .
-dharma evidence preview --workspace . --latest
+dharma evidence preview --workspace . --provider <provider> --policy .dharma/approved-policy.json --maximum-sessions 20
 ```
 
-Stop when the organization, repository, evidence mode, or provider coverage is not what the user expects.
+There is no `policy` command; the approved policy is the signed `.dharma/approved-policy.json`. Stop when the organization, repository, evidence mode, or provider coverage is not what the user expects.
