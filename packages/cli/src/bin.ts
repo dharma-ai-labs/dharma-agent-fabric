@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { fileURLToPath } from 'node:url';
-import { CLI_USAGE } from './usage.js';
+import { commandUsage, isHelpRequest } from './usage.js';
 import {
   findSupportedNodeRuntime,
   isSupportedNodeVersion,
@@ -10,8 +10,9 @@ import {
 } from './runtime-bootstrap.js';
 
 const args = process.argv.slice(2);
-if (args.includes('--help') || args.includes('-h')) {
-  process.stdout.write(`${CLI_USAGE}\n`);
+if (isHelpRequest(args)) {
+  // Text only, before the runtime check and before the command modules load.
+  process.stdout.write(`${commandUsage(args)}\n`);
 } else if (!isSupportedNodeVersion(process.versions.node)) {
   const runtime = process.env.DHARMA_NODE_BOOTSTRAPPED ? null : findSupportedNodeRuntime();
   if (!runtime) {
