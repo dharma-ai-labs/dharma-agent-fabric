@@ -492,3 +492,15 @@ test('no CLI document says every command prints JSON, because help prints text',
     }
   }
 });
+
+test('documented repository worker failure paths match the status JSON', async () => {
+  const index = (await sourceFile()).getText();
+  assert.match(index, /status\.repositoryRelays = \{ state: 'observed', repositories: observations \};/,
+    'status no longer nests repository observations under repositoryRelays.repositories');
+  assert.match(index, /observations\.push\(\{[\s\S]*?\.\.\.\(lastFailure \? \{ lastFailure \} : \{\}\) \}\);/,
+    'repository observations no longer carry lastFailure');
+  for (const path of CLI_DOCUMENTS) {
+    assert.doesNotMatch(await repositoryText(path), /repositoryRelays\[\]/,
+      `${path} documents repositoryRelays[] but status returns repositoryRelays.repositories[]`);
+  }
+});
