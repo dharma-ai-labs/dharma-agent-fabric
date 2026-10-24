@@ -376,8 +376,12 @@ test('Windows deletion-in-progress denial waits for verified absence before retr
   const f = await fixture();
   try {
     await fs.mkdir(f.recovery); await fs.writeFile(resolve(f.recovery, 'owner'), `${process.pid}\n`);
-    let denied = false, absent = false, probes = 0, earlyPublication = false;
-    const lock = await acquire({process: {platform: 'win32', pid: process.pid, kill: process.kill.bind(process)},
+    let denied = false, absent = false, probes = 0, earlyPublication = false, clock = 0;
+    const lock = await acquire({
+      // Verify deletion ordering independently of filesystem latency; expiry is covered below.
+      Date: {now: () => clock},
+      setTimeout: (done: () => void, milliseconds: number) => setImmediate(() => {clock += milliseconds; done();}),
+      process: {platform: 'win32', pid: process.pid, kill: process.kill.bind(process)},
       rename: async (from: string, to: string) => {
         if (to === f.recovery && denied && !absent) earlyPublication = true;
         await windowsRename(f.recovery)(from, to);
@@ -394,6 +398,8 @@ test('Windows deletion-in-progress denial waits for verified absence before retr
       }});
     const release = await lock(f.lock, 500, 'lock timeout');
     assert.equal(probes, 3); assert.equal(absent, true); assert.equal(earlyPublication, false);
+    assert.equal(clock, 75);
+    assert.ok(clock < 500, 'verified absence and publication must stay within the original deadline');
     await release(); assert.deepEqual(await fs.readdir(f.root), []);
   } finally {await f.cleanup();}
 });
