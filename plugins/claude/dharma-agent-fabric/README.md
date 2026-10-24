@@ -37,7 +37,7 @@ Manual publication checks require a nonzero immutable `GITHUB_SHA` matching the
 checkout; this validates that selected payload, not its change since a prior release.
 PR and push checks retain their separate base/before content-version comparison.
 
-This source candidate is Claude/Grok `1.0.5`; Codex remains `0.1.0`. A later change
+This source candidate is Claude/Grok `1.0.6` and Codex `0.1.1`. A later change
 to shared content requires each affected route's own version increment, not
 synchronized version numbers. A source change does not alter a previously
 reviewed or submitted bundle. Publisher review, strict client validation,
@@ -94,7 +94,7 @@ Fabric tools take your organization ID (`org_...`) as `organizationId`, and no t
 - When you sign in, the Dharma authorization server (`clerk.dharma-ai.io`) receives the OAuth request, and your client receives an access token scoped to `openid`, `profile`, `email` and `user:org:read` for your Dharma account and organization.
 - When your client calls a Fabric tool, the tool name and its arguments, such as an organization, agent, task or remediation identifier, a task or message you approved, or an analysis request, are sent over HTTPS to `https://mcp.dharma-ai.io/mcp`. The response contains only the organization data that your membership and role allow.
 - Mutating, paid or GitHub-writing tools send data only after your explicit confirmation. Nothing else from your conversation, files or machine is sent by the plugin.
-- Separately from the connector, the setup skill can guide your agent, with your approval, to install the official Dharma CLI from the npm registry (`npm install --global @dharma-ai-labs/agent-fabric`) and complete a browser sign-in at `www.dharma-ai.io`. The CLI then exchanges enrollment, task and skill data with Dharma's platform (`www.dharma-ai.io`, `api.dharma-ai.io`) under its own enrollment and your organization's policy.
+- Separately from the connector, the setup skill can guide your agent, with your approval, to install the exact Dharma CLI version that your portal prompt pins from the npm registry (`npm install --global @dharma-ai-labs/agent-fabric@<version-from-your-portal-prompt>`; never `latest`) and complete a browser sign-in at `www.dharma-ai.io`. The CLI then exchanges enrollment, task and skill data with Dharma's platform (`www.dharma-ai.io`, `api.dharma-ai.io`) under its own enrollment and your organization's policy.
 - The operational skill describes approved local trajectory preview/sync, task dispatch and results, agent-to-agent messages, BYOK/managed billing checks, evaluation and signed-skill rollout/rollback. Invoking these workflows can send their scoped task/message text, filtered evidence, skill metadata and usage to the existing Fabric services under the relevant CLI/device or connector authority. Local provider credentials stay local; model execution and paid analysis have separate policy and cost gates. Adding this skill does not authorize collection, synchronization, dispatch or rollout. Route-specific directory disclosure answers require separate review before any new submission.
 - How Dharma stores and retains this data is described in the [privacy policy](https://www.dharma-ai.io/privacy).
 

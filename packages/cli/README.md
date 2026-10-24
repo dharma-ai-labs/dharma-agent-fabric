@@ -17,6 +17,37 @@ Missing prerequisites must stop with a typed result rather than weaken storage,
 copy authentication or switch to a legacy grant. See
 `AGENT_FABRIC_ONBOARDING.md` for readiness, scoped recovery and team operation.
 
+## Identities, the MCP connector and conversations
+
+- **Member**: your Dharma organization membership. The remote MCP connector
+  (`https://mcp.dharma-ai.io/mcp`, OAuth) acts as the signed-in member. It holds
+  no device key, so it cannot enroll a device, register a workspace or run the
+  relay.
+- **Device**: one Ed25519 device identity in one `DHARMA_HOME` (default
+  `~/.dharma`). One `DHARMA_HOME` serves one organization; `login` refuses a
+  home enrolled to, or holding workspaces of, another organization. Use the
+  same `DHARMA_HOME` for every command, including `status`, `relay` and
+  `relay autostart`.
+- **Workspace**: one checkout on one device. `workspace add` writes only the
+  local registry. `workspace sync <id> --policy-revision <revision> --apply`,
+  `repositories connect`, `onboard` and `bootstrap` register it with Dharma and
+  bind it to that repository's logical agent.
+- **Logical agent and endpoint**: each device, workspace and provider that
+  serves a connected repository is an endpoint of that repository's agent. The
+  MCP tools `fabric_create_agent`, `fabric_bind_local_endpoint` and
+  `fabric_bind_runtime_endpoint` are write tools that require explicit
+  confirmation. `dharma agents list` and `dharma agents bind-runtime` are the
+  CLI's agent-listing and runtime-binding commands.
+- **Conversation**: no CLI or MCP command attaches to, or delivers into, an
+  existing provider conversation (a Codex or Claude Code chat the user opened).
+  `assistant chat` and the `fabric_control_agent_*` tools address Dharma's
+  server-hosted control agent, not a provider chat. Relay tasks run in a new
+  provider process in a relay-owned worktree; for Claude Code that is
+  `claude --print --verbose --safe-mode --no-session-persistence`. Claude Code
+  provider sessions are not supported in this release. Named sessions, the
+  only retained provider conversations, are Linux-only Codex sessions that
+  `sessions start` opens and `sessions work` sends work to.
+
 ## Read-only named-session diagnosis
 
 For an already enrolled workspace, the agent can diagnose an unavailable named
@@ -25,6 +56,10 @@ owner through the normal CLI:
 ```bash
 dharma sessions readiness --name <registered-name> --workspace-id <workspace-id> --diagnostic
 ```
+
+Named sessions are Codex sessions and run only on Linux. On other platforms,
+every `dharma sessions` command fails with `codex_session_sandbox_unqualified`.
+`--name` defaults to `codex`. A Claude Code endpoint has no named session.
 
 This is an agent operation, not an additional human-terminal setup step. It
 uses the unchanged readiness request and starts no session or model turn.
@@ -208,8 +243,9 @@ readiness receipt after the supported grant-free resume.
 
 ## Inspect repository worker failures
 
-CLI 0.2.129 records sanitized per-repository worker failure stages and categories.
-From the enrolled checkout, inspect `dharma status --diagnostic`. A receipt is
+The relay records sanitized per-repository worker failure stages and categories.
+From the enrolled checkout, inspect `repositoryRelays.repositories[].lastFailure` in
+`dharma status --diagnostic`. A receipt is
 bound to the organization, device, workspace and observed relay PID-file state;
 foreign, stale or superseded failures are not treated as current.
 
@@ -219,6 +255,36 @@ requesting a supported repair. Diagnostics do not relax evidence policy, disclos
 raw exception text, replace enrollment or establish signed readiness. Preserve
 encrypted evidence; do not delete it or repeat unchanged bootstrap to bypass a
 failure. Require the full readiness receipt after recovery.
+
+## Read `dharma status`
+
+`dharma status` reads local state under `DHARMA_HOME` and the local startup
+registration. It does not contact Dharma. It prints JSON; `--json` changes
+nothing.
+
+- `version`: the running CLI version.
+- `enrolled`: `true` when `DHARMA_HOME/device.json` exists and parses. It does
+  not show that the device was approved, that the membership is current, or
+  that a workspace or endpoint is registered.
+- `relay` and `supervisor`: `running`, `stopped` or `unknown`, from
+  `relay/relay.pid` and `relay/supervisor.pid`. A missing PID file, or one whose
+  process has exited, reports `stopped`; an unreadable or invalid file reports
+  `unknown`.
+- `autostart`: the startup registration: `state` (`enabled`, `disabled`,
+  `unavailable` or `unsupported`), `backend`, and a `reason` when it is not
+  usable.
+- `reconnect.state`: `stopped` when neither the relay nor the supervisor is
+  running; `restarting` when the supervisor runs without the relay;
+  `awaiting_acknowledgement` while the relay runs without an acknowledged poll;
+  `acknowledged_recently` for an acknowledged poll in the last five minutes;
+  otherwise `stale`. `reconnect.lastSuccessfulPollAt` is set only when the last
+  successful poll belongs to the running supervisor's workspace and this CLI
+  version.
+
+`--verbose` or `--diagnostic` adds `home`. For an enrolled device it also adds
+`organizationId`, `deviceId`, `workspaceRegistry` and per-repository
+`repositoryRelays`, including any current `lastFailure`. Check `home`,
+`organizationId` and `deviceId` to confirm which enrollment the command read.
 
 ## Demo peer collaboration
 
@@ -289,9 +355,16 @@ financial records, or bypass browser approval. Missing OS credentials or a
 missing protected signing anchor fail without recreating them. Expired trust requires supported
 browser-authorized re-enrollment, never editing local trust files.
 
-## Autonomous organization setup
+## Legacy grant setup for existing integrations
 
 Requires Node.js 22.20.0 through 24.x.
+
+Current portal prompts run the setup-reference form inside the coding agent:
+`dharma bootstrap --setup-reference <public-reference> --setup-recipient-membership-id <membership> --setup-scope-digest <sha256> --setup-contract-digest <sha256> --complete`
+(see [One prompt in the actual coding-agent session](#one-prompt-in-the-actual-coding-agent-session)).
+The `--grant` command below remains only for existing integrations. It is
+never a fallback for a refused or expired setup reference, and a setup
+reference cannot be combined with `--grant`.
 
 An organization administrator copies the recipient-bound setup instruction from
 the portal into the coding agent. The instruction authorizes one pinned command
@@ -372,7 +445,7 @@ Manual browser-confirmed enrollment remains available when no one-time grant is
 issued:
 
 ```bash
-npm install --global @dharma-ai-labs/agent-fabric
+npm install --global @dharma-ai-labs/agent-fabric@<version-from-your-portal-prompt>
 dharma login \
   --portal-url https://www.dharma-ai.io \
   --organization-id <organization-id>
@@ -543,7 +616,7 @@ It must enforce the question's authorized paths and network limits.
 This consumer does not create/resume another thread or wake an idle desktop chat.
 It is not an installed native host hook or a CLI/MCP attachment command. Session
 IDs from environment variables or historical transcripts are not ownership proof.
-See [session routing](../../docs/24-provider-session-routing.md) for the exact
+See [session routing](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/24-provider-session-routing.md) for the exact
 contract, failure recovery and remaining live qualification boundaries.
 
 ## Named coding work evidence

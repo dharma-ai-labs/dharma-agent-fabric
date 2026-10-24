@@ -9,6 +9,7 @@ Select only the route requested and actually qualified for the current release.
 | Portal source-connected agent | Exact pinned prompt and recipient/repository/policy; genuine supported harness; matching browser approval; final original-process receipt | Knowledge-only joining, another repository or arbitrary provider support |
 | Existing knowledge-only join | Existing selected binding and signed release; effective recipient role; a separately qualified join/setup contract; activation receipt | Source ownership, source collection, code writes or a fresh source candidate |
 | Existing enrolled recovery | Same device, protected identity, original binding and cause-specific released recovery contract | Permission to replace keys, replay grants, reset retry counters or restart another owner's service |
+| Existing Claude Code conversation (desktop or terminal) | Connected OAuth MCP identity and confirmed tool results in this conversation; for local work, a separately enrolled device whose `claude` endpoint serves the connected repository's agent | Delivery into this conversation: Claude Code provider sessions are `not_supported` in this release, so no task, A2A message or peer question reaches or is answered here; relay tasks run as new `claude --print --no-session-persistence` processes |
 
 The four provider IDs accepted by current CLI command parsing are `codex`,
 `claude`, `agy` and `hermes`. Parsing or installed asset discovery is not live
@@ -46,6 +47,16 @@ The recorded CLI211 source does **not** implement a bare interactive guided entr
 requires an explicit organization ID. Therefore the guided-entry row is blocked
 on this revision; do not execute it as though it existed or publish this skill as
 a proven full setup solution.
+
+At CLI source `0.2.214`, the Claude adapter reports
+`sessionContinuation: unavailable`, provider-session registration and the
+cooperative in-session consumer accept only Codex, and named sessions are
+Linux-only Codex sessions. Report the Claude Code conversation row as
+`not_supported` for delivery. A Claude Code conversation can read and, with
+confirmation, dispatch through the connector, and on an enrolled device it can
+pull a repository question reply with `dharma repositories reply`. It cannot
+receive or answer Fabric work. See
+[provider-session routing](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/24-provider-session-routing.md).
 
 The source has an existing `joinExistingRepository` knowledge-only mechanism,
 using an isolated managed knowledge workspace and a selected existing binding.
