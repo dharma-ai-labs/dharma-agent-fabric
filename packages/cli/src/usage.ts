@@ -29,7 +29,7 @@ export const COMMAND_USAGE: Readonly<Record<string, CommandUsage>> = Object.free
   'sessions start': { synopsis: `sessions start ${SESSION} [--apply] [--session-budget-cents <1..10000>] [--turn-budget-cents <cents>] [--fence-id <UUID>]`,
     summary: 'Plans, or with --apply starts, the Linux named Codex session for a registered workspace.' },
   'sessions serve': { synopsis: `sessions serve ${SESSION} [--apply] [--session-budget-cents <1..10000>] [--turn-budget-cents <cents>]`,
-    summary: 'Runs the owned named-session worker in the foreground; sessions start --apply launches it.' },
+    summary: 'Plans, or with --apply runs, the owned named-session worker in the foreground; sessions start --apply launches it.' },
   'sessions status': { synopsis: `sessions status ${SESSION}`,
     summary: 'Reports the named session state, or stopped when its service does not answer.' },
   'sessions readiness': { synopsis: `sessions readiness ${SESSION} [--diagnostic]`,
