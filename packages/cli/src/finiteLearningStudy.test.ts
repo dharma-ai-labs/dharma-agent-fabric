@@ -36,6 +36,46 @@ function fill(ledger: FiniteLearningStudyLedger) {
   return ledger.status().windowHash!;
 }
 
+async function executorResults<T>(operations: Promise<T>[]): Promise<Awaited<T>[]> {
+  const outcomes = await Promise.allSettled(operations);
+  const values: Awaited<T>[] = [], errors: unknown[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status === 'fulfilled') values.push(outcome.value);
+    else errors.push(outcome.reason);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'finite_study_executor_failures');
+  return values;
+}
+
+test('an executor failure cannot start fixture cleanup before its sibling settles', async () => {
+  const original = new Error('original executor failure');
+  let release!: () => void, siblingSettled = false, cleanupStarted = false;
+  const sibling = new Promise<number>(resolve => {
+    release = () => { siblingSettled = true; resolve(2); };
+  });
+  const observed = executorResults([Promise.reject(original), sibling])
+    .finally(() => { cleanupStarted = true; })
+    .catch((error: unknown) => error);
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(cleanupStarted, false, 'cleanup must wait for every owned executor');
+  } finally { release(); }
+  assert.equal(await observed, original);
+  assert.equal(siblingSettled, true);
+  assert.equal(cleanupStarted, true);
+});
+
+test('executor results preserve input order and retain every executor failure', async () => {
+  assert.deepEqual(await executorResults([Promise.resolve(1), Promise.resolve(2)]), [1, 2]);
+  const first = new Error('first executor failure'), second = new Error('second executor failure');
+  await assert.rejects(executorResults([Promise.reject(first), Promise.reject(second)]), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [first, second]);
+    return true;
+  });
+});
+
 test('finite study schema and no-write plan require exact identity, finite limits and bounded phases', async () => {
   const ajv = new Ajv2020({ strict: true, allErrors: true });
   (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
@@ -107,7 +147,7 @@ test('three executor processes share one cohort, one phase claim and one in-flig
       const result=ledger.reserve({...${JSON.stringify(request(''))},windowHash:ledger.status().windowHash,
         executor:process.argv[1],idempotencyKey:process.argv[1]+'-analysis-key'});
       ledger.close();process.stdout.write(JSON.stringify(result));`;
-    const results = await Promise.all(['local', 'roomote', 'gemini'].map(async executor =>
+    const results = await executorResults(['local', 'roomote', 'gemini'].map(async executor =>
       JSON.parse((await execute(process.execPath, ['--input-type=module', '-e', source, executor], { timeout: 15_000 })).stdout)));
     assert.equal(results.filter(result => result.ok && result.execute).length, 1);
     assert.equal(ledger.status().windowCount, 1);
