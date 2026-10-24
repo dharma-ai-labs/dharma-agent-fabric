@@ -38,12 +38,15 @@ copy authentication or switch to a legacy grant. See
   `fabric_bind_runtime_endpoint` are write tools that require explicit
   confirmation. `dharma agents list` and `dharma agents bind-runtime` are the
   CLI's agent-listing and runtime-binding commands.
-- **Conversation**: no CLI or MCP command attaches to an existing chat or
-  delivers into it. Relay tasks run in a new provider process in a relay-owned
-  worktree; for Claude Code that is
+- **Conversation**: no CLI or MCP command attaches to, or delivers into, an
+  existing provider conversation (a Codex or Claude Code chat the user opened).
+  `assistant chat` and the `fabric_control_agent_*` tools address Dharma's
+  server-hosted control agent, not a provider chat. Relay tasks run in a new
+  provider process in a relay-owned worktree; for Claude Code that is
   `claude --print --verbose --safe-mode --no-session-persistence`. Claude Code
   provider sessions are not supported in this release. Named sessions, the
-  only retained conversations, are Linux-only Codex sessions.
+  only retained provider conversations, are Linux-only Codex sessions that
+  `sessions start` opens and `sessions work` sends work to.
 
 ## Read-only named-session diagnosis
 
@@ -256,8 +259,8 @@ failure. Require the full readiness receipt after recovery.
 ## Read `dharma status`
 
 `dharma status` reads local state under `DHARMA_HOME` and the local startup
-registration. It does not contact Dharma. Like every command it prints JSON;
-`--json` changes nothing.
+registration. It does not contact Dharma. It prints JSON; `--json` changes
+nothing.
 
 - `version`: the running CLI version.
 - `enrolled`: `true` when `DHARMA_HOME/device.json` exists and parses. It does

@@ -5,9 +5,12 @@
 There is one output mode. Each command prints one JSON document on stdout,
 indented with two spaces. A string result, such as the usage text, is printed as
 plain text. `signing-recovery` also streams compact JSON progress frames, one
-per line. `--json` is accepted for compatibility and does not change the output.
-Approval prompts, watch progress and other human-readable lines go to stderr.
-Stdout contains no spinner, color, or diagnostic prose.
+per line. `--json` never changes the output. Most commands accept `--json` as a
+no-op, but commands with a fixed option set (`setup codex`, `sessions audit`,
+`sessions readiness --diagnostic` and `relay container-entrypoint`) reject it,
+as they reject any other flag outside that set. Approval prompts, watch
+progress and other human-readable lines go to stderr. Stdout contains no
+spinner, color, or diagnostic prose.
 
 `--help` or `-h` anywhere on the command line prints the global usage summary.
 There is no per-command help. A failed command prints its error message as
@@ -133,12 +136,14 @@ dharma skills verify
 
 `help` and `version` behave like `--help` and `--version`. `capture` is an
 alias of `evidence capture`. `sessions serve` and `relay supervise` are
-internal entries: `sessions start` launches `sessions serve`, and `relay start`
-and the owned startup entry launch `relay supervise`. The `--help` summary lists
-most commands. `setup codex`, `repositories source-resolve` and
-`repositories restore` are described in their own usage paragraphs, while
-`sessions quiesce`, `sessions resume`, `tasks run-once` and `handoffs dispatch`
-are dispatched but not listed there.
+internal entries. `sessions start` launches `sessions serve`. `relay supervise`
+is the supervisor entry and, with `--policy`, runs `relay start` as its
+receiver. `bootstrap`, `onboard` and `repositories connect` start
+`relay supervise`, as do the owned startup entry and the container entrypoint.
+The `--help` summary lists most commands. `setup codex`,
+`repositories source-resolve` and `repositories restore` are described in their
+own usage paragraphs, while `sessions quiesce`, `sessions resume`,
+`tasks run-once` and `handoffs dispatch` are dispatched but not listed there.
 
 `logout`, `device`, `messages`, `policy` and `diagnostics` are not CLI commands,
 and neither are `workspace list`, `inspect`, `pause`, `resume` or `remove`.
@@ -295,8 +300,8 @@ a bounded question from a registered workspace, and `repositories reply` reads
 the reply to a question by its ID. Both are pulls by the caller. With
 `--session-name`, they go through a named session, so they are Linux and Codex
 only. `demo` peer commands use a separate Demo device and repository scope. No
-command attaches to an existing provider chat or delivers into it. For Claude
-Code, a relay task runs as a new `claude --print --no-session-persistence`
+command attaches to, or delivers into, a provider chat the user opened. For
+Claude Code, a relay task runs as a new `claude --print --no-session-persistence`
 process in a relay-owned worktree; see
 [provider-session routing](24-provider-session-routing.md).
 
