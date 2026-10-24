@@ -155,6 +155,32 @@ test('every command and subcommand in the CLI dispatch table has a COMMAND_USAGE
   assert.match(String(await run(['capture', '--help'])), /^Usage: dharma evidence capture /);
 });
 
+/** True when the first `--apply` of a synopsis sits directly inside an optional `[...]` group. */
+function offersOptionalApply(synopsis: string) {
+  const groups: string[] = [];
+  for (let index = 0; index < synopsis.length; index += 1) {
+    const character = synopsis[index]!;
+    if (character === '[' || character === '(') groups.push(character);
+    else if (character === ']' || character === ')') groups.pop();
+    else if (synopsis.startsWith('--apply', index) && !/[\w-]/.test(synopsis[index + '--apply'.length] ?? '')) {
+      return groups.at(-1) === '[';
+    }
+  }
+  return false;
+}
+
+test('a command whose --apply is optional states its default plan in its usage summary', () => {
+  // Without --apply these handlers return a plan or dry run (for example namedSessionCommand for
+  // sessions start/serve/stop/quiesce/resume), so a summary must not present the --apply effect as the default.
+  const optional = Object.entries(usage.COMMAND_USAGE).filter(([, entry]) => offersOptionalApply(entry.synopsis));
+  const keys = optional.map(([key]) => key);
+  assert.ok(keys.includes('sessions serve') && keys.includes('signing-recovery'), 'Optional --apply detection');
+  assert.ok(!keys.includes('repositories restore') && !keys.includes('repositories recover-installer'),
+    'A required --dry-run | --apply choice is not an optional --apply');
+  const unstated = optional.filter(([, entry]) => !/^Plans\b|; --apply \w/.test(entry.summary)).map(([key]) => key);
+  assert.deepEqual(unstated, [], `Summaries that present the --apply effect as the default: ${unstated.join(', ')}`);
+});
+
 test('tasks run-once --help and -h print that command usage and exit 0 without running the task handler', async () => {
   await withIsolatedHome(async (home, requests) => {
     const policy = join(home, 'checkout', '.dharma', 'approved-policy.json');
