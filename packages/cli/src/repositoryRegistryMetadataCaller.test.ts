@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import * as usage from './usage.js';
 
 type Flags = Map<string, string | boolean>;
 type Caller = (...args: any[]) => Promise<Record<string, any>>;
@@ -22,7 +23,8 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None }, reportDiagnostics: true,
   });
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
-  return runInNewContext(`${compiled.outputText}\n${name}`, { exports: {}, ...dependencies }, {
+  // The dispatcher's pure usage text helpers come first; fixture dependencies stay authoritative.
+  return runInNewContext(`${compiled.outputText}\n${name}`, { exports: {}, ...usage, ...dependencies }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;
 }

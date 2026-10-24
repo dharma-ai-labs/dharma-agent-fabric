@@ -39,7 +39,7 @@ import {
   type TaskEnvelope,
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
-import { CLI_USAGE } from './usage.js';
+import { CLI_USAGE, commandUsage, isHelpRequest } from './usage.js';
 import { runAssignedCaptureCommand, type AssignedCaptureCommandContext } from './assignedCapture.js';
 export type { AssignedCaptureCommandContext } from './assignedCapture.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
@@ -268,6 +268,7 @@ export function formatCommandOutput(value:unknown):string{
 }
 
 export function commandExitCode(argv: string[], value: Output): number {
+  if (isHelpRequest(argv) && typeof value === 'string') return 0;
   const { positional, flags } = parseCliOptions(argv);
   if(positional[0]==='relay'&&positional[1]==='upgrade'
     &&(flags.has('stage-signing-maintenance')||flags.has('finish-signing-maintenance'))){
@@ -9316,6 +9317,9 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
 export async function run(argv: string[], captureContext?: AssignedCaptureCommandContext): Promise<Output> {
   const { positional, flags, repeated } = parseCliOptions(argv);
   const [command, subcommand] = positional;
+  // Command help is text only: it returns before any handler, device state, credential or network
+  // access. In-process owner contexts (assigned capture, bootstrap callbacks) keep their closed checks.
+  if (captureContext === undefined && !currentBootstrapHostScope() && isHelpRequest(argv)) return commandUsage(argv);
   if (captureContext !== undefined || flags.has('assignment-id')) {
     if (currentBootstrapHostScope()) throw new Error('capture_assignment_command_invalid');
     return runAssignedCaptureCommand({ positional, flags, repeated }, captureContext);

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import * as usage from './usage.js';
 
 async function dispatcher() {
   const text = await readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
@@ -21,7 +22,8 @@ async function dispatcher() {
   const calls: string[] = [];
   const forbidden = () => { throw new Error('unexpected_effect'); };
   const run = runInNewContext(`${compiled.outputText}\nrun`, {
-    exports: {}, USAGE: 'unsupported_command', currentBootstrapHostScope: () => undefined,
+    // The dispatcher's pure usage text helpers; every effect below stays a spy or forbidden.
+    exports: {}, ...usage, USAGE: 'unsupported_command', currentBootstrapHostScope: () => undefined,
     providerAdapters: [{ capability: async () => { calls.push('capability'); return { providerId: 'claude' }; } }],
     receiptAwareProviderCapabilities: async (value: unknown) => { calls.push('receiver'); return value; },
     organizationApi: async () => ({
@@ -98,4 +100,14 @@ test('provider capability and task list are separate from task execution', async
   const runner = await dispatcher();
   await runner.run(['tasks', 'run-once', '--policy', '/synthetic/approved-policy.json']);
   assert.deepEqual(runner.calls, ['run-once']);
+});
+
+test('task runner help prints its usage without reaching the task runner', async () => {
+  for (const argv of [['tasks', 'run-once', '--policy', '/synthetic/approved-policy.json', '-h'],
+    ['tasks', 'run-once', '-h'], ['tasks', 'run-once', '--help']]) {
+    const f = await dispatcher();
+    const output = await f.run(argv);
+    assert.deepEqual(f.calls, [], argv.join(' '));
+    assert.match(String(output), /^Usage: dharma tasks run-once --policy /, argv.join(' '));
+  }
 });
