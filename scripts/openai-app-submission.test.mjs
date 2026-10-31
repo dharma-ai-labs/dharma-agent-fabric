@@ -99,7 +99,7 @@ test('the agent listing case tolerates the seeded organization control agent', (
 });
 
 test('the seed plan enrolls without a forbidden step and checks the trajectory count before freezing', () => {
-  const commands = seedPlan.split('\n').filter(line => /dharma (repositories connect|workspace sync)/.test(line));
+  const commands = seedPlan.split('\n').filter(line => /^\s*dharma (repositories connect|workspace sync) /.test(line));
   assert.ok(commands.length > 0, 'seed plan must name its enrollment command');
   for (const line of commands) assert.match(line, /--policy-revision /, `enrollment command needs --policy-revision: ${line.trim()}`);
   assert.doesNotMatch(seedPlan, /\| Not present \| No GitHub App installation/, 'a connect step needs a GitHub App; do not forbid it and use it');
