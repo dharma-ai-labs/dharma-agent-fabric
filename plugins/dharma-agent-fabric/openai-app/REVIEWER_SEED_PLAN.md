@@ -86,7 +86,9 @@ The five trajectory IDs are fixed and are not placeholders:
 | Runtime activation | The organization's managed runtime activation entitlement is `ready`, which the control agent needs | TC-2, TC-6 |
 | Control agent | The organization control agent (`dharma:organization-control-agent`) is provisioned and `ready`, with exactly one `managed_runtime` endpoint, `active` | TC-2, TC-6 |
 | Members | One `developer` reviewer, bound to the reviewer's sign-in; one operator admin | TC-1, TC-5, TC-6 |
-| Repository | One synthetic public demo repository whose `README.md` starts with `# Dharma reviewer demo` | step 3 |
+| Repository-agent model | On for the reviewer organization; the onboarding step `repository_agent` is complete | step 3 |
+| GitHub App and control repository | The Dharma GitHub App is installed on a Dharma-controlled demo GitHub organization, and the organization's control repository is provisioned in that same GitHub organization; the onboarding steps `github_app` and `repository` are complete | step 3 |
+| Repository | One synthetic public demo repository whose `README.md` starts with `# Dharma reviewer demo`, cloned on the seed device at a path that has no Codex session history | step 3 |
 | Device | One Dharma-controlled seed device enrolled in the organization, relay stopped after seeding | TC-2 |
 | Workspace | One workspace for the demo repository | TC-2, TC-3 |
 | Repository agent | Exactly one, with exactly one endpoint: `local_provider`, `codex`, `local_device`, `active` | TC-2 |
@@ -104,54 +106,74 @@ a managed trajectory, which would change TC-3.
 Each step uses an existing product surface. Record every returned ID in the
 private seed receipt.
 
-1. **Organization.** Use the reviewer organization (see the decision above).
-   Confirm that Agent Fabric is active and that the runtime activation
-   entitlement is `ready`. Record `{{REVIEWER_ORG_ID}}`.
-   [NICK-DECIDES: approval for the owner-only changes this step may need in
-   production HQ: turning on the runtime activation entitlement and the
-   organization control agent for the reviewer organization.]
+1. **Organization and readiness check.** Use the reviewer organization (see
+   the decision above). Record `{{REVIEWER_ORG_ID}}`. **Readiness check:**
+   as the operator, read the organization's Agent Fabric onboarding status
+   (the portal's Agent Fabric onboarding page, which reads
+   `GET /api/v1/orgs/{organizationId}/agent-fabric/onboarding`). It changes
+   nothing. Continue only if the steps `runtime`, `github_app`, `repository`
+   and `repository_agent` are all complete and `repositoryAgent.enabled` is
+   `true`. Do not run any `dharma` command against the organization before
+   this check passes: the CLI registers the workspace before it requests the
+   repository bind, so a bind that the server refuses still leaves a
+   registered workspace and agent behind.
+   [NICK-DECIDES: approval for the owner-only production HQ changes this step
+   may need for the reviewer organization: the runtime activation entitlement,
+   the organization control agent, the repository-agent model, the Dharma
+   GitHub App installation on a Dharma-controlled demo GitHub organization
+   and the control repository in it. If a GitHub App installation for the
+   seed is not acceptable, the seed cannot be built with today's CLI: it
+   first needs a CLI change that registers a workspace without the
+   repository bind.]
 2. **Members.** Invite the reviewer account as `developer` through the Dharma
    portal. After the reviewer's first sign-in, `fabric_get_identity` must
    report `bindingState` `bound`.
 3. **Device, workspace, repository agent and endpoint.** On the seed device,
-   as the operator, enroll the device and register the demo repository.
-   There are two routes, and they need different things from the organization:
+   as the operator, enroll the device and connect the demo repository with
+   `dharma repositories connect`. This is the only enrollment path in this
+   plan. `dharma workspace sync` is not an alternative: it always registers
+   the workspace and then requests the repository-agent bind
+   (`POST /agent-fabric/repository-agents`), which the server refuses with
+   `agent_fabric_repository_agents_not_enabled` when the repository-agent
+   model is off. No enrollment command registers a workspace without that
+   bind.
 
-   - **Route A, workspace registration without a GitHub App.** This needs the
-     repository-agent model to be off for the reviewer organization. The
-     server then registers the workspace with one agent per attached provider,
-     with agent key `local:<workspace-id>:codex`, and one `local_provider`
-     endpoint.
+   First check that the clone has no Codex history on the seed device.
+   Connect syncs up to 20 existing Codex sessions of the workspace as its
+   first learning evidence, which would add trajectories before T1. This
+   command reads local files only:
 
-     ```bash
-     dharma login --portal-url https://www.dharma-ai.io --organization-id {{REVIEWER_ORG_ID}}
-     dharma workspace add <demo-repo-path> --organization-id {{REVIEWER_ORG_ID}}
-     dharma workspace sync <workspace-id> --policy-revision <dashboard-policy-revision> --provider codex --apply
-     ```
+   ```bash
+   dharma evidence preview --workspace <demo-repo-path> --provider codex
+   ```
 
-   - **Route B, repository connect.** `dharma repositories connect` creates a
-     repository-scoped agent (agent key `repo:<fingerprint prefix>`). The
-     server accepts it only when the organization has a provisioned control
-     repository and an active GitHub App installation. Otherwise it refuses
-     with `control_repository_required` or `github_app_installation_required`.
-     The GitHub App would be installed on a Dharma-controlled demo GitHub
-     organization that holds only the synthetic demo repository.
+   It must report `trajectoryCount` 0. Otherwise use a fresh clone at a new
+   path. Then connect:
 
-     ```bash
-     dharma login --portal-url https://www.dharma-ai.io --organization-id {{REVIEWER_ORG_ID}}
-     dharma repositories connect --repo <demo-repo-path> --provider codex --organization-id {{REVIEWER_ORG_ID}} --policy-revision <dashboard-policy-revision>
-     ```
+   ```bash
+   dharma login --portal-url https://www.dharma-ai.io --organization-id {{REVIEWER_ORG_ID}}
+   dharma repositories connect --repo <demo-repo-path> --provider codex --organization-id {{REVIEWER_ORG_ID}} --policy-revision <dashboard-policy-revision>
+   ```
 
-   [NICK-DECIDES: Route A (set the repository-agent model off for the reviewer
-   organization, an owner-only configuration change) or Route B (install the
-   Dharma GitHub App on a Dharma-controlled demo GitHub organization and
-   provision its control repository). Neither can be done without an owner
-   action. Route B adds no agent to the listing, because the control
-   repository is not an agent, so TC-2 is the same on both routes.]
+   With the repository-agent model on, the server registers the workspace
+   with one repository-scoped agent (agent key `repo:<24 hex characters>`)
+   and one `local_provider` endpoint per attached provider, with credential
+   boundary `local_device`. Connect then creates the agent's control branch
+   in the control repository through the GitHub App, submits a package
+   candidate of the synthetic demo repository, which the server then
+   publishes to the control repository, and starts the relay. The control
+   branch and the package publication are GitHub writes, so they need GitHub
+   writes to be on in production (`AGENT_FABRIC_DISABLE_GITHUB_WRITES` not
+   `true`). The control repository is not an agent, so it adds nothing to the
+   agent listing. If connect fails or returns `ok` false, resolve the stage
+   or code it names (for example approve the repository source scope as the
+   operator) and rerun the same command.
 
    Attach only `codex`. Then call `fabric_list_agents` and
-   `fabric_list_workspaces` as the operator. There must be exactly one agent
-   with exactly one Codex endpoint, `active`. Record
+   `fabric_list_workspaces` as the operator. There must be exactly one agent,
+   the `repo:` agent, with exactly one Codex endpoint, `active`, and exactly
+   one workspace. If there is any other agent, endpoint or workspace, do not
+   continue: rebuild the organization from step 1. Record
    `{{REVIEWER_WORKSPACE_ID}}`, `{{REVIEWER_AGENT_KEY}}` and
    `{{REVIEWER_CODEX_ENDPOINT_ID}}`. Between this step and step 5, do not use
    Codex on the seed device for anything else: while the relay runs, every
