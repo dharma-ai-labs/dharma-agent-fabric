@@ -510,6 +510,43 @@ function normalizeTimestamp(value: string | null, fallback: Date): string {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback.toISOString();
 }
 
+// A session's time range comes from its records' own timestamps. Record order is
+// not time order (Claude writes attachments a millisecond before their message),
+// and file birthtime/mtime are only a fallback for sessions with no timestamp.
+function recordTimeRange(records: SourceRecord[], fallbackStart: Date, fallbackEnd: Date) {
+  let earliest = Number.POSITIVE_INFINITY;
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const record of records) {
+    const parsed = record.timestamp ? Date.parse(record.timestamp) : Number.NaN;
+    if (!Number.isFinite(parsed)) continue;
+    earliest = Math.min(earliest, parsed);
+    latest = Math.max(latest, parsed);
+  }
+  if (!Number.isFinite(earliest)) {
+    return { startedAt: fallbackStart.toISOString(), endedAt: fallbackEnd.toISOString() };
+  }
+  return { startedAt: new Date(earliest).toISOString(), endedAt: new Date(latest).toISOString() };
+}
+
+function contentBlockTypes(record: Record<string, unknown>): string[] {
+  const message = record.message && typeof record.message === 'object'
+    ? record.message as Record<string, unknown>
+    : {};
+  return Array.isArray(message.content)
+    ? message.content.map((block) => block && typeof block === 'object' ? (block as Record<string, unknown>).type : null)
+      .filter((type): type is string => typeof type === 'string')
+    : [];
+}
+
+// Claude Code session records carry tool calls and results inside assistant and
+// user messages, plus a "tools-used" summary that repeats calls already recorded.
+function claudeSessionRecordKind(record: Record<string, unknown>): string {
+  if (record.type === 'assistant' && contentBlockTypes(record).includes('tool_use')) return 'tool_call';
+  if (record.type === 'user' && contentBlockTypes(record).includes('tool_result')) return 'tool_result';
+  if (record.type === 'tools-used') return 'metadata';
+  return inferKind(record);
+}
+
 function inferKind(record: Record<string, unknown>): string {
   const payload = record.payload && typeof record.payload === 'object'
     ? record.payload as Record<string, unknown>
@@ -791,15 +828,14 @@ async function parseSessionFile(
       line,
       workspace: cwd,
       timestamp,
-      kind: inferKind(native),
+      kind: provider === 'claude' ? claudeSessionRecordKind(native) : inferKind(native),
       coverage: bounded.tailOffset === null || (inTail && tailTurnReady) ? 'observed' : 'partial',
     });
   }
   const bound = records.filter((record) => record.workspace && insideWorkspace(workspace, record.workspace));
   if (bound.length === 0) return null;
   const effective = records.filter((record) => !record.workspace || insideWorkspace(workspace, record.workspace));
-  const startedAt = normalizeTimestamp(effective[0]?.timestamp ?? null, fileStat.birthtime);
-  const endedAt = normalizeTimestamp(effective.at(-1)?.timestamp ?? null, fileStat.mtime);
+  const { startedAt, endedAt } = recordTimeRange(effective, fileStat.birthtime, fileStat.mtime);
   const sourceHash = createHash('sha256').update(path).digest('hex');
   return {
     provider,
@@ -852,8 +888,7 @@ export function segmentProviderSession(session: ProviderSession): ProviderSessio
     sessionId: `${session.sessionId}:turn:${turnId}`,
     records,
     coverage: records.every((record) => record.coverage === 'observed') ? 'observed' : 'partial',
-    startedAt: normalizeTimestamp(records[0]?.timestamp ?? null, new Date(session.startedAt)),
-    endedAt: normalizeTimestamp(records.at(-1)?.timestamp ?? null, new Date(session.endedAt)),
+    ...recordTimeRange(records, new Date(session.startedAt), new Date(session.endedAt)),
   }));
 }
 

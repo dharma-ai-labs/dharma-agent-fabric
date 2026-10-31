@@ -158,7 +158,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.212';
+const VERSION = '0.2.215';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -502,6 +502,18 @@ export function rawLocalRetentionDays(policy: Pick<OrganizationPolicy, 'retentio
   return Number(value);
 }
 
+// Earlier CLIs (through 0.2.212) could queue a Claude capsule whose start came from
+// the file birthtime and whose end came from an earlier record. The server always
+// rejects such a capsule, so it must be retired instead of re-sent on every resume.
+function capsuleTimeRangeInverted(capsule: Record<string, unknown>): boolean {
+  const range = capsule.timeRange && typeof capsule.timeRange === 'object'
+    ? capsule.timeRange as Record<string, unknown>
+    : {};
+  const start = typeof range.start === 'string' ? Date.parse(range.start) : Number.NaN;
+  const end = typeof range.end === 'string' ? Date.parse(range.end) : Number.NaN;
+  return Number.isFinite(start) && Number.isFinite(end) && end < start;
+}
+
 export async function syncPendingRetentionCapsules(
   vault: {
     listPendingCapsuleSyncs<T>(limit?: number, offset?: number): Promise<Array<{ trajectoryId: string; revision: number; capsule: T }>>;
@@ -557,7 +569,8 @@ export async function syncPendingRetentionCapsules(
       }
       const oversized = Buffer.byteLength(canonicalize(item.capsule)) > policy.evidence.maximumCapsuleBytes;
       const containsLocalPath = containsDisallowedLocalPath(item.capsule);
-      if (oversized || containsLocalPath) {
+      const timeRangeInverted = capsuleTimeRangeInverted(item.capsule);
+      if (oversized || containsLocalPath || timeRangeInverted) {
         const serverHead = acceptedTrajectoryHead(await fabric.getTrajectoryHead({
           trajectoryId: item.trajectoryId, workspaceId,
         }), item.trajectoryId);
@@ -573,10 +586,13 @@ export async function syncPendingRetentionCapsules(
           throw new Error('Rejected pending trajectory revision conflicts with the accepted server head.');
         }
         await vault.discardPendingCapsuleSync(item.trajectoryId, item.revision,
-          containsLocalPath ? 'local_path_disclosure_superseded' : 'capsule_size_limit_superseded');
+          containsLocalPath ? 'local_path_disclosure_superseded'
+            : oversized ? 'capsule_size_limit_superseded' : 'time_range_inverted_superseded');
         process.stderr.write(containsLocalPath
           ? 'An unsent trajectory capsule containing a local path was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n'
-          : 'An unsent oversized trajectory capsule was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n');
+          : oversized
+            ? 'An unsent oversized trajectory capsule was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured under the current policy.\n'
+            : 'An unsent trajectory capsule whose time range ends before it starts was retired from the upload queue. Encrypted raw evidence remains local and eligible sessions can be recaptured.\n');
         continue;
       }
       try {
