@@ -71,7 +71,7 @@ test('the submission declares exactly the ChatGPT profile, with no merge or depl
 test('the seed plan records the owner decisions on the reviewer role and organization', () => {
   assert.match(seedPlan, /Owner decision \(Nick, 2026-10-31\): the reviewer account is `developer`/);
   assert.match(seedPlan, /Owner decision \(Nick, 2026-10-31\): a dedicated reviewer organization/);
-  assert.match(seedPlan, /asks Nick before creating/);
+  assert.match(seedPlan, /asks Nick\s+before creating/);
   assert.doesNotMatch(seedPlan, /NICK-DECIDES: the reviewer account role/);
   assert.doesNotMatch(seedPlan, /NICK-DECIDES: reuse the existing reviewer organization/);
 });

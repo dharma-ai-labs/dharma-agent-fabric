@@ -103,9 +103,10 @@ receives for the calls a user makes.
 - Revoking a device stops new relay work at once. Signed task leases, skill
   rollouts and receipts stay auditable as immutable receipts.
 
-[NICK-DECIDES: retention for tasks, A2A handoffs and control-agent
-conversations, which have no automatic deletion today, and for billing, audit
-and hosting logs. Use the same choice as the privacy policy revision.]
+Retention follows the privacy policy revision of 2026-10-31 (owner decision,
+Nick): tasks, A2A handoffs and control-agent conversations are kept for the life
+of the organization unless deletion is requested; billing records 7 years;
+audit and idempotency records 12 months; hosting logs per provider.
 
 - Privacy: `https://www.dharma-ai.io/privacy`
 - Terms: `https://www.dharma-ai.io/terms`
