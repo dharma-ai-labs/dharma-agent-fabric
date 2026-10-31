@@ -23,9 +23,9 @@ The app authenticates the user to Dharma and exposes organization-level intent t
 The hosted server exposes 65 tools to every authenticated client, ChatGPT
 included. `live-mcp-tools.snapshot.json` records them exactly as the server
 registers them: names, titles, descriptions, annotations, confirmation and
-required inputs. `mcp-tool-catalog.json` adds the backend scope, admin-only flag
-and mode for each tool. `chatgpt-app-submission.json` declares the same 65
-tools, because OpenAI reads the tool list from the server.
+required inputs. `mcp-tool-catalog.json` adds the backend scope, admin-only flag,
+mode and ChatGPT profile flag for each tool. `chatgpt-app-submission.json`
+declares only the ChatGPT profile described below.
 
 | Group | Tools | Who |
 | --- | --- | --- |
@@ -57,24 +57,34 @@ agent proposes them. An organization admin runs one exact proposal with the
 matching `fabric_control_execute_*` tool, which checks the stored arguments
 hash, or rejects it with `fabric_control_reject_proposal`.
 
-## Proposed ChatGPT profile
+## ChatGPT tool profile
 
-[NICK-DECIDES: whether the ChatGPT app should see a smaller tool set. Today the
-server cannot show ChatGPT fewer tools than other clients. A smaller set needs
-a server-side filter keyed to the ChatGPT OAuth client, in the HQ control
-plane. Until that ships, the submission must declare all 65 tools.]
+`AGENTS.md` sets the security default "No direct merge or deployment
+authority". The ChatGPT app therefore declares a 20-tool profile, marked with
+`chatgptProfile: true` in the catalog: 17 reads, `fabric_dispatch_task`,
+`fabric_control_agent_create_session` and `fabric_control_agent_send_message`.
+It leaves out the remediation lifecycle (including `fabric_remediation_merge_pr`),
+skill release and every rollout tool (including `fabric_rollout_rollback`),
+learning-policy administration, control-agent execution, endpoint binding and
+evidence-request writes. `npm run mcp:catalog:verify` fails if the submission
+declares any other tool, or if the profile gains a merge, release or rollout
+tool. All submitted test cases use only read-only profile tools.
 
-The catalog marks a proposed 21-tool profile with `chatgptProfile: true`:
-17 reads, `fabric_dispatch_task`, `fabric_control_agent_create_session`,
-`fabric_control_agent_send_message` and `fabric_rollout_rollback`. It leaves
-out learning-policy administration, the remediation lifecycle (including the
-merge tool), control-agent execution, endpoint binding, skill release and
-evidence-request writes. All submitted test cases use only profile tools.
+The declared profile is not yet what ChatGPT sees. Today the server lists all
+65 tools to every client and cannot show ChatGPT fewer tools than other
+clients.
+
+[NICK-DECIDES: either ship a server-side filter keyed to the ChatGPT OAuth
+client in the HQ control plane, so ChatGPT is served only the declared profile,
+or amend AGENTS.md to allow the admin-only merge and signed rollout tools in
+the ChatGPT app. Until one of them is done, the package must not be submitted.
+This package does not amend AGENTS.md.]
 
 ## Keeping the package in step with the server
 
-- `npm run mcp:catalog:verify` checks that the catalog, the submission tool
-  declarations and the test cases match `live-mcp-tools.snapshot.json`.
+- `npm run mcp:catalog:verify` checks that the catalog and the test cases
+  match `live-mcp-tools.snapshot.json`, and that the submission declares
+  exactly the ChatGPT profile.
 - Before each submission, capture `tools/list` from the hosted server, project
   it with `scripts/mcp-tools-list-project.mjs`, and run
   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.

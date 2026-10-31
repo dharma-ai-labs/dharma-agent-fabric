@@ -48,7 +48,12 @@ assert.equal(snapshot.schema, 'dharma.mcp-live-tool-snapshot/v1');
 assert.equal(snapshot.toolCount, snapshot.tools.length);
 assert.equal(catalog.toolCount, catalog.tools.length);
 assert.deepEqual(actualTools, snapshot.tools.map((tool) => tool.name), 'public MCP catalog must match the live tool snapshot order');
-assert.deepEqual(Object.keys(submission.tools), actualTools, 'OpenAI submission tool declarations must match the public catalog');
+// The submission declares only the ChatGPT profile. AGENTS.md forbids direct
+// merge or deployment authority, so the profile holds no merge, signed skill
+// release, rollout or remediation release tool.
+const profileTools = catalog.tools.filter((tool) => tool.chatgptProfile).map((tool) => tool.name);
+assert.deepEqual(Object.keys(submission.tools), profileTools, 'OpenAI submission tool declarations must match the ChatGPT profile');
+assert.deepEqual(profileTools.filter((name) => /merge|release|rollout|rollback|expand/.test(name)), [], 'ChatGPT profile must not declare merge or deployment tools');
 assert.deepEqual(catalog.oauthScopes, ['openid', 'user:org:read']);
 assert.equal(catalog.resource, 'https://mcp.dharma-ai.io/mcp');
 assert.equal(snapshot.resource, catalog.resource);
@@ -65,7 +70,9 @@ for (const tool of catalog.tools) {
   assert.equal(typeof tool.adminOnly, 'boolean');
   assert.equal(typeof tool.chatgptProfile, 'boolean');
   assert.equal(tool.mode === 'read' || tool.mode === 'sensitive_read', tool.annotations.readOnlyHint, `${tool.name} mode contradicts readOnlyHint`);
-  assert.deepEqual(submission.tools[tool.name]?.annotations, submissionHints(tool.annotations), `${tool.name} submission annotations drifted`);
+  if (tool.chatgptProfile) {
+    assert.deepEqual(submission.tools[tool.name]?.annotations, submissionHints(tool.annotations), `${tool.name} submission annotations drifted`);
+  }
 }
 
 for (const name of [...removedSpeculativeTools, ...removedLegacyTools, ...catalog.forbiddenTools]) {

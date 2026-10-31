@@ -16,18 +16,28 @@ private review channel. They are never committed to this repository.
 
 - Every tool needs the organization ID, so every test prompt names it. The
   server never guesses an organization.
-- Every write, and every evidence expansion, needs explicit confirmation.
-  ChatGPT asks for it before the call. Prompts that change state start with
-  "After I confirm".
+- Every submitted case is one user turn that calls one read-only tool. None of
+  them changes state.
+- Evidence expansion needs explicit confirmation (`confirmed: true`). TC-4
+  gives it in the prompt ("I confirm ..."). The tool is read-only, so ChatGPT
+  adds no approval step of its own, and the call happens in that one turn.
+- Writes need explicit confirmation too, and ChatGPT adds its own approval
+  step to every write tool, so their outcome depends on a second turn. They
+  are guided checks below, not submitted cases.
 - The reviewer account is a `developer` member of the reviewer organization.
-  Admin-only tools are refused for it with `insufficient_scope`.
+  Tools that need admin or device administration scope are refused for it with
+  `insufficient_scope`.
 - The reviewer organization holds a fixed seed, described in
   `REVIEWER_SEED_PLAN.md`. Each test case below lists the seed items it reads.
   Values in `{{...}}` are filled in from the private seed receipt.
-- Results do not depend on order. You can run the cases on ChatGPT web and then
-  on ChatGPT mobile and get the same results. Fields not named in an expected
-  output (timestamps, new task and session IDs, correlation IDs) differ between
-  runs.
+- The seed already contains everything a first call would otherwise create,
+  including the organization control agent. Because no submitted case writes,
+  you can run them in any order, on ChatGPT web and then on ChatGPT mobile, and
+  get the same results. Fields not named in an expected output (timestamps,
+  correlation IDs) can differ between runs.
+- Please do not create control-agent conversations or dispatch tasks with the
+  reviewer account in the reviewer organization. A conversation you create
+  appears in TC-6 on the next run. Ask for the guided checks instead.
 
 ## Submitted test cases
 
@@ -42,16 +52,22 @@ private review channel. They are never committed to this repository.
   and OAuth scopes that include `openid` and `user:org:read`. No token, key or
   credential is shown.
 
-### TC-2 Logical agent and endpoint
+### TC-2 Logical agents and endpoints
 
 - Tool: `fabric_list_agents` (read).
-- Seed: exactly one logical agent with exactly one Codex endpoint.
+- Seed: the repository agent with one Codex endpoint, and the organization
+  control agent with one managed runtime endpoint, both provisioned before the
+  seed was frozen.
 - Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list my logical agents
   and their endpoint bindings.
-- Expected: exactly one agent, agent key `{{REVIEWER_AGENT_KEY}}`, with exactly
-  one endpoint: ID `{{REVIEWER_CODEX_ENDPOINT_ID}}`, kind `local_provider`,
-  provider `codex`, credential boundary `local_device`, status `active`,
-  workspace `{{REVIEWER_WORKSPACE_ID}}`. No local path or credential.
+- Expected: exactly two agents. The repository agent has agent key
+  `{{REVIEWER_AGENT_KEY}}` and exactly one endpoint: ID
+  `{{REVIEWER_CODEX_ENDPOINT_ID}}`, kind `local_provider`, provider `codex`,
+  credential boundary `local_device`, status `active`, workspace
+  `{{REVIEWER_WORKSPACE_ID}}`. The control agent has agent key
+  `dharma:organization-control-agent` and exactly one endpoint: ID
+  `{{REVIEWER_CONTROL_ENDPOINT_ID}}`, kind `managed_runtime`, status `active`.
+  No local path or credential.
 
 ### TC-3 Trajectory capsules
 
@@ -64,53 +80,39 @@ private review channel. They are never committed to this repository.
   provider `codex`, evidence mode `structured`, status `observed`, latest
   revision 1 and workspace `{{REVIEWER_WORKSPACE_ID}}`. No evidence is expanded.
 
-### TC-4 Evidence expansion with confirmation
+### TC-4 Evidence expansion, confirmed in the prompt
 
-- Tool: `fabric_get_trajectory_evidence` (sensitive read, confirmation).
+- Tool: `fabric_get_trajectory_evidence` (sensitive read, needs confirmation).
 - Seed: T1, revision 1, capsule hash `{{REVIEWER_T1_CAPSULE_HASH}}`.
-- Prompt: After I confirm, open the bounded evidence for trajectory
+- Prompt: I confirm that I want to open the bounded evidence for trajectory
   `5eed0000-0000-4000-8000-000000000001` in Dharma organization
-  `{{REVIEWER_ORG_ID}}`.
-- Expected: ChatGPT asks for confirmation first. The result shows trajectory T1,
-  provider `codex`, and exactly one revision (1) with capsule hash
-  `{{REVIEWER_T1_CAPSULE_HASH}}`, a redacted capsule summary and an empty
+  `{{REVIEWER_ORG_ID}}`. Open it now.
+- Expected: one call with `confirmed` true, in the same turn. The result shows
+  trajectory T1, provider `codex`, and exactly one revision (1) with capsule
+  hash `{{REVIEWER_T1_CAPSULE_HASH}}`, a redacted capsule summary and an empty
   `validation_results` list. No raw transcript, local path or credential.
 
-### TC-5 Bounded task dispatch with confirmation
+### TC-5 Workspace listing is refused for a developer
 
-- Tool: `fabric_dispatch_task` (write, confirmation).
-- Seed: the Codex endpoint and workspace; the seed relay is stopped.
-- Prompt: After I confirm, in Dharma organization `{{REVIEWER_ORG_ID}}`
-  dispatch a `remediation_smoke` task to endpoint
-  `{{REVIEWER_CODEX_ENDPOINT_ID}}` in workspace `{{REVIEWER_WORKSPACE_ID}}`
-  with the instructions "Report the first heading of README.md. Do not change
-  any file." Allow read path README.md only, no write paths, no commands, and
-  network deny.
-- Expected: ChatGPT asks for confirmation first. The result is a new task with
-  status `offered`, type `remediation_smoke`, the named endpoint and workspace,
-  a `sha256:` envelope hash and a correlation ID. Each run creates a new task.
-  Because the seed relay is stopped, the task is not executed and expires.
+- Tool: `fabric_list_workspaces` (read, needs device administration scope).
+- Seed: reviewer role `developer`.
+- Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list the registered
+  workspaces.
+- Expected: the tool returns an error with code `insufficient_scope`, because
+  listing workspaces needs device administration scope, which a developer
+  member does not hold. Nothing changes, so the result is the same on every
+  run.
 
-### TC-6 Control-agent conversation with confirmation
+### TC-6 Own control-agent conversations
 
-- Tool: `fabric_control_agent_create_session` (write, confirmation).
-- Seed: organization control agent enabled.
-- Prompt: After I confirm, create a Dharma control-agent conversation titled
-  "Reviewer check" in organization `{{REVIEWER_ORG_ID}}`. Do not send it a
-  message.
-- Expected: ChatGPT asks for confirmation first. The result is a new
-  conversation titled "Reviewer check" and a correlation ID. No message is
-  sent, no model runs and no credits are used.
-
-### TC-7 Admin-only rollback is refused
-
-- Tool: `fabric_rollout_rollback` (destructive write, confirmation, admin only).
-- Seed: bundle `{{REVIEWER_CANARY_BUNDLE_ID}}`; reviewer role `developer`.
-- Prompt: After I confirm, roll back the signed skill rollout for bundle
-  `{{REVIEWER_CANARY_BUNDLE_ID}}` in Dharma organization `{{REVIEWER_ORG_ID}}`.
-- Expected: ChatGPT asks for confirmation first. The tool returns an error with
-  code `insufficient_scope`, because rollback needs an organization admin. The
-  rollout is unchanged, so the result is the same on every run.
+- Tool: `fabric_control_agent_list_sessions` (read).
+- Seed: the reviewer account has created no conversation. The operator's
+  seeding conversation exists, but a developer member sees only the
+  conversations it created.
+- Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list my Dharma
+  control-agent conversations.
+- Expected: `ok` true and an empty `sessions` list. No model runs and no
+  credits are used.
 
 ### Negative cases
 
@@ -122,18 +124,25 @@ private review channel. They are never committed to this repository.
 
 ## Guided checks (not submitted)
 
-These checks change state that cannot be restored between a web run and a
-mobile run, or depend on model-written text. A Dharma operator can show them on
-request, as an organization admin, in a seeded copy of the organization.
+These checks write, so ChatGPT asks for its own approval before the call and
+the outcome depends on that second turn. Some also depend on model-written
+text. A Dharma operator shows them on request in a separate copy of the seed,
+never in the reviewer organization, because each one adds a record that the
+submitted cases would then see.
 
-- **Signed rollback that succeeds.** As an admin, `fabric_rollout_rollback` on
-  a 10% canary returns state `rolled_back` and a correlation ID. It works once
-  per canary, then the operator restarts the canary.
-- **Analysis window.** `fabric_run_analysis` is metered and its result depends
-  on which trajectories exist when it runs.
-- **Control-agent message.** `fabric_control_agent_send_message` is metered
-  and the answer is written by a model. Any paid or mutating action it proposes
-  stays a proposal until an admin runs the matching execution tool.
+- **Bounded task dispatch.** `fabric_dispatch_task` with `confirmed` true,
+  task type `remediation_smoke`, read path `README.md` only, no write paths, no
+  commands and network `deny`, to the seeded Codex endpoint and workspace.
+  Returns a new task with status `offered`, a `sha256:` envelope hash and a
+  correlation ID. Each run creates a new task. The task cannot merge or deploy.
+- **Control-agent conversation.** `fabric_control_agent_create_session` with
+  `confirmed` true and a title. Returns a new conversation and a correlation
+  ID. No message is sent and no model runs. In an organization without a
+  control agent, the first call also provisions it.
+- **Control-agent message.** `fabric_control_agent_send_message` is metered,
+  the answer is written by a model, and the turn records a managed trajectory.
+  Any paid or mutating action it proposes stays a proposal: the execution
+  tools are not part of the ChatGPT app.
 
 ## Expected authority behavior
 
@@ -141,10 +150,11 @@ request, as an organization admin, in a seeded copy of the organization.
   exists.
 - Evidence expansion and every mutation require explicit confirmation.
 - Reusing an idempotency key returns the durable prior result.
-- Admin-only tools are refused for `developer` members.
-- There is no arbitrary shell, local file, generic merge, generic deployment or
-  secret tool. The one merge tool merges only an approved remediation pull
-  request, for an organization admin, after its checks pass.
+- Admin-only tools, and tools that need device administration scope, are
+  refused for `developer` members.
+- The ChatGPT app declares no merge, skill release, rollout or deployment tool,
+  and no arbitrary shell, local file or secret tool. See the tool profile
+  section of `README.md` for how the hosted server is kept in line with that.
 - Local provider credentials remain on the enrolled device.
 
 ## Support
