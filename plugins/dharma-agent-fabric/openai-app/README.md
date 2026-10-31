@@ -74,11 +74,10 @@ The declared profile is not yet what ChatGPT sees. Today the server lists all
 65 tools to every client and cannot show ChatGPT fewer tools than other
 clients.
 
-[NICK-DECIDES: either ship a server-side filter keyed to the ChatGPT OAuth
-client in the HQ control plane, so ChatGPT is served only the declared profile,
-or amend AGENTS.md to allow the admin-only merge and signed rollout tools in
-the ChatGPT app. Until one of them is done, the package must not be submitted.
-This package does not amend AGENTS.md.]
+Owner decision (Nick, 2026-10-31): ship a server-side filter keyed to the ChatGPT OAuth
+client in the HQ control plane, so ChatGPT is served only the declared profile.
+AGENTS.md stays unchanged. The filter is a platform change and is not part of
+this package; until it ships, the package must not be submitted.
 
 ## Keeping the package in step with the server
 

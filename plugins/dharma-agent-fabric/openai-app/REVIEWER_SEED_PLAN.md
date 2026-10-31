@@ -39,16 +39,14 @@ organization.
 | Reviewer account | `developer` | OpenAI reviewers, through ChatGPT |
 | Seed operator account | `org_admin` | Dharma operator only, for the steps below |
 
-[NICK-DECIDES: the reviewer account role. This plan assumes `developer`. With
+Owner decision (Nick, 2026-10-31): the reviewer account is `developer`. With
 `developer`, admin-only tools are refused with `insufficient_scope`, and TC-5
-relies on that. If the reviewer gets `org_admin`, TC-5 and TC-6 change: an
-admin can list workspaces and sees every conversation, including the
-operator's seeding conversation.]
+relies on that.
 
-[NICK-DECIDES: reuse the existing reviewer organization, or create a dedicated
-one for this seed. A dedicated organization is simpler to keep exact, because
-any earlier trajectory, agent, conversation or repository in the existing one
-changes TC-2, TC-3 and TC-6.]
+Owner decision (Nick, 2026-10-31): a dedicated reviewer organization for this
+seed, because any earlier trajectory, agent, conversation or repository in an
+existing one changes TC-2, TC-3 and TC-6. Claude-e04489 seeds it, and asks Nick
+before creating the organization.
 
 Reviewer credentials and the organization ID go to OpenAI through the private
 review channel. They are never committed.
