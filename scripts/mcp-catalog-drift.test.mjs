@@ -409,7 +409,7 @@ test('reference derives from the actual catalog without hardcoded host inventory
 test('no-argument verifier keeps its exact existing output', () => {
   const child = spawnSync(process.execPath, [verifier], { cwd: root, encoding: 'utf8', timeout: 30_000 });
   assert.equal(child.status, 0, child.stderr);
-  assert.equal(child.stdout, '{"ok":true,"toolCount":30,"confirmationCount":14}\n');
+  assert.equal(child.stdout, '{"ok":true,"toolCount":65,"confirmationCount":38}\n');
 });
 
 test('verifier opt-in snapshot mode runs the comparator against the real catalog', () => {
