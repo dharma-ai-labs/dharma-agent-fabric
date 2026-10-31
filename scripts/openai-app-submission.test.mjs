@@ -15,10 +15,17 @@ const snapshot = readJson(catalog.snapshot);
 const submission = readJson('chatgpt-app-submission.json');
 const guide = readText('REVIEWER_GUIDE.md');
 const seedPlan = readText('REVIEWER_SEED_PLAN.md');
+const readme = readText('README.md');
+const checklist = readText('PUBLICATION_CHECKLIST.md');
+const dataAndSecurity = readText('DATA_AND_SECURITY.md');
 const catalogByName = new Map(catalog.tools.map(tool => [tool.name, tool]));
 const snapshotByName = new Map(snapshot.tools.map(tool => [tool.name, tool]));
 const LEGACY = ['fabric_rollout_skill', 'fabric_advance_remediation', 'fabric_control_agent_decide_tool'];
 const PLACEHOLDER = /\{\{([A-Z0-9_]+)\}\}/g;
+// AGENTS.md security default: no direct merge or deployment authority. Signed
+// skill release, rollout and remediation release tools count as deployment.
+const MERGE_OR_DEPLOY = /merge|release|rollout|rollback|expand/;
+const testCaseById = id => submission.test_cases.find(testCase => testCase.description.startsWith(`${id}. `));
 const toolsOf = testCase => String(testCase.tools_triggered).split(',').map(name => name.trim()).filter(Boolean);
 
 test('catalog matches the checked-in live tool snapshot exactly', () => {
@@ -32,7 +39,7 @@ test('catalog matches the checked-in live tool snapshot exactly', () => {
     assert.deepEqual(tool.annotations, live.annotations, tool.name);
     assert.equal(tool.confirmation, live.confirmation, tool.name);
   }
-  assert.deepEqual(Object.keys(submission.tools), snapshot.tools.map(tool => tool.name));
+  for (const name of Object.keys(submission.tools)) assert.ok(snapshotByName.has(name), `${name} is not served`);
   for (const name of LEGACY) assert.equal(snapshotByName.has(name), false, `${name} is not served`);
 });
 
@@ -50,23 +57,65 @@ test('every test case names only live catalog tools in the proposed ChatGPT prof
   });
 });
 
-test('test cases name the organization and the explicit confirmation each tool requires', () => {
+test('the submission declares exactly the ChatGPT profile, with no merge or deployment tool', () => {
+  const profile = catalog.tools.filter(tool => tool.chatgptProfile).map(tool => tool.name);
+  assert.deepEqual(Object.keys(submission.tools), profile, 'submission must declare the ChatGPT profile, in catalog order');
+  assert.deepEqual(profile.filter(name => MERGE_OR_DEPLOY.test(name)), [], 'ChatGPT profile must not contain merge, release or rollout tools');
+  assert.match(readme, /\[NICK-DECIDES: [^\]]*server-side filter[^\]]*AGENTS\.md[^\]]*\]/s,
+    'README.md must keep the owner decision between a server-side ChatGPT filter and an AGENTS.md amendment');
+});
+
+test('test cases are single turn: they name the organization and give any confirmation in the prompt', () => {
   for (const testCase of submission.test_cases) {
     const id = testCase.description.split('.')[0];
+    assert.doesNotMatch(testCase.user_prompt, /After I confirm/, `${id} must not depend on a second user turn`);
+    assert.doesNotMatch(testCase.expected_output, /Asks for confirmation/, `${id} must not expect a confirmation question`);
     for (const name of toolsOf(testCase)) {
       const live = snapshotByName.get(name);
+      assert.equal(live.annotations.readOnlyHint, true, `${id} uses write tool ${name}; ChatGPT adds its own approval step, so it is a guided check`);
       if (live.inputRequired.includes('organizationId')) {
         assert.match(testCase.user_prompt, /\{\{REVIEWER_ORG_ID\}\}/, `${id} must name the reviewer organization`);
       }
       if (live.confirmation) {
-        assert.match(testCase.user_prompt, /^After I confirm, /, `${id} must ask for explicit confirmation`);
-        assert.match(testCase.expected_output, /^Asks for confirmation before the call, /, `${id} must expect a confirmation step`);
+        assert.match(testCase.user_prompt, /^I confirm /, `${id} must give the explicit confirmation in the prompt`);
+        assert.match(testCase.expected_output, /confirmed true/, `${id} must expect confirmed true`);
       } else {
-        assert.doesNotMatch(testCase.user_prompt, /After I confirm/, `${id} is a plain read`);
+        assert.doesNotMatch(testCase.user_prompt, /^I confirm/, `${id} is a plain read`);
       }
       assert.ok(testCase.expected_output.includes(`Calls ${name}`) || testCase.expected_output.includes(`calls ${name}`),
         `${id} expected output must name the call to ${name}`);
     }
+  }
+});
+
+test('the agent listing case tolerates the seeded organization control agent', () => {
+  const listing = testCaseById('TC-2');
+  assert.ok(listing, 'TC-2 must exist');
+  assert.match(listing.expected_output, /exactly two agents/);
+  assert.match(listing.expected_output, /dharma:organization-control-agent/);
+  assert.match(seedPlan, /runtime activation/i, 'seed plan must require the runtime activation entitlement');
+  assert.match(seedPlan, /control agent[^\n]*`ready`/i, 'seed plan must provision the control agent before freezing');
+  assert.doesNotMatch(guide, /Results do not depend on order\./, 'order independence is shown by the seed, not asserted');
+});
+
+test('the seed plan enrolls without a forbidden step and checks the trajectory count before freezing', () => {
+  const commands = seedPlan.split('\n').filter(line => /dharma (repositories connect|workspace sync)/.test(line));
+  assert.ok(commands.length > 0, 'seed plan must name its enrollment command');
+  for (const line of commands) assert.match(line, /--policy-revision /, `enrollment command needs --policy-revision: ${line.trim()}`);
+  assert.doesNotMatch(seedPlan, /\| Not present \| No GitHub App installation/, 'a connect step needs a GitHub App; do not forbid it and use it');
+  const countCheck = seedPlan.indexOf('Trajectory count check');
+  const freeze = seedPlan.indexOf('Freeze the seed');
+  assert.ok(countCheck > 0 && freeze > countCheck, 'the trajectory count check must come before the seed is frozen');
+});
+
+test('the checklist gates on the privacy fix and the security summary names every outside recipient', () => {
+  assert.doesNotMatch(checklist, /^- \[x\] Privacy policy/m, 'privacy policy item stays open until the privacy fix is published');
+  assert.doesNotMatch(checklist, /^- \[x\] Data retention/m, 'retention item stays open until the privacy fix is published');
+  assert.match(checklist, /^- \[ \] .*R-OAI-1/m);
+  assert.doesNotMatch(dataAndSecurity, /both are limited to organization admins/);
+  assert.doesNotMatch(dataAndSecurity, /Full local evidence remains in the encrypted local\s+vault unless/);
+  for (const term of ['customer_authorized_content', 'native_provider_payload', 'Google Cloud', 'GitHub', 'Clerk', '[NICK-DECIDES:']) {
+    assert.ok(dataAndSecurity.includes(term), `DATA_AND_SECURITY.md must cover ${term}`);
   }
 });
 
