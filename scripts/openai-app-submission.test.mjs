@@ -108,6 +108,35 @@ test('the seed plan enrolls without a forbidden step and checks the trajectory c
   assert.ok(countCheck > 0 && freeze > countCheck, 'the trajectory count check must come before the seed is frozen');
 });
 
+test('the seed plan enrolls only through a CLI path that succeeds with the repository bind it always makes', () => {
+  // `dharma workspace sync` always registers the workspace and then requests the
+  // repository-agent bind, which the server refuses when the repository-agent
+  // model is off. So it is not a route that avoids the repository-agent model.
+  const cli = readFileSync(resolve(import.meta.dirname, '..', 'packages/cli/src/index.ts'), 'utf8');
+  const workspaceSyncBody = cli.slice(cli.indexOf('async function workspaceSync('), cli.indexOf('async function syncWorkspacePolicy('));
+  const workspaceSyncBinds = /registerWorkspaceBeforeRepositoryBind\(/.test(workspaceSyncBody)
+    && /bindRepositoryAgent\(fabric, canonical\)/.test(cli);
+  if (workspaceSyncBinds) {
+    assert.doesNotMatch(seedPlan, /^\s*dharma workspace sync /m, 'workspace sync always binds the repository agent');
+    assert.doesNotMatch(seedPlan, /Route A/, 'no seed route may rely on the repository-agent model being off');
+  }
+  const commands = seedPlan.split('\n').filter(line => /^\s*dharma (repositories connect|workspace (sync|add)) /.test(line));
+  assert.ok(commands.length > 0, 'seed plan must name its enrollment command');
+  for (const line of commands) assert.match(line, /^\s*dharma repositories connect /, `only repositories connect enrolls: ${line.trim()}`);
+  // The readiness readback happens before anything is registered, because a
+  // refused bind leaves a registered workspace behind.
+  const readiness = seedPlan.indexOf('Readiness check');
+  const enroll = seedPlan.search(/^\s*dharma repositories connect /m);
+  assert.ok(readiness > 0 && readiness < enroll, 'the readiness check must come before the connect command');
+  for (const step of ['`github_app`', '`repository`', '`repository_agent`']) {
+    assert.ok(seedPlan.includes(step), `the readiness check must require onboarding step ${step}`);
+  }
+  // Connect syncs up to 20 existing Codex sessions of the workspace as its first
+  // learning evidence, which would add trajectories before T1.
+  assert.match(seedPlan, /dharma evidence preview --workspace <demo-repo-path> --provider codex/);
+  assert.match(seedPlan, /`trajectoryCount` 0/);
+});
+
 test('the checklist gates on the privacy fix and the security summary names every outside recipient', () => {
   assert.doesNotMatch(checklist, /^- \[x\] Privacy policy/m, 'privacy policy item stays open until the privacy fix is published');
   assert.doesNotMatch(checklist, /^- \[x\] Data retention/m, 'retention item stays open until the privacy fix is published');
