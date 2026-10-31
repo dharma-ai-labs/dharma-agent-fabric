@@ -61,8 +61,19 @@ test('the submission declares exactly the ChatGPT profile, with no merge or depl
   const profile = catalog.tools.filter(tool => tool.chatgptProfile).map(tool => tool.name);
   assert.deepEqual(Object.keys(submission.tools), profile, 'submission must declare the ChatGPT profile, in catalog order');
   assert.deepEqual(profile.filter(name => MERGE_OR_DEPLOY.test(name)), [], 'ChatGPT profile must not contain merge, release or rollout tools');
-  assert.match(readme, /\[NICK-DECIDES: [^\]]*server-side filter[^\]]*AGENTS\.md[^\]]*\]/s,
-    'README.md must keep the owner decision between a server-side ChatGPT filter and an AGENTS.md amendment');
+  assert.match(readme, /Owner decision \(Nick, 2026-10-31\): ship a server-side filter keyed to the ChatGPT OAuth\s+client[\s\S]*AGENTS\.md stays unchanged/,
+    'README.md must record the owner decision: a server-side ChatGPT filter, with AGENTS.md unchanged');
+  assert.doesNotMatch(readme, /NICK-DECIDES/, 'README.md has no open owner decision left');
+  assert.match(checklist, /^- \[ \] The ChatGPT app is not given merge or deployment tools in practice\..*server-side filter/m,
+    'the checklist keeps the filter item open until the filter ships');
+});
+
+test('the seed plan records the owner decisions on the reviewer role and organization', () => {
+  assert.match(seedPlan, /Owner decision \(Nick, 2026-10-31\): the reviewer account is `developer`/);
+  assert.match(seedPlan, /Owner decision \(Nick, 2026-10-31\): a dedicated reviewer organization/);
+  assert.match(seedPlan, /asks Nick before creating/);
+  assert.doesNotMatch(seedPlan, /NICK-DECIDES: the reviewer account role/);
+  assert.doesNotMatch(seedPlan, /NICK-DECIDES: reuse the existing reviewer organization/);
 });
 
 test('test cases are single turn: they name the organization and give any confirmation in the prompt', () => {
