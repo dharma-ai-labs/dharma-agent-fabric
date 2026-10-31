@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import test from 'node:test';
 import {
   agyCapability,
   agyAdapter,
+  claudeAdapter,
   codexAdapter,
   defaultProcessRunner,
   executableVersion,
@@ -326,6 +327,74 @@ test('cwd-less sessions are not inferred into a workspace', async () => {
   await mkdir(sessions);
   await writeFile(join(sessions, 'unknown.jsonl'), JSON.stringify({ type: 'user_message', text: 'unbound' }));
   assert.deepEqual(await codexAdapter.discover({ workspace, roots: [sessions] }), []);
+});
+
+test('Claude discovery takes the session time range from record timestamps, not file times', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-claude-time-'));
+  const workspace = join(root, 'repo');
+  const projects = join(root, 'projects', 'repo');
+  await mkdir(workspace);
+  await mkdir(projects, { recursive: true });
+  const path = join(projects, 'session.jsonl');
+  // Claude Code 2.1.316 opens every session file with untimestamped mode records, and
+  // a session written at once (a /login-only session) has record timestamps earlier
+  // than the file birthtime. The file times must not invert the trajectory range.
+  await writeFile(path, [
+    { type: 'mode', mode: 'default' },
+    { type: 'permission-mode', permissionMode: 'default' },
+    { type: 'system', subtype: 'local_command', cwd: workspace, timestamp: '2026-08-03T01:00:05.000Z' },
+    { type: 'attachment', cwd: workspace, timestamp: '2026-08-03T01:00:04.000Z' },
+    { type: 'system', subtype: 'local_command', cwd: workspace, timestamp: '2026-08-03T01:00:06.000Z' },
+    { type: 'last-prompt' },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+  await utimes(path, new Date('2026-08-01T00:00:00.000Z'), new Date('2026-08-01T00:00:00.000Z'));
+  const fileStat = await stat(path);
+  assert.ok(fileStat.mtime.getTime() < Date.parse('2026-08-03T01:00:04.000Z'));
+
+  const [session] = await claudeAdapter.discover({ workspace, roots: [join(root, 'projects')] });
+  assert.equal(session?.records.length, 6);
+  assert.equal(session?.startedAt, '2026-08-03T01:00:04.000Z');
+  assert.equal(session?.endedAt, '2026-08-03T01:00:06.000Z');
+  assert.ok(Date.parse(session!.startedAt) <= Date.parse(session!.endedAt));
+});
+
+test('Claude discovery falls back to file times only when no record has a timestamp', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-claude-time-'));
+  const workspace = join(root, 'repo');
+  const projects = join(root, 'projects', 'repo');
+  await mkdir(workspace);
+  await mkdir(projects, { recursive: true });
+  const path = join(projects, 'session.jsonl');
+  await writeFile(path, [
+    { type: 'mode', mode: 'default' },
+    { type: 'system', subtype: 'local_command', cwd: workspace, timestamp: 'not a time' },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+  await utimes(path, new Date('2099-01-01T00:00:00.000Z'), new Date('2099-01-01T00:00:00.000Z'));
+  const fileStat = await stat(path);
+
+  const [session] = await claudeAdapter.discover({ workspace, roots: [join(root, 'projects')] });
+  assert.equal(session?.startedAt, fileStat.birthtime.toISOString());
+  assert.equal(session?.endedAt, '2099-01-01T00:00:00.000Z');
+});
+
+test('Claude discovery pairs tool_use and tool_result records as tool evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-claude-kinds-'));
+  const workspace = join(root, 'repo');
+  const projects = join(root, 'projects', 'repo');
+  await mkdir(workspace);
+  await mkdir(projects, { recursive: true });
+  await writeFile(join(projects, 'session.jsonl'), [
+    { type: 'user', cwd: workspace, message: { role: 'user', content: 'run the tests' } },
+    { type: 'assistant', cwd: workspace, message: { role: 'assistant', content: [{ type: 'text', text: 'Running.' }] } },
+    { type: 'assistant', cwd: workspace, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash' }] } },
+    { type: 'user', cwd: workspace, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1' }] } },
+    { type: 'tools-used', cwd: workspace, tools: ['Bash'] },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+
+  const [session] = await claudeAdapter.discover({ workspace, roots: [join(root, 'projects')] });
+  assert.deepEqual(session?.records.map((record) => record.kind), [
+    'user_message', 'agent_message', 'tool_call', 'tool_result', 'metadata',
+  ]);
 });
 
 test('discovery bounds oversized sessions and marks sampled evidence partial', async () => {

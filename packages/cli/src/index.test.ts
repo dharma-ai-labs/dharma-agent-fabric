@@ -1814,6 +1814,73 @@ test('oversized queued current-device revision is retired only after checking th
   assert.equal(pending.length, 1);
 });
 
+test('queued capsule whose time range ends before it starts is retired and does not block the queue', async () => {
+  const base = await materializeWorkspacePolicy({
+    workspace: await mkdtemp(join(tmpdir(), 'dharma-inverted-capsule-')),
+    organizationId: 'org_northstar', revision: 'local',
+  });
+  const deviceId = '22222222-2222-4222-8222-222222222222';
+  const session = (sessionId: string, startedAt: string, endedAt: string) => ({
+    provider: 'claude' as const, sessionId, sourcePath: '/private/claude.jsonl',
+    workspace: '/repo', coverage: 'observed' as const, startedAt, endedAt,
+    records: [{ native: { type: 'system' }, sourcePath: '/private/claude.jsonl', line: 1,
+      workspace: '/repo', timestamp: endedAt, kind: 'metadata' as const }],
+  });
+  // CLI 0.2.212 queued this shape: start from the file birthtime, end from an earlier record.
+  const inverted = buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId, workspaceId: 'workspace-northstar',
+    session: session('login-only', '2026-10-31T03:19:40.946Z', '2026-10-31T03:19:40.909Z'),
+    policy: base.policy, rawContentId: `sha256:${'a'.repeat(64)}`, rawBytes: 32,
+  });
+  const valid = buildTrajectoryCapsule({
+    organizationId: 'org_northstar', deviceId, workspaceId: 'workspace-northstar',
+    session: session('later-work', '2026-10-31T03:21:27.212Z', '2026-10-31T03:22:55.503Z'),
+    policy: base.policy, rawContentId: `sha256:${'b'.repeat(64)}`, rawBytes: 32,
+  });
+  const pending = [inverted, valid];
+  const discarded: Array<{ trajectoryId: string; reason: string }> = [];
+  const sent: string[] = [];
+  const headsRequested: string[] = [];
+  const vault = {
+    listPendingCapsuleSyncs: async () => pending.map(capsule => ({ trajectoryId: capsule.trajectoryId,
+      revision: capsule.revision, capsule })),
+    markCapsuleSynced: (trajectoryId: string) => { pending.splice(pending.findIndex(c => c.trajectoryId === trajectoryId), 1); },
+    discardPendingCapsuleSync: (trajectoryId: string, _revision: number, reason: string) => {
+      discarded.push({ trajectoryId, reason });
+      pending.splice(pending.findIndex(c => c.trajectoryId === trajectoryId), 1);
+    },
+  };
+  const fabric = {
+    config: { organizationId: 'org_northstar', deviceId },
+    getTrajectoryHead: async ({ trajectoryId }: { trajectoryId: string }) => {
+      headsRequested.push(trajectoryId);
+      return { trajectoryId, head: null };
+    },
+    syncTrajectory: async (capsule: { trajectoryId: string; timeRange: { start: string; end: string } }) => {
+      if (Date.parse(capsule.timeRange.end) < Date.parse(capsule.timeRange.start)) {
+        throw Object.assign(new Error('Trajectory end precedes its start.'), { code: 'invalid_trajectory_capsule', status: 400 });
+      }
+      sent.push(capsule.trajectoryId);
+    },
+  };
+
+  const stderr: string[] = [];
+  const write = process.stderr.write;
+  process.stderr.write = ((chunk: string) => { stderr.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  let count: number;
+  try {
+    count = await syncPendingRetentionCapsules(vault as never, fabric as never, base.policy, 'workspace-northstar');
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(count, 1);
+  assert.deepEqual(discarded, [{ trajectoryId: inverted.trajectoryId, reason: 'time_range_inverted_superseded' }]);
+  assert.deepEqual(sent, [valid.trajectoryId]);
+  assert.deepEqual(headsRequested, [inverted.trajectoryId]);
+  assert.equal(pending.length, 0);
+  assert.match(stderr.join(''), /time range ends before it starts was retired/);
+});
+
 test('queued native recipient paths retire only an unsent revision without uploading it', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'dharma-recipient-path-capsule-'));
   const signed = signedPolicyAuthorization({
