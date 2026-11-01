@@ -29,7 +29,7 @@ const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath
 
 type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
 type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;
-  probe?: () => Promise<void>};
+  probe?: () => Promise<void>; request?: () => Promise<void>};
 type Compiled = Record<string, (...args: any[]) => Promise<any>>;
 
 function deferred() {
@@ -95,6 +95,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   const server = {config, registerWorkspace: async () => {
     const turn = turns.shift();
     assert.ok(turn, 'the fixture server was asked for more authorizations than the test scripted');
+    await hooks.request?.();
     const signed = await signing(async () => {
       if (turn.unreachable) throw new Error('fixture server unreachable');
       const value = authorization(turn.issuedAt, turn.revision);
@@ -121,7 +122,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
     dharmaHome: () => home, evidenceUploadLedgerPath: () => resolve(home, 'relay', 'evidence-upload-ledger.json'),
     // The real step recovers enrollment under signing control and turns a busy control into a degraded receipt.
     receiptAwareProviderCapabilities: async (providers: unknown[]) => {
-      await signing(async () => undefined).catch(() => undefined);
+      await signingWithContention({config}, async () => undefined).catch(() => undefined);
       return providers;
     },
     selectedProviderAdapters: () => [{capability: async () => {await hooks.probe?.(); return {provider: 'codex'};}}],
@@ -145,6 +146,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   };
   const sync = () => compiled.syncWorkspacePolicy!(server, item, 'policy-v1', true);
   return {hooks, policyPath, statePath, signing, sync, denyPolicyWriteAndRestore,
+    namedTurn: <T>(work: () => Promise<T>) => signingWithContention({config}, work),
     refresh: () => compiled.refreshVerifiedWorkspacePolicyForTransmission!(policyPath, WORKSPACE, server),
     denyPolicyWrite: (denied: boolean) => {hooks.rename = denied ? (_from, to) => {
       if (to === policyPath) throw Object.assign(new Error('EPERM: operation not permitted, rename'), {code: 'EPERM'});
@@ -281,19 +283,22 @@ test('control: the transmission refresh keeps syncing under its own refresh lock
 });
 
 for (const side of ['sync', 'refresh'] as const) {
-  test(`a named turn and a relay ${side} stopped in its provider probes both finish`, async t => {
-    // The named turn holds signing control for the whole turn and then refreshes.
-    const relayProbing = deferred(), turnHoldsControl = deferred();
-    const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);
-    await f.sync();
-    f.hooks.probe = async () => {f.hooks.probe = undefined; relayProbing.resolve(); await turnHoldsControl.promise;};
-    const relay = f[side]();
-    await relayProbing.promise;
-    const turn = f.signing(async () => {turnHoldsControl.resolve(); return f.refresh();});
-    const [first, second] = await Promise.allSettled([relay, turn]);
-    assert.deepEqual({relay: outcome(first), turn: outcome(second), ...await f.observed()},
-      {relay: 'applied', turn: 'applied', replay: NEWEST, policy: NEWEST, relayStart: 'verified'});
-  });
+  for (const gap of ['probe', 'request'] as const) {
+    test(`a named turn and a relay ${side} stopped before its ${gap} both finish`, async t => {
+      // The named turn holds signing control for the whole turn and then refreshes.
+      const relayStopped = deferred(), proceed = deferred();
+      const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);
+      await f.sync();
+      f.hooks[gap] = async () => {f.hooks[gap] = undefined; relayStopped.resolve(); await proceed.promise;};
+      f.hooks.contended = proceed.resolve;
+      const relay = f[side]();
+      await relayStopped.promise;
+      const turn = f.namedTurn(async () => {proceed.resolve(); return f.refresh();});
+      const [first, second] = await Promise.allSettled([relay, turn]);
+      assert.deepEqual({relay: outcome(first), turn: outcome(second), ...await f.observed()},
+        {relay: 'applied', turn: 'applied', replay: NEWEST, policy: NEWEST, relayStart: 'verified'});
+    });
+  }
 
   test(`provider probes during a relay ${side} hold neither lock`, async t => {
     // Six blocking spawns at 5 s each must not stall every signed request on the device.
