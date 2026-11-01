@@ -8,7 +8,8 @@ import test from 'node:test';
 import ts from 'typescript';
 import {assertPolicy, loadOrganizationPolicy} from '@dharma-ai-labs/agent-fabric-policy';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
-import {withDeviceSigningControl} from '@dharma-ai-labs/agent-fabric-relay-client';
+import {AgentFabricClient, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor, withDeviceSigningControl,
+  type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
 import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 import {applyServerEvidencePolicy, pathExistsOrThrow} from './index.js';
@@ -376,4 +377,30 @@ test('control: a current pair starts with no extra server request', async t => {
   await f.sync();
   assert.equal(await f.start(), `running on ${OLDER}`);
   assert.equal(f.sessions(), 1);
+});
+
+test('control: a signed request through the real client queue reuses the signing control its caller holds', async t => {
+  // Otherwise a policy sync that holds the control would wait on its own lock until it timed out.
+  const root = await fs.mkdtemp(resolve(tmpdir(), 'dharma-policy-sync-client-'));
+  t.after(() => fs.rm(root, {recursive: true, force: true}));
+  const values = new Map<string, string>();
+  const store: SecureSecretStore = {backend: 'linux-secret-service', async get(account) {return values.get(account) ?? null;},
+    async put(account, value) {values.set(account, value);}, async delete(account) {values.delete(account);}};
+  const hqUrl = 'https://hq.example', organizationId = `org_fixture${randomUUID().replaceAll('-', '')}`;
+  const identity = await loadOrCreateDeviceIdentity({hqUrl, organizationId, store});
+  const config: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl, organizationId, deviceId: randomUUID(),
+    deviceName: 'Synthetic', platform: 'linux', publicKeyEd25519: identity.publicKeyEd25519,
+    serverPublicKeyEd25519: identity.publicKeyEd25519, relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString()};
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, config);
+  await saveDeviceEnrollmentAnchor({config, store});
+  const client = await AgentFabricClient.open({configPath, statePath, store,
+    fetcher: async () => new Response(JSON.stringify({ok: true}), {status: 201})});
+  await client.openSession();
+  const reply = await withDeviceSigningControl({config: client.config}, async lease => {
+    const response = await client.registerWorkspace({workspaceId: 'fixture'});
+    await lease.assertHeld();
+    return response;
+  });
+  assert.equal(reply.ok, true);
 });
