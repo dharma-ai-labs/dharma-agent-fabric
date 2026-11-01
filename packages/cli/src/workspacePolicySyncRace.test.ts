@@ -29,7 +29,7 @@ const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath
 
 type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
 type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;
-  probe?: () => Promise<void>; request?: () => Promise<void>};
+  probe?: () => Promise<void>; signing?: () => Promise<void>; request?: () => Promise<void>};
 type Compiled = Record<string, (...args: any[]) => Promise<any>>;
 
 function deferred() {
@@ -109,7 +109,11 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   const compiled = await compile({...fs, dirname, resolve, createHash, randomUUID, Buffer, Date, setTimeout, structuredClone,
     process: {platform: process.platform, pid: process.pid, kill: process.kill.bind(process), once() {}, removeListener() {},
       stderr: {write: (line: string) => logged.push(line)}},
-    AbortController, performance, withDeviceSigningControl: signingWithContention, withRepositoryRelayStage,
+    AbortController, performance, withRepositoryRelayStage,
+    withDeviceSigningControl: async (input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<unknown>) => {
+      await hooks.signing?.();
+      return signingWithContention(input, work);
+    },
     required: (flags: Map<string, string>, name: string) => flags.get(name),
     client: async () => {sessions += 1; return server;}, acquireRelayProcessLease: async () => async () => undefined,
     selectRepositoryRelayRegistrations: async () => [{workspaceId: WORKSPACE, policyPath}],
@@ -283,20 +287,21 @@ test('control: the transmission refresh keeps syncing under its own refresh lock
 });
 
 for (const side of ['sync', 'refresh'] as const) {
-  for (const gap of ['probe', 'request'] as const) {
-    test(`a named turn and a relay ${side} stopped before its ${gap} both finish`, async t => {
+  for (const gap of ['probe', 'signing', 'request'] as const) {
+    test(`a named turn and a relay ${side} stopped at its ${gap} step both finish`, async t => {
       // The named turn holds signing control for the whole turn and then refreshes.
       const relayStopped = deferred(), proceed = deferred();
+      let stopped = false;
       const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);
       await f.sync();
-      f.hooks[gap] = async () => {f.hooks[gap] = undefined; relayStopped.resolve(); await proceed.promise;};
+      f.hooks[gap] = async () => {f.hooks[gap] = undefined; stopped = true; relayStopped.resolve(); await proceed.promise;};
       f.hooks.contended = proceed.resolve;
       const relay = f[side]();
-      await relayStopped.promise;
+      await Promise.race([relayStopped.promise, relay.catch(() => undefined)]);
       const turn = f.namedTurn(async () => {proceed.resolve(); return f.refresh();});
       const [first, second] = await Promise.allSettled([relay, turn]);
-      assert.deepEqual({relay: outcome(first), turn: outcome(second), ...await f.observed()},
-        {relay: 'applied', turn: 'applied', replay: NEWEST, policy: NEWEST, relayStart: 'verified'});
+      assert.deepEqual({stopped, relay: outcome(first), turn: outcome(second), ...await f.observed()},
+        {stopped: true, relay: 'applied', turn: 'applied', replay: NEWEST, policy: NEWEST, relayStart: 'verified'});
     });
   }
 
