@@ -20,7 +20,6 @@ import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
-  withDeviceSigningControl,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
@@ -73,6 +72,7 @@ import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInp
 import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, automaticBootstrapResume,
   connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
+import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -1830,8 +1830,9 @@ async function gitValue(workspace: string, argv: string[]) {
 }
 
 async function client() {
-  const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
-    hostScope: currentBootstrapHostScope(), isolatedSession: isIsolatedDeviceSession() });
+  const hostScope = currentBootstrapHostScope();
+  const instance = admitSignedRequests(await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope, isolatedSession: isIsolatedDeviceSession() }), hostScope);
   await instance.openSession(VERSION);
   return instance;
 }
@@ -5530,8 +5531,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     if (childScope && existing && existing.identity.membershipId !== childScope.request.membershipId) {
       throw new Error('setup_child_unavailable');
     }
-    const fabric = await startupStep(() => AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json'),
-      hostScope: currentBootstrapHostScope() }));
+    const hostScope = currentBootstrapHostScope();
+    const fabric = admitSignedRequests(await startupStep(() => AgentFabricClient.open({ configPath: configPath(),
+      statePath: resolve(paths.root, 'protocol-state.json'), hostScope })), hostScope);
     if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
       || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
     startupPhase = 'trust';
@@ -5684,7 +5686,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
-      withActivationBoundary: (operation, work) => withDeviceSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withClientSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
         const sharedReady = await repositorySharedReady(item);
@@ -5825,7 +5827,7 @@ async function withWorkspacePolicySyncOrder<T>(
   workspaceId: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return withDeviceSigningControl({ config: fabric.config, hostScope: currentBootstrapHostScope() },
+  return withClientSigningControl({ config: fabric.config, hostScope: currentBootstrapHostScope() },
     () => withWorkspacePolicyRefreshLock(workspaceId, operation));
 }
 

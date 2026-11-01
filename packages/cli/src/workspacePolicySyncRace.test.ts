@@ -14,6 +14,7 @@ import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 import {applyServerEvidencePolicy, pathExistsOrThrow} from './index.js';
 import {withRepositoryRelayStage} from './repositoryRelaySupervisor.js';
+import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 
 // Issue 397. The real sync, apply, lock, signing control and verification bodies
 // run against real files. Only the server, the provider probes and the rename and
@@ -73,11 +74,11 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   const signingWithContention = async <T>(input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<T>) => {
     let entered = false;
     const run = () => {entered = true; return work();};
-    try {return await withDeviceSigningControl({...input, timeoutMs: 50}, run);}
+    try {return await withClientSigningControl({...input, timeoutMs: 50}, run);}
     catch (error) {
       if (entered || (error as Error).message !== 'connection_anchor_busy') throw error;
       hooks.contended?.('device signing control');
-      return withDeviceSigningControl(input, run);
+      return withClientSigningControl(input, run);
     }
   };
   const item = {workspaceId: WORKSPACE, organizationId: ORGANIZATION, name: 'demo', path: workspace,
@@ -110,8 +111,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   const compiled = await compile({...fs, dirname, resolve, createHash, randomUUID, Buffer, Date, setTimeout, structuredClone,
     process: {platform: process.platform, pid: process.pid, kill: process.kill.bind(process), once() {}, removeListener() {},
       stderr: {write: (line: string) => logged.push(line)}},
-    AbortController, performance, withRepositoryRelayStage,
-    withDeviceSigningControl: async (input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<unknown>) => {
+    AbortController, performance, withRepositoryRelayStage, admitSignedRequests,
+    withClientSigningControl: async (input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<unknown>) => {
       await hooks.signing?.();
       return signingWithContention(input, work);
     },
@@ -440,4 +441,20 @@ test('a request queued after a sync takes signing control and before it queues r
   assert.deepEqual({sync: outcome(first), poll: outcome(second), served},
     {sync: 'applied', poll: 'applied', served: ['sessions', 'workspaces', 'skills/poll']});
   assert.deepEqual(await f.observed(), {replay: OLDER, policy: OLDER, relayStart: 'verified'});
+});
+
+test('control: signed requests on one client keep their order while the first is in flight', async t => {
+  const arrived = deferred(), release = deferred(), served: string[] = [];
+  const fabric = admitSignedRequests(await AgentFabricClient.open({...await syntheticDevice(t), fetcher: async url => {
+    const route = String(url).split('/agent-fabric/')[1]!;
+    served.push(route);
+    if (route === 'first') {arrived.resolve(); await release.promise;}
+    return new Response(JSON.stringify({ok: true}), {status: 201});
+  }}));
+  await fabric.openSession();
+  const requests = ['first', 'second', 'third'].map(route => fabric.signedPost(`/agent-fabric/${route}`, {}));
+  await arrived.promise;
+  release.resolve();
+  await Promise.all(requests);
+  assert.deepEqual(served, ['sessions', 'first', 'second', 'third']);
 });
