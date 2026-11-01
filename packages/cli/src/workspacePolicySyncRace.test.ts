@@ -8,7 +8,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import {assertPolicy, loadOrganizationPolicy} from '@dharma-ai-labs/agent-fabric-policy';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
-import {AgentFabricClient, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor, withDeviceSigningControl,
+import {AgentFabricClient, isDefinitiveAgentFabricRejection, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor, withDeviceSigningControl,
   type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
 import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
@@ -412,36 +412,41 @@ test('control: a signed request through the real client queue reuses the signing
   assert.equal(reply.ok, true);
 });
 
-test('a request queued after a sync takes signing control and before it queues registration holds neither up', async t => {
-  // Background skill preparation shares the relay client. Its poll must not reach the
-  // front of the client queue and wait for the signing control the sync already holds.
-  const stopped = deferred(), proceed = deferred(), served: string[] = [];
-  const device = await syntheticDevice(t, ORGANIZATION);
-  const fetcher = async (url: string | URL | Request) => {
-    served.push(String(url).split('/agent-fabric/')[1]!);
-    if (!String(url).endsWith('/workspaces')) return new Response(JSON.stringify({ok: true}), {status: 201});
-    return new Response(JSON.stringify({ok: true, organizationId: ORGANIZATION, organizationPolicyAuthorization: f.authorization(OLDER),
-      workspace: {id: WORKSPACE, status: 'active', policyRevision: 'signed-test-policy'}}), {status: 201});
-  };
-  const f = await fixture(t, [], {configPath: () => device.configPath, protocolStatePath: () => device.statePath,
-    isIsolatedDeviceSession: () => false, VERSION: 'test',
-    AgentFabricClient: {open: (input: object) => AgentFabricClient.open({...input, ...device, fetcher})}}, ['client']);
-  const fabric: AgentFabricClient = await f.openClient();
-  f.hooks.lock = async lockPath => {
-    if (!lockPath.endsWith('.refresh.lock')) return;
-    f.hooks.lock = undefined;
-    stopped.resolve();
-    await proceed.promise;
-  };
-  const sync = f.sync(fabric);
-  await stopped.promise;
-  const poll = fabric.pollSkill({workspaceId: WORKSPACE, provider: 'codex', installedBundleId: null});
-  proceed.resolve();
-  const [first, second] = await Promise.allSettled([sync, poll]);
-  assert.deepEqual({sync: outcome(first), poll: outcome(second), served},
-    {sync: 'applied', poll: 'applied', served: ['sessions', 'workspaces', 'skills/poll']});
-  assert.deepEqual(await f.observed(), {replay: OLDER, policy: OLDER, relayStart: 'verified'});
-});
+for (const [method, route, request] of [
+  ['signedPost', 'skills/poll', (fabric: AgentFabricClient) => fabric.pollSkill({workspaceId: WORKSPACE, provider: 'codex', installedBundleId: null})],
+  ['signedGet', 'read', (fabric: AgentFabricClient) => fabric.signedGet('/agent-fabric/read')],
+] as const) {
+  test(`a ${method} queued after a sync takes signing control and before it queues registration holds neither up`, async t => {
+    // Background skill preparation shares the relay client. Its request must not reach the
+    // front of the client queue and wait for the signing control the sync already holds.
+    const stopped = deferred(), proceed = deferred(), served: string[] = [];
+    const device = await syntheticDevice(t, ORGANIZATION);
+    const fetcher = async (url: string | URL | Request) => {
+      served.push(String(url).split('/agent-fabric/')[1]!);
+      if (!String(url).endsWith('/workspaces')) return new Response(JSON.stringify({ok: true}), {status: 201});
+      return new Response(JSON.stringify({ok: true, organizationId: ORGANIZATION, organizationPolicyAuthorization: f.authorization(OLDER),
+        workspace: {id: WORKSPACE, status: 'active', policyRevision: 'signed-test-policy'}}), {status: 201});
+    };
+    const f = await fixture(t, [], {configPath: () => device.configPath, protocolStatePath: () => device.statePath,
+      isIsolatedDeviceSession: () => false, VERSION: 'test',
+      AgentFabricClient: {open: (input: object) => AgentFabricClient.open({...input, ...device, fetcher})}}, ['client']);
+    const fabric: AgentFabricClient = await f.openClient();
+    f.hooks.lock = async lockPath => {
+      if (!lockPath.endsWith('.refresh.lock')) return;
+      f.hooks.lock = undefined;
+      stopped.resolve();
+      await proceed.promise;
+    };
+    const sync = f.sync(fabric);
+    await stopped.promise;
+    const queued = request(fabric);
+    proceed.resolve();
+    const [first, second] = await Promise.allSettled([sync, queued]);
+    assert.deepEqual({sync: outcome(first), queued: outcome(second), served},
+      {sync: 'applied', queued: 'applied', served: ['sessions', 'workspaces', route]});
+    assert.deepEqual(await f.observed(), {replay: OLDER, policy: OLDER, relayStart: 'verified'});
+  });
+}
 
 test('control: signed requests on one client keep their order while the first is in flight', async t => {
   const arrived = deferred(), release = deferred(), served: string[] = [];
@@ -457,4 +462,20 @@ test('control: signed requests on one client keep their order while the first is
   release.resolve();
   await Promise.all(requests);
   assert.deepEqual(served, ['sessions', 'first', 'second', 'third']);
+});
+
+test('a request the server refuses leaves the line open for the requests behind it and after it', async t => {
+  const served: string[] = [];
+  const fabric = admitSignedRequests(await AgentFabricClient.open({...await syntheticDevice(t), fetcher: async url => {
+    const route = String(url).split('/agent-fabric/')[1]!;
+    served.push(route);
+    return route === 'refused' ? new Response(JSON.stringify({ok: false}), {status: 400})
+      : new Response(JSON.stringify({ok: true}), {status: 201});
+  }}));
+  await fabric.openSession();
+  const refused = fabric.signedPost('/agent-fabric/refused', {}), queued = fabric.signedPost('/agent-fabric/queued', {});
+  await assert.rejects(refused, isDefinitiveAgentFabricRejection);
+  assert.equal((await queued).ok, true);
+  assert.equal((await fabric.signedPost('/agent-fabric/later', {})).ok, true);
+  assert.deepEqual(served, ['sessions', 'refused', 'queued', 'later']);
 });
