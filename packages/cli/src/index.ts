@@ -20,7 +20,6 @@ import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
-  withDeviceSigningControl,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
@@ -73,6 +72,7 @@ import { bootstrapGrantMode, readPrivateBootstrapGrant } from './privateGrantInp
 import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, automaticBootstrapResume,
   connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
+import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
@@ -620,7 +620,8 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   workspaceId: string,
   fabric: AgentFabricClient,
 ) {
-  return withWorkspacePolicyRefreshLock(workspaceId, async () => {
+  const providers = await providerCapabilitiesForWorkspacePolicy(null);
+  return withWorkspacePolicySyncOrder(fabric, workspaceId, async () => {
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
     if (!item) throw new Error('Content transmission workspace is not registered locally.');
     const canonicalPolicyPath = resolve(item.path, '.dharma', 'approved-policy.json');
@@ -635,7 +636,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     if (current.organizationId !== item.organizationId) {
       throw new Error('Workspace policy organization does not match registration.');
     }
-    await syncWorkspacePolicy(fabric, item, current.revision, true);
+    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true, providers);
     return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
   });
 }
@@ -1472,7 +1473,21 @@ async function applyWorkspaceAuthorizationAtomically(input: {
         signature: input.authorization.signature,
         contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
       }));
-      await step(() => writeJsonAtomic(input.policyPath, input.policy));
+      try {
+        await step(() => writeJsonAtomic(input.policyPath, input.policy));
+      } catch (error) {
+        // Windows denies this rename while any reader has the policy file open, so
+        // the replay record returns to the last accepted authorization. The same
+        // denial can hit this restore. The next sync or relay start then repairs the
+        // pair, and the write failure stays the reported error.
+        try {
+          await step(() => previous ? writeJsonAtomic(statePath, previous) : unlink(statePath));
+        } catch (restoreError) {
+          process.stderr.write(`${JSON.stringify({ event: 'workspace_policy_replay_restore_failed',
+            workspaceId: input.workspaceId, code: (restoreError as NodeJS.ErrnoException).code ?? null })}\n`);
+        }
+        throw error;
+      }
     }));
     await scope?.assert();
   } catch (error) {
@@ -1815,8 +1830,9 @@ async function gitValue(workspace: string, argv: string[]) {
 }
 
 async function client() {
-  const instance = await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
-    hostScope: currentBootstrapHostScope(), isolatedSession: isIsolatedDeviceSession() });
+  const hostScope = currentBootstrapHostScope();
+  const instance = admitSignedRequests(await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
+    hostScope, isolatedSession: isIsolatedDeviceSession() }), hostScope);
   await instance.openSession(VERSION);
   return instance;
 }
@@ -5515,8 +5531,9 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     if (childScope && existing && existing.identity.membershipId !== childScope.request.membershipId) {
       throw new Error('setup_child_unavailable');
     }
-    const fabric = await startupStep(() => AgentFabricClient.open({ configPath: configPath(), statePath: resolve(paths.root, 'protocol-state.json'),
-      hostScope: currentBootstrapHostScope() }));
+    const hostScope = currentBootstrapHostScope();
+    const fabric = admitSignedRequests(await startupStep(() => AgentFabricClient.open({ configPath: configPath(),
+      statePath: resolve(paths.root, 'protocol-state.json'), hostScope })), hostScope);
     if (fabric.config.organizationId !== config.organizationId || fabric.config.deviceId !== config.deviceId
       || fabric.config.publicKeyEd25519 !== config.publicKeyEd25519) throw new Error('named_session_trust_scope_mismatch');
     startupPhase = 'trust';
@@ -5669,7 +5686,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
-      withActivationBoundary: (operation, work) => withDeviceSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withClientSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
         const sharedReady = await repositorySharedReady(item);
@@ -5788,9 +5805,39 @@ async function syncWorkspacePolicy(
   apply = true,
   providerIds: ProviderId[] | null = null,
 ) {
-  const providers = await receiptAwareProviderCapabilities(
+  const providers = await providerCapabilitiesForWorkspacePolicy(providerIds);
+  return withWorkspacePolicySyncOrder(fabric, item.workspaceId,
+    () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providers));
+}
+
+// Provider probes spawn up to six blocking commands, so they run before either lock
+// of a policy sync. A slow CLI must not stall every signed request on this device.
+async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] | null) {
+  return receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
   );
+}
+
+// Every policy sync takes device signing control and then the refresh lock. A named
+// work turn holds signing control and then refreshes, so the reverse order makes that
+// turn lose a timeout to the relay. The control nests through its async owner, so a
+// sync inside the turn reuses it.
+async function withWorkspacePolicySyncOrder<T>(
+  fabric: AgentFabricClient,
+  workspaceId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withClientSigningControl({ config: fabric.config, hostScope: currentBootstrapHostScope() },
+    () => withWorkspacePolicyRefreshLock(workspaceId, operation));
+}
+
+async function syncWorkspacePolicyHoldingRefreshLock(
+  fabric: AgentFabricClient,
+  item: WorkspaceRecord,
+  policyRevision: string,
+  apply: boolean,
+  providers: ProviderCapability[],
+) {
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
@@ -6075,6 +6122,17 @@ async function expiredSkillAuthorizationForReplacement(
     });
     if (!refreshed) throw error;
     return getExpiredSkillBundleAuthorizationForReplacement(authorizationInput(refreshed.receiptHash));
+  }
+}
+
+// Null only for the anti-rollback refusal, which means the replay state is ahead of
+// this file. Every other verification failure still throws.
+async function loadVerifiedWorkspacePolicyUnlessReplayAhead(path: string, workspaceId: string) {
+  try { return await loadVerifiedWorkspacePolicy(path, workspaceId); }
+  catch (error) {
+    if ((error as Error | undefined)?.message
+      === 'Server workspace policy authorization is older than the last accepted authorization.') return null;
+    throw error;
   }
 }
 
@@ -8798,7 +8856,9 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   if (!authorized.some(row => row.workspaceId === selected.workspaceId && row.policyPath === anchor)) {
     throw new Error('Relay policy is not registered to this enrolled device.');
   }
-  await loadVerifiedWorkspacePolicy(anchor, selected.workspaceId);
+  // A replay state ahead of this file does not stop the start: the workspace loop
+  // repairs it and verifies again before any work runs.
+  await loadVerifiedWorkspacePolicyUnlessReplayAhead(anchor, selected.workspaceId);
   const release = await acquireRelayProcessLease();
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -8864,10 +8924,16 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     throw new Error('Relay policy must be the canonical policy of one registered workspace.');
   }
   let canonicalWorkspace: WorkspaceRecord = selectedWorkspace;
-  let policy = await withRepositoryRelayStage('policy_verification',
-    () => loadVerifiedWorkspacePolicy(policyPath, canonicalWorkspace.workspaceId));
+  const verifiedPolicy = await withRepositoryRelayStage('policy_verification',
+    () => loadVerifiedWorkspacePolicyUnlessReplayAhead(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
   const fabric = await withRepositoryRelayStage('session_open', () => client());
+  // A kill or a denied restore between the two authorization writes leaves the replay
+  // state ahead of the file. One fresh server authorization repairs the pair: it takes
+  // the same signature and anti-rollback checks as any sync, and the file is verified
+  // again afterwards, so nothing older than the last accepted authorization can run.
+  let policy = verifiedPolicy ?? await withRepositoryRelayStage('policy_verification',
+    () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, canonicalWorkspace.workspaceId, fabric));
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
   let stopping = signal.aborted;

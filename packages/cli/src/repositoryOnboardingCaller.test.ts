@@ -915,7 +915,7 @@ test('workspace synchronization validates policy against the server-returned can
     id: canonical.workspaceId, status: 'active', policyRevision: 'policy_fixture',
   }, organizationPolicyAuthorization: { workspaceId: canonical.workspaceId } };
   const fabric = { registerWorkspace: async () => { calls.push('register'); return response; } };
-  const actual = await (await caller('syncWorkspacePolicy', {
+  const actual = await (await caller('syncWorkspacePolicyHoldingRefreshLock', {
     receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
     registry: async () => [requested, canonical],
     reconcileWorkspaceRegistration: reconcile,
@@ -1002,7 +1002,7 @@ test('canonical registration cannot bypass signed-policy verification or bind af
   const f = registrationFixture();
   const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
   let bound = false;
-  const synchronize = await caller('syncWorkspacePolicy', {
+  const synchronize = await caller('syncWorkspacePolicyHoldingRefreshLock', {
     receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
     registry: async () => [f.canonical], reconcileWorkspaceRegistration: reconcile,
     readDeviceConfig: async () => ({ serverPublicKeyEd25519: 'fixture_key' }),
