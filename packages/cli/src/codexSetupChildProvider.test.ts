@@ -46,7 +46,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   }};
   const dependencies: Record<string, unknown> = {Date, resolve, config, scope: role, vault, workspaceId: request.workspaceId,
     name: request.name, existing: null, item: {path: root}, paths: {root: resolve(root, 'session')}, VERSION: '0.2.153',
-    process: {env: {}}, transport: undefined, AgentFabricClient: {open: async () => {effects.push('fabric-client'); return fabric;}},
+    process: {env: {}}, transport: undefined, admitSignedRequests: (client: unknown) => client,
+    AgentFabricClient: {open: async () => {effects.push('fabric-client'); return fabric;}},
     configPath: () => 'synthetic-config-path', currentBootstrapHostScope: () => undefined,
     createNamedSessionTrust: () => ({refresh: async () => {effects.push('trust');}}),
     refreshVerifiedWorkspacePolicyForTransmission: async () => ({tasks: {writePaths: ['src/**']}}),
