@@ -635,7 +635,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     if (current.organizationId !== item.organizationId) {
       throw new Error('Workspace policy organization does not match registration.');
     }
-    await syncWorkspacePolicy(fabric, item, current.revision, true);
+    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true);
     return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
   });
 }
@@ -1472,7 +1472,15 @@ async function applyWorkspaceAuthorizationAtomically(input: {
         signature: input.authorization.signature,
         contentLedgerInitialized: previous?.contentLedgerInitialized === true || contentAuthorized,
       }));
-      await step(() => writeJsonAtomic(input.policyPath, input.policy));
+      try {
+        await step(() => writeJsonAtomic(input.policyPath, input.policy));
+      } catch (error) {
+        // Windows denies this rename while any reader has the policy file open.
+        // A replay record ahead of the file would refuse every later start before
+        // a sync could repair it, so it returns to the last accepted authorization.
+        await step(() => previous ? writeJsonAtomic(statePath, previous) : unlink(statePath));
+        throw error;
+      }
     }));
     await scope?.assert();
   } catch (error) {
@@ -5782,6 +5790,17 @@ async function workspaceSync(flags: Map<string, string | boolean>, positional: s
 }
 
 async function syncWorkspacePolicy(
+  fabric: AgentFabricClient,
+  item: WorkspaceRecord,
+  policyRevision: string,
+  apply = true,
+  providerIds: ProviderId[] | null = null,
+) {
+  return withWorkspacePolicyRefreshLock(item.workspaceId,
+    () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providerIds));
+}
+
+async function syncWorkspacePolicyHoldingRefreshLock(
   fabric: AgentFabricClient,
   item: WorkspaceRecord,
   policyRevision: string,
