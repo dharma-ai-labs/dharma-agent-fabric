@@ -8,24 +8,28 @@ import test from 'node:test';
 import ts from 'typescript';
 import {assertPolicy, loadOrganizationPolicy} from '@dharma-ai-labs/agent-fabric-policy';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
+import {withDeviceSigningControl} from '@dharma-ai-labs/agent-fabric-relay-client';
 import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 import {applyServerEvidencePolicy, pathExistsOrThrow} from './index.js';
+import {withRepositoryRelayStage} from './repositoryRelaySupervisor.js';
 
-// Issue 397. The real sync, apply, lock and verification bodies run against real
-// files. Only the server and the rename and link boundaries are observable, so
-// every ordering below is forced by a gate: nothing sleeps and nothing races.
+// Issue 397. The real sync, apply, lock, signing control and verification bodies
+// run against real files. Only the server, the provider probes and the rename and
+// link boundaries are observable, so every ordering below is forced by a gate:
+// nothing sleeps and nothing races.
 const EARLIER = '2026-10-31T18:58:01.000Z', OLDER = '2026-10-31T18:59:16.731Z', NEWER = '2026-10-31T19:00:34.925Z';
+const NEWEST = '2026-10-31T19:01:52.118Z';
 const REFUSAL = 'Server workspace policy authorization is older than the last accepted authorization.';
 const ORGANIZATION = 'org_demo', WORKSPACE = '00000005-1111-4111-8111-111111111111';
 const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath', 'assertWorkspaceAuthorizationCurrent',
   'applyWorkspaceAuthorizationAtomically', 'newEvidenceUploadLedger', 'assertEvidenceLedger',
   'evidenceLedgerForPolicyActivation', 'pathExists', 'acquirePidLock', 'withFileLock', 'writeJsonAtomic',
-  'withWorkspacePolicyRefreshLock', 'reconcileWorkspaceRegistration', 'loadVerifiedWorkspacePolicy',
-  'refreshVerifiedWorkspacePolicyForTransmission'];
+  'reconcileWorkspaceRegistration', 'relayStart', 'relayWorkspaceLoop'];
 
-type Turn = {issuedAt: string; revision?: string; signed?: () => void; respond?: Promise<void>};
-type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void};
+type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
+type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;
+  probe?: () => Promise<void>};
 type Compiled = Record<string, (...args: any[]) => Promise<any>>;
 
 function deferred() {
@@ -38,7 +42,7 @@ async function compile(context: Record<string, unknown>) {
   const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const functions = ast.statements.filter(ts.isFunctionDeclaration);
-  const names = [...COMPILED, ...functions.map(node => node.name?.text ?? '').filter(name => name.startsWith('syncWorkspacePolicy'))];
+  const names = [...new Set([...COMPILED, ...functions.map(node => node.name?.text ?? '').filter(name => /workspacepolicy/i.test(name))])];
   const declarations = names.map(name => {
     const nodes = functions.filter(node => node.name?.text === name);
     assert.equal(nodes.length, 1, name);
@@ -58,7 +62,23 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   await fs.mkdir(workspace);
   await fs.writeFile(resolve(workspace, 'package.json'), JSON.stringify({scripts: {test: 'node --test'}}));
   const keys = generateKeyPairSync('ed25519'), publicKey = keys.publicKey.export({format: 'jwk'}).x!;
-  const hooks: Hooks = {};
+  const hooks: Hooks = {}, logged: string[] = [], ran: string[] = [];
+  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
+  const statePath = resolve(home, 'registry', 'workspace-authorizations', `${WORKSPACE}.json`);
+  const config = {hqUrl: 'https://www.dharma-ai.io', organizationId: ORGANIZATION, deviceId: randomUUID()};
+  const signing = <T>(work: () => Promise<T>, timeoutMs?: number) =>
+    withDeviceSigningControl({config, ...(timeoutMs ? {timeoutMs} : {})}, work);
+  // The real primitive has no contention hook, so a short first attempt reports it.
+  const signingWithContention = async <T>(input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<T>) => {
+    let entered = false;
+    const run = () => {entered = true; return work();};
+    try {return await withDeviceSigningControl({...input, timeoutMs: 50}, run);}
+    catch (error) {
+      if (entered || (error as Error).message !== 'connection_anchor_busy') throw error;
+      hooks.contended?.('device signing control');
+      return withDeviceSigningControl(input, run);
+    }
+  };
   const item = {workspaceId: WORKSPACE, organizationId: ORGANIZATION, name: 'demo', path: workspace,
     routeHash: `sha256:${'a'.repeat(64)}`, repositoryRemoteHash: `sha256:${'b'.repeat(64)}`, status: 'active'};
   const authorization = (issuedAt: string, revision = 'signed-test-policy') => {
@@ -70,34 +90,76 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
       issuedAt, expiresAt: new Date(Date.now() + 86_400_000).toISOString(), keyVersion: 'synthetic'};
     return {...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey)};
   };
-  const server = {registerWorkspace: async () => {
+  let sessions = 0;
+  // Like the real client, the request holds signing control and the reply does not.
+  const server = {config, registerWorkspace: async () => {
     const turn = turns.shift();
     assert.ok(turn, 'the fixture server was asked for more authorizations than the test scripted');
-    const signed = authorization(turn.issuedAt, turn.revision);
-    turn.signed?.();
+    const signed = await signing(async () => {
+      if (turn.unreachable) throw new Error('fixture server unreachable');
+      const value = authorization(turn.issuedAt, turn.revision);
+      turn.signed?.();
+      return value;
+    });
     await turn.respond;
     return {ok: true, organizationId: ORGANIZATION, organizationPolicyAuthorization: signed,
       workspace: {id: WORKSPACE, status: 'active', policyRevision: 'signed-test-policy'}};
   }};
-  const compiled = await compile({...fs, dirname, resolve, createHash, randomUUID, Buffer, process, Date, setTimeout, structuredClone,
+  const compiled = await compile({...fs, dirname, resolve, createHash, randomUUID, Buffer, Date, setTimeout, structuredClone,
+    process: {platform: process.platform, pid: process.pid, kill: process.kill.bind(process), once() {}, removeListener() {},
+      stderr: {write: (line: string) => logged.push(line)}},
+    AbortController, performance, withDeviceSigningControl: signingWithContention, withRepositoryRelayStage,
+    required: (flags: Map<string, string>, name: string) => flags.get(name),
+    client: async () => {sessions += 1; return server;}, acquireRelayProcessLease: async () => async () => undefined,
+    selectRepositoryRelayRegistrations: async () => [{workspaceId: WORKSPACE, policyPath}],
+    serializeRelayWork: () => (operation: () => Promise<unknown>) => operation(),
+    RepositorySourceWatcher: class {}, BlockedRepositorySourceRetry: class {},
+    rawLocalRetentionDays: (policy: {serverAuthorization: {issuedAt: string}}) => {ran.push(policy.serverAuthorization.issuedAt); return 1;},
+    openBootstrapVault: async () => {throw RELAY_WORK_STARTS;},
     exports: {}, currentBootstrapHostScope, writeBootstrapHostJson, pathExistsOrThrow, assertPolicy, loadOrganizationPolicy,
     applyServerEvidencePolicy, UUID_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     dharmaHome: () => home, evidenceUploadLedgerPath: () => resolve(home, 'relay', 'evidence-upload-ledger.json'),
-    receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [], registry: async () => [item],
-    canonicalFilesystemPath: async (path: string) => path,
+    // The real step recovers enrollment under signing control and turns a busy control into a degraded receipt.
+    receiptAwareProviderCapabilities: async (providers: unknown[]) => {
+      await signing(async () => undefined).catch(() => undefined);
+      return providers;
+    },
+    selectedProviderAdapters: () => [{capability: async () => {await hooks.probe?.(); return {provider: 'codex'};}}],
+    registry: async () => [item], canonicalFilesystemPath: async (path: string) => path,
     readDeviceConfig: async () => ({organizationId: ORGANIZATION, serverPublicKeyEd25519: publicKey}),
     rename: async (from: string, to: string) => {await hooks.rename?.(from, to); return fs.rename(from, to);},
     link: async (from: string, to: string) => {
       try {return await fs.link(from, to);}
       catch (error) {if ((error as NodeJS.ErrnoException).code === 'EEXIST') hooks.contended?.(to); throw error;}
     }, ...overrides});
-  const policyPath = resolve(workspace, '.dharma', 'approved-policy.json');
-  const statePath = resolve(home, 'registry', 'workspace-authorizations', `${WORKSPACE}.json`);
-  return {hooks, policyPath, statePath, sync: () => compiled.syncWorkspacePolicy!(server, item, 'policy-v1', true),
+  const relayOutcome = (run: () => Promise<unknown>) => run().then(() => 'relay returned', (error: Error) => {
+    const cause = error.cause ?? error;
+    return cause === RELAY_WORK_STARTS ? `running on ${ran.at(-1)}` : (cause as Error).message;
+  });
+  const denyPolicyWriteAndRestore = () => {
+    let stateWrites = 0;
+    hooks.rename = (_from, to) => {
+      if (to === policyPath) throw Object.assign(new Error('EPERM: operation not permitted, rename'), {code: 'EPERM'});
+      if (to === statePath && ++stateWrites === 2) throw Object.assign(new Error('EBUSY: resource busy, rename'), {code: 'EBUSY'});
+    };
+  };
+  const sync = () => compiled.syncWorkspacePolicy!(server, item, 'policy-v1', true);
+  return {hooks, policyPath, statePath, signing, sync, denyPolicyWriteAndRestore,
     refresh: () => compiled.refreshVerifiedWorkspacePolicyForTransmission!(policyPath, WORKSPACE, server),
     denyPolicyWrite: (denied: boolean) => {hooks.rename = denied ? (_from, to) => {
       if (to === policyPath) throw Object.assign(new Error('EPERM: operation not permitted, rename'), {code: 'EPERM'});
     } : undefined;},
+    // A denied restore and a hard kill between the two renames leave these same bytes.
+    strand: async () => {
+      await sync();
+      denyPolicyWriteAndRestore();
+      await assert.rejects(sync());
+      hooks.rename = undefined;
+    },
+    sessions: () => sessions, ran: () => ran.length, logged: () => logged.map(line => JSON.parse(line)),
+    start: () => relayOutcome(() => compiled.relayStart!(new Map<string, string | boolean>([['policy', policyPath], ['once', true]]))),
+    restart: () => relayOutcome(() => compiled.relayWorkspaceLoop!(new Map([['policy', policyPath]]), new AbortController().signal,
+      (operation: () => Promise<unknown>) => operation())),
     observed: async () => ({
       replay: JSON.parse(await fs.readFile(statePath, 'utf8')).issuedAt as string,
       policy: (await loadOrganizationPolicy(policyPath)).serverAuthorization?.issuedAt,
@@ -106,6 +168,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
 }
 
 const outcome = (settled: PromiseSettledResult<unknown>) => settled.status === 'fulfilled' ? 'applied' : String(settled.reason?.message);
+const RELAY_WORK_STARTS = new Error('fixture: the relay reached its first work step');
 
 test('a policy write denied after the replay write leaves both records on the last accepted authorization', async t => {
   const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}]);
@@ -215,4 +278,92 @@ test('control: the transmission refresh keeps syncing under its own refresh lock
   await f.sync();
   assert.equal((await f.refresh()).serverAuthorization.issuedAt, NEWER);
   assert.deepEqual(await f.observed(), {replay: NEWER, policy: NEWER, relayStart: 'verified'});
+});
+
+for (const side of ['sync', 'refresh'] as const) {
+  test(`a named turn and a relay ${side} stopped in its provider probes both finish`, async t => {
+    // The named turn holds signing control for the whole turn and then refreshes.
+    const relayProbing = deferred(), turnHoldsControl = deferred();
+    const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);
+    await f.sync();
+    f.hooks.probe = async () => {f.hooks.probe = undefined; relayProbing.resolve(); await turnHoldsControl.promise;};
+    const relay = f[side]();
+    await relayProbing.promise;
+    const turn = f.signing(async () => {turnHoldsControl.resolve(); return f.refresh();});
+    const [first, second] = await Promise.allSettled([relay, turn]);
+    assert.deepEqual({relay: outcome(first), turn: outcome(second), ...await f.observed()},
+      {relay: 'applied', turn: 'applied', replay: NEWEST, policy: NEWEST, relayStart: 'verified'});
+  });
+
+  test(`provider probes during a relay ${side} hold neither lock`, async t => {
+    // Six blocking spawns at 5 s each must not stall every signed request on the device.
+    const probing = deferred(), checked = deferred();
+    const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}]);
+    await f.sync();
+    f.hooks.probe = async () => {f.hooks.probe = undefined; probing.resolve(); await checked.promise;};
+    const relay = f[side]();
+    await probing.promise;
+    const held = {refresh: await fs.lstat(`${f.statePath}.refresh.lock`).then(() => 'held', () => 'free'),
+      signing: await f.signing(async () => 'free', 50).catch((error: Error) => error.message)};
+    checked.resolve();
+    await relay;
+    assert.deepEqual(held, {refresh: 'free', signing: 'free'});
+  });
+}
+
+test('a denied restore keeps the write failure and reports that the replay state stayed ahead', async t => {
+  const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}]);
+  await f.sync();
+  f.denyPolicyWriteAndRestore();
+  await assert.rejects(f.sync(), {code: 'EPERM'});
+  assert.deepEqual(await f.observed(), {replay: NEWER, policy: OLDER, relayStart: REFUSAL});
+  assert.deepEqual(f.logged(), [{event: 'workspace_policy_replay_restore_failed', workspaceId: WORKSPACE, code: 'EBUSY'}]);
+});
+
+for (const [name, entry] of [['relay start', 'start'], ['a restarted relay worker', 'restart']] as const) {
+  test(`${name} re-syncs a replay state ahead of the policy file, then runs only on the verified policy`, async t => {
+    const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);
+    await f.strand();
+    assert.equal((await f.observed()).relayStart, REFUSAL);
+    assert.equal(await f[entry](), `running on ${NEWEST}`);
+    assert.deepEqual(await f.observed(), {replay: NEWEST, policy: NEWEST, relayStart: 'verified'});
+    assert.equal(f.sessions(), 1);
+  });
+}
+
+for (const [name, repair] of [['older', {issuedAt: OLDER}], ['same-time, differently signed', {issuedAt: NEWER, revision: 'same-time-other-grant'}],
+  ['unreachable', {issuedAt: NEWEST, unreachable: true}]] as const) {
+  test(`control: a repair that is ${name} leaves a stranded pair alone and the relay does not run`, async t => {
+    const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {...repair}]);
+    await f.strand();
+    const policy = await fs.readFile(f.policyPath, 'utf8'), replay = await fs.readFile(f.statePath, 'utf8');
+    assert.doesNotMatch(await f.start(), /^running on/);
+    assert.equal(f.ran(), 0);
+    assert.equal(await fs.readFile(f.policyPath, 'utf8'), policy);
+    assert.equal(await fs.readFile(f.statePath, 'utf8'), replay);
+    assert.equal((await f.observed()).relayStart, REFUSAL);
+  });
+}
+
+test('control: only a replay state ahead of the file re-syncs, so other refusals stay fatal with no server request', async t => {
+  const missing = await fixture(t, [{issuedAt: OLDER}]);
+  await missing.sync();
+  await fs.rm(missing.statePath);
+  assert.equal(await missing.start(), 'Workspace authorization replay state is missing or invalid; apply a fresh server policy.');
+  assert.equal(missing.sessions(), 0);
+  const tampered = await fixture(t, [{issuedAt: OLDER}]);
+  await tampered.sync();
+  const policy = JSON.parse(await fs.readFile(tampered.policyPath, 'utf8'));
+  policy.serverAuthorization.signature = Buffer.alloc(64, 7).toString('base64url');
+  await fs.writeFile(tampered.policyPath, JSON.stringify(policy));
+  assert.doesNotMatch(await tampered.start(), /^running on/);
+  assert.equal(tampered.sessions(), 0);
+  assert.equal(tampered.ran(), 0);
+});
+
+test('control: a current pair starts with no extra server request', async t => {
+  const f = await fixture(t, [{issuedAt: OLDER}]);
+  await f.sync();
+  assert.equal(await f.start(), `running on ${OLDER}`);
+  assert.equal(f.sessions(), 1);
 });

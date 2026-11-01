@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve} from 'node:path';
 import test from 'node:test';
+import type {SecureSecretStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import * as relay from './index.js';
 
 type Lease={controllerInstanceId:string;processIdentityDigest:string;leaseDigest:string;assertHeld():Promise<void>};
@@ -45,4 +49,25 @@ test('expired async context cannot silently reenter a released control lease',as
   const run=api(),scope=input();let later!:()=>void;let detached!:Promise<unknown>;
   await run(scope,async()=>{detached=new Promise<void>(r=>{later=r;}).then(()=>run(scope,async()=>assert.fail('released context reused')));});
   later();await assert.rejects(detached,/device_signing_control_unavailable/);
+});
+
+test('a signed request through the client queue reuses the signing control its caller holds',async t=>{
+  // Otherwise a policy sync that holds the control would wait on its own lock until it timed out.
+  const root=await mkdtemp(resolve(tmpdir(),'fabric-signing-nesting-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const values=new Map<string,string>();
+  const store:SecureSecretStore={backend:'linux-secret-service',async get(account){return values.get(account)??null;},
+    async put(account,value){values.set(account,value);},async delete(account){values.delete(account);}};
+  const hqUrl='https://hq.example',organizationId='org_fixture'+randomUUID().replaceAll('-','');
+  const identity=await relay.loadOrCreateDeviceIdentity({hqUrl,organizationId,store});
+  const config:relay.DeviceConfig={schema:'dharma.device-config/v1',hqUrl,organizationId,deviceId:randomUUID(),deviceName:'Synthetic',
+    platform:'linux',publicKeyEd25519:identity.publicKeyEd25519,serverPublicKeyEd25519:identity.publicKeyEd25519,
+    relayUrl:'wss://relay.example',enrolledAt:new Date().toISOString()};
+  const configPath=resolve(root,'device.json'),statePath=resolve(root,'state.json');
+  await relay.saveDeviceConfig(configPath,config);await relay.saveDeviceEnrollmentAnchor({config,store});
+  const client=await relay.AgentFabricClient.open({configPath,statePath,store,
+    fetcher:async()=>new Response(JSON.stringify({ok:true}),{status:201})});
+  await client.openSession();
+  const reply=await api()({config:client.config},async lease=>{
+    const response=await client.registerWorkspace({workspaceId:'fixture'});await lease.assertHeld();return response;});
+  assert.equal(reply.ok,true);
 });
