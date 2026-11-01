@@ -30,7 +30,7 @@ const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath
 
 type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
 type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;
-  probe?: () => Promise<void>; signing?: () => Promise<void>; request?: () => Promise<void>};
+  probe?: () => Promise<void>; signing?: () => Promise<void>; request?: () => Promise<void>; lock?: (lockPath: string) => Promise<void>};
 type Compiled = Record<string, (...args: any[]) => Promise<any>>;
 
 function deferred() {
@@ -39,11 +39,11 @@ function deferred() {
   return {promise, resolve: accept};
 }
 
-async function compile(context: Record<string, unknown>) {
+async function compile(context: Record<string, unknown>, lifted: string[]) {
   const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const functions = ast.statements.filter(ts.isFunctionDeclaration);
-  const names = [...new Set([...COMPILED, ...functions.map(node => node.name?.text ?? '').filter(name => /workspacepolicy/i.test(name))])];
+  const names = [...new Set([...COMPILED, ...lifted, ...functions.map(node => node.name?.text ?? '').filter(name => /workspacepolicy/i.test(name))])];
   const declarations = names.map(name => {
     const nodes = functions.filter(node => node.name?.text === name);
     assert.equal(nodes.length, 1, name);
@@ -56,7 +56,7 @@ async function compile(context: Record<string, unknown>) {
     {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as Compiled;
 }
 
-async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[], overrides: Record<string, unknown> = {}) {
+async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[], overrides: Record<string, unknown> = {}, lifted: string[] = []) {
   const root = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'dharma-policy-sync-race-')));
   t.after(() => fs.rm(root, {recursive: true, force: true}));
   const workspace = resolve(root, 'workspace'), home = resolve(root, 'home');
@@ -135,9 +135,10 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
     readDeviceConfig: async () => ({organizationId: ORGANIZATION, serverPublicKeyEd25519: publicKey}),
     rename: async (from: string, to: string) => {await hooks.rename?.(from, to); return fs.rename(from, to);},
     link: async (from: string, to: string) => {
+      await hooks.lock?.(to);
       try {return await fs.link(from, to);}
       catch (error) {if ((error as NodeJS.ErrnoException).code === 'EEXIST') hooks.contended?.(to); throw error;}
-    }, ...overrides});
+    }, ...overrides}, lifted);
   const relayOutcome = (run: () => Promise<unknown>) => run().then(() => 'relay returned', (error: Error) => {
     const cause = error.cause ?? error;
     return cause === RELAY_WORK_STARTS ? `running on ${ran.at(-1)}` : (cause as Error).message;
@@ -149,8 +150,9 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
       if (to === statePath && ++stateWrites === 2) throw Object.assign(new Error('EBUSY: resource busy, rename'), {code: 'EBUSY'});
     };
   };
-  const sync = () => compiled.syncWorkspacePolicy!(server, item, 'policy-v1', true);
-  return {hooks, policyPath, statePath, signing, sync, denyPolicyWriteAndRestore,
+  const sync = (fabric: unknown = server) => compiled.syncWorkspacePolicy!(fabric, item, 'policy-v1', true);
+  return {hooks, policyPath, statePath, signing, sync, denyPolicyWriteAndRestore, authorization,
+    openClient: () => compiled.client!(),
     namedTurn: <T>(work: () => Promise<T>) => signingWithContention({config}, work),
     refresh: () => compiled.refreshVerifiedWorkspacePolicyForTransmission!(policyPath, WORKSPACE, server),
     denyPolicyWrite: (denied: boolean) => {hooks.rename = denied ? (_from, to) => {
@@ -172,6 +174,23 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
       policy: (await loadOrganizationPolicy(policyPath)).serverAuthorization?.issuedAt,
       relayStart: await compiled.loadVerifiedWorkspacePolicy!(policyPath, WORKSPACE).then(() => 'verified', (error: Error) => error.message),
     })};
+}
+
+async function syntheticDevice(t: {after(fn: () => Promise<void>): void}, organizationId = `org_fixture${randomUUID().replaceAll('-', '')}`) {
+  const root = await fs.mkdtemp(resolve(tmpdir(), 'dharma-policy-sync-client-'));
+  t.after(() => fs.rm(root, {recursive: true, force: true}));
+  const values = new Map<string, string>();
+  const store: SecureSecretStore = {backend: 'linux-secret-service', async get(account) {return values.get(account) ?? null;},
+    async put(account, value) {values.set(account, value);}, async delete(account) {values.delete(account);}};
+  const hqUrl = 'https://hq.example';
+  const identity = await loadOrCreateDeviceIdentity({hqUrl, organizationId, store});
+  const config: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl, organizationId, deviceId: randomUUID(),
+    deviceName: 'Synthetic', platform: 'linux', publicKeyEd25519: identity.publicKeyEd25519,
+    serverPublicKeyEd25519: identity.publicKeyEd25519, relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString()};
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  await saveDeviceConfig(configPath, config);
+  await saveDeviceEnrollmentAnchor({config, store});
+  return {configPath, statePath, store};
 }
 
 const outcome = (settled: PromiseSettledResult<unknown>) => settled.status === 'fulfilled' ? 'applied' : String(settled.reason?.message);
@@ -381,20 +400,7 @@ test('control: a current pair starts with no extra server request', async t => {
 
 test('control: a signed request through the real client queue reuses the signing control its caller holds', async t => {
   // Otherwise a policy sync that holds the control would wait on its own lock until it timed out.
-  const root = await fs.mkdtemp(resolve(tmpdir(), 'dharma-policy-sync-client-'));
-  t.after(() => fs.rm(root, {recursive: true, force: true}));
-  const values = new Map<string, string>();
-  const store: SecureSecretStore = {backend: 'linux-secret-service', async get(account) {return values.get(account) ?? null;},
-    async put(account, value) {values.set(account, value);}, async delete(account) {values.delete(account);}};
-  const hqUrl = 'https://hq.example', organizationId = `org_fixture${randomUUID().replaceAll('-', '')}`;
-  const identity = await loadOrCreateDeviceIdentity({hqUrl, organizationId, store});
-  const config: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl, organizationId, deviceId: randomUUID(),
-    deviceName: 'Synthetic', platform: 'linux', publicKeyEd25519: identity.publicKeyEd25519,
-    serverPublicKeyEd25519: identity.publicKeyEd25519, relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString()};
-  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
-  await saveDeviceConfig(configPath, config);
-  await saveDeviceEnrollmentAnchor({config, store});
-  const client = await AgentFabricClient.open({configPath, statePath, store,
+  const client = await AgentFabricClient.open({...await syntheticDevice(t),
     fetcher: async () => new Response(JSON.stringify({ok: true}), {status: 201})});
   await client.openSession();
   const reply = await withDeviceSigningControl({config: client.config}, async lease => {
@@ -403,4 +409,35 @@ test('control: a signed request through the real client queue reuses the signing
     return response;
   });
   assert.equal(reply.ok, true);
+});
+
+test('a request queued after a sync takes signing control and before it queues registration holds neither up', async t => {
+  // Background skill preparation shares the relay client. Its poll must not reach the
+  // front of the client queue and wait for the signing control the sync already holds.
+  const stopped = deferred(), proceed = deferred(), served: string[] = [];
+  const device = await syntheticDevice(t, ORGANIZATION);
+  const fetcher = async (url: string | URL | Request) => {
+    served.push(String(url).split('/agent-fabric/')[1]!);
+    if (!String(url).endsWith('/workspaces')) return new Response(JSON.stringify({ok: true}), {status: 201});
+    return new Response(JSON.stringify({ok: true, organizationId: ORGANIZATION, organizationPolicyAuthorization: f.authorization(OLDER),
+      workspace: {id: WORKSPACE, status: 'active', policyRevision: 'signed-test-policy'}}), {status: 201});
+  };
+  const f = await fixture(t, [], {configPath: () => device.configPath, protocolStatePath: () => device.statePath,
+    isIsolatedDeviceSession: () => false, VERSION: 'test',
+    AgentFabricClient: {open: (input: object) => AgentFabricClient.open({...input, ...device, fetcher})}}, ['client']);
+  const fabric: AgentFabricClient = await f.openClient();
+  f.hooks.lock = async lockPath => {
+    if (!lockPath.endsWith('.refresh.lock')) return;
+    f.hooks.lock = undefined;
+    stopped.resolve();
+    await proceed.promise;
+  };
+  const sync = f.sync(fabric);
+  await stopped.promise;
+  const poll = fabric.pollSkill({workspaceId: WORKSPACE, provider: 'codex', installedBundleId: null});
+  proceed.resolve();
+  const [first, second] = await Promise.allSettled([sync, poll]);
+  assert.deepEqual({sync: outcome(first), poll: outcome(second), served},
+    {sync: 'applied', poll: 'applied', served: ['sessions', 'workspaces', 'skills/poll']});
+  assert.deepEqual(await f.observed(), {replay: OLDER, policy: OLDER, relayStart: 'verified'});
 });
