@@ -10,6 +10,7 @@ import {generateKeyPairSync, sign, randomUUID} from 'node:crypto';
 import {verifyServerAuthorizedPolicy} from '@dharma-ai-labs/agent-fabric-policy';
 import {AgentFabricClient, parseDeviceConfig, readDeviceConnectionPreference, saveDeviceConnectionPreference, loadOrCreateDeviceIdentity, saveDeviceEnrollmentAnchor, installTrustedServerSigningKeyset, type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
+import {admitSignedRequests} from './signedRequestAdmission.js';
 import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, connectionPreference, resumeDeviceConnection} from './deviceConnection.js';
 import {automaticBootstrapResume} from './deviceConnection.js';
 import {bootstrapGrantMode} from './privateGrantInput.js';
@@ -45,7 +46,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const effects: string[] = [];
   const deps: Record<string, unknown> = {
     readFile, writeFile, resolve, mkdir: async () => {}, rm: async () => {}, randomUUID, AbortSignal, fetch, setTimeout, URL,
-    isIsolatedDeviceSession, runInIsolatedDeviceSession, saveDeviceConnectionPreference,
+    isIsolatedDeviceSession, runInIsolatedDeviceSession, saveDeviceConnectionPreference, admitSignedRequests,
     configPath: () => configPath, pendingEnrollmentPath: () => join(home, 'pending.json'),
     workspaceRegistryPath: () => join(home, 'workspaces.json'), dharmaHome: () => home,
     currentBootstrapHostScope: () => undefined,

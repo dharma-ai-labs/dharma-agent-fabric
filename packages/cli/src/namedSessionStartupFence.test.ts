@@ -62,6 +62,7 @@ test('actual direct serve hands home-wide admission to its service lock before p
   const f=await caller({openBootstrapVault:async()=>({close:async()=>{effects.push('vault-close');}}),
     acquirePidLock:async()=>{effects.push('service-lock');return async()=>{effects.push('service-release');};},
     assertNamedSessionStartupRegistration:()=>{effects.push('registration-recheck');},
+    admitSignedRequests:(client:unknown)=>client,
     AgentFabricClient:{open:async()=>{assert.equal(f.held(),false);effects.push('provider-boundary');throw Error('FIXTURE_PROVIDER_STOP');}},
     namedSessionStartupPhaseError:(_phase:string,error:Error)=>error});
   await assert.rejects(f.run('serve',f.flags),/FIXTURE_PROVIDER_STOP/);
