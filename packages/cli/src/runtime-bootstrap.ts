@@ -113,13 +113,14 @@ export function findSupportedNodeRuntime(input: Parameters<typeof nodeRuntimeCan
   return null;
 }
 
-// Red-first stub for #398: today an unsupported runtime with no local supported runtime has no fallback.
+/** For an unsupported current Node: a supported local runtime first, else the CLI's own
+ * pinned runtime (#398). A relaunched child never searches or fetches again. */
 export async function selectCliRuntime(input: {
   version: string; bootstrapped: boolean;
   findSupported: () => string | null; ensurePinned: () => Promise<string>;
 }) {
-  if (input.bootstrapped) return null;
-  return input.findSupported();
+  if (input.bootstrapped || isSupportedNodeVersion(input.version)) return null;
+  return input.findSupported() ?? await input.ensurePinned();
 }
 
 export function runtimeBootstrapHint(env: NodeJS.ProcessEnv = process.env) {
