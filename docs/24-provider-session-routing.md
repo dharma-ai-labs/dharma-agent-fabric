@@ -2,6 +2,30 @@
 
 Status: investigation. This is not a production capability claim.
 
+## Claude Code sessions: not supported in this release
+
+Claude Code provider sessions are `not_supported`. No CLI, relay or library path
+registers, attaches to, continues or answers in a Claude Code conversation,
+whether desktop or terminal. Re-verified against CLI source `0.2.214`:
+
+- The Claude adapter reports `sessionContinuation: unavailable`. A relay task
+  for Claude runs as a new
+  `claude --print --verbose --safe-mode --no-session-persistence` process in a
+  relay-owned worktree.
+- Provider-session registration requests from the CLI name only
+  `provider: codex`, and the channel refuses to open for a session scope with
+  any other provider. The control plane's registration contract also accepts
+  only `codex`, so a Claude session cannot be registered.
+- `openCooperativeInboxSession` requires a Codex `cooperative_session` binding.
+  `runOriginalSessionInboxOnce` returns `not_supported` with
+  `provider_in_session_consumer_unavailable` for any provider other than Codex.
+- Named sessions are Codex app-server sessions and run only on Linux.
+
+Report a Claude Code conversation as `not_supported`. A relay task's result is
+an answer from a new process, not from the user's Claude Code conversation.
+Do not substitute `claude --print` or a relay task for same-session
+continuation (step 4 below).
+
 ## September 26 retained-conversation proof
 
 The earlier no-model observations below are historical. A bounded Linux test on
@@ -140,7 +164,7 @@ The receiver moves each question through `accepted`, `executing`, `answered`, `f
 1. Probe Codex app-server using a disposable `CODEX_HOME`: initialize, create and read its own exact thread while retaining the same transport. Resume only an unloaded persisted thread, never a new empty rollout. Do not start a model turn or touch an existing user thread in this probe.
 2. Implement a provider-owned session bridge with an explicit local attach command and a durable binding record. Add negative tests for wrong organization, repository, member, device, workspace, expired lease, duplicate question, unavailable owner, and revoked authority. Keep the current fresh-process task runner unchanged.
 3. In an isolated test account, run a bounded read-only question to a bridge-owned Codex thread and verify that `turn/start` returns an answer linked to that same thread. Prove a second question continues the same context and a different thread never receives it. Record actual provider cost.
-4. Qualify Claude through its documented native session API or CLI resume contract separately. If safe same-session continuation is unavailable, report `not_supported`; do not silently substitute `claude --print`.
+4. Qualify Claude through its documented native session API or CLI resume contract separately. If safe same-session continuation is unavailable, report `not_supported`; do not silently substitute `claude --print`. Current result: `not_supported` (see [Claude Code sessions](#claude-code-sessions-not-supported-in-this-release)).
 5. Test a desktop chat only through an approved app-owned integration that can attest thread ownership and turn state. Never use a rollout file path, shared local socket, or inferred recent-session ID as authorization.
 
 Production acceptance requires a real two-machine, two-member named-session exchange; offline and active-turn behavior; signed package access in the target repository; provider restart; revocation; and no answer attributed to the wrong chat. Generic one-prompt enrollment remains a separate gate.
@@ -187,5 +211,6 @@ the platform drafts are deployed. Those live acceptance gates remain separate.
 ## Sources
 
 - Current CLI source: `packages/provider-adapters/src/index.ts`, `packages/task-runner/src/index.ts`, `packages/contracts/src/task-envelope.schema.json` at `bc5682b`.
+- Claude session re-verification: `packages/provider-adapters/src/index.ts`, `packages/cli/src/providerSessionChannel.ts`, `packages/cli/src/cooperativeInboxSession.ts`, `packages/cli/src/originalSessionHost.ts` and `packages/cli/src/index.ts` at `8bc67fe` (CLI source `0.2.214`).
 - Codex app-server protocol: https://developers.openai.com/codex/app-server
 - Codex CLI: `codex exec resume --help` and `codex app-server --help`, inspected September 25, 2026.

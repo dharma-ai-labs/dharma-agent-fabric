@@ -135,16 +135,16 @@ The complete token is displayed once. Store it in the operating-system secret ma
 
 Prerequisites:
 
-- Node.js 22.20 or later;
+- Node.js 22.20.0 through 24.x;
 - Git;
 - one supported provider installed and authenticated locally;
 - a clean source repository;
 - browser access to the signed-in Clerk organization.
 
-Install the public CLI:
+Install the exact public CLI version shown in the dashboard; never install `latest`:
 
 ```bash
-npm install --global @dharma-ai-labs/agent-fabric
+npm install --global @dharma-ai-labs/agent-fabric@<version-shown-in-the-dashboard>
 dharma --version
 ```
 
@@ -242,6 +242,8 @@ dharma relay start --policy .dharma/approved-policy.json
 ```
 
 The relay has no inbound listener. It verifies signed task authority, leases, budgets, paths, registered command IDs, and the task's pinned skill bundle before using a relay-owned Git worktree.
+
+Each relay task runs in a new provider process in that worktree. Retained named sessions exist only for Codex on Linux. Claude Code provider sessions are not supported in this release, so a task never continues in, or answers from, an existing Claude Code conversation. See [provider-session routing](../24-provider-session-routing.md).
 
 ## 6. Call a managed or BYOK agent through the SDK
 

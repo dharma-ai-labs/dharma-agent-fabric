@@ -101,6 +101,15 @@ It may not by default:
 
 ## Provider task adapter interface
 
+Status: design. The interface below is not implemented. The current adapters
+expose only `capability()` and `discover()` (`ProviderAdapter` in
+`@dharma-ai-labs/agent-fabric-provider-adapters`). A task runs through one
+`executeProviderTask` call: the provider process is started once with the
+task's instructions in the task worktree, and an abort signal or the task
+timeout ends it. There is no `sendMessage`, so a running task cannot receive a
+mid-task message or reply, and there is no per-task `cancel` or `collectFinal`
+by task ID.
+
 ```ts
 export interface ProviderTaskAdapter {
   readonly providerId: string;
@@ -190,6 +199,8 @@ The task may enter `waiting_for_input` when:
 - acceptance evidence conflicts.
 
 The server or a human can reply through an `AgentMessage`. The reply becomes part of the task trajectory.
+
+Status: design. No package implements `waiting_for_input` or a mid-task reply; see the provider task adapter status above.
 
 ## Agent-to-agent protocol
 
