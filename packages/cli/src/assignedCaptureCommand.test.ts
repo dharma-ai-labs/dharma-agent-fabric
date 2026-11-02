@@ -7,6 +7,7 @@ import ts from 'typescript';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import { runAssignedCaptureCommand, type AssignedCaptureCommandContext, type CaptureAssignment } from './assignedCapture.js';
+import * as usage from './usage.js';
 
 const now = Date.parse('2026-10-21T19:00:00Z');
 const id = (n: string) => `${n.repeat(8)}-${n.repeat(4)}-4${n.repeat(3)}-8${n.repeat(3)}-${n.repeat(12)}`;
@@ -27,7 +28,8 @@ async function dispatcher(bootstrapScope = false) {
   const effects: string[] = [];
   const forbidden = (name: string) => () => { effects.push(name); throw new Error(`forbidden_${name}`); };
   const run = runInNewContext(`${compiled.outputText}\nrun`, {
-    exports: {}, Error, USAGE: 'unsupported_command',
+    // The dispatcher's pure usage text helpers; every effect below stays forbidden.
+    exports: {}, ...usage, Error, USAGE: 'unsupported_command',
     currentBootstrapHostScope: () => bootstrapScope ? {} : undefined,
     providerAdapters: [{ capability: forbidden('capability') }],
     receiptAwareProviderCapabilities: forbidden('receiver'),
