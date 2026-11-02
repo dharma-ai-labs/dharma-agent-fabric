@@ -7,15 +7,32 @@ import {
   isSupportedNodeVersion,
   launchWithRuntime,
   runtimeBootstrapHint,
+  selectCliRuntime,
 } from './runtime-bootstrap.js';
+import { PINNED_NODE_VERSION, defaultDharmaHome, ensurePinnedNodeRuntime } from './pinnedNodeRuntime.js';
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
   process.stdout.write(`${CLI_USAGE}\n`);
 } else if (!isSupportedNodeVersion(process.versions.node)) {
-  const runtime = process.env.DHARMA_NODE_BOOTSTRAPPED ? null : findSupportedNodeRuntime();
+  let failure = '';
+  const runtime = await selectCliRuntime({
+    version: process.versions.node,
+    bootstrapped: Boolean(process.env.DHARMA_NODE_BOOTSTRAPPED),
+    findSupported: () => findSupportedNodeRuntime(),
+    ensurePinned: () => {
+      process.stderr.write(`Node.js ${process.versions.node} is not supported; using Dharma's own pinned Node.js ${PINNED_NODE_VERSION} `
+        + 'from the Dharma home (fetched from nodejs.org on first use, SHA-256 checked). Your system Node is not changed.\n');
+      return ensurePinnedNodeRuntime({ dharmaHome: defaultDharmaHome() });
+    },
+  }).catch((error: unknown) => {
+    failure = error instanceof Error ? error.message : String(error);
+    return null;
+  });
   if (!runtime) {
-    process.stderr.write(`${runtimeBootstrapHint()} Current runtime: ${process.versions.node}.\n`);
+    process.stderr.write(failure
+      ? `Unable to fetch the pinned Node.js ${PINNED_NODE_VERSION} runtime (${failure}). Allow access to https://nodejs.org and rerun the same command.\n`
+      : `${runtimeBootstrapHint()} Current runtime: ${process.versions.node}.\n`);
     process.exitCode = 1;
   } else {
     const child = launchWithRuntime(runtime, fileURLToPath(import.meta.url), args, process.env);
