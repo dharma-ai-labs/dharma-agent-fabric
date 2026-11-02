@@ -113,6 +113,15 @@ export function findSupportedNodeRuntime(input: Parameters<typeof nodeRuntimeCan
   return null;
 }
 
+// Red-first stub for #398: today an unsupported runtime with no local supported runtime has no fallback.
+export async function selectCliRuntime(input: {
+  version: string; bootstrapped: boolean;
+  findSupported: () => string | null; ensurePinned: () => Promise<string>;
+}) {
+  if (input.bootstrapped) return null;
+  return input.findSupported();
+}
+
 export function runtimeBootstrapHint(env: NodeJS.ProcessEnv = process.env) {
   const explicit = env.DHARMA_NODE_BINARY
     ? ` DHARMA_NODE_BINARY currently points to ${basename(env.DHARMA_NODE_BINARY)} but it is not a supported runtime.`
