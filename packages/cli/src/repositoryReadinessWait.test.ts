@@ -42,3 +42,20 @@ test('observes once when waiting is disabled and rejects invalid bounds', async 
   assert.equal(result.outcome, 'pending');
   await assert.rejects(waitForRepositoryReadiness(async () => observation('absent'), { intervalMs: 0 }), /Invalid/);
 });
+
+// G11 (2026-11-02, correlation 0e7f1918): the member saw nothing for 300 s while the
+// wait polled 59 times. Each pending observation is now reported so setup can show it.
+test('reports each pending observation with elapsed time before waiting again', async () => {
+  let clock = 0;
+  const progress: unknown[] = [];
+  const result = await waitForRepositoryReadiness(async () => observation('published'), {
+    maximumWaitMs: 10_000, intervalMs: 5_000, now: () => clock,
+    wait: async delayMs => { clock += delayMs; },
+    onProgress: update => { progress.push(update); },
+  });
+  assert.equal(result.outcome, 'pending');
+  assert.deepEqual(progress, [
+    { ...observation('published'), attempts: 1, elapsedMs: 0, maximumWaitMs: 10_000 },
+    { ...observation('published'), attempts: 2, elapsedMs: 5_000, maximumWaitMs: 10_000 },
+  ]);
+});
