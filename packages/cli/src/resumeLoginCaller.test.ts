@@ -862,3 +862,93 @@ test('legacy recovery rejects untrusted approval keysets before writing an ancho
     assert.equal(f.effects.includes('anchor-write'), false);
   }
 });
+
+// C9 (a) and (c): browser authorization of the same device admits a verified
+// successor keyset. It chains from the stored keyset, or the pinned root signed
+// it at a higher generation, even after the stored keyset expired.
+const C9_DAY = 24 * 60 * 60_000;
+type C9Signer = {privateKey: import('node:crypto').KeyObject; publicKey: import('node:crypto').KeyObject};
+function c9Keyset(signer: C9Signer, generation: number, issuedAt: number, expiresAt: number, organizationId = 'org_fixture') {
+  const now = Date.now(), unsigned = {schema: 'dharma.server-signing-keyset/v1' as const, organizationId, generation,
+    keys: [{keyVersion: 'kms/1', publicKeyEd25519: signer.publicKey.export({format: 'jwk'}).x!, status: 'active' as const,
+      notBefore: new Date(now - 90 * C9_DAY).toISOString(), notAfter: new Date(now + 300 * C9_DAY).toISOString()}],
+    signedByKeyVersion: 'kms/1', issuedAt: new Date(issuedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString()};
+  return {...unsigned, signature: sign(null, Buffer.from(canonicalize(unsigned)), signer.privateKey).toString('base64url')};
+}
+
+async function c9Reauthentication(t: {after(fn: () => Promise<void>): void}, stored: (root: C9Signer) => unknown,
+  approved: (root: C9Signer) => unknown) {
+  const f = await fixture(t), root = generateKeyPairSync('ed25519');
+  const config = {...f.config, serverPublicKeyEd25519: root.publicKey.export({format: 'jwk'}).x!, serverSigningKeyset: stored(root)};
+  await writeFile(f.configPath, JSON.stringify(config));
+  const anchors: Array<{config: DeviceConfig; requireAbsent?: boolean}> = [];
+  const keyset = approved(root);
+  f.deps.enrolledDeviceIdentity = async () => ({publicKeyEd25519: config.publicKeyEd25519});
+  f.deps.pollEnrollment = async () => ({status: 'approved', organizationId: config.organizationId, deviceId: config.deviceId,
+    relayUrl: config.relayUrl, serverPublicKeyEd25519: config.serverPublicKeyEd25519, serverSigningKeyset: keyset});
+  f.deps.saveDeviceEnrollmentAnchor = async (input: {config: DeviceConfig; requireAbsent?: boolean}) => {
+    f.effects.push('anchor-write'); anchors.push(input);
+  };
+  f.deps.saveDeviceConfig = async (_path: string, value: unknown) => {
+    f.effects.push('config-write'); await writeFile(f.configPath, JSON.stringify(value));
+  };
+  return {...f, config, keyset, anchors, before: await readFile(f.configPath, 'utf8')};
+}
+
+test('anchor lost after two renewals: browser reauthentication installs the verified successor and keeps the device id', async t => {
+  const now = Date.now();
+  const f = await c9Reauthentication(t, root => c9Keyset(root, 1, now - 14 * C9_DAY, now + 15 * C9_DAY),
+    root => c9Keyset(root, 3, now - 60_000, now + 29 * C9_DAY));
+  const login = await caller('login', f.deps);
+  const result = await login(new Map([['reauthenticate', true]]));
+  assert.equal(result?.status, 'reauthenticated');
+  assert.equal(result?.deviceId, f.config.deviceId);
+  assert.deepEqual(f.effects, ['enrollment', 'browser', 'anchor-write', 'config-write'], 'The anchor is written ahead of device.json');
+  assert.equal(f.anchors[0]!.requireAbsent, true);
+  assert.deepEqual(f.anchors[0]!.config.serverSigningKeyset, f.keyset);
+  const saved = JSON.parse(await readFile(f.configPath, 'utf8'));
+  assert.deepEqual(saved.serverSigningKeyset, f.keyset);
+  assert.equal(saved.deviceId, f.config.deviceId);
+});
+
+test('an expired device plus browser authorization of the same device is re-admitted', async t => {
+  const now = Date.now();
+  const f = await c9Reauthentication(t, root => c9Keyset(root, 2, now - 31 * C9_DAY, now - 2 * C9_DAY),
+    root => c9Keyset(root, 7, now - 60_000, now + 29 * C9_DAY));
+  const login = await caller('login', f.deps);
+  assert.equal((await login(new Map([['reauthenticate', true]])))?.status, 'reauthenticated');
+  assert.deepEqual(JSON.parse(await readFile(f.configPath, 'utf8')).serverSigningKeyset, f.keyset);
+  assert.equal(JSON.parse(await readFile(f.configPath, 'utf8')).deviceId, f.config.deviceId);
+});
+
+test('a byte-identical current keyset still reauthenticates without rewriting device.json', async t => {
+  const now = Date.now();
+  let stored: unknown;
+  const f = await c9Reauthentication(t, root => (stored = c9Keyset(root, 2, now - C9_DAY, now + 20 * C9_DAY)), () => stored);
+  const login = await caller('login', f.deps);
+  assert.equal((await login(new Map([['reauthenticate', true]])))?.status, 'reauthenticated');
+  assert.deepEqual(f.effects, ['enrollment', 'browser', 'anchor-write']);
+  assert.equal(await readFile(f.configPath, 'utf8'), f.before);
+});
+
+for (const [variant, expired] of [['different root', false], ['different root', true], ['lower generation', false],
+  ['lower generation', true], ['equal generation', false], ['equal generation', true], ['tampered signature', false], ['tampered signature', true],
+  ['other organization', true]] as const) {
+  test(`browser reauthentication rejects a ${variant} keyset (stored ${expired ? 'expired' : 'current'}) before any write`, async t => {
+    const now = Date.now(), other = generateKeyPairSync('ed25519');
+    const f = await c9Reauthentication(t,
+      root => expired ? c9Keyset(root, 3, now - 31 * C9_DAY, now - 2 * C9_DAY) : c9Keyset(root, 3, now - C9_DAY, now + 20 * C9_DAY),
+      root => {
+        if (variant === 'different root') return c9Keyset(other, 4, now - 60_000, now + 29 * C9_DAY);
+        if (variant === 'lower generation') return c9Keyset(root, 2, now - 60_000, now + 29 * C9_DAY);
+        if (variant === 'equal generation') return c9Keyset(root, 3, now - 60_000, now + 29 * C9_DAY);
+        if (variant === 'other organization') return c9Keyset(root, 4, now - 60_000, now + 29 * C9_DAY, 'org_other');
+        return {...c9Keyset(root, 4, now - 60_000, now + 29 * C9_DAY), expiresAt: new Date(now + 28 * C9_DAY).toISOString()};
+      });
+    const login = await caller('login', f.deps);
+    await assert.rejects(login(new Map([['reauthenticate', true]])), /connection_reauthentication_trust_rejected/);
+    assert.equal(await readFile(f.configPath, 'utf8'), f.before);
+    assert.equal(f.effects.includes('anchor-write'), false);
+    assert.equal(f.effects.includes('config-write'), false);
+  });
+}
