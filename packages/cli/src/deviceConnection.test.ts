@@ -278,20 +278,25 @@ function rootSignedKeyset(signer: {privateKey: KeyObject; publicKey: KeyObject},
 }
 
 // C9 (b): resume runs the same verified recovery as relay startup.
-async function expiredFixture(t: TestContext, anchoredGeneration: number | null) {
+type Signer = {privateKey: KeyObject; publicKey: KeyObject};
+async function expiredFixture(t: TestContext, anchoredGeneration: number | null | ((root: Signer, now: number) => TrustedServerSigningKeyset)) {
   const f = await fixture(t), root = generateKeyPairSync('ed25519'), now = Date.now();
   const config: DeviceConfig = {...f.config, serverPublicKeyEd25519: (root.publicKey.export({format: 'jwk'}) as JsonWebKey).x!,
     serverSigningKeyset: rootSignedKeyset(root, 1, now - 29 * DAY - 3_600_000, now - 3_600_000)};
   const anchored = anchoredGeneration === null ? config
+    : typeof anchoredGeneration === 'function' ? {...config, serverSigningKeyset: anchoredGeneration(root, now)}
     : {...config, serverSigningKeyset: rootSignedKeyset(root, anchoredGeneration, now - 22 * DAY, now + 7 * DAY)};
   for (const account of [...f.values.keys()].filter(key => key.startsWith('device-enrollment-'))) f.values.delete(account);
   await saveDeviceConfig(f.configPath, config);
   await saveDeviceEnrollmentAnchor({config: anchored, store: f.store});
   f.writes.length = 0;
-  const fetcher = async () => new Response(JSON.stringify(admission(config)), {status: 201});
+  const admissions: string[] = [];
+  const fetcher = async (url: string | URL | Request) => {
+    admissions.push(String(url)); return new Response(JSON.stringify(admission(config)), {status: 201});
+  };
   const input = {...f.input, config,
     openClient: () => AgentFabricClient.open({configPath: f.configPath, statePath: f.statePath, store: f.store, fetcher, readOnly: true})};
-  return {...f, config, anchored, input};
+  return {...f, config, anchored, input, admissions};
 }
 
 test('resume recovers an interrupted install after the old keyset expired and keeps the device id', async t => {
@@ -310,3 +315,32 @@ test('an expired device without browser authorization is still rejected by resum
   assert.equal(await readFile(f.configPath, 'utf8'), before);
   assert.deepEqual(f.writes, []);
 });
+
+// C9-T1: with the stored keyset expired, resume reaches only the pinned-root
+// fallback. A root-signed higher-generation anchor keyset that is itself expired
+// or issued beyond the five-minute tolerance must not be installed.
+for (const variant of ['expired candidate', 'future-issued candidate', 'valid successor (control)'] as const) {
+  test(`stored keyset expired: resume handles a root-signed higher-generation ${variant} anchor`, async t => {
+    const f = await expiredFixture(t, (root, now) => variant === 'expired candidate'
+      ? rootSignedKeyset(root, 2, now - 20 * DAY, now - 30 * 60_000)
+      : variant === 'future-issued candidate'
+        ? rootSignedKeyset(root, 2, now + 10 * 60_000, now + 20 * DAY)
+        : rootSignedKeyset(root, 2, now - DAY, now + 20 * DAY));
+    if (variant === 'valid successor (control)') {
+      const result = await resumeDeviceConnection(f.input);
+      assert.equal(result.status, 'resumed');
+      assert.equal(result.deviceId, f.config.deviceId);
+      assert.deepEqual((await loadDeviceConfig(f.configPath)).serverSigningKeyset, f.anchored.serverSigningKeyset);
+      assert.equal(f.admissions.length, 1);
+      return;
+    }
+    const configBefore = await readFile(f.configPath, 'utf8'), protectedBefore = JSON.stringify([...f.values]);
+    await assert.rejects(f.input.recoverEnrollment(), /Interrupted server signing keyset installation could not be verified/);
+    await assert.rejects(resumeDeviceConnection(f.input), /connection_trust_requires_recovery/);
+    assert.equal(await readFile(f.configPath, 'utf8'), configBefore, 'device.json is byte-identical');
+    assert.equal(JSON.stringify([...f.values]), protectedBefore, 'The protected anchor is byte-identical');
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.admissions, [], 'No admission request');
+    assert.equal(await readFile(f.statePath, 'utf8'), f.state, 'Protocol state is not replaced');
+  });
+}

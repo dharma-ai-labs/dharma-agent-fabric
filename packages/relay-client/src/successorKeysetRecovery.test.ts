@@ -7,6 +7,7 @@ import test, {type TestContext} from 'node:test';
 import {signCanonicalObject, type TrustedServerSigningKeyset} from '@dharma-ai-labs/agent-fabric-contracts';
 import type {SecureSecretStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {AgentFabricClient, loadDeviceEnrollmentAnchor, loadOrCreateDeviceIdentity, recoverDeviceEnrollmentConsistency,
+  verifyServerSigningKeysetSuccessor,
   saveDeviceConfig, saveDeviceEnrollmentAnchor, type DeviceConfig} from './index.js';
 
 // C9: an interrupted keyset installation leaves the protected anchor one renewal
@@ -15,9 +16,9 @@ import {AgentFabricClient, loadDeviceEnrollmentAnchor, loadOrCreateDeviceIdentit
 
 const DAY = 24 * 60 * 60_000;
 
-function memoryStore(): SecureSecretStore {
+function memoryStore(): SecureSecretStore & {values: Map<string, string>} {
   const values = new Map<string, string>();
-  return {backend: 'linux-secret-service',
+  return {backend: 'linux-secret-service', values,
     async get(account) {return values.get(account) ?? null;},
     async put(account, value) {values.set(account, value);},
     async delete(account) {values.delete(account);}};
@@ -96,5 +97,41 @@ for (const variant of ['different root', 'lower generation', 'equal generation',
     await assert.rejects(recoverDeviceEnrollmentConsistency({configPath: f.configPath, store: f.store, now: new Date(now)}),
       /Interrupted server signing keyset installation could not be verified/);
     assert.equal(await readFile(f.configPath, 'utf8'), before);
+  });
+}
+
+// C9-T1: the pinned-root fallback must still enforce the candidate's own time
+// validity. The stored keyset is expired, so only the root path can admit it.
+for (const variant of ['expired candidate', 'future-issued candidate', 'valid successor (control)'] as const) {
+  test(`stored keyset expired: interrupted-install recovery handles a root-signed higher-generation ${variant}`, async t => {
+    const now = Date.now(), root = generateKeyPairSync('ed25519');
+    const stored = rootKeyset({signer: root, generation: 3, issuedAt: now - 29 * DAY - 3_600_000, expiresAt: now - 3_600_000, now});
+    const anchored = variant === 'expired candidate'
+      // Issued after the stored keyset and also expired before now.
+      ? rootKeyset({signer: root, generation: 4, issuedAt: now - 20 * DAY, expiresAt: now - 30 * 60_000, now})
+      : variant === 'future-issued candidate'
+        // Ten minutes ahead: past the five-minute contract tolerance.
+        ? rootKeyset({signer: root, generation: 4, issuedAt: now + 10 * 60_000, expiresAt: now + 20 * DAY, now})
+        : rootKeyset({signer: root, generation: 4, issuedAt: now - DAY, expiresAt: now + 20 * DAY, now});
+    const expected = {'expired candidate': 'expired', 'future-issued candidate': 'not_yet_valid'} as const;
+    const f = await interruptedInstall(t, stored, anchored, publicX(root.publicKey));
+    const verification = verifyServerSigningKeysetSuccessor(f.config, stored, anchored, new Date(now));
+    const configBefore = await readFile(f.configPath, 'utf8');
+    const protectedBefore = JSON.stringify([...f.store.values]);
+    if (variant === 'valid successor (control)') {
+      assert.deepEqual(verification, {ok: true});
+      const recovered = await recoverDeviceEnrollmentConsistency({configPath: f.configPath, store: f.store, now: new Date(now)});
+      assert.deepEqual(recovered.serverSigningKeyset, anchored);
+      assert.equal(recovered.deviceId, f.config.deviceId);
+      return;
+    }
+    assert.deepEqual(verification, {ok: false, reason: expected[variant]});
+    await assert.rejects(recoverDeviceEnrollmentConsistency({configPath: f.configPath, store: f.store, now: new Date(now)}),
+      /Interrupted server signing keyset installation could not be verified/);
+    await assert.rejects(AgentFabricClient.open({configPath: f.configPath, statePath: f.statePath, store: f.store,
+      fetcher: async () => {throw new Error('admission must not be attempted');}}),
+    /Interrupted server signing keyset installation could not be verified/);
+    assert.equal(await readFile(f.configPath, 'utf8'), configBefore, 'device.json is byte-identical');
+    assert.equal(JSON.stringify([...f.store.values]), protectedBefore, 'The protected anchor and keys are byte-identical');
   });
 }

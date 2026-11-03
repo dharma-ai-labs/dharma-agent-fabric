@@ -952,3 +952,31 @@ for (const [variant, expired] of [['different root', false], ['different root', 
     assert.equal(f.effects.includes('config-write'), false);
   });
 }
+
+// C9-T1: with the stored keyset expired, only the pinned-root fallback can admit
+// the approved keyset. That fallback still refuses a candidate that is itself
+// expired or issued beyond the five-minute contract tolerance.
+for (const variant of ['expired candidate', 'future-issued candidate', 'valid successor (control)'] as const) {
+  test(`stored keyset expired: browser reauthentication handles a root-signed higher-generation ${variant}`, async t => {
+    const now = Date.now();
+    const f = await c9Reauthentication(t, root => c9Keyset(root, 3, now - 31 * C9_DAY, now - 2 * C9_DAY),
+      root => variant === 'expired candidate' ? c9Keyset(root, 4, now - 20 * C9_DAY, now - 30 * 60_000)
+        : variant === 'future-issued candidate' ? c9Keyset(root, 4, now + 10 * 60_000, now + 20 * C9_DAY)
+        : c9Keyset(root, 4, now - 60_000, now + 20 * C9_DAY));
+    const login = await caller('login', f.deps);
+    if (variant === 'valid successor (control)') {
+      const result = await login(new Map([['reauthenticate', true]]));
+      assert.equal(result?.status, 'reauthenticated');
+      assert.equal(result?.deviceId, f.config.deviceId);
+      assert.deepEqual(f.effects, ['enrollment', 'browser', 'anchor-write', 'config-write']);
+      assert.deepEqual(JSON.parse(await readFile(f.configPath, 'utf8')).serverSigningKeyset, f.keyset);
+      return;
+    }
+    assert.throws(() => assertReauthenticationSigningTrust(f.config as DeviceConfig, f.keyset),
+      /connection_reauthentication_trust_rejected/);
+    await assert.rejects(login(new Map([['reauthenticate', true]])), /connection_reauthentication_trust_rejected/);
+    assert.equal(await readFile(f.configPath, 'utf8'), f.before, 'device.json is byte-identical');
+    assert.deepEqual(f.anchors, [], 'The protected anchor is never written');
+    assert.deepEqual(f.effects, ['enrollment', 'browser'], 'No anchor or config write');
+  });
+}
