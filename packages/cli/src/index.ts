@@ -39,6 +39,7 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { claudeSignInPreflight } from './claudeSignInPreflight.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
@@ -3483,6 +3484,12 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     : requestedProvider;
   if (!isLocalProviderId(provider)) {
     throw new Error('Bootstrap provider must be auto, codex, claude, agy, or hermes.');
+  }
+  // #398: never report a Claude endpoint ready, or spend setup authority, while
+  // its Claude Code CLI is signed out.
+  if (provider === 'claude') {
+    const signInBlocker = await step(() => claudeSignInPreflight());
+    if (signInBlocker) return signInBlocker;
   }
   let existing = await step(() => readDeviceConfig());
   const enrollmentMismatch = Boolean(existing
