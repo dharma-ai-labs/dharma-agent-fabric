@@ -10,10 +10,12 @@ import {
   verifyInitialServerSigningKeyset,
   verifyServerSigningKeysetUpdate,
   validateDeviceConfigContract,
+  validateTrustedServerSigningKeysetContract,
   validateDeviceConnectionPreferenceContract,
   type DeviceConnectionPreference,
   type ActionDecisionAcknowledgement,
   type ProviderId,
+  type ServerSigningKeysetVerificationResult,
   type TrustedServerSigningKeyset,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
@@ -962,6 +964,27 @@ function verifyKeysetTransition(
     );
 }
 
+/** A verified successor of a stored keyset (runbook C9). It either chains from
+ * the stored keyset, or this device's pinned root signed it at a strictly higher
+ * generation. The root path still applies after the stored keyset expired. A
+ * different root, a lower or equal generation or a bad signature never passes. */
+export function verifyServerSigningKeysetSuccessor(
+  config: Pick<DeviceConfig, 'organizationId' | 'serverPublicKeyEd25519'>,
+  stored: TrustedServerSigningKeyset,
+  candidate: TrustedServerSigningKeyset,
+  now = new Date(),
+): ServerSigningKeysetVerificationResult {
+  const chained = verifyServerSigningKeysetUpdate(stored, candidate, now);
+  if (chained.ok) return chained;
+  if (!validateTrustedServerSigningKeysetContract(stored).ok || !validateTrustedServerSigningKeysetContract(candidate).ok
+    || stored.organizationId !== config.organizationId) return chained;
+  if (candidate.generation <= stored.generation) return { ok: false, reason: 'generation_not_advanced' };
+  let root: ReturnType<typeof createPublicKey>;
+  try {root = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' });}
+  catch {return { ok: false, reason: 'untrusted_initial_signer' };}
+  return verifyInitialServerSigningKeyset(candidate, root, config.organizationId, now);
+}
+
 export async function recoverDeviceEnrollmentConsistency(input: {
   configPath: string;
   store?: SecureSecretStore;
@@ -1019,7 +1042,11 @@ async function recoverEnrollmentLocked(input: {
 
   const now = input.now ?? new Date();
   if (anchor.serverSigningKeyset) {
-    const verification = verifyKeysetTransition(config, config.serverSigningKeyset, anchor.serverSigningKeyset, now);
+    // The anchor is written ahead of device.json. Its keyset may follow a stored
+    // keyset that expired while the device was offline (C9).
+    const verification = config.serverSigningKeyset
+      ? verifyServerSigningKeysetSuccessor(config, config.serverSigningKeyset, anchor.serverSigningKeyset, now)
+      : verifyKeysetTransition(config, undefined, anchor.serverSigningKeyset, now);
     if (verification.ok) {
       const recovered = { ...config, serverSigningKeyset: anchor.serverSigningKeyset };
       await atomicJson(input.configPath, recovered, input.hostFence);
