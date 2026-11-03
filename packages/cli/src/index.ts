@@ -21,7 +21,7 @@ import {
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
   loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
-  saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type SecureSecretStore,
+  saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type DeviceTelemetryOptions, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
   AgentFabricClient as AgentFabricApiClient,
@@ -47,7 +47,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
-import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
@@ -1833,12 +1833,30 @@ async function gitValue(workspace: string, argv: string[]) {
   }
 }
 
-async function client() {
+async function client(telemetry: DeviceTelemetryOptions = {}) {
   const hostScope = currentBootstrapHostScope();
   const instance = admitSignedRequests(await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
     hostScope, isolatedSession: isIsolatedDeviceSession() }), hostScope);
-  await instance.openSession(VERSION);
+  await instance.openSession(VERSION, telemetry);
   return instance;
+}
+
+let relayAutostartReportCache: { home: string; at: number; report: DeviceTelemetryOptions } | undefined;
+
+/**
+ * C8: the owned relay autostart state for signed session open and workspace.register; omitted when unreadable.
+ * Reading it can start a process (PowerShell, systemctl, launchctl), so a periodic policy sync reuses it for
+ * ten minutes; the server alerts on a 48-hour threshold.
+ */
+async function relayAutostartReport(): Promise<DeviceTelemetryOptions> {
+  const home = dharmaHome(), now = Date.now();
+  if (relayAutostartReportCache?.home === home && now - relayAutostartReportCache.at < 600_000) {
+    return relayAutostartReportCache.report;
+  }
+  const enabled = await relayAutostartTelemetry({ home });
+  const report = enabled === undefined ? {} : { relayAutostartEnabled: enabled };
+  relayAutostartReportCache = { home, at: now, report };
+  return report;
 }
 
 type RelayProbeClient = Pick<AgentFabricClient, 'config' | 'openSession'>;
@@ -5929,7 +5947,7 @@ async function syncWorkspacePolicyHoldingRefreshLock(
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
     repositoryAgentId: item.repositoryAgentId,
     policyRevision, providers,
-  });
+  }, await relayAutostartReport());
   const canonical = reconcileWorkspaceRegistration(await registry(), item, response);
   const generated = await materializeWorkspacePolicy({
     workspace: canonical.path,
@@ -9009,7 +9027,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   const verifiedPolicy = await withRepositoryRelayStage('policy_verification',
     () => loadVerifiedWorkspacePolicyUnlessReplayAhead(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
-  const fabric = await withRepositoryRelayStage('session_open', () => client());
+  const fabric = await withRepositoryRelayStage('session_open', async () => client(await relayAutostartReport()));
   // A kill or a denied restore between the two authorization writes leaves the replay
   // state ahead of the file. One fresh server authorization repairs the pair: it takes
   // the same signature and anti-rollback checks as any sync, and the file is verified

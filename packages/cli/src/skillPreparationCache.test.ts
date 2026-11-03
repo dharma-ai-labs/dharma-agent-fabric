@@ -343,7 +343,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       serverAuthorization: { workspaceId: workspace.workspaceId },
     }),
     loadVerifiedWorkspacePolicy: async () => policy,
-    client: async () => Object.freeze({ fixture: true }), dharmaHome: () => f.home,
+    client: async () => Object.freeze({ fixture: true }), relayAutostartReport: async () => ({}), dharmaHome: () => f.home,
     acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },

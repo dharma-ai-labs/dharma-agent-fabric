@@ -1233,7 +1233,8 @@ export class AgentFabricClient {
     });
   }
 
-  async openSession(relayVersion = '0.1.0') {
+  async openSession(relayVersion = '0.1.0', telemetry: DeviceTelemetryOptions = {}) {
+    const deviceTelemetry = deviceKeysetTelemetry(this.config, telemetry);
     await this.#assertHostScope();
     if (this.#readOnly && (this.#state.sessionId || this.#readSessionAdmissionUsed)) {
       throw new Error('relay_read_only_session_already_started');
@@ -1253,12 +1254,13 @@ export class AgentFabricClient {
     };
     await this.#persist();
     return this.signedPost('/agent-fabric/sessions', {
-      connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion,
+      connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion, deviceTelemetry,
     });
   }
 
-  async registerWorkspace(body: unknown) {
-    const response = await this.signedPost('/agent-fabric/workspaces', body);
+  async registerWorkspace(body: Record<string, unknown>, telemetry: DeviceTelemetryOptions = {}) {
+    const response = await this.signedPost('/agent-fabric/workspaces',
+      { ...body, deviceTelemetry: deviceKeysetTelemetry(this.config, telemetry) });
     if (response.serverSigningKeyset !== undefined) {
       const next = await installKeysetWithFence({
         configPath: this.#configPath,
@@ -1669,6 +1671,37 @@ export class AgentFabricClient {
 }
 
 export const RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS = 90_000;
+
+/** schemas/device-keyset-telemetry.schema.json. Reported for lag alerts only; the server never authorizes on it. */
+export type DeviceKeysetTelemetry = {
+  schema: 'dharma.device-keyset-telemetry/v1';
+  heldKeysetGeneration: number | null;
+  heldKeysetExpiresAt: string | null;
+  relayAutostartEnabled?: boolean;
+};
+/** Omit relayAutostartEnabled when the state cannot be read; it is never guessed as false. */
+export type DeviceTelemetryOptions = { relayAutostartEnabled?: boolean };
+
+const TELEMETRY_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export function deviceKeysetTelemetry(config: Pick<DeviceConfig, 'serverSigningKeyset'>,
+  options: DeviceTelemetryOptions = {}): DeviceKeysetTelemetry {
+  const keyset = config.serverSigningKeyset;
+  const generation: unknown = keyset ? keyset.generation : null;
+  const expiresAt: unknown = keyset ? keyset.expiresAt : null;
+  const autostart: unknown = options.relayAutostartEnabled;
+  if ((keyset && (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1
+    || typeof expiresAt !== 'string' || !TELEMETRY_INSTANT.test(expiresAt) || Number.isNaN(Date.parse(expiresAt))))
+    || (autostart !== undefined && typeof autostart !== 'boolean')) {
+    throw new Error('device_keyset_telemetry_invalid');
+  }
+  return {
+    schema: 'dharma.device-keyset-telemetry/v1',
+    heldKeysetGeneration: generation as number | null,
+    heldKeysetExpiresAt: expiresAt as string | null,
+    ...(autostart === undefined ? {} : { relayAutostartEnabled: autostart as boolean }),
+  };
+}
 
 export function isContentBearingPath(pathname: string): boolean {
   return pathname.endsWith('/agent-fabric/trajectories')

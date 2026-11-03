@@ -324,6 +324,16 @@ function windowsTaskLookup(registration: Registration) {
   return `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName || '')} -ErrorAction SilentlyContinue; `;
 }
 
+/** C8 telemetry: true or false only when the owned startup state is read, otherwise undefined. Never throws. */
+export async function relayAutostartTelemetry(options: RelayAutostartOptions): Promise<boolean | undefined> {
+  try {
+    const status = await relayAutostartStatus(options);
+    return status.state === 'enabled' ? true : status.state === 'disabled' ? false : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function relayAutostartStatus(options: RelayAutostartOptions): Promise<RelayAutostartState> {
   let registration;
   try { registration = await readRegistration(options); }
