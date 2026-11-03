@@ -39,6 +39,7 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import { claudeSignInPreflight } from './claudeSignInPreflight.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
@@ -158,7 +159,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.217';
+const VERSION = '0.2.218';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3483,6 +3484,12 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     : requestedProvider;
   if (!isLocalProviderId(provider)) {
     throw new Error('Bootstrap provider must be auto, codex, claude, agy, or hermes.');
+  }
+  // #398: never report a Claude endpoint ready, or spend setup authority, while
+  // its Claude Code CLI is signed out.
+  if (provider === 'claude') {
+    const signInBlocker = await step(() => claudeSignInPreflight());
+    if (signInBlocker) return signInBlocker;
   }
   let existing = await step(() => readDeviceConfig());
   const enrollmentMismatch = Boolean(existing

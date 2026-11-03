@@ -342,6 +342,13 @@ and deny rules are preserved. The allowlist does not permit enrollment, evidence
 sync, task dispatch, source writes, paid operations, release, rollout, or
 rollback.
 
+For Claude Code, bootstrap first runs `claude auth status`. The relay runs tasks
+through the Claude Code CLI, which has its own sign-in, separate from the Claude
+desktop app. If that CLI is signed out, bootstrap stops before it redeems the
+setup or changes enrollment, with `stage: "provider_preflight"` and
+`code: "provider_claude_login_required"`. Run `claude`, enter `/login`, then
+rerun the same setup command.
+
 Use the separate teammate action in the Instructions tab to send a Clerk
 organization invitation and copy a distinct one-time setup for that teammate.
 The agent connection can complete before the teammate accepts portal access.
