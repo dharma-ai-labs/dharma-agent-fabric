@@ -1944,6 +1944,8 @@ test('device keyset telemetry reports a keyset-less device as null and rejects m
   assert.deepEqual(deviceKeysetTelemetry(held(4, '2026-11-26T18:35:00.000Z'), { relayAutostartEnabled: false }),
     { schema: 'dharma.device-keyset-telemetry/v1', heldKeysetGeneration: 4,
       heldKeysetExpiresAt: '2026-11-26T18:35:00.000Z', relayAutostartEnabled: false });
+  assert.equal(deviceKeysetTelemetry(held(4, '2026-11-26t18:35:00+00:00')).heldKeysetExpiresAt, '2026-11-26T18:35:00.000Z',
+    'A contract-valid date-time is normalized, never a reason to fail session open');
   for (const [generation, expiresAt] of [[0, '2026-11-26T18:35:00.000Z'], [1.5, '2026-11-26T18:35:00.000Z'],
     ['4', '2026-11-26T18:35:00.000Z'], [4, 'tomorrow'], [4, null]]) {
     assert.throws(() => deviceKeysetTelemetry(held(generation, expiresAt)), /device_keyset_telemetry_invalid/);

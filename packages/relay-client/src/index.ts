@@ -1682,7 +1682,8 @@ export type DeviceKeysetTelemetry = {
 /** Omit relayAutostartEnabled when the state cannot be read; it is never guessed as false. */
 export type DeviceTelemetryOptions = { relayAutostartEnabled?: boolean };
 
-const TELEMETRY_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+// A date-time the keyset contract accepts (including a lowercase or space separator); sent normalized to ISO.
+const TELEMETRY_INSTANT = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:[Zz]|[+-]\d{2}:\d{2})$/;
 
 export function deviceKeysetTelemetry(config: Pick<DeviceConfig, 'serverSigningKeyset'>,
   options: DeviceTelemetryOptions = {}): DeviceKeysetTelemetry {
@@ -1698,7 +1699,7 @@ export function deviceKeysetTelemetry(config: Pick<DeviceConfig, 'serverSigningK
   return {
     schema: 'dharma.device-keyset-telemetry/v1',
     heldKeysetGeneration: generation as number | null,
-    heldKeysetExpiresAt: expiresAt as string | null,
+    heldKeysetExpiresAt: expiresAt === null ? null : new Date(Date.parse(expiresAt as string)).toISOString(),
     ...(autostart === undefined ? {} : { relayAutostartEnabled: autostart as boolean }),
   };
 }
