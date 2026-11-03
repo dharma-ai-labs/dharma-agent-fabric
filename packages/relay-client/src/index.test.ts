@@ -26,6 +26,7 @@ import {
   saveDeviceEnrollmentAnchor,
   loadOrganizationApiToken,
   saveOrganizationApiToken,
+  deviceKeysetTelemetry,
 } from './index.js';
 import {
   signCanonicalObject,
@@ -1897,4 +1898,56 @@ test('consistency recovery and restoration preserve verified anchor bytes in eit
     assert.equal(final, writes[0]);
     assert.equal(JSON.parse(final).serverSigningKeyset.generation, 2);
   }
+});
+
+test('session open and workspace registration report the held keyset generation, expiry and relay autostart (C8)', async () => {
+  const now = new Date();
+  const fixture = keysetFixture(now);
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-c8-keyset-telemetry-'));
+  const configPath = resolve(root, 'device.json');
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  await saveKeysetConfig({ configPath, publicKeyEd25519: fixture.firstPublic,
+    devicePublicKeyEd25519: identity.publicKeyEd25519, keyset: fixture.initial, now });
+  await anchorConfig(configPath, store);
+  const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const client = await AgentFabricClient.open({ configPath, statePath: resolve(root, 'state.json'), store,
+    fetcher: async (url, init) => {
+      sent.push({ path: new URL(String(url)).pathname, body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    } });
+  await client.openSession('0.2.999', { relayAutostartEnabled: true });
+  await client.registerWorkspace({ workspaceId: 'workspace', name: 'Fixture' }, { relayAutostartEnabled: false });
+  await client.openSession('0.2.999');
+  const [session, workspace, unknownAutostart] = sent;
+  assert.equal(session!.path, '/api/v1/orgs/org_a/agent-fabric/sessions');
+  assert.equal(session!.body.relayVersion, '0.2.999');
+  assert.equal(typeof session!.body.connectionId, 'string');
+  assert.deepEqual(session!.body.deviceTelemetry, { schema: 'dharma.device-keyset-telemetry/v1',
+    heldKeysetGeneration: 1, heldKeysetExpiresAt: fixture.initial.expiresAt, relayAutostartEnabled: true });
+  assert.equal(workspace!.path, '/api/v1/orgs/org_a/agent-fabric/workspaces');
+  assert.equal(workspace!.body.workspaceId, 'workspace');
+  assert.equal(workspace!.body.name, 'Fixture');
+  assert.deepEqual(workspace!.body.deviceTelemetry, { schema: 'dharma.device-keyset-telemetry/v1',
+    heldKeysetGeneration: 1, heldKeysetExpiresAt: fixture.initial.expiresAt, relayAutostartEnabled: false });
+  assert.deepEqual(unknownAutostart!.body.deviceTelemetry, { schema: 'dharma.device-keyset-telemetry/v1',
+    heldKeysetGeneration: 1, heldKeysetExpiresAt: fixture.initial.expiresAt },
+  'An unknown autostart state is omitted, never reported as false');
+});
+
+test('device keyset telemetry reports a keyset-less device as null and rejects malformed values (C8)', () => {
+  const legacy = { serverSigningKeyset: undefined } as unknown as Parameters<typeof deviceKeysetTelemetry>[0];
+  assert.deepEqual(deviceKeysetTelemetry(legacy), { schema: 'dharma.device-keyset-telemetry/v1',
+    heldKeysetGeneration: null, heldKeysetExpiresAt: null });
+  const held = (generation: unknown, expiresAt: unknown) => ({ serverSigningKeyset: { generation, expiresAt } }) as
+    unknown as Parameters<typeof deviceKeysetTelemetry>[0];
+  assert.deepEqual(deviceKeysetTelemetry(held(4, '2026-11-26T18:35:00.000Z'), { relayAutostartEnabled: false }),
+    { schema: 'dharma.device-keyset-telemetry/v1', heldKeysetGeneration: 4,
+      heldKeysetExpiresAt: '2026-11-26T18:35:00.000Z', relayAutostartEnabled: false });
+  for (const [generation, expiresAt] of [[0, '2026-11-26T18:35:00.000Z'], [1.5, '2026-11-26T18:35:00.000Z'],
+    ['4', '2026-11-26T18:35:00.000Z'], [4, 'tomorrow'], [4, null]]) {
+    assert.throws(() => deviceKeysetTelemetry(held(generation, expiresAt)), /device_keyset_telemetry_invalid/);
+  }
+  assert.throws(() => deviceKeysetTelemetry(legacy, { relayAutostartEnabled: 'yes' as unknown as boolean }),
+    /device_keyset_telemetry_invalid/);
 });

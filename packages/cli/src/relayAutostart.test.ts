@@ -10,7 +10,7 @@ import {
   disableRelayAutostart, enableRelayAutostart, linuxRelayUnit,
   relayAutostartStatus, windowsRelayStartupScript,
   startRelayAutostart, stopRelayAutostart, inspectOwnedRelayAutostart, macRelayLaunchAgent,
-  assertRelayAutostartPaused,
+  assertRelayAutostartPaused, relayAutostartTelemetry,
 } from './relayAutostart.js';
 
 const startupPreflight = async (options: RelayAutostartOptions & { version?: string }) => {
@@ -813,4 +813,24 @@ test('Windows owned operations guard the exact action, arguments, workspace and 
     assert.match(command, /autostart_conflict/);
     assert.ok(command.indexOf('autostart_conflict') < command.indexOf(verb));
   }
+});
+
+test('relay autostart telemetry reports enabled, disabled and omits an unknown state (C8)', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-c8-autostart-telemetry-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  let state = 'enabled';
+  const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
+    workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
+    policy: '/fixtures/repo/.dharma/approved-policy.json', version: '0.2.217',
+    wslHost: {context: async () => null}, run: async () => ({stdout: `${state}
+`})};
+  assert.equal(await relayAutostartTelemetry(options), false, 'No owned registration means autostart is not enabled');
+  await enableRelayAutostart(options);
+  assert.equal(await relayAutostartTelemetry(options), true);
+  state = 'disabled';
+  assert.equal(await relayAutostartTelemetry(options), false);
+  await writeFile(join(options.home, 'relay', 'autostart.json'), '{"schema":"tampered"}');
+  assert.equal(await relayAutostartTelemetry(options), undefined, 'An unreadable state is omitted, never reported');
+  assert.equal(await relayAutostartTelemetry({...options, run: async () => { throw new Error('systemctl_missing'); }}),
+    undefined, 'Telemetry never fails the caller');
 });

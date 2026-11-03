@@ -226,4 +226,19 @@ if (!validateSkillBundle({
   throw new Error(`Skill bundle schema rejected a canonical nested skill path: ${ajv.errorsText(validateSkillBundle?.errors)}`);
 }
 
+const validateKeysetTelemetry = ajv.getSchema('https://schemas.dharma-ai.io/device-keyset-telemetry/v1');
+const keysetTelemetry = { schema: 'dharma.device-keyset-telemetry/v1', heldKeysetGeneration: 4,
+  heldKeysetExpiresAt: '2026-11-26T18:35:00.000Z', relayAutostartEnabled: true };
+if (!validateKeysetTelemetry?.(keysetTelemetry)
+  || !validateKeysetTelemetry({ schema: 'dharma.device-keyset-telemetry/v1', heldKeysetGeneration: null, heldKeysetExpiresAt: null })) {
+  throw new Error(`Device keyset telemetry is invalid: ${ajv.errorsText(validateKeysetTelemetry?.errors)}`);
+}
+for (const override of [{ heldKeysetGeneration: 0 }, { heldKeysetGeneration: 1.5 }, { heldKeysetGeneration: '4' },
+  { heldKeysetExpiresAt: 'tomorrow' }, { relayAutostartEnabled: 'yes' }, { relayAutostartEnabled: null },
+  { deviceSecret: 'never-persist' }]) {
+  if (validateKeysetTelemetry({ ...keysetTelemetry, ...override })) {
+    throw new Error('Device keyset telemetry schema accepted a malformed value or an unknown field.');
+  }
+}
+
 process.stdout.write(`${JSON.stringify({ ok: true, schemas: names.length })}\n`);
