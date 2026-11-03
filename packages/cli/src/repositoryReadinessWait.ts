@@ -9,6 +9,12 @@ export type RepositoryReadinessResult = RepositoryReadinessObservation & {
   attempts: number;
 };
 
+export type RepositoryReadinessProgress = RepositoryReadinessObservation & {
+  attempts: number;
+  elapsedMs: number;
+  maximumWaitMs: number;
+};
+
 export async function waitForRepositoryReadiness(
   observe: () => Promise<RepositoryReadinessObservation>,
   options: {
@@ -16,6 +22,7 @@ export async function waitForRepositoryReadiness(
     intervalMs?: number;
     now?: () => number;
     wait?: (delayMs: number) => Promise<void>;
+    onProgress?: (progress: RepositoryReadinessProgress) => void;
   } = {},
 ): Promise<RepositoryReadinessResult> {
   const maximumWaitMs = options.maximumWaitMs ?? 300_000;
@@ -33,6 +40,7 @@ export async function waitForRepositoryReadiness(
     if (observed.state === 'blocked') return { ...observed, outcome: 'blocked', attempts };
     const remaining = deadline - now();
     if (remaining <= 0) return { ...observed, outcome: 'pending', attempts };
+    options.onProgress?.({ ...observed, attempts, elapsedMs: maximumWaitMs - remaining, maximumWaitMs });
     await wait(Math.min(intervalMs, remaining));
   }
 }
