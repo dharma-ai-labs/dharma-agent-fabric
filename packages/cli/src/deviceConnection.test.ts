@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import {mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createHash} from 'node:crypto';
+import {createHash, generateKeyPairSync, type JsonWebKey, type KeyObject} from 'node:crypto';
 import test, {type TestContext} from 'node:test';
-import {AgentFabricClient, loadDeviceConfig, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceConnectionPreference, saveDeviceEnrollmentAnchor,
-  type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
+import {signCanonicalObject, type TrustedServerSigningKeyset} from '@dharma-ai-labs/agent-fabric-contracts';
+import {AgentFabricClient, loadDeviceConfig, loadOrCreateDeviceIdentity, recoverDeviceEnrollmentConsistency, saveDeviceConfig,
+  saveDeviceConnectionPreference, saveDeviceEnrollmentAnchor, type DeviceConfig, type SecureSecretStore} from '@dharma-ai-labs/agent-fabric-relay-client';
 import {automaticBootstrapResume, connectionPreference, readExistingDeviceConfig, resumeDeviceConnection} from './deviceConnection.js';
 
 function admission(config: DeviceConfig) {
@@ -47,7 +48,8 @@ async function fixture(t: TestContext) {
     return new Response(JSON.stringify(admission(config)), {status: 201});
   };
   const input = {config, configPath, statePath, installationPath, version: '0.1.177',
-    openClient: () => AgentFabricClient.open({configPath, statePath, store, fetcher, readOnly: true})};
+    openClient: () => AgentFabricClient.open({configPath, statePath, store, fetcher, readOnly: true}),
+    recoverEnrollment: () => recoverDeviceEnrollmentConsistency({configPath, store})};
   return {home, values, writes, requests, store, config, configPath, statePath, installationPath, identity, state, fetcher, input};
 }
 
@@ -265,3 +267,80 @@ test('bound preference survives trust metadata updates and fails closed on corru
   assert.equal((await loadDeviceConfig(f.configPath)).connectionMode, 'manual', 'Changed scope cannot resurrect an inline opt-in');
   assert.deepEqual(f.writes, []);
 });
+
+const DAY = 24 * 60 * 60_000;
+function rootSignedKeyset(signer: {privateKey: KeyObject; publicKey: KeyObject}, generation: number, issuedAt: number, expiresAt: number) {
+  const now = Date.now(), unsigned = {schema: 'dharma.server-signing-keyset/v1' as const, organizationId: 'org_fixture', generation,
+    keys: [{keyVersion: 'kms/1', publicKeyEd25519: (signer.publicKey.export({format: 'jwk'}) as JsonWebKey).x!, status: 'active' as const,
+      notBefore: new Date(now - 90 * DAY).toISOString(), notAfter: new Date(now + 300 * DAY).toISOString()}],
+    signedByKeyVersion: 'kms/1', issuedAt: new Date(issuedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString()};
+  return {...unsigned, signature: signCanonicalObject(unsigned, signer.privateKey)} as TrustedServerSigningKeyset;
+}
+
+// C9 (b): resume runs the same verified recovery as relay startup.
+type Signer = {privateKey: KeyObject; publicKey: KeyObject};
+async function expiredFixture(t: TestContext, anchoredGeneration: number | null | ((root: Signer, now: number) => TrustedServerSigningKeyset)) {
+  const f = await fixture(t), root = generateKeyPairSync('ed25519'), now = Date.now();
+  const config: DeviceConfig = {...f.config, serverPublicKeyEd25519: (root.publicKey.export({format: 'jwk'}) as JsonWebKey).x!,
+    serverSigningKeyset: rootSignedKeyset(root, 1, now - 29 * DAY - 3_600_000, now - 3_600_000)};
+  const anchored = anchoredGeneration === null ? config
+    : typeof anchoredGeneration === 'function' ? {...config, serverSigningKeyset: anchoredGeneration(root, now)}
+    : {...config, serverSigningKeyset: rootSignedKeyset(root, anchoredGeneration, now - 22 * DAY, now + 7 * DAY)};
+  for (const account of [...f.values.keys()].filter(key => key.startsWith('device-enrollment-'))) f.values.delete(account);
+  await saveDeviceConfig(f.configPath, config);
+  await saveDeviceEnrollmentAnchor({config: anchored, store: f.store});
+  f.writes.length = 0;
+  const admissions: string[] = [];
+  const fetcher = async (url: string | URL | Request) => {
+    admissions.push(String(url)); return new Response(JSON.stringify(admission(config)), {status: 201});
+  };
+  const input = {...f.input, config,
+    openClient: () => AgentFabricClient.open({configPath: f.configPath, statePath: f.statePath, store: f.store, fetcher, readOnly: true})};
+  return {...f, config, anchored, input, admissions};
+}
+
+test('resume recovers an interrupted install after the old keyset expired and keeps the device id', async t => {
+  const f = await expiredFixture(t, 2);
+  const result = await resumeDeviceConnection(f.input);
+  assert.equal(result.status, 'resumed');
+  assert.equal(result.deviceId, f.config.deviceId);
+  assert.deepEqual((await loadDeviceConfig(f.configPath)).serverSigningKeyset, f.anchored.serverSigningKeyset);
+  assert.equal(await readFile(f.statePath, 'utf8'), f.state);
+});
+
+test('an expired device without browser authorization is still rejected by resume', async t => {
+  const f = await expiredFixture(t, null);
+  const before = await readFile(f.configPath, 'utf8');
+  await assert.rejects(resumeDeviceConnection(f.input), /connection_trust_requires_recovery/);
+  assert.equal(await readFile(f.configPath, 'utf8'), before);
+  assert.deepEqual(f.writes, []);
+});
+
+// C9-T1: with the stored keyset expired, resume reaches only the pinned-root
+// fallback. A root-signed higher-generation anchor keyset that is itself expired
+// or issued beyond the five-minute tolerance must not be installed.
+for (const variant of ['expired candidate', 'future-issued candidate', 'valid successor (control)'] as const) {
+  test(`stored keyset expired: resume handles a root-signed higher-generation ${variant} anchor`, async t => {
+    const f = await expiredFixture(t, (root, now) => variant === 'expired candidate'
+      ? rootSignedKeyset(root, 2, now - 20 * DAY, now - 30 * 60_000)
+      : variant === 'future-issued candidate'
+        ? rootSignedKeyset(root, 2, now + 10 * 60_000, now + 20 * DAY)
+        : rootSignedKeyset(root, 2, now - DAY, now + 20 * DAY));
+    if (variant === 'valid successor (control)') {
+      const result = await resumeDeviceConnection(f.input);
+      assert.equal(result.status, 'resumed');
+      assert.equal(result.deviceId, f.config.deviceId);
+      assert.deepEqual((await loadDeviceConfig(f.configPath)).serverSigningKeyset, f.anchored.serverSigningKeyset);
+      assert.equal(f.admissions.length, 1);
+      return;
+    }
+    const configBefore = await readFile(f.configPath, 'utf8'), protectedBefore = JSON.stringify([...f.values]);
+    await assert.rejects(f.input.recoverEnrollment(), /Interrupted server signing keyset installation could not be verified/);
+    await assert.rejects(resumeDeviceConnection(f.input), /connection_trust_requires_recovery/);
+    assert.equal(await readFile(f.configPath, 'utf8'), configBefore, 'device.json is byte-identical');
+    assert.equal(JSON.stringify([...f.values]), protectedBefore, 'The protected anchor is byte-identical');
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.admissions, [], 'No admission request');
+    assert.equal(await readFile(f.statePath, 'utf8'), f.state, 'Protocol state is not replaced');
+  });
+}

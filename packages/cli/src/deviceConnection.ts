@@ -3,6 +3,7 @@ import {createPublicKey} from 'node:crypto';
 import {canonicalize, validateDeviceAdmissionContract, validateTrustedServerSigningKeysetContract,
   verifyInitialServerSigningKeyset, type TrustedServerSigningKeyset} from '@dharma-ai-labs/agent-fabric-contracts';
 import {AgentFabricClient, AgentFabricRequestError, parseDeviceConfig, readDeviceConnectionPreference,
+  recoverDeviceEnrollmentConsistency, verifyServerSigningKeysetSuccessor,
   type DeviceConfig, type HostOperationScope} from '@dharma-ai-labs/agent-fabric-relay-client';
 
 export type ConnectionFlags = Map<string, string | boolean>;
@@ -67,33 +68,73 @@ function assertCurrentTrust(config: DeviceConfig) {
   }
 }
 
-/** Approval verifies current trust without silently migrating a historical config. */
-export function assertReauthenticationSigningTrust(config: DeviceConfig, approvedKeyset: unknown) {
-  if (config.serverSigningKeyset) {
-    assertCurrentTrust(config);
-    if (canonicalize(approvedKeyset ?? null) !== canonicalize(config.serverSigningKeyset)) {
-      throw new Error('connection_reauthentication_identity_mismatch');
+/** Approval verifies current trust without silently migrating a historical config.
+ * Returns the approved keyset to install when it is a verified successor (C9). */
+export function assertReauthenticationSigningTrust(config: DeviceConfig, approvedKeyset: unknown,
+  now = new Date()): TrustedServerSigningKeyset | undefined {
+  const stored = config.serverSigningKeyset;
+  if (stored) {
+    if (canonicalize(approvedKeyset ?? null) === canonicalize(stored)) {
+      assertCurrentTrust(config);
+      return undefined;
     }
-    return;
+    if (approvedKeyset === undefined) throw new Error('connection_reauthentication_identity_mismatch');
+    // Browser approval of this same device admits a successor that chains from
+    // the stored keyset, or that the pinned root signed at a higher generation,
+    // even after the stored keyset expired. Nothing else replaces stored trust.
+    let verification: {ok: boolean};
+    try {verification = verifyServerSigningKeysetSuccessor(config, stored, approvedKeyset as TrustedServerSigningKeyset, now);}
+    catch {verification = {ok: false};}
+    if (verification.ok) return approvedKeyset as TrustedServerSigningKeyset;
+    throw new Error('connection_reauthentication_trust_rejected');
   }
   // Historical servers may return no keyset. Current servers must return one
   // signed by this exact legacy root; accepting it never installs new trust.
-  if (approvedKeyset === undefined) return;
+  if (approvedKeyset === undefined) return undefined;
   try {
     const verification = verifyInitialServerSigningKeyset(approvedKeyset as TrustedServerSigningKeyset,
       createPublicKey({key: {kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519}, format: 'jwk'}),
-      config.organizationId);
-    if (verification.ok) return;
+      config.organizationId, now);
+    if (verification.ok) return undefined;
   } catch { /* Invalid keys or schema remain a closed recovery boundary. */ }
   throw new Error('connection_reauthentication_trust_rejected');
 }
 
 export type ConnectionProbeClient = Pick<AgentFabricClient, 'config' | 'openSession'>;
-export async function resumeDeviceConnection(input: {
+type ResumeInput = {
   config: DeviceConfig; configPath: string; statePath: string; installationPath: string;
   version: string; hostScope?: HostOperationScope;
   openClient?: () => Promise<ConnectionProbeClient>;
-}) {
+  recoverEnrollment?: () => Promise<DeviceConfig>;
+};
+
+export async function resumeDeviceConnection(input: ResumeInput) {
+  try {return await resumeWithConfig(input, input.config);}
+  catch (error) {
+    if (!(error instanceof Error) || error.message !== 'connection_trust_requires_recovery') throw error;
+    const recovered = await recoveredResumeConfig(input);
+    if (!recovered) throw error;
+    return resumeWithConfig(input, recovered);
+  }
+}
+
+/** An interrupted keyset install leaves the protected anchor ahead of device.json.
+ * Resume completes it with the same verified recovery as relay startup (C9). It
+ * accepts only the same enrollment holding a higher-generation keyset. */
+async function recoveredResumeConfig(input: ResumeInput): Promise<DeviceConfig | null> {
+  let recovered: DeviceConfig;
+  try {
+    recovered = await (input.recoverEnrollment
+      ?? (() => recoverDeviceEnrollmentConsistency({configPath: input.configPath, hostScope: input.hostScope})))();
+  } catch {return null;}
+  const stored = input.config.serverSigningKeyset, next = recovered.serverSigningKeyset;
+  if (!next || (stored && next.generation <= stored.generation)
+    || canonicalize({...recovered, serverSigningKeyset: null}) !== canonicalize({...input.config, serverSigningKeyset: null})) return null;
+  return recovered;
+}
+
+async function resumeWithConfig(resumeInput: ResumeInput, config: DeviceConfig) {
+  const input = {...resumeInput, config};
   const expected = canonicalize(input.config);
   await assertInstallationContinuity(input.config, input.installationPath);
   assertCurrentTrust(input.config);

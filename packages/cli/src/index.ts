@@ -4285,7 +4285,10 @@ async function login(flags: Map<string, string | boolean>): Promise<Output> {
       const release = await acquirePidLock(`${configPath()}.connection.lock`, 10_000, 'connection_preference_busy');
       try {
         const current = await readDeviceConfig();
-        if (!current || canonicalize(current) !== canonicalize(existing)) throw new Error('connection_state_changed');
+        // The preference binding excludes trust snapshots, so a keyset that resume
+        // or reauthentication just installed is not a changed enrollment.
+        if (!current || canonicalize({...current, serverSigningKeyset: null})
+          !== canonicalize({...existing, serverSigningKeyset: null})) throw new Error('connection_state_changed');
         await saveDeviceConnectionPreference({configPath: configPath(), config: current, connectionMode: preference,
           hostScope: currentBootstrapHostScope()});
       } finally {await release();}
@@ -4446,12 +4449,16 @@ async function reauthenticateExistingDevice(config: DeviceConfig, flags: Map<str
           || result.serverPublicKeyEd25519 !== config.serverPublicKeyEd25519) {
           throw new Error('connection_reauthentication_identity_mismatch');
         }
-        assertReauthenticationSigningTrust(config, result.serverSigningKeyset);
+        const successor = assertReauthenticationSigningTrust(config, result.serverSigningKeyset);
         const current = await readDeviceConfig();
         if (!current || canonicalize(current) !== canonicalize(config)) throw new Error('connection_state_changed');
         await assertInstallationContinuity(config, installationIdentityPath());
         await assertDeviceEnrollmentAnchorAbsent({config, hostScope: currentBootstrapHostScope()});
-        await saveDeviceEnrollmentAnchor({config, hostScope: currentBootstrapHostScope(), requireAbsent: true});
+        const next = successor ? {...config, serverSigningKeyset: successor} : config;
+        // The protected anchor is the write-ahead record. If the process stops
+        // before device.json is replaced, startup recovery completes it (C9).
+        await saveDeviceEnrollmentAnchor({config: next, hostScope: currentBootstrapHostScope(), requireAbsent: true});
+        if (successor) await saveDeviceConfig(configPath(), next, currentBootstrapHostScope());
         return {ok: true, status: 'reauthenticated', deviceId: config.deviceId, organizationId: config.organizationId,
           connected: false, browserOpened, providerAuthentication: 'not_checked'};
       }
