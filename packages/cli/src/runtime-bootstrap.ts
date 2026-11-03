@@ -113,6 +113,16 @@ export function findSupportedNodeRuntime(input: Parameters<typeof nodeRuntimeCan
   return null;
 }
 
+/** For an unsupported current Node: a supported local runtime first, else the CLI's own
+ * pinned runtime (#398). A relaunched child never searches or fetches again. */
+export async function selectCliRuntime(input: {
+  version: string; bootstrapped: boolean;
+  findSupported: () => string | null; ensurePinned: () => Promise<string>;
+}) {
+  if (input.bootstrapped || isSupportedNodeVersion(input.version)) return null;
+  return input.findSupported() ?? await input.ensurePinned();
+}
+
 export function runtimeBootstrapHint(env: NodeJS.ProcessEnv = process.env) {
   const explicit = env.DHARMA_NODE_BINARY
     ? ` DHARMA_NODE_BINARY currently points to ${basename(env.DHARMA_NODE_BINARY)} but it is not a supported runtime.`

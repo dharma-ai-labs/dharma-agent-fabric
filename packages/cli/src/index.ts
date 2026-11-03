@@ -158,7 +158,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.216';
+const VERSION = '0.2.217';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3780,7 +3780,11 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
           ready: await repositorySharedReady(current),
           candidateId: current.repositoryPackage?.candidateId || null,
         };
-      })));
+      }, { onProgress: progress => {
+        if (progress.attempts % 6 !== 1) return;
+        process.stderr.write(`Waiting for the shared repository package to install on this device (package ${progress.state}, `
+          + `${Math.round(progress.elapsedMs / 1000)} s of ${Math.round(progress.maximumWaitMs / 1000)} s).\n`);
+      } })));
     sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
   }
   const apiFlags = new Map<string, string | boolean>([

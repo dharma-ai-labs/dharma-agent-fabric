@@ -291,7 +291,11 @@ browser-authorized re-enrollment, never editing local trust files.
 
 ## Autonomous organization setup
 
-Requires Node.js 22.20.0 through 24.x.
+Requires Node.js 22.20.0 through 24.x. When the CLI starts on any other Node.js
+release (for example Node 26) and finds no supported runtime installed, it fetches
+the official Node.js 24.22.2 archive from nodejs.org once, checks it against the
+SHA-256 pinned in the CLI, keeps it under `$DHARMA_HOME/runtime` and runs itself
+with it. The system Node.js is never changed.
 
 An organization administrator copies the recipient-bound setup instruction from
 the portal into the coding agent. The instruction authorizes one pinned command
