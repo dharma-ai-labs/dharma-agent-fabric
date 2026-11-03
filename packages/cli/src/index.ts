@@ -3784,7 +3784,11 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
           ready: await repositorySharedReady(current),
           candidateId: current.repositoryPackage?.candidateId || null,
         };
-      })));
+      }, { onProgress: progress => {
+        if (progress.attempts % 6 !== 1) return;
+        process.stderr.write(`Waiting for the shared repository package to install on this device (package ${progress.state}, `
+          + `${Math.round(progress.elapsedMs / 1000)} s of ${Math.round(progress.maximumWaitMs / 1000)} s).\n`);
+      } })));
     sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
   }
   const apiFlags = new Map<string, string | boolean>([
