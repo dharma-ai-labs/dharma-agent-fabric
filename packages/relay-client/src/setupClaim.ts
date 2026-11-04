@@ -18,7 +18,15 @@ const SCOPES = ['agents:read', 'agents:run', 'evals:read', 'evals:run', 'traces:
   'skills:write', 'usage:read', 'reports:read', 'fabric:devices', 'fabric:tasks'];
 const fail = (): never => { throw new Error('setup_claim_failed'); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const SERVER_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+// Exact codes only: a character pattern would still let a token-shaped value through to stderr.
+const SERVER_CODES = new Set([
+  'setup_claim_approval_unavailable', 'setup_claim_client_unavailable', 'setup_claim_consume_unavailable',
+  'setup_claim_credentials_unavailable', 'setup_claim_device_mismatch', 'setup_claim_expired',
+  'setup_claim_proof_invalid', 'setup_claim_recipient_required', 'setup_claim_scope_unavailable',
+  'setup_claim_unavailable', 'agent_fabric_capability_disabled', 'agent_fabric_decisions_not_ready',
+  'agent_fabric_not_enabled', 'agent_fabric_retention_not_ready', 'agent_fabric_signing_expired',
+  'agent_fabric_signing_not_ready', 'agent_fabric_signing_rotation_required', 'internal_error',
+  'invalid_request', 'rate_limit_exceeded', 'rate_limit_unavailable', 'rate_limited']);
 
 export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
   | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
@@ -206,7 +214,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       const parsed = await boundedJson(response, requestSignal);
       if (response.status >= 300) {
         const error = parsed.error as {code?: unknown; correlationId?: unknown} | null | undefined;
-        if (typeof error?.code === 'string' && SERVER_CODE.test(error.code)) serverCode = error.code;
+        if (typeof error?.code === 'string' && SERVER_CODES.has(error.code)) serverCode = error.code;
         if (typeof error?.correlationId === 'string' && UUID.test(error.correlationId)) correlationId = error.correlationId;
         if (![409,429].includes(response.status)) return fail();
       }
@@ -322,7 +330,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     try {
       // The approval wait ends locally: its deadline passes with no further request, so no server error exists.
       const approvalExpired = approvalDeadline !== undefined && (phase === 'finalize' || phase === 'recipient_approval')
-        && (now() >= approvalDeadline || serverCode === 'setup_claim_expired');
+        && (serverCode === 'setup_claim_expired' || (now() >= approvalDeadline && failureReason !== 'server_rejected'));
       const reason = scopeSignal?.aborted ? 'canceled' : approvalExpired ? 'approval_expired'
         : failureReason ?? (phase === 'challenge' || phase === 'finalize' ? 'response_invalid' : undefined);
       void Promise.resolve(input.onFailureDiagnostic?.(Object.freeze({

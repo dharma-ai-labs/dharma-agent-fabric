@@ -11,6 +11,7 @@ import { sealSetupClaimCredential, signCanonicalObject, setupClaimSigningPayload
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
 const correlation = '55555555-5555-4555-8555-555555555555';
+const tokenShapedCode = `dharma_org_${'s'.repeat(48)}`;
 const scope = {
   hqUrl: 'https://hq.example', organizationId: 'org_demo',
   setupReference: '11111111-1111-4111-8111-111111111111',
@@ -84,7 +85,7 @@ test('additive failure fields stay bounded by the schema', async () => {
     assert.equal((await validateContract(schemaDir, schemaId, {...report, reason, serverCode: 'setup_claim_expired',
       correlationId: correlation})).ok, true);
   }
-  for (const extra of [{reason: 'secret-canary'}, {serverCode: 'secret canary'}, {correlationId: 'secret-canary'}]) {
+  for (const extra of [{reason: 'secret-canary'}, {serverCode: tokenShapedCode}, {correlationId: 'secret-canary'}]) {
     assert.equal((await validateContract(schemaDir, schemaId, {...report, ...extra})).ok, false);
   }
 });
@@ -352,6 +353,19 @@ test('server expiry while approval is pending is the same approval_expired reaso
       reason:'approval_expired',serverCode:'setup_claim_expired',correlationId:correlation}]);
   } finally {await rm(f.root,{recursive:true,force:true});}
 });
+test('an explicit server rejection after the deadline is not reported as approval expiry',async()=>{
+  const f=await fixture(undefined,true); const reports:unknown[]=[]; const {fetcher:pending,sentAt}=unansweredApproval(f);
+  const fetcher:typeof fetch=async(url,init)=>{
+    if(sentAt.length<3) return pending(url,init);
+    f.advance(60_001);
+    return Response.json({ok:false,error:{code:'setup_claim_device_mismatch',message:'secret-canary',correlationId:correlation}},{status:403});
+  };
+  try{
+    await assert.rejects(claimSetupReference({...f.input,fetcher,onFailureDiagnostic:report=>{reports.push(report);}}),/^Error: setup_claim_failed$/);
+    assert.deepEqual(reports,[{schema:'dharma.setup-claim-failure/v1',code:'setup_claim_failed',phase:'finalize',
+      reason:'server_rejected',serverCode:'setup_claim_device_mismatch',correlationId:correlation}]);
+  } finally {await rm(f.root,{recursive:true,force:true});}
+});
 test('other finalize failures report a typed reason and server correlation, never server text',async t=>{
   const header={'x-dharma-correlation-id':correlation};
   const rejected=(code:unknown,status:number,id:unknown=correlation)=>
@@ -361,6 +375,7 @@ test('other finalize failures report a typed reason and server correlation, neve
     ['conflict',rejected('setup_claim_consume_unavailable',409),{reason:'server_rejected',serverCode:'setup_claim_consume_unavailable',correlationId:correlation}],
     ['unreadable body',()=>new Response('<html>secret-canary</html>',{status:502,headers:header}),{reason:'server_rejected',correlationId:correlation}],
     ['unsafe code',rejected('secret canary https://hq.example/#request=x',403),{reason:'server_rejected',correlationId:correlation}],
+    ['token-shaped code',rejected(tokenShapedCode,403),{reason:'server_rejected',correlationId:correlation}],
     ['unsafe correlation',rejected('setup_claim_proof_invalid',403,'secret-canary'),{reason:'server_rejected',serverCode:'setup_claim_proof_invalid'}],
     ['malformed success',()=>Response.json({ok:true,status:'secret-canary'}),{reason:'response_invalid'}],
     ['network',()=>{throw new Error('secret-canary');},{reason:'network_unavailable'}],
