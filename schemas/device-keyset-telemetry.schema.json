@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/device-keyset-telemetry/v1",
+  "title": "Device Keyset Telemetry",
+  "description": "Additive, optional deviceTelemetry field of the signed session open and workspace.register bodies. It reports the server signing keyset generation and expiry this device holds and, when the client can read it, whether relay autostart is enabled. The server stores it for device-lag and relay-not-running alerts only; it never grants authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "heldKeysetGeneration", "heldKeysetExpiresAt"],
+  "properties": {
+    "schema": { "const": "dharma.device-keyset-telemetry/v1" },
+    "heldKeysetGeneration": {
+      "description": "Generation of the held server signing keyset, or null when the device holds no keyset (root-only trust).",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "heldKeysetExpiresAt": {
+      "description": "expiresAt of the held server signing keyset, or null when the device holds no keyset.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "relayAutostartEnabled": {
+      "description": "Whether the owned relay autostart registration is enabled. Omitted when the state cannot be read.",
+      "type": "boolean"
+    }
+  }
+}

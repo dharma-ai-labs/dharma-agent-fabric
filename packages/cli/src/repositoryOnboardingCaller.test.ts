@@ -914,8 +914,13 @@ test('workspace synchronization validates policy against the server-returned can
   const response = { ok: true, organizationId: 'org_fixture', workspace: {
     id: canonical.workspaceId, status: 'active', policyRevision: 'policy_fixture',
   }, organizationPolicyAuthorization: { workspaceId: canonical.workspaceId } };
-  const fabric = { registerWorkspace: async () => { calls.push('register'); return response; } };
+  const fabric = { registerWorkspace: async (_body: unknown, telemetry: unknown) => {
+    calls.push('register');
+    assert.deepEqual(telemetry, { relayAutostartEnabled: true }, 'C8 autostart state rides on the signed registration');
+    return response;
+  } };
   const actual = await (await caller('syncWorkspacePolicyHoldingRefreshLock', {
+    relayAutostartReport: async () => ({ relayAutostartEnabled: true }),
     receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
     registry: async () => [requested, canonical],
     reconcileWorkspaceRegistration: reconcile,
@@ -1003,6 +1008,7 @@ test('canonical registration cannot bypass signed-policy verification or bind af
   const reconcile = await caller('reconcileWorkspaceRegistration', { UUID_PATTERN: /^[0-9a-f-]{36}$/i });
   let bound = false;
   const synchronize = await caller('syncWorkspacePolicyHoldingRefreshLock', {
+    relayAutostartReport: async () => ({}),
     receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
     registry: async () => [f.canonical], reconcileWorkspaceRegistration: reconcile,
     readDeviceConfig: async () => ({ serverPublicKeyEd25519: 'fixture_key' }),
