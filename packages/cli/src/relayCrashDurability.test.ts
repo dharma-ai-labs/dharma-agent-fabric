@@ -267,6 +267,21 @@ test('a session that opens after the failure ends failing, even if that failure 
   assert.equal((await f.reconnect()).state, 'failing');
 });
 
+test('a success record from the future or in another form cannot end a session open failure', async t => {
+  const f = await runningRelayHome(t);
+  await f.writeReceipt(f.receipt);
+  const later = new Date(Date.parse(f.at) + 2000).toISOString();
+  for (const name of ['last-session-open.json', 'last-successful-poll.json']) {
+    const record = join(f.repository, name);
+    for (const at of ['9999-01-01T00:00:00.000Z', new Date(Date.now() + 3_600_000).toISOString(),
+      later.replace(/\.\d{3}Z$/, 'Z'), `${later}\n`]) {
+      await fs.writeFile(record, JSON.stringify({at}));
+      assert.equal((await f.reconnect()).state, 'failing', `${name} ${at}`);
+    }
+    await fs.rm(record);
+  }
+});
+
 test('a later success in any workspace outranks the failure of a stopped workspace', async t => {
   const f = await runningRelayHome(t), other = join(f.home, 'relay', 'repositories', randomUUID());
   await f.writeReceipt(f.receipt);
@@ -335,7 +350,7 @@ test('relay start on a NUL-filled replay state leaves a stable receipt before th
   assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
 });
 
-test('verbose status drops a repository failure once its session has opened again', async t => {
+test('verbose status drops a repository failure only once a valid session open follows it', async t => {
   const f = await signedWorkspace(t);
   const relayPid = join(f.home, 'relay', 'relay.pid'), repository = join(f.home, 'relay', 'repositories', f.workspaceId);
   await fs.mkdir(repository, {recursive: true});
@@ -351,6 +366,8 @@ test('verbose status drops a repository failure once its session has opened agai
   await fs.writeFile(join(repository, 'last-session-open.json'),
     JSON.stringify({at: new Date(Date.parse(at) + 1000).toISOString()}));
   assert.equal((await repository0())?.lastFailure, undefined);
+  await fs.writeFile(join(repository, 'last-session-open.json'), JSON.stringify({at: '9999-01-01T00:00:00.000Z'}));
+  assert.equal((await repository0())?.lastFailure?.failureCode, 'connection_anchor_lock_invalid');
 });
 
 test('a supervised relay on a NUL-filled replay state shows the failure in status', async t => {

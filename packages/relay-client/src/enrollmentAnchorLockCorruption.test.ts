@@ -206,3 +206,47 @@ test('a failed flush publishes nothing', async t => {
   await assert.rejects(acquire(f.path, undefined, 100), {code: 'EIO'});
   assert.deepEqual((await fs.readdir(f.root)).filter(name => !name.endsWith('.candidate')), []);
 });
+
+// Records every flush and every change to the recovery mutex, in the order they happen.
+function recordedLockFiles(path: string) {
+  const events: string[] = [], recovery = path + '.recovery';
+  let opened = 0;
+  return {events, opened: () => opened, context: {
+    open: async (name: string, ...rest: [string, number]) => {
+      const handle = await fs.open(name, ...rest);
+      opened++;
+      return {writeFile: (data: string) => handle.writeFile(data), close: () => handle.close(),
+        sync: async () => {events.push('flush'); await handle.sync();}};
+    },
+    link: async (candidate: string, destination: string) => {
+      await fs.link(candidate, destination);
+      if (destination === recovery) events.push('mutex link');
+    },
+    unlink: async (name: string) => {
+      await fs.unlink(name);
+      if (name === recovery) events.push('mutex unlink');
+    },
+  }};
+}
+
+test('nothing is flushed while the recovery mutex exists', async t => {
+  const clean = await fixture(t), first = recordedLockFiles(clean.path);
+  await (await (await compiledAcquire(first.context))(clean.path))();
+  assert.deepEqual(first.events, ['flush', 'mutex link', 'mutex unlink']);
+  const dead = await fixture(t), retried = recordedLockFiles(dead.path);
+  await fs.writeFile(dead.path, NUL_OWNER);
+  await (await (await compiledAcquire(retried.context))(dead.path, undefined, 2000))();
+  assert.deepEqual(retried.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink']);
+});
+
+test('a waiter flushes one candidate however long it retries, and removes it when it gives up', async t => {
+  for (const blocked of ['', '.recovery']) {
+    const f = await fixture(t), recorded = recordedLockFiles(f.path);
+    await fs.writeFile(f.path + blocked, `${process.pid}\n`);
+    const acquire = await compiledAcquire(recorded.context);
+    await assert.rejects(acquire(f.path, undefined, 200), /connection_anchor_busy/);
+    assert.equal(recorded.opened(), 1, blocked);
+    assert.equal(recorded.events.filter(event => event === 'flush').length, 1, blocked);
+    assert.deepEqual(await fs.readdir(f.root), ['anchor.lock' + blocked]);
+  }
+});

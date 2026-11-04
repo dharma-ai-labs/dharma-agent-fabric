@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createRequire} from 'node:module';
 import test from 'node:test';
+import {Ajv2020} from 'ajv/dist/2020.js';
+import type {FormatsPlugin} from 'ajv-formats';
+import * as supervisor from './repositoryRelaySupervisor.js';
 import {currentRepositoryRelayFailure, runRegisteredRepositoryRelays,
   withRepositoryRelayStage, type RepositoryRelayStage} from './repositoryRelaySupervisor.js';
 
@@ -70,4 +75,46 @@ test('the failure receipt reader returns a known code and drops any other value'
     assert.deepEqual(read({...receipt,failureCode}), base);
   }
   assert.equal(read({...receipt,at:'Fri, 16 Oct 2026 22:00:00 GMT (C:/Users/someone/.secret)'}), null);
+});
+
+const contract = supervisor as unknown as {REPOSITORY_RELAY_STAGES: readonly string[];
+  REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string>;
+  repositoryRelayFailureReceipt(event: unknown, binding: Record<string, unknown>, at: string): Record<string, unknown>};
+
+async function schema(name: string) {
+  return JSON.parse(await readFile(new URL(`./schemas/${name}.schema.json`, import.meta.url), 'utf8'));
+}
+async function validator(name: string) {
+  const ajv = new Ajv2020({strict: true, strictRequired: false});
+  (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
+  return ajv.compile(await schema(name));
+}
+
+test('the failure receipt schema lists exactly the stages and codes the relay writes', async () => {
+  const {properties} = await schema('local-repository-relay-failure');
+  assert.deepEqual(properties.stage.enum, [...contract.REPOSITORY_RELAY_STAGES]);
+  assert.deepEqual(properties.failureCode.enum, [...contract.REPOSITORY_RELAY_FAILURE_CODES]);
+});
+
+test('receipts built from real relay events match the failure receipt schema', async () => {
+  const validate = await validator('local-repository-relay-failure'), at = new Date().toISOString();
+  const receipt = (event: unknown) => contract.repositoryRelayFailureReceipt(event, {organizationId: 'org_a',
+    deviceId: 'device_a', pid: 50, relayPidMtimeMs: 1.5, relayPidCtimeMs: 2.5}, at);
+  for (const message of [...lockCodes, 'private-key-and-response-body']) {
+    const [event] = await observedFailure(Error(message));
+    const value = receipt(event);
+    assert.equal(validate(value), true, JSON.stringify(validate.errors));
+    assert.equal(value.failureCode, lockCodes.includes(message) ? message : undefined);
+    assert.equal(value.workspaceId, 'workspace_a');
+  }
+  const [event] = await observedFailure(Error('connection_anchor_busy'));
+  assert.equal(validate({...receipt(event), failureCode: 'C:/Users/someone/.secret'}), false);
+  assert.equal(validate({...receipt(event), detail: 'free text'}), false);
+});
+
+test('the session open record matches its schema', async () => {
+  const validate = await validator('local-repository-session-open');
+  assert.equal(validate({at: new Date().toISOString()}), true, JSON.stringify(validate.errors));
+  for (const value of [{}, {at: '2026-11-04T00:00:00Z'}, {at: '2026-11-04T00:00:00.000Z\n'},
+    {at: new Date().toISOString(), detail: 'free text'}]) assert.equal(validate(value), false);
 });
