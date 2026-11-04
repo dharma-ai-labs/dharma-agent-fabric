@@ -43,6 +43,7 @@ import { claudeSignInPreflight } from './claudeSignInPreflight.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
+import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
@@ -1031,8 +1032,19 @@ async function writeJsonAtomic(path: string, value: unknown) {
   if (hostScope) return writeBootstrapHostJson(path, value, hostScope);
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  // A hard reset can keep the rename but lose unflushed data, which leaves NUL bytes.
+  const handle = await open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+    await handle.sync();
+  } finally { await handle.close(); }
   await rename(temporary, path);
+  try {
+    const directory = await open(dirname(path), 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
+  } catch {
+    // Windows and some mounted filesystems cannot flush a directory.
+  }
 }
 
 async function reserveDailyEvidenceBytes(key: string, bytes: number, policy: OrganizationPolicy, _store?: SecureSecretStore) {
@@ -2435,6 +2447,11 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
         stdio: 'ignore',
         env: process.env,
       }),
+      onExit: async exit => {
+        const path = relayChildFailurePath();
+        const previous = await readFile(path, 'utf8').then(value => JSON.parse(value) as unknown).catch(() => null);
+        await writeJsonAtomic(path, relayChildExitReceipt({ previous, exit, supervisorPid: process.pid, version: VERSION }));
+      },
     }) : Promise.resolve({ restarts: 0 });
     services.push(standard);
     const sessions = policyPath ? superviseNamedSessions(controller.signal) : Promise.resolve();
@@ -8861,7 +8878,10 @@ async function takeCachedSkillUpdate(input: {
   }
 }
 
-async function relayStart(flags: Map<string, string | boolean>): Promise<Output> {
+function relayChildFailurePath() { return resolve(dharmaHome(), 'relay', 'last-child-failure.json'); }
+
+async function relayStart(flags: Map<string, string | boolean>,
+  startup: { workspaceId: string | null; leased: boolean } = { workspaceId: null, leased: false }): Promise<Output> {
   const anchor = resolve(required(flags, 'policy'));
   const config = await readDeviceConfig();
   if (!config) throw new Error('Relay requires current enrollment.');
@@ -8870,6 +8890,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   const selected = rows.find(row => row.workspaceId === declared.serverAuthorization?.workspaceId
     && row.organizationId === config.organizationId && resolve(row.path, '.dharma', 'approved-policy.json') === anchor);
   if (!selected) throw new Error('Relay policy must be the canonical policy of one registered workspace.');
+  startup.workspaceId = selected.workspaceId;
   const authorized = await selectRepositoryRelayRegistrations(rows, config, loadOrganizationPolicy);
   if (!authorized.some(row => row.workspaceId === selected.workspaceId && row.policyPath === anchor)) {
     throw new Error('Relay policy is not registered to this enrolled device.');
@@ -8878,6 +8899,7 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
   // repairs it and verifies again before any work runs.
   await loadVerifiedWorkspacePolicyUnlessReplayAhead(anchor, selected.workspaceId);
   const release = await acquireRelayProcessLease();
+  startup.leased = true;
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
@@ -8924,6 +8946,19 @@ async function relayStart(flags: Map<string, string | boolean>): Promise<Output>
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     await release();
+  }
+}
+
+// A failure before the lease has no relay.pid or per-repository receipt to report it.
+async function relayStartWithFailureReceipt(flags: Map<string, string | boolean>): Promise<Output> {
+  const startup = { workspaceId: null as string | null, leased: false };
+  try { return await relayStart(flags, startup); }
+  catch (error) {
+    if (!startup.leased) {
+      await writeJsonAtomic(relayChildFailurePath(), relayStartFailureReceipt({ error, pid: process.pid,
+        version: VERSION, workspaceId: startup.workspaceId })).catch(() => undefined);
+    }
+    throw error;
   }
 }
 
@@ -9636,11 +9671,15 @@ export async function run(argv: string[]): Promise<Output> {
       && lastPoll?.version === VERSION;
     const lastSuccessfulPollAt = acknowledgedWorkspace && typeof lastPoll?.at === 'string' ? lastPoll.at : null;
     const pollAge = lastSuccessfulPollAt ? Date.now() - Date.parse(lastSuccessfulPollAt) : NaN;
+    const lastFailure = relay !== 'running' && supervisor === 'running'
+      ? currentRelayChildFailure(await readFile(relayChildFailurePath(), 'utf8')
+        .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null;
     const reconnect = {
-      state: relay !== 'running' ? (supervisor === 'running' ? 'restarting' : 'stopped')
+      state: relay !== 'running' ? (supervisor === 'running' ? (lastFailure ? 'failing' : 'restarting') : 'stopped')
         : !Number.isFinite(pollAge) ? 'awaiting_acknowledgement'
           : pollAge <= 300_000 && pollAge >= 0 ? 'acknowledged_recently' : 'stale',
       lastSuccessfulPollAt,
+      ...(lastFailure ? { lastFailure } : {}),
     };
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
@@ -9730,7 +9769,7 @@ export async function run(argv: string[]): Promise<Output> {
     throw new Error('Use dharma relay autostart status, pause or disable.');
   }
   if (command === 'relay' && subcommand === 'supervise') return relaySupervise(flags);
-  if (command === 'relay' && subcommand === 'start') return relayStart(flags);
+  if (command === 'relay' && subcommand === 'start') return relayStartWithFailureReceipt(flags);
   if (command === 'skills' && subcommand === 'sync') return skillSync(flags);
   if (command === 'skills' && subcommand === 'status') {
     const providerValue = required(flags, 'provider');

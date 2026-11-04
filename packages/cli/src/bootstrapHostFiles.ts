@@ -101,6 +101,14 @@ async function writeFrozenBootstrapHostFile(path: string, bytes: Buffer, scope: 
     handle = undefined;
     await verifyOwned();
     await scope.step(() => rename(temporary, path));
+    let directory: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await scope.step(async () => {directory = await open(dirname(path), 'r');});
+      await scope.step(() => directory!.sync());
+    } catch {
+      // An unsupported directory flush is not permission to swallow withdrawal.
+      await scope.assert();
+    } finally {await directory?.close();}
   } finally {
     try {await handle?.close();} catch {throw new Error('codex_setup_host_state_cleanup_unconfirmed');}
     // Preserve failed staging as recovery evidence. No automatic path-based
