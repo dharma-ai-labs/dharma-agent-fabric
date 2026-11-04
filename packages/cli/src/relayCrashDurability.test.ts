@@ -78,10 +78,10 @@ test('replay and protocol state reaches disk before the rename publishes it', as
   const target = join(root, 'state', 'authorization.json');
   const files = recordedFiles(target);
   const {writeJsonAtomic} = await privateFunctions(['writeJsonAtomic'], files.overrides);
-  await writeJsonAtomic!(target, {issuedAt: 'synthetic'});
+  await writeJsonAtomic!(target, {issuedAt: '0.2.214'});
   assert.deepEqual(files.events, ['open:temporary', 'write:temporary', 'sync:temporary', 'close:temporary', 'rename',
     'open:directory', 'sync:directory', 'close:directory']);
-  assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), {issuedAt: 'synthetic'});
+  assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), {issuedAt: '0.2.214'});
   assert.deepEqual(await fs.readdir(dirname(target)), ['authorization.json']);
 });
 
@@ -114,8 +114,8 @@ test('a NUL-filled replay state still refuses, and nothing repairs or removes it
   const {assertWorkspaceAuthorizationCurrent} = await privateFunctions(['assertWorkspaceAuthorizationCurrent'],
     {workspaceAuthorizationStatePath: () => statePath});
   for (const requireExisting of [true, false]) {
-    await assert.rejects(assertWorkspaceAuthorizationCurrent!('synthetic',
-      {issuedAt: new Date().toISOString(), signature: 'synthetic'}, requireExisting), {message: new RegExp(REPLAY_TEXT)});
+    await assert.rejects(assertWorkspaceAuthorizationCurrent!('0.2.214',
+      {issuedAt: new Date().toISOString(), signature: '0.2.214'}, requireExisting), {message: new RegExp(REPLAY_TEXT)});
   }
   assert.deepEqual(await fs.readFile(statePath), NUL_STATE);
   assert.deepEqual(await fs.readdir(root), ['state.json']);
@@ -167,7 +167,7 @@ test('status replaces plain restarting with the current supervisor child failure
   await fs.writeFile(join(home, 'relay', 'supervisor.pid'), `${process.pid}\n`);
   const at = new Date().toISOString();
   const receipt = {schema: 'dharma.local-relay-child-failure/v1', code: 'workspace_authorization_replay_state_invalid',
-    at, pid: 4242, version: 'synthetic', workspaceId: null, supervisorPid: process.pid, exitCode: 2, signal: null};
+    at, pid: 4242, version: '0.2.214', workspaceId: null, supervisorPid: process.pid, exitCode: 2, signal: null};
   const reconnect = async () => withHome(home, async () => (await run(['status']) as {reconnect: unknown}).reconnect);
   assert.deepEqual(await reconnect(), {state: 'restarting', lastSuccessfulPollAt: null});
   await fs.writeFile(receiptPath, JSON.stringify(receipt));
@@ -198,7 +198,7 @@ async function signedWorkspace(t: {after(fn: () => Promise<void>): void}) {
       consentReceiptId: 'synthetic-consent', allowedContentClasses: ['native_provider_payload']},
     maximumCapsuleBytes: 1000, maximumDailyUploadBytes: 10000, maximumExpansionBytes: 100,
     excludePaths: ['**/.env', '**/*.key'], pseudonymizeIdentity: true}},
-    issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 600_000).toISOString(), keyVersion: 'synthetic'};
+    issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 600_000).toISOString(), keyVersion: '0.2.214'};
   const {policy: base} = await withHome(home,
     () => materializeWorkspacePolicy({workspace, organizationId, revision: 'base'}));
   await fs.writeFile(policyPath, JSON.stringify(applyServerEvidencePolicy(base,
@@ -268,19 +268,19 @@ test('failure receipts keep stable codes and never store error text', () => {
     ['Cannot start a second relay while process state is unknown.', 'relay_lease_unavailable'],
     [canary, 'relay_start_failed'],
   ] as const) assert.equal(relayChildFailureCode(new Error(message)), code);
-  const started = relayStartFailureReceipt({error: new Error(canary), pid: 10, version: 'synthetic', workspaceId: null});
+  const started = relayStartFailureReceipt({error: new Error(canary), pid: 10, version: '0.2.214', workspaceId: null});
   assert.equal(JSON.stringify(started).includes('canary'), false);
   const exit = {pid: 10, exitCode: 2, signal: null};
-  const own = relayChildExitReceipt({previous: {...started, code: 'relay_lease_unavailable'}, exit, supervisorPid: 20, version: 'synthetic'});
+  const own = relayChildExitReceipt({previous: {...started, code: 'relay_lease_unavailable'}, exit, supervisorPid: 20, version: '0.2.214'});
   assert.equal(own.code, 'relay_lease_unavailable');
   assert.equal(own.supervisorPid, 20);
   for (const previous of [null, {...started, pid: 11}, {...started, code: canary}, {...started, schema: 'foreign'}]) {
-    const generic = relayChildExitReceipt({previous, exit, supervisorPid: 20, version: 'synthetic'});
+    const generic = relayChildExitReceipt({previous, exit, supervisorPid: 20, version: '0.2.214'});
     assert.equal(generic.code, 'relay_child_exited');
     assert.equal(JSON.stringify(generic).includes('canary'), false);
   }
   assert.equal(relayChildExitReceipt({previous: {...started, pid: null}, exit: {pid: null, exitCode: null, signal: null},
-    supervisorPid: 20, version: 'synthetic'}).code, 'relay_child_exited');
+    supervisorPid: 20, version: '0.2.214'}).code, 'relay_child_exited');
   assert.equal(currentRelayChildFailure(own, 0), null);
 });
 
