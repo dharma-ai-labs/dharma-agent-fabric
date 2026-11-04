@@ -239,13 +239,34 @@ test('status drops the session open failure once it is no longer current', async
   assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
 });
 
-test('status ignores a failure record outside the supervisor binding', async t => {
+test('status finds the failure under the workspace the loop used, not the supervisor alias', async t => {
   const f = await runningRelayHome(t);
   await f.writeReceipt(f.receipt);
-  for (const binding of [{pid: process.pid + 1, workspaceId: f.workspaceId}, {pid: process.pid, workspaceId: '../../outside'}]) {
-    await fs.writeFile(join(f.home, 'relay', 'supervisor-workspace.json'), JSON.stringify(binding));
-    assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
-  }
+  await fs.writeFile(join(f.home, 'relay', 'supervisor-workspace.json'),
+    JSON.stringify({pid: process.pid, workspaceId: randomUUID()}));
+  assert.equal((await f.reconnect()).state, 'failing');
+});
+
+test('status ignores a failure record outside a workspace directory', async t => {
+  const f = await runningRelayHome(t);
+  const outside = join(f.home, 'relay', 'repositories', 'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(join(outside, 'last-failure.json'), JSON.stringify({...f.receipt, workspaceId: 'outside'}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+});
+
+test('a session that opens again clears only its own session open failure', async t => {
+  const f = await runningRelayHome(t), path = join(f.repository, 'last-failure.json');
+  const {clearSessionOpenFailure} = await privateFunctions(['clearSessionOpenFailure'], {dharmaHome: () => f.home});
+  await f.writeReceipt(f.receipt);
+  assert.equal((await f.reconnect()).state, 'failing');
+  await clearSessionOpenFailure!(f.workspaceId);
+  await assert.rejects(fs.readFile(path), {code: 'ENOENT'});
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  await clearSessionOpenFailure!(f.workspaceId);
+  await f.writeReceipt({...f.receipt, stage: 'task_poll'});
+  await clearSessionOpenFailure!(f.workspaceId);
+  assert.equal(JSON.parse(await fs.readFile(path, 'utf8')).stage, 'task_poll');
 });
 
 test('the repository failure receipt schema admits a code and refuses text', async t => {

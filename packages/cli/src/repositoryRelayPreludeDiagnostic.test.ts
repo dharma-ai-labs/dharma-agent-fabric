@@ -69,4 +69,5 @@ test('the failure receipt reader returns a known code and drops any other value'
   for (const failureCode of ['C:/Users/someone/.secret', 'free text', 7, null]) {
     assert.deepEqual(read({...receipt,failureCode}), base);
   }
+  assert.equal(read({...receipt,at:'Fri, 16 Oct 2026 22:00:00 GMT (C:/Users/someone/.secret)'}), null);
 });
