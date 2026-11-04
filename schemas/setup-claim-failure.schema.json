@@ -10,6 +10,9 @@
     "code": { "const": "setup_claim_failed" },
     "phase": {
       "enum": ["input_validation", "store_preflight", "identity", "challenge", "signing", "finalize", "recipient_approval", "credential_validation", "credential_commit"]
-    }
+    },
+    "reason": { "enum": ["approval_expired", "server_rejected", "network_unavailable", "response_invalid", "canceled"] },
+    "serverCode": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+    "correlationId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
   }
 }

@@ -68,10 +68,13 @@ closed. Source tests do not establish live enrollment or startup readiness.
 
 The optional local `onFailureDiagnostic` observer receives only a frozen
 `dharma.setup-claim-failure/v1` record with the fixed `setup_claim_failed` code
-and an allowlisted phase. The CLI emits this record to stderr; stdout and the
-existing sanitized exception remain unchanged. Observer failures are ignored.
-No caught exception, server response, credential, approval URL or device data
-is included. A phase describes the last local boundary attempted, not the
+and an allowlisted phase. It may add a typed `reason`, the server's error code
+as `serverCode`, and a server `correlationId`; `approval_expired` means browser
+approval was not given before the wait ended. The CLI emits this record to
+stderr, followed by the fixed `setupClaimFailureMessage` line when a reason is
+known; stdout and the existing sanitized exception remain unchanged. Observer
+failures are ignored. No caught exception, server message, credential, approval
+URL or device data is included. A phase describes the last local boundary attempted, not the
 remote root cause, proof that a preceding phase succeeded atomically, or
 authority to retry. In particular, a `credential_commit` failure may retain
 protected partial writes for the existing same-key recovery path.
