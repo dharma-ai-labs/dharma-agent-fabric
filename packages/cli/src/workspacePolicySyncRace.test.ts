@@ -117,7 +117,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
       return signingWithContention(input, work);
     },
     required: (flags: Map<string, string>, name: string) => flags.get(name),
-    client: async () => {sessions += 1; return server;}, acquireRelayProcessLease: async () => async () => undefined,
+    client: async () => {sessions += 1; return server;}, relayAutostartReport: async () => ({}), acquireRelayProcessLease: async () => async () => undefined,
     selectRepositoryRelayRegistrations: async () => [{workspaceId: WORKSPACE, policyPath}],
     serializeRelayWork: () => (operation: () => Promise<unknown>) => operation(),
     RepositorySourceWatcher: class {}, BlockedRepositorySourceRetry: class {},
