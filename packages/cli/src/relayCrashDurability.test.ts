@@ -255,31 +255,34 @@ test('status ignores a failure record outside a workspace directory', async t =>
   assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
 });
 
-test('a session that opens again clears only its own session open failure', async t => {
-  const f = await runningRelayHome(t), path = join(f.repository, 'last-failure.json');
-  const {clearSessionOpenFailure} = await privateFunctions(['clearSessionOpenFailure'], {dharmaHome: () => f.home});
+test('a session that opens after the failure ends failing, even if that failure is written late', async t => {
+  const f = await runningRelayHome(t), opened = join(f.repository, 'last-session-open.json');
   await f.writeReceipt(f.receipt);
   assert.equal((await f.reconnect()).state, 'failing');
-  await clearSessionOpenFailure!(f.workspaceId);
-  await assert.rejects(fs.readFile(path), {code: 'ENOENT'});
+  await fs.writeFile(opened, JSON.stringify({at: new Date(Date.parse(f.at) + 1000).toISOString()}));
   assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
-  await clearSessionOpenFailure!(f.workspaceId);
-  await f.writeReceipt({...f.receipt, stage: 'task_poll'});
-  await clearSessionOpenFailure!(f.workspaceId);
-  assert.equal(JSON.parse(await fs.readFile(path, 'utf8')).stage, 'task_poll');
+  await f.writeReceipt(f.receipt);
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  await fs.writeFile(opened, JSON.stringify({at: new Date(Date.parse(f.at) - 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'failing');
 });
 
-test('the repository failure receipt schema admits a code and refuses text', async t => {
-  const f = await runningRelayHome(t);
-  const ajv = new Ajv2020({strict: true, strictRequired: false});
-  (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
-  const validate = ajv.compile(JSON.parse(await fs.readFile(
-    new URL('./schemas/local-repository-relay-failure.schema.json', import.meta.url), 'utf8')));
-  const {failureCode: _unused, ...withoutCode} = f.receipt;
-  assert.equal(validate(f.receipt), true, JSON.stringify(validate.errors));
-  assert.equal(validate(withoutCode), true, JSON.stringify(validate.errors));
-  for (const bad of [{...f.receipt, failureCode: 'C:/Users/someone/.secret'}, {...f.receipt, message: 'text'},
-    {...f.receipt, stage: 'free text'}]) assert.equal(validate(bad), false);
+test('a later success in any workspace outranks the failure of a stopped workspace', async t => {
+  const f = await runningRelayHome(t), other = join(f.home, 'relay', 'repositories', randomUUID());
+  await f.writeReceipt(f.receipt);
+  await fs.mkdir(other);
+  await fs.writeFile(join(other, 'last-successful-poll.json'), JSON.stringify({at: new Date(Date.parse(f.at) - 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'failing');
+  await fs.writeFile(join(other, 'last-successful-poll.json'), JSON.stringify({at: new Date(Date.parse(f.at) + 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+});
+
+test('the relay loop records a session open before any later stage runs', async () => {
+  const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const open = source.indexOf("withRepositoryRelayStage('session_open'");
+  const record = source.indexOf("'last-session-open.json'), { at:", open);
+  assert.ok(open > 0 && record > open);
+  assert.ok(record < source.indexOf('let policy = verifiedPolicy', open));
 });
 
 async function signedWorkspace(t: {after(fn: () => Promise<void>): void}) {
