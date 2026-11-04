@@ -43,8 +43,8 @@ async function inspectionFixture(input: {
     mkdir: async (name: string, options: {recursive: true; mode: number}) => {
       effects.push('mkdir'); return fs.mkdir(name, options);
     },
-    writeFile: async (name: string, value: string, options: {flag: string; mode: number}) => {
-      effects.push('write'); return fs.writeFile(name, value, options);
+    open: async (name: string, flags: string, mode: number) => {
+      effects.push('write'); return fs.open(name, flags, mode);
     },
     unlink: async (name: string) => {effects.push('unlink'); return fs.unlink(name);},
     rename: async (from: string, to: string) => {effects.push('rename'); return fs.rename(from, to);},

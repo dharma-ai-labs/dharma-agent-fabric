@@ -8976,6 +8976,24 @@ async function takeCachedSkillUpdate(input: {
 
 function relayChildFailurePath() { return resolve(dharmaHome(), 'relay', 'last-child-failure.json'); }
 
+// The relay process stays up while its repository loop fails, so relay.pid alone reads as healthy.
+async function currentSessionOpenFailure(workspaceId: unknown) {
+  if (typeof workspaceId !== 'string' || !UUID_PATTERN.test(workspaceId)) return null;
+  const read = (path: string) => readFile(path, 'utf8')
+    .then(value => JSON.parse(value) as Record<string, unknown>).catch(() => null);
+  const relay = resolve(dharmaHome(), 'relay'), repository = resolve(relay, 'repositories', workspaceId);
+  const config = await read(configPath());
+  const pid = await readFile(resolve(relay, 'relay.pid'), 'utf8').then(value => Number(value.trim())).catch(() => 0);
+  const pidState = await stat(resolve(relay, 'relay.pid')).catch(() => null);
+  const poll = await read(resolve(repository, 'last-successful-poll.json'));
+  const failure = currentRepositoryRelayFailure({ receipt: await read(resolve(repository, 'last-failure.json')),
+    organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
+    relayPidMtimeMs: pidState?.mtimeMs ?? null, relayPidCtimeMs: pidState?.ctimeMs ?? null,
+    lastSuccessfulPollAt: typeof poll?.at === 'string' ? poll.at : null });
+  return failure?.stage === 'session_open' ? { code: failure.failureCode ?? 'repository_relay_failed', at: failure.at,
+    stage: failure.stage, category: failure.category } : null;
+}
+
 async function relayStart(flags: Map<string, string | boolean>,
   startup: { workspaceId: string | null; leased: boolean } = { workspaceId: null, leased: false }): Promise<Output> {
   const anchor = resolve(required(flags, 'policy'));
@@ -9026,6 +9044,7 @@ async function relayStart(flags: Map<string, string | boolean>,
           schema: 'dharma.local-repository-relay-failure/v1', organizationId: config.organizationId,
           deviceId: config.deviceId, workspaceId: event.workspaceId, pid: process.pid, ...pidState,
           at, stage: event.stage, category: event.category,
+          ...(event.failureCode ? { failureCode: event.failureCode } : {}),
         };
         let writer = diagnosticWriters.get(event.workspaceId);
         if (!writer) {
@@ -9779,11 +9798,14 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
       && lastPoll?.version === VERSION;
     const lastSuccessfulPollAt = acknowledgedWorkspace && typeof lastPoll?.at === 'string' ? lastPoll.at : null;
     const pollAge = lastSuccessfulPollAt ? Date.now() - Date.parse(lastSuccessfulPollAt) : NaN;
-    const lastFailure = relay !== 'running' && supervisor === 'running'
+    const sessionOpenFailure = relay === 'running' && supervisor === 'running' && binding?.pid === supervisorPid
+      ? await currentSessionOpenFailure(binding.workspaceId) : null;
+    const lastFailure = sessionOpenFailure ?? (relay !== 'running' && supervisor === 'running'
       ? currentRelayChildFailure(await readFile(relayChildFailurePath(), 'utf8')
-        .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null;
+        .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null);
     const reconnect = {
       state: relay !== 'running' ? (supervisor === 'running' ? (lastFailure ? 'failing' : 'restarting') : 'stopped')
+        : sessionOpenFailure ? 'failing'
         : !Number.isFinite(pollAge) ? 'awaiting_acknowledgement'
           : pollAge <= 300_000 && pollAge >= 0 ? 'acknowledged_recently' : 'stale',
       lastSuccessfulPollAt,

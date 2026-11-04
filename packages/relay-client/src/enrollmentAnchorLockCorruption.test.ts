@@ -127,7 +127,9 @@ test('contending processes on one NUL lock each own it alone', async t => {
 
 test('a contender cannot publish while the inspector holds the mutex over a NUL lock', async t => {
   const f = await fixture(t), started = resolve(f.root, 'started'), ready = resolve(f.root, 'ready');
+  // Once the mutex is free either side may win, so the contender holds only briefly.
   const finish = resolve(f.root, 'finish');
+  await fs.writeFile(finish, 'finish');
   await fs.writeFile(f.path, NUL_OWNER);
   let contender: Promise<void> | undefined, inspected = false;
   const acquire = await compiledAcquire({readFile: async (path: string, encoding: BufferEncoding) => {
@@ -144,17 +146,15 @@ test('a contender cannot publish while the inspector holds the mutex over a NUL 
     }
     return text;
   }});
+  const release = await acquire(f.path, undefined, 5000);
   try {
-    const release = await acquire(f.path, undefined, 5000);
     assert.equal(inspected, true);
     await release.assertHeld();
     assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`);
-    await assert.rejects(fs.readFile(ready), {code: 'ENOENT'});
-    await release();
-    const pid = await waitFor(ready);
-    assert.equal(await fs.readFile(f.path, 'utf8'), `${pid}\n`);
-  } finally {await fs.writeFile(finish, 'finish');}
+  } finally {await release();}
   await contender;
+  await waitFor(ready);
+  assert.deepEqual((await fs.readdir(f.root)).sort(), ['finish', 'ready', 'started']);
 });
 
 test('a NUL recovery mutex is an abandoned mutex: preserved and reported, not reclaimed', async t => {

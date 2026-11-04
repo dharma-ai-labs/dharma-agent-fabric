@@ -6,8 +6,13 @@ export interface RepositoryRelayRegistration { workspaceId: string; policyPath: 
 export type RepositoryRelayStage = 'policy_verification' | 'session_open' | 'vault_open' | 'trajectory_recovery' | 'evidence_sync'
   | 'pending_capsule_sync' | 'evidence_request' | 'task_poll' | 'worker_run';
 export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_ready' | 'policy_invalid' | 'unexpected';
+// Exact codes only: any other error message can quote a path or a server value.
+const REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string> = new Set(['connection_anchor_lock_invalid', 'connection_anchor_busy',
+  'connection_anchor_recovery_required', 'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed',
+  'device_signing_control_unavailable']);
+const typedFailure = (value: unknown) => REPOSITORY_RELAY_FAILURE_CODES.has(value as string) ? { failureCode: value as string } : {};
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
-  category?: RepositoryRelayFailureCategory }
+  category?: RepositoryRelayFailureCategory; failureCode?: string }
 
 class StagedRepositoryRelayError extends Error {
   constructor(readonly stage: RepositoryRelayStage, cause: unknown) {
@@ -20,11 +25,14 @@ export async function withRepositoryRelayStage<T>(stage: RepositoryRelayStage, o
   catch (error) { throw error instanceof StagedRepositoryRelayError ? error : new StagedRepositoryRelayError(stage, error); }
 }
 
-function failureCategory(error: unknown): RepositoryRelayFailureCategory {
+function failureMessage(error: unknown) {
   const cause = error instanceof StagedRepositoryRelayError ? error.cause : error;
-  let message = '';
-  try { if (cause instanceof Error) message = cause.message; }
-  catch { return 'unexpected'; }
+  try { return cause instanceof Error ? cause.message : ''; }
+  catch { return ''; }
+}
+
+function failureCategory(error: unknown): RepositoryRelayFailureCategory {
+  const message = failureMessage(error);
   if (/^policy_boundary:/.test(message)) return 'policy_boundary';
   if (/^agent_fabric_retention_not_ready:/.test(message)) return 'retention_not_ready';
   if (/^agent_fabric_policy_invalid:/.test(message)) return 'policy_invalid';
@@ -49,7 +57,8 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || !['policy_boundary', 'retention_not_ready', 'policy_invalid', 'unexpected'].includes(String(value.category))) {
     return null;
   }
-  return { at: value.at, stage: value.stage, category: value.category };
+  return { at: value.at, stage: value.stage, category: value.category,
+    ...typedFailure(value.failureCode) };
 }
 
 export async function selectRepositoryRelayRegistrations<T extends OnboardingWorkspaceRecord & { routeHash: string }>(
@@ -179,7 +188,8 @@ export async function runRegisteredRepositoryRelays(input: {
               worker.failed = true;
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
                 stage: error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run',
-                category: failureCategory(error) });
+                category: failureCategory(error),
+                ...typedFailure(failureMessage(error)) });
             }
           } finally {
             worker.done = true;

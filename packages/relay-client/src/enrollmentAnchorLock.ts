@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {link, lstat, mkdir, readFile, rename, unlink, writeFile} from 'node:fs/promises';
+import {link, lstat, mkdir, open, readFile, rename, unlink} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import type {HostOperationFence} from './hostOperationScope.js';
 
@@ -13,6 +13,8 @@ export interface EnrollmentAnchorLockRelease {
 // A recovery mutex serializes dead-primary cleanup; an abandoned recovery mutex
 // is preserved for explicit recovery. Automatically reclaiming that mutex would
 // introduce another check-then-replace race.
+// Owner contents are flushed before publication, so a live owner's file always
+// holds its PID. Contents that cannot be a PID have no owner and count as dead.
 export async function acquireEnrollmentAnchorLock(
   lockPath: string, scope?: HostOperationFence, timeoutMs = 10_000,
 ): Promise<EnrollmentAnchorLockRelease> {
@@ -58,7 +60,9 @@ export async function acquireEnrollmentAnchorLock(
     try {
       await step(async () => {
         await assertNamespace();
-        await writeFile(candidate, `${process.pid}\n`, {flag: 'wx', mode: 0o600});
+        const file = await open(candidate, 'wx', 0o600);
+        try {await file.writeFile(`${process.pid}\n`); await file.sync();}
+        finally {await file.close();}
         owned.set(candidate, null);
         owned.set(candidate, await metadata(candidate));
       });
@@ -79,9 +83,8 @@ export async function acquireEnrollmentAnchorLock(
       if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') return null;
       throw error;
     }
-    if (!/^[1-9][0-9]*$/.test(text) || !Number.isSafeInteger(Number(text))) {
-      throw Error('connection_anchor_lock_invalid');
-    }
+    // process.kill refuses anything above this range, so no such owner can be checked.
+    if (!/^[1-9][0-9]*$/.test(text) || Number(text) > 0x7fffffff) return {identity, alive: false};
     let alive = true;
     try {await step(async () => {process.kill(Number(text), 0);});}
     catch (error) {
