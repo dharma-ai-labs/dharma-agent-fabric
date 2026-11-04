@@ -274,6 +274,60 @@ test('JSON quotation escapes are not absolute paths and source bytes remain inta
   await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot });
 });
 
+test('source Markdown escapes and rendering expressions are not paths or dependencies', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/grant/SKILL.md', '[Library](scripts/library.py)\n[Interview](scripts/interview.py)');
+  const library = String.raw`def safe(text):
+    return str(text).replace("|", "\\|").replace("[", "\\[").replace("]", "\\]")`;
+  const interview = String.raw`def render(source):
+    return f"[Source]({source['url']})"`;
+  await f.put('skills/grant/scripts/library.py', library);
+  await f.put('skills/grant/scripts/interview.py', interview);
+  const snapshot = await inventoryRepositoryPackage(f);
+  assert.deepEqual(snapshot.manifest.exclusions, []);
+  assert.equal(snapshot.manifest.skills[0]?.availability, 'available');
+  for (const [path, content] of [['library', library], ['interview', interview]]) {
+    const file = snapshot.manifest.files.find(item => item.path === `skills/grant/scripts/${path}.py`)!;
+    assert.ok(file);
+    assert.equal(Buffer.from(snapshot.blobs.find(blob => blob.sha256 === file.sha256)!.contentBase64, 'base64').toString(), content);
+  }
+});
+
+test('installed dependencies and Python caches do not make a complete source skill partial', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/grant/SKILL.md', '[Script](scripts/library.py)');
+  await f.put('skills/grant/scripts/library.py', 'print("portable")');
+  await f.put('skills/grant/runtime/package.json', '{"name":"grant-runtime"}');
+  await f.put('skills/grant/runtime/node_modules/example/index.js', 'must not collect');
+  await f.put('skills/grant/scripts/__pycache__/library.pyc', '\u0000compiled cache');
+  const snapshot = await inventoryRepositoryPackage(f);
+  assert.equal(snapshot.manifest.skills[0]?.availability, 'available');
+  assert.equal(snapshot.manifest.files.length, 3);
+  assert.ok(!serializeRepositoryPackageSnapshot(snapshot).includes('must not collect'));
+  assert.ok(!snapshot.manifest.files.some(file => file.path.includes('__pycache__')));
+});
+
+test('UNC shares in text and source literals remain excluded', async t => {
+  const f = await fixture();
+  t.after(() => rm(f.workspace, { recursive: true, force: true }));
+  await f.put('skills/grant/SKILL.md', '# Safe');
+  for (const [name, content] of Object.entries({
+    plain: String.raw`Private file \\server\share\private.md`,
+    raw: String.raw`path = r"\\server\share\private.md"`,
+    escaped: String.raw`path = "\\\\server\\share\\private.md"`,
+    extended: String.raw`path = "\\?\C:\Users\customer\private.md"`,
+    device: String.raw`path = "\\.\pipe\customer"`,
+    unicode: String.raw`path = "\\例\share\private.md"`,
+    drive: String.raw`path = "C:\\Users\\customer\\private.md"`,
+    posix: 'path = "/home/customer/private.md"',
+  })) await f.put(`skills/grant/scripts/${name}.py`, content);
+  const snapshot = await inventoryRepositoryPackage(f);
+  assert.equal(snapshot.manifest.files.length, 1);
+  assert.equal(snapshot.manifest.exclusions.filter(item => item.reason === 'local_path_content').length, 8);
+});
+
 test('decoded JSON keys and nested values still exclude absolute paths and secrets', async t => {
   const f = await fixture();
   t.after(() => rm(f.workspace, { recursive: true, force: true }));
