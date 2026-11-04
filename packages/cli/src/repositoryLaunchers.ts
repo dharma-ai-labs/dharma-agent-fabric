@@ -6,6 +6,7 @@ import { dirname, join, posix, win32 } from 'node:path';
 type Launchers = { shell: string; windows: string };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
 type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; codexDirectory?: string};
+const UNSAFE_CODEX_ON_PATH = 'relay_startup_codex_path_invalid: the first codex on PATH belongs to another user or is not protected. Put your own codex first on PATH, or remove the other one from PATH.';
 
 function codexDirectoryPath(value: string) {
   if (!value || value.length > 4096 || !posix.isAbsolute(value) || value === '/'
@@ -175,10 +176,10 @@ export async function resolveRepositoryCodexDirectory(options: {searchPath?: str
     if (!directory) continue;
     try {await lstat(join(directory, 'codex'));} catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw new Error('relay_startup_codex_path_invalid');
+      throw new Error(UNSAFE_CODEX_ON_PATH);
     }
     // Do not skip an unsafe first match and silently select a different provider.
-    try {return await protectedCodexDirectory(directory);} catch {throw new Error('relay_startup_codex_path_invalid');}
+    try {return await protectedCodexDirectory(directory);} catch {throw new Error(UNSAFE_CODEX_ON_PATH);}
   }
   return undefined;
 }
