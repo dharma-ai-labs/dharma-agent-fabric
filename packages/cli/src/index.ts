@@ -9847,10 +9847,14 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
               const lastSuccessfulPollAt = typeof observation?.at === 'string' ? observation.at : null;
               const failure = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
                 'last-failure.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              const opened = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
+                'last-session-open.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              const lastSuccess = [lastSuccessfulPollAt, opened?.at].filter(value => typeof value === 'string')
+                .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
               const lastFailure = currentRepositoryRelayFailure({ receipt: failure,
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
-                relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt });
+                relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
