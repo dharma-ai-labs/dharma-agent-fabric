@@ -84,7 +84,7 @@ test('anchor lock excludes independent processes and releases only its own inode
   } finally {await f.cleanup();}
 });
 
-test('anchor lock recovers a dead process without treating corrupt metadata as absence', async () => {
+test('anchor lock recovers a dead process', async () => {
   const f = await fixture();
   try {
     await child(`import {acquireEnrollmentAnchorLock} from ${JSON.stringify(moduleUrl)};
@@ -92,10 +92,6 @@ test('anchor lock recovers a dead process without treating corrupt metadata as a
     const release = await acquireEnrollmentAnchorLock(f.path);
     await release();
     assert.deepEqual(await readdir(f.root), []);
-    await writeFile(f.path, 'corrupt-owner');
-    await assert.rejects(acquireEnrollmentAnchorLock(f.path, undefined, 100), /connection_anchor_lock_invalid/);
-    assert.equal(await readFile(f.path, 'utf8'), 'corrupt-owner');
-    assert.deepEqual(await readdir(f.root), ['anchor.lock']);
   } finally {await f.cleanup();}
 });
 

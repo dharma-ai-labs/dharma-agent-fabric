@@ -26,3 +26,47 @@ for (const stage of ['session_open', 'vault_open']) {
     assert(!JSON.stringify(events).includes('private-key-and-response-body'));
   });
 }
+
+const lockCodes = ['connection_anchor_lock_invalid', 'connection_anchor_busy', 'connection_anchor_recovery_required',
+  'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed', 'device_signing_control_unavailable'];
+
+async function observedFailure(error: Error) {
+  const controller = new AbortController(), events: unknown[] = [];
+  let ticks = 0;
+  await runRegisteredRepositoryRelays({signal:controller.signal,
+    list:async()=>[{workspaceId:'workspace_a',policyPath:'/a/.dharma/approved-policy.json'}],
+    run:()=>withRepositoryRelayStage('session_open',async()=>{throw error;}),
+    observe:event=>{events.push(event);},now:()=>0,
+    wait:async()=>{await Promise.resolve();await Promise.resolve();if(++ticks===4)controller.abort();}});
+  return events;
+}
+
+for (const failureCode of lockCodes) {
+  test(`the stage line names ${failureCode} instead of only unexpected`, async () => {
+    assert.deepEqual(await observedFailure(Error(failureCode)), [{workspaceId:'workspace_a',
+      code:'repository_relay_failed',stage:'session_open',category:'unexpected',failureCode}]);
+  });
+}
+
+test('only an exact known code reaches the stage line, never a message that holds one', async () => {
+  for (const message of ['connection_anchor_lock_invalid C:/Users/someone/.secret', 'connection_anchor_lock_invalid\n',
+    'Connection_Anchor_Lock_Invalid', 'plain_lowercase_words', 'sk_live_token_value']) {
+    const events = await observedFailure(Error(message));
+    assert.deepEqual(events, [{workspaceId:'workspace_a',code:'repository_relay_failed',stage:'session_open',category:'unexpected'}]);
+  }
+});
+
+test('the failure receipt reader returns a known code and drops any other value', () => {
+  const at = '2026-10-16T23:00:00.000Z', mtime = Date.parse(at) - 1000;
+  const receipt = {schema:'dharma.local-repository-relay-failure/v1', organizationId:'org_a',
+    deviceId:'device_a', workspaceId:'workspace_a', pid:50, relayPidMtimeMs:mtime,
+    relayPidCtimeMs:mtime, at, stage:'session_open', category:'unexpected'};
+  const read = (value: unknown) => currentRepositoryRelayFailure({receipt:value,organizationId:'org_a',deviceId:'device_a',
+    workspaceId:'workspace_a',pid:50,relayPidMtimeMs:mtime,relayPidCtimeMs:mtime,lastSuccessfulPollAt:null,now:Date.parse(at)+1000});
+  const base = {at,stage:'session_open',category:'unexpected'};
+  assert.deepEqual(read({...receipt,failureCode:'connection_anchor_lock_invalid'}),
+    {...base,failureCode:'connection_anchor_lock_invalid'});
+  for (const failureCode of ['C:/Users/someone/.secret', 'free text', 7, null]) {
+    assert.deepEqual(read({...receipt,failureCode}), base);
+  }
+});

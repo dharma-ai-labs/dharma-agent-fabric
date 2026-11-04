@@ -182,6 +182,85 @@ test('status replaces plain restarting with the current supervisor child failure
   assert.deepEqual(await reconnect(), {state: 'restarting', lastSuccessfulPollAt: null});
 });
 
+// The relay process is alive here, as on the wedged G11 device: only its session opens fail.
+async function runningRelayHome(t: {after(fn: () => Promise<void>): void}) {
+  const home = await temporaryRoot(t, 'dharma-status-open-failure-');
+  const workspaceId = randomUUID(), repository = join(home, 'relay', 'repositories', workspaceId);
+  const organizationId = 'org_test', deviceId = 'device_test', relayPid = join(home, 'relay', 'relay.pid');
+  await fs.mkdir(repository, {recursive: true});
+  await fs.writeFile(relayPid, `${process.pid}\n`);
+  await fs.writeFile(join(home, 'relay', 'supervisor.pid'), `${process.pid}\n`);
+  await fs.writeFile(join(home, 'relay', 'supervisor-workspace.json'), JSON.stringify({pid: process.pid, workspaceId}));
+  await fs.writeFile(join(home, 'device.json'), JSON.stringify({organizationId, deviceId}));
+  const {mtimeMs, ctimeMs} = await fs.stat(relayPid);
+  const at = new Date().toISOString();
+  const receipt = {schema: 'dharma.local-repository-relay-failure/v1', organizationId, deviceId, workspaceId,
+    pid: process.pid, relayPidMtimeMs: mtimeMs, relayPidCtimeMs: ctimeMs, at, stage: 'session_open',
+    category: 'unexpected', failureCode: 'connection_anchor_lock_invalid'};
+  const reconnect = async () => withHome(home, async () => (await run(['status']) as {reconnect: {state: string}}).reconnect);
+  return {home, workspaceId, repository, at, receipt, reconnect,
+    writeReceipt: (value: unknown) => fs.writeFile(join(repository, 'last-failure.json'), JSON.stringify(value))};
+}
+
+test('status says failing while a running relay fails every session open', async t => {
+  const f = await runningRelayHome(t);
+  const version = (await withHome(f.home, () => run(['status'])) as {version: string}).version;
+  const pollAt = new Date(Date.parse(f.at) - 60_000).toISOString();
+  await fs.writeFile(join(f.home, 'relay', 'last-successful-poll.json'),
+    JSON.stringify({at: pollAt, workspaceId: f.workspaceId, version}));
+  assert.equal((await f.reconnect()).state, 'acknowledged_recently');
+  await f.writeReceipt(f.receipt);
+  assert.deepEqual(await f.reconnect(), {state: 'failing', lastSuccessfulPollAt: pollAt, lastFailure: {
+    code: 'connection_anchor_lock_invalid', at: f.at, stage: 'session_open', category: 'unexpected'}});
+});
+
+test('a session open failure without a known code still reads as failing, with no free text', async t => {
+  const f = await runningRelayHome(t);
+  await f.writeReceipt({...f.receipt, failureCode: 'C:/Users/someone/.secret'});
+  const reconnect = await f.reconnect();
+  assert.deepEqual(reconnect, {state: 'failing', lastSuccessfulPollAt: null, lastFailure: {
+    code: 'repository_relay_failed', at: f.at, stage: 'session_open', category: 'unexpected'}});
+});
+
+test('status drops the session open failure once it is no longer current', async t => {
+  const f = await runningRelayHome(t);
+  const repositoryPoll = join(f.repository, 'last-successful-poll.json');
+  await f.writeReceipt(f.receipt);
+  assert.equal((await f.reconnect()).state, 'failing');
+  await fs.writeFile(repositoryPoll, JSON.stringify({at: new Date(Date.parse(f.at) + 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  await fs.rm(repositoryPoll);
+  for (const stale of [{...f.receipt, pid: process.pid + 1}, {...f.receipt, relayPidMtimeMs: 1},
+    {...f.receipt, stage: 'task_poll'}]) {
+    await f.writeReceipt(stale);
+    assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  }
+  await fs.writeFile(join(f.repository, 'last-failure.json'), NUL_STATE);
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+});
+
+test('status ignores a failure record outside the supervisor binding', async t => {
+  const f = await runningRelayHome(t);
+  await f.writeReceipt(f.receipt);
+  for (const binding of [{pid: process.pid + 1, workspaceId: f.workspaceId}, {pid: process.pid, workspaceId: '../../outside'}]) {
+    await fs.writeFile(join(f.home, 'relay', 'supervisor-workspace.json'), JSON.stringify(binding));
+    assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  }
+});
+
+test('the repository failure receipt schema admits a code and refuses text', async t => {
+  const f = await runningRelayHome(t);
+  const ajv = new Ajv2020({strict: true, strictRequired: false});
+  (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
+  const validate = ajv.compile(JSON.parse(await fs.readFile(
+    new URL('./schemas/local-repository-relay-failure.schema.json', import.meta.url), 'utf8')));
+  const {failureCode: _unused, ...withoutCode} = f.receipt;
+  assert.equal(validate(f.receipt), true, JSON.stringify(validate.errors));
+  assert.equal(validate(withoutCode), true, JSON.stringify(validate.errors));
+  for (const bad of [{...f.receipt, failureCode: 'C:/Users/someone/.secret'}, {...f.receipt, message: 'text'},
+    {...f.receipt, stage: 'free text'}]) assert.equal(validate(bad), false);
+});
+
 async function signedWorkspace(t: {after(fn: () => Promise<void>): void}) {
   const root = await temporaryRoot(t, 'dharma-relay-nul-');
   const home = join(root, 'home'), workspace = join(root, 'repo');
