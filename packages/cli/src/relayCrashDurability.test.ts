@@ -12,6 +12,7 @@ import ts from 'typescript';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
 import {applyServerEvidencePolicy, materializeWorkspacePolicy, run} from './index.js';
 import {workspaceIdForDevice} from './onboardingWorkspace.js';
+import {currentRelayChildFailure, relayChildExitReceipt, relayChildFailureCode, relayStartFailureReceipt} from './relayChildFailure.js';
 import {superviseRelay} from './relaySupervisor.js';
 
 const execFileAsync = promisify(execFile);
@@ -219,9 +220,7 @@ test('relay start on a NUL-filled replay state leaves a stable receipt before th
   assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
 });
 
-test('a supervised relay on a NUL-filled replay state shows the failure in status', {
-  skip: process.platform === 'win32',
-}, async t => {
+test('a supervised relay on a NUL-filled replay state shows the failure in status', async t => {
   const f = await signedWorkspace(t);
   const supervisor = spawn(process.execPath, [bin, 'relay', 'supervise', '--policy', f.policyPath],
     {env: f.env, stdio: 'ignore', detached: true});
@@ -243,4 +242,30 @@ test('a supervised relay on a NUL-filled replay state shows the failure in statu
   } finally {
     if (supervisor.exitCode === null) supervisor.kill('SIGTERM');
   }
+});
+
+test('failure receipts keep stable codes and never store error text', () => {
+  const canary = 'token-sk-private-canary C:\Users\private\secret.json';
+  for (const [message, code] of [
+    [`${REPLAY_TEXT}; apply a fresh server policy.`, 'workspace_authorization_replay_state_invalid'],
+    ['Relay requires current enrollment.', 'relay_enrollment_missing'],
+    ['Relay policy is not registered to this enrolled device.', 'relay_policy_not_registered'],
+    ['Another relay process is already running for this device.', 'relay_lease_unavailable'],
+    ['Cannot start a second relay while process state is unknown.', 'relay_lease_unavailable'],
+    [canary, 'relay_start_failed'],
+  ] as const) assert.equal(relayChildFailureCode(new Error(message)), code);
+  const started = relayStartFailureReceipt({error: new Error(canary), pid: 10, version: 'synthetic', workspaceId: null});
+  assert.equal(JSON.stringify(started).includes('canary'), false);
+  const exit = {pid: 10, exitCode: 2, signal: null};
+  const own = relayChildExitReceipt({previous: {...started, code: 'relay_lease_unavailable'}, exit, supervisorPid: 20, version: 'synthetic'});
+  assert.equal(own.code, 'relay_lease_unavailable');
+  assert.equal(own.supervisorPid, 20);
+  for (const previous of [null, {...started, pid: 11}, {...started, code: canary}, {...started, schema: 'foreign'}]) {
+    const generic = relayChildExitReceipt({previous, exit, supervisorPid: 20, version: 'synthetic'});
+    assert.equal(generic.code, 'relay_child_exited');
+    assert.equal(JSON.stringify(generic).includes('canary'), false);
+  }
+  assert.equal(relayChildExitReceipt({previous: {...started, pid: null}, exit: {pid: null, exitCode: null, signal: null},
+    supervisorPid: 20, version: 'synthetic'}).code, 'relay_child_exited');
+  assert.equal(currentRelayChildFailure(own, 0), null);
 });
