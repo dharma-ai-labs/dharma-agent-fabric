@@ -47,7 +47,8 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || value.organizationId !== input.organizationId || value.deviceId !== input.deviceId
     || value.workspaceId !== input.workspaceId || value.pid !== input.pid
     || !Number.isSafeInteger(input.pid) || input.pid <= 0
-    || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))
+    || typeof value.at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.at)
+    || !Number.isFinite(Date.parse(value.at))
     || !Number.isFinite(input.relayPidMtimeMs) || !Number.isFinite(input.relayPidCtimeMs)
     || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
     || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000

@@ -8977,21 +8977,34 @@ async function takeCachedSkillUpdate(input: {
 function relayChildFailurePath() { return resolve(dharmaHome(), 'relay', 'last-child-failure.json'); }
 
 // The relay process stays up while its repository loop fails, so relay.pid alone reads as healthy.
-async function currentSessionOpenFailure(workspaceId: unknown) {
-  if (typeof workspaceId !== 'string' || !UUID_PATTERN.test(workspaceId)) return null;
+async function currentSessionOpenFailure() {
   const read = (path: string) => readFile(path, 'utf8')
     .then(value => JSON.parse(value) as Record<string, unknown>).catch(() => null);
-  const relay = resolve(dharmaHome(), 'relay'), repository = resolve(relay, 'repositories', workspaceId);
+  const relay = resolve(dharmaHome(), 'relay');
   const config = await read(configPath());
   const pid = await readFile(resolve(relay, 'relay.pid'), 'utf8').then(value => Number(value.trim())).catch(() => 0);
   const pidState = await stat(resolve(relay, 'relay.pid')).catch(() => null);
-  const poll = await read(resolve(repository, 'last-successful-poll.json'));
-  const failure = currentRepositoryRelayFailure({ receipt: await read(resolve(repository, 'last-failure.json')),
-    organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
-    relayPidMtimeMs: pidState?.mtimeMs ?? null, relayPidCtimeMs: pidState?.ctimeMs ?? null,
-    lastSuccessfulPollAt: typeof poll?.at === 'string' ? poll.at : null });
-  return failure?.stage === 'session_open' ? { code: failure.failureCode ?? 'repository_relay_failed', at: failure.at,
-    stage: failure.stage, category: failure.category } : null;
+  for (const workspaceId of await readdir(resolve(relay, 'repositories')).catch(() => [] as string[])) {
+    if (!UUID_PATTERN.test(workspaceId)) continue;
+    const repository = resolve(relay, 'repositories', workspaceId);
+    const poll = await read(resolve(repository, 'last-successful-poll.json'));
+    const failure = currentRepositoryRelayFailure({ receipt: await read(resolve(repository, 'last-failure.json')),
+      organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
+      relayPidMtimeMs: pidState?.mtimeMs ?? null, relayPidCtimeMs: pidState?.ctimeMs ?? null,
+      lastSuccessfulPollAt: typeof poll?.at === 'string' ? poll.at : null });
+    if (failure?.stage === 'session_open') {
+      return { code: failure.failureCode ?? 'repository_relay_failed', at: failure.at, stage: failure.stage,
+        category: failure.category };
+    }
+  }
+  return null;
+}
+
+// The first poll receipt can follow a long task, so an open session clears its own failure at once.
+async function clearSessionOpenFailure(workspaceId: string) {
+  const path = resolve(dharmaHome(), 'relay', 'repositories', workspaceId, 'last-failure.json');
+  const receipt = await readFile(path, 'utf8').then(value => JSON.parse(value) as { stage?: string }).catch(() => null);
+  if (receipt?.stage === 'session_open') await rm(path, { force: true }).catch(() => undefined);
 }
 
 async function relayStart(flags: Map<string, string | boolean>,
@@ -9096,6 +9109,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     () => loadVerifiedWorkspacePolicyUnlessReplayAhead(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
   const fabric = await withRepositoryRelayStage('session_open', async () => client(await relayAutostartReport()));
+  await clearSessionOpenFailure(canonicalWorkspace.workspaceId);
   // A kill or a denied restore between the two authorization writes leaves the replay
   // state ahead of the file. One fresh server authorization repairs the pair: it takes
   // the same signature and anti-rollback checks as any sync, and the file is verified
@@ -9798,8 +9812,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
       && lastPoll?.version === VERSION;
     const lastSuccessfulPollAt = acknowledgedWorkspace && typeof lastPoll?.at === 'string' ? lastPoll.at : null;
     const pollAge = lastSuccessfulPollAt ? Date.now() - Date.parse(lastSuccessfulPollAt) : NaN;
-    const sessionOpenFailure = relay === 'running' && supervisor === 'running' && binding?.pid === supervisorPid
-      ? await currentSessionOpenFailure(binding.workspaceId) : null;
+    const sessionOpenFailure = relay === 'running' ? await currentSessionOpenFailure() : null;
     const lastFailure = sessionOpenFailure ?? (relay !== 'running' && supervisor === 'running'
       ? currentRelayChildFailure(await readFile(relayChildFailurePath(), 'utf8')
         .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null);
