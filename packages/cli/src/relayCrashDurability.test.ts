@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import {execFile, spawn, type ChildProcess} from 'node:child_process';
 import {generateKeyPairSync, randomUUID} from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {runInNewContext} from 'node:vm';
+import {Ajv2020} from 'ajv/dist/2020.js';
+import type {FormatsPlugin} from 'ajv-formats';
 import ts from 'typescript';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
 import {applyServerEvidencePolicy, materializeWorkspacePolicy, run} from './index.js';
@@ -33,6 +36,13 @@ async function privateFunctions(names: string[], context: Record<string, unknown
   return runInNewContext(`${output.outputText}\n({${names.join(',')}})`, {...fs, dirname, resolve, randomUUID, process,
     Date, structuredClone, exports: {}, currentBootstrapHostScope: () => undefined, ...context},
   {timeout: 1000}) as Record<string, (...args: any[]) => Promise<any>>;
+}
+
+async function failureReceiptValidator() {
+  const url = new URL('./schemas/local-relay-child-failure.schema.json', import.meta.url);
+  const ajv = new Ajv2020({strict: true, strictRequired: false});
+  (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
+  return ajv.compile(JSON.parse(await fs.readFile(url, 'utf8')));
 }
 
 async function temporaryRoot(t: {after(fn: () => Promise<void>): void}, prefix: string) {
@@ -216,6 +226,8 @@ test('relay start on a NUL-filled replay state leaves a stable receipt before th
   assert.equal(receipt.code, 'workspace_authorization_replay_state_invalid');
   assert.equal(receipt.workspaceId, f.workspaceId);
   assert.equal(text.includes(REPLAY_TEXT), false, 'the receipt carries a code, never error text');
+  const validate = await failureReceiptValidator();
+  assert.equal(validate(receipt), true, JSON.stringify(validate.errors));
   await assert.rejects(fs.stat(join(f.home, 'relay', 'relay.pid')), {code: 'ENOENT'});
   assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
 });
@@ -233,6 +245,8 @@ test('a supervised relay on a NUL-filled replay state shows the failure in statu
     assert.equal(receipt?.supervisorPid, supervisor.pid);
     assert.equal(receipt?.code, 'workspace_authorization_replay_state_invalid');
     assert.equal(receipt?.exitCode, 2);
+    const validate = await failureReceiptValidator();
+    assert.equal(validate(receipt), true, JSON.stringify(validate.errors));
     const {stdout} = await execFileAsync(process.execPath, [bin, 'status'], {env: f.env, timeout: 30_000});
     const status = JSON.parse(stdout);
     assert.equal(status.reconnect.state, 'failing');
@@ -268,4 +282,22 @@ test('failure receipts keep stable codes and never store error text', () => {
   assert.equal(relayChildExitReceipt({previous: {...started, pid: null}, exit: {pid: null, exitCode: null, signal: null},
     supervisorPid: 20, version: 'synthetic'}).code, 'relay_child_exited');
   assert.equal(currentRelayChildFailure(own, 0), null);
+});
+
+test('the failure receipt schema admits both receipt forms and refuses text or a half-stamped exit', async () => {
+  const validate = await failureReceiptValidator();
+  const version = '0.2.219', canary = 'token-sk-private-canary';
+  const start = relayStartFailureReceipt({error: new Error(canary), pid: 10, version, workspaceId: null});
+  const stamp = (exit: {pid: number | null; exitCode: number | null; signal: NodeJS.Signals | null}) =>
+    relayChildExitReceipt({previous: start, exit, supervisorPid: 20, version});
+  const stamped = stamp({pid: 10, exitCode: 2, signal: null});
+  for (const receipt of [start, stamped, stamp({pid: 10, exitCode: null, signal: 'SIGKILL'}),
+    stamp({pid: null, exitCode: null, signal: null})]) {
+    assert.equal(validate(receipt), true, JSON.stringify(validate.errors));
+  }
+  const {exitCode: _exitCode, ...withoutExitCode} = stamped;
+  for (const receipt of [{...start, message: canary}, {...start, code: canary}, {...start, at: 'not-a-time'},
+    {...start, pid: null}, {...start, pid: 0}, {...start, version: canary}, {...start, code: 'relay_child_exited'},
+    {...start, exitCode: 2}, {...start, signal: 'SIGTERM'}, {...stamped, supervisorPid: 0}, {...stamped, signal: canary},
+    withoutExitCode]) assert.equal(validate(receipt), false, JSON.stringify(receipt));
 });
