@@ -30,13 +30,13 @@ test('expired browser approval prints the plain reason, the next step and the co
   const diagnostic = {...report, reason: 'approval_expired', correlationId};
   const lines = await stderrFor(diagnostic);
   assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
-  assert.equal(lines[1], `setup_claim_failed (approval_expired): Browser approval expired before anyone approved this device. Get a fresh setup prompt from Dharma and run it. Correlation ID: ${correlationId}.\n`);
+  assert.equal(lines[1], `setup_claim_failed (approval_expired): Browser approval expired: setup did not receive an approval in time. Get a fresh setup prompt from Dharma and run it. Correlation ID: ${correlationId}.\n`);
   assert.equal(lines.length, 2);
 });
 
 test('expired browser approval without a correlation ID does not invent one', async () => {
   const lines = await stderrFor({...report, reason: 'approval_expired'});
-  assert.equal(lines[1], 'setup_claim_failed (approval_expired): Browser approval expired before anyone approved this device. Get a fresh setup prompt from Dharma and run it.\n');
+  assert.equal(lines[1], 'setup_claim_failed (approval_expired): Browser approval expired: setup did not receive an approval in time. Get a fresh setup prompt from Dharma and run it.\n');
 });
 
 test('other finalize failures print their typed reason and server code', async () => {

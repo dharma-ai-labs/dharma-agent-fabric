@@ -46,7 +46,7 @@ export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureD
   if (!diagnostic.reason) return undefined;
   const retry = 'Get a fresh setup prompt from Dharma and run it.';
   const text = {
-    approval_expired: `Browser approval expired before anyone approved this device. ${retry}`,
+    approval_expired: `Browser approval expired: setup did not receive an approval in time. ${retry}`,
     server_rejected: `Dharma rejected this setup${diagnostic.serverCode ? ` (${diagnostic.serverCode})` : ''}. ${retry} If it fails again, send Dharma this line.`,
     network_unavailable: `Could not reach Dharma. Check this machine's network connection. ${retry}`,
     response_invalid: `Dharma's setup response could not be verified. ${retry} If it fails again, send Dharma this line.`,
