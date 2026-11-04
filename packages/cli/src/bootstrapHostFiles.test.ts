@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {readFileSync, readdirSync, unlinkSync, writeFileSync} from 'node:fs';
+import {createRequire, syncBuiltinESMExports} from 'node:module';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -44,6 +45,23 @@ test('withdrawal after writing prevents publication and preserves partial eviden
   assert.equal(files.length, 3);
   assert.equal(files.filter(name => name.startsWith('state.json.') && name.endsWith('.tmp')).length, 1);
   assert.equal(await readFile(resolve(f.root, 'unrelated.tmp'), 'utf8'), 'preserve\n');
+});
+
+test('a committed local state rename is flushed to its directory where the platform allows', async t => {
+  const f = await fixture(t);
+  const files = createRequire(import.meta.url)('node:fs/promises') as {open: typeof import('node:fs/promises').open};
+  const original = files.open;
+  let directorySyncs = 0;
+  files.open = (async (path: string, ...rest: [string, number]) => {
+    const handle = await original(path, ...rest);
+    if (path === f.root) handle.sync = async () => {directorySyncs += 1; throw Object.assign(new Error('synthetic'), {code: 'EPERM'});};
+    return handle;
+  }) as typeof files.open;
+  syncBuiltinESMExports();
+  try {await writeBootstrapHostJson(f.path, {ok: true}, f.scope);}
+  finally {files.open = original; syncBuiltinESMExports();}
+  assert.equal(directorySyncs, 1);
+  assert.deepEqual(JSON.parse(await readFile(f.path, 'utf8')), {ok: true});
 });
 
 test('a verified owning scope commits parser-safe local state', async t => {
