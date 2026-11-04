@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { watchOwnedChild } from './ownedChildLifecycle.js';
+import type { RelayChildExit } from './relayChildFailure.js';
 
 export function relayRestartDelayMs(consecutiveShortRuns: number): number {
   return Math.min(30_000, 1_000 * 2 ** Math.min(Math.max(0, consecutiveShortRuns - 1), 5));
@@ -23,6 +24,7 @@ export async function superviseRelay(input: {
   signal: AbortSignal;
   now?: () => number;
   wait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  onExit?: (exit: RelayChildExit) => void | Promise<void>;
 }): Promise<{ restarts: number }> {
   const now = input.now || Date.now;
   const wait = input.wait || waitForRestart;
@@ -58,6 +60,10 @@ export async function superviseRelay(input: {
     }
     if (input.signal.aborted) break;
 
+    // A diagnostic write must never stop the restart loop.
+    try {
+      await input.onExit?.({ pid: child.pid ?? null, exitCode: child.exitCode, signal: child.signalCode });
+    } catch { /* The next exit tries again. */ }
     consecutiveShortRuns = now() - startedAt >= 60_000 ? 1 : consecutiveShortRuns + 1;
     restarts += 1;
     await wait(relayRestartDelayMs(consecutiveShortRuns), input.signal);
