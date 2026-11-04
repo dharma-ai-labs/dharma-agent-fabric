@@ -335,6 +335,24 @@ test('relay start on a NUL-filled replay state leaves a stable receipt before th
   assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
 });
 
+test('verbose status drops a repository failure once its session has opened again', async t => {
+  const f = await signedWorkspace(t);
+  const relayPid = join(f.home, 'relay', 'relay.pid'), repository = join(f.home, 'relay', 'repositories', f.workspaceId);
+  await fs.mkdir(repository, {recursive: true});
+  await fs.writeFile(relayPid, String(process.pid));
+  const {mtimeMs, ctimeMs} = await fs.stat(relayPid), at = new Date().toISOString();
+  await fs.writeFile(join(repository, 'last-failure.json'), JSON.stringify({schema: 'dharma.local-repository-relay-failure/v1',
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: f.workspaceId, pid: process.pid,
+    relayPidMtimeMs: mtimeMs, relayPidCtimeMs: ctimeMs, at, stage: 'session_open', category: 'unexpected',
+    failureCode: 'connection_anchor_lock_invalid'}));
+  const repository0 = async () => withHome(f.home, async () => (await run(['status', '--verbose']) as {
+    repositoryRelays: {repositories: Array<{lastFailure?: {failureCode?: string}}>}}).repositoryRelays.repositories[0]);
+  assert.equal((await repository0())?.lastFailure?.failureCode, 'connection_anchor_lock_invalid');
+  await fs.writeFile(join(repository, 'last-session-open.json'),
+    JSON.stringify({at: new Date(Date.parse(at) + 1000).toISOString()}));
+  assert.equal((await repository0())?.lastFailure, undefined);
+});
+
 test('a supervised relay on a NUL-filled replay state shows the failure in status', async t => {
   const f = await signedWorkspace(t);
   const supervisor = spawn(process.execPath, [bin, 'relay', 'supervise', '--policy', f.policyPath],
