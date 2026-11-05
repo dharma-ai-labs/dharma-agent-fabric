@@ -15,7 +15,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -5828,8 +5828,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               if (!binding) throw new Error('named_session_binding_unavailable');
               const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
               taskStateFailure = 'runtime_version_unavailable';
-              const version = (await execFileAsync('codex', ['--version'], { timeout: 10_000, maxBuffer: 4096,
-                env: providerProcessEnvironment(process.env) })).stdout.trim();
+              const versionEnvironment = providerProcessEnvironment(process.env);
+              const versionLaunch = providerLaunch('codex', ['--version'], versionEnvironment);
+              const version = (await execFileAsync(versionLaunch.command, versionLaunch.argv, { timeout: 10_000, maxBuffer: 4096,
+                env: versionEnvironment })).stdout.trim();
               if (!/^codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version)) {
                 throw new Error('named_session_runtime_version_unavailable');
               }
