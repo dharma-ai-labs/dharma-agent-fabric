@@ -735,6 +735,9 @@ test('Claude tasks with required skills fail unless each skill file was read', a
   assert.equal(hasClaudeRequiredSkillReads(failedRead, [skillPath]), false);
   assert.equal(hasClaudeRequiredSkillReads(otherFile, [skillPath]), false);
   assert.equal(hasClaudeRequiredSkillReads('', [skillPath]), false);
+  const variantPath = skillPath.toUpperCase().replaceAll('\\', '/');
+  const variantRead = read.replaceAll(JSON.stringify(skillPath), JSON.stringify(variantPath));
+  assert.equal(hasClaudeRequiredSkillReads(variantRead, [skillPath]), process.platform === 'win32');
 
   const run = (stdout: string) => executeProviderTask({
     provider: 'claude', workspace: root, instructions: 'Use the skill.', timeoutSeconds: 30, allowedCommandArgv: [], allowWrites: false,

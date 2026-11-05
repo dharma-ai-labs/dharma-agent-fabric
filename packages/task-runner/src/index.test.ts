@@ -815,6 +815,7 @@ test('Claude tasks read required skills from installed files because safe mode d
   const providerExecutor: ProviderTaskExecutor = async (input) => {
     providerCalls += 1;
     assert.ok(input.instructions.includes(JSON.stringify(skillFile)));
+    assert.deepEqual(input.requiredSkillPaths, [skillFile]);
     assert.match(input.instructions, /use the Read tool/);
     return { provider: 'claude', exitCode: 0, signal: null, timedOut: false, stdout: 'answer', stderr: '',
       stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
