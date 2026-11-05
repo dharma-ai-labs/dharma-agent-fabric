@@ -8,7 +8,7 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const MARKER = `${ROOT}/.dharma-agent-fabric.json`;
-const MARKER_RECOVERY = `Move ${ROOT} out of this repository, then run the same setup command again with --resume.`;
+const MARKER_RECOVERY = `Move ${ROOT} out of this repository, then run the same command again; for dharma onboard, add --resume.`;
 const FILES = [MARKER, `${ROOT}/SKILL.md`, `${ROOT}/references/organization.md`,
   '.dharma/agent-fabric.json', '.dharma/repository-agent.json'] as const;
 type InstallerFile = typeof FILES[number];
