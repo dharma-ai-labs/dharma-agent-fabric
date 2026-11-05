@@ -8,6 +8,7 @@ import { validateRepositorySourceAuthorization } from './repositorySourceAuthori
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const MARKER = `${ROOT}/.dharma-agent-fabric.json`;
+const MARKER_RECOVERY = `Move ${ROOT} out of this repository, then run the same setup command again with --resume.`;
 const FILES = [MARKER, `${ROOT}/SKILL.md`, `${ROOT}/references/organization.md`,
   '.dharma/agent-fabric.json', '.dharma/repository-agent.json'] as const;
 type InstallerFile = typeof FILES[number];
@@ -148,7 +149,7 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
       handle = await open(markerPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
     });
     const before = await installerEffect(scope, () => handle!.stat());
-    if (!before.isFile() || before.nlink !== 1 || before.size > 4096) throw new Error('Invalid repository skill ownership marker.');
+    if (!before.isFile() || before.nlink !== 1 || before.size > 4096) throw new Error(`Invalid repository skill ownership marker. ${MARKER_RECOVERY}`);
     const buffer = Buffer.alloc(4097);
     const { bytesRead } = await installerEffect(scope, () => handle!.read(buffer, 0, buffer.length, 0));
     const after = await installerEffect(scope, () => handle!.stat());
@@ -158,9 +159,9 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
       || current.nlink !== 1 || current.mtimeMs !== after.mtimeMs) throw new Error('Repository ownership marker changed.');
     let marker: unknown;
     try { marker = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')); }
-    catch { throw new Error('Invalid repository skill ownership marker.'); }
+    catch { throw new Error(`Invalid repository skill ownership marker. ${MARKER_RECOVERY}`); }
     if (!marker || typeof marker !== 'object' || Array.isArray(marker)) {
-      throw new Error('Invalid or foreign repository skill ownership marker.');
+      throw new Error(`Invalid or foreign repository skill ownership marker. ${MARKER_RECOVERY}`);
     }
     const value = marker as Record<string, unknown>;
     const installerOwned = Object.keys(value).sort().join(',') === 'managedBy,workspaceId'
@@ -169,7 +170,7 @@ export async function assertRepositoryInstallerOwnership(workspace: string, work
       && value.skillId === 'dharma-agent-fabric' && value.workspaceId === workspaceId
       && typeof value.bundleId === 'string'
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.bundleId);
-    if (!installerOwned && !signedOwned) throw new Error('Invalid or foreign repository skill ownership marker.');
+    if (!installerOwned && !signedOwned) throw new Error(`Invalid or foreign repository skill ownership marker. ${MARKER_RECOVERY}`);
     return signedOwned ? 'signed' as const : 'installer' as const;
   } finally {
     try {await handle?.close();}
