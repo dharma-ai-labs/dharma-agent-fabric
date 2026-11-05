@@ -25,6 +25,7 @@ import {
   FileTaskReceiptStore,
   providerInstructionsForTask,
   verifyTaskEnvelope,
+  type ProviderTaskExecutor,
   type TaskEnvelope,
 } from './index.js';
 
@@ -775,6 +776,64 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   const recovered = await store.get(task.taskId);
   assert.equal(recovered?.commandResults[0]?.failureCategory, 'quota');
   assert.equal(recovered?.commandResults[0]?.stderr, '');
+});
+
+test('Claude tasks read required skills from installed files because safe mode disables native skills', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-skill-file-'));
+  const workspace = resolve(root, 'workspace');
+  await mkdir(workspace);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  const policy: OrganizationPolicy = {
+    schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
+    evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
+    tasks: { defaultNetwork: 'deny', defaultGit: 'task_branch', allowedCommands: {}, writePaths: [], requireLocalConfirmationFor: [] },
+    skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
+  };
+  const keys = generateKeyPairSync('ed25519');
+  const signedTask = () => {
+    const unsigned = {
+      schema: 'dharma.task/v1' as const, taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace', taskType: 'external_request' as const,
+      target: { deviceId: 'device', provider: 'claude' as const }, skillBundle: { bundleId: randomUUID(), bundleHash: `sha256:${'a'.repeat(64)}` },
+      instructions: 'Use the skill.',
+      requiredSkills: [{ skillId: 'dharma-agent-fabric', version: '5.0.0', commit: 'b'.repeat(40), contentHash: `sha256:${'c'.repeat(64)}` }],
+      authority: { readPaths: ['.'], writePaths: [], commands: [], network: 'deny', git: 'task_branch' as const },
+      execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+      acceptance: { commands: [], requiredArtifacts: [] }, budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: randomUUID(),
+    };
+    return { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey) } as TaskEnvelope;
+  };
+  const skillFile = resolve(root, 'skills', 'dharma-agent-fabric', 'SKILL.md');
+  await mkdir(resolve(root, 'skills', 'dharma-agent-fabric'), { recursive: true });
+  await writeFile(skillFile, '# Skill\n');
+  const state = resolve(root, 'state');
+  const receiptStore = new FileTaskReceiptStore(resolve(root, 'receipts'));
+  let providerCalls = 0;
+  const providerExecutor: ProviderTaskExecutor = async (input) => {
+    providerCalls += 1;
+    assert.ok(input.instructions.includes(JSON.stringify(skillFile)));
+    assert.match(input.instructions, /use the Read tool/);
+    return { provider: 'claude', exitCode: 0, signal: null, timedOut: false, stdout: 'answer', stderr: '',
+      stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
+  };
+  const common = { policy, workspace, relayStateDirectory: state, serverPublicKey: keys.publicKey, receiptStore, providerExecutor };
+  const success = await executeTask({ ...common, task: signedTask(),
+    requiredSkillFiles: [{ skillId: 'dharma-agent-fabric', path: skillFile }] });
+  assert.equal(success.status, 'completed');
+  assert.equal(providerCalls, 1);
+
+  const missingFile = await executeTask({ ...common, task: signedTask(),
+    requiredSkillFiles: [{ skillId: 'dharma-agent-fabric', path: resolve(root, 'absent', 'SKILL.md') }] });
+  assert.equal(missingFile.status, 'failed');
+  assert.match(missingFile.commandResults[0]?.stderr || '', /Required skill file is unavailable/);
+
+  const unlisted = await executeTask({ ...common, task: signedTask() });
+  assert.equal(unlisted.status, 'failed');
+  assert.match(unlisted.commandResults[0]?.stderr || '', /Required skill file is unavailable/);
+  assert.equal(providerCalls, 1);
 });
 
 test('read-only signed tasks receive only matching verified knowledge and remove it afterward', async () => {
