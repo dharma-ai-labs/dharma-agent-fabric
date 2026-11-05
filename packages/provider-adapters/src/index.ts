@@ -9,10 +9,12 @@ import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-l
 import { validateTaskKnowledgeScope, type TaskKnowledgeScope } from './knowledge-server.js';
 import { prepareProviderExecutionQualification, snapshotProviderExecutionQualification,
   type ProviderExecutionQualification, type ProviderExecutionQualificationReceipt } from './executionQualification.js';
+import { providerLaunch } from './windowsNpmShim.js';
 
 export { reportedProviderExecutionQualification, snapshotProviderExecutionQualification } from './executionQualification.js';
 export type { ProviderExecutionQualification, ProviderExecutionQualificationReceipt } from './executionQualification.js';
 export { createCooperativeSessionMcpServer } from './cooperative-session-server.js';
+export { providerLaunch } from './windowsNpmShim.js';
 export type { CooperativeSessionMcpAnswer, CooperativeSessionMcpConsumer } from './cooperative-session-server.js';
 
 const execFileAsync = promisify(execFile);
@@ -188,9 +190,11 @@ function terminateProcessTree(child: ReturnType<typeof spawn>, force: boolean) {
 }
 
 export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
-  const child = spawn(input.command, input.argv, {
+  const env = { ...providerProcessEnvironment(), ...(input.environment || {}) };
+  const launch = providerLaunch(input.command, input.argv, env);
+  const child = spawn(launch.command, launch.argv, {
     cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...providerProcessEnvironment(), ...(input.environment || {}) },
+    env,
     detached: process.platform !== 'win32',
   });
   const maximum = 5_000_000;
@@ -473,11 +477,9 @@ export async function executableVersion(
   ) => { status: number | null; stdout: string; stderr: string },
 ): Promise<string | null> {
   const run = probe || (await import('node:child_process')).spawnSync;
-  const result = run(command, ['--version'], {
-    encoding: 'utf8',
-    timeout: 5_000,
-    env: providerProcessEnvironment(source),
-  });
+  const env = providerProcessEnvironment(source);
+  const launch = providerLaunch(command, ['--version'], env);
+  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env });
   if (result.status !== 0) return null;
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout?.toString('utf8') || '';
   const stderr = typeof result.stderr === 'string' ? result.stderr : result.stderr?.toString('utf8') || '';
@@ -501,12 +503,9 @@ export async function providerTaskReadiness(
   probe?: SynchronousProbe,
 ): Promise<'available' | 'partial'> {
   const run = probe || (await import('node:child_process')).spawnSync;
-  const argv = provider === 'claude' ? ['auth', 'status'] : ['login', 'status'];
-  const result = run(command, argv, {
-    encoding: 'utf8',
-    timeout: 5_000,
-    env: providerProcessEnvironment(source),
-  });
+  const env = providerProcessEnvironment(source);
+  const launch = providerLaunch(command, provider === 'claude' ? ['auth', 'status'] : ['login', 'status'], env);
+  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env });
   const stdout = probeText(result.stdout);
   const stderr = probeText(result.stderr);
   if (result.status !== 0) return 'partial';
@@ -1161,10 +1160,12 @@ export const hermesAdapter: ProviderAdapter = {
     }
     const argv = ['sessions', 'export', '-', '--format', 'jsonl', '--cwd', resolve(request.workspace), '--yes', '--redact'];
     if (request.since) argv.push('--after', request.since.toISOString());
-    const { stdout } = await execFileAsync('hermes', argv, {
+    const env = providerProcessEnvironment();
+    const launch = providerLaunch('hermes', argv, env);
+    const { stdout } = await execFileAsync(launch.command, launch.argv, {
       timeout: 60_000,
       maxBuffer: 67_108_864,
-      env: providerProcessEnvironment(),
+      env,
     });
     return parseHermesSessionExport(String(stdout), request.workspace, request);
   },

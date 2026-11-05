@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import type { CodexAppServerTransport, CodexToolHandler } from './codexAppServerSession.js';
+import { providerLaunch } from './windowsNpmShim.js';
 
 type PendingRequest = {
   method: string;
@@ -42,8 +43,10 @@ export async function openCodexAppServerTransport(input: {
     || !Number.isInteger(maximumFrameBytes) || maximumFrameBytes < 1_024 || maximumFrameBytes > 5_000_000) {
     throw new Error('codex_app_server_launch_invalid');
   }
-  const child = spawn(input.command, input.argv, {
-    cwd: input.cwd, env: input.environment ?? process.env,
+  const env = input.environment ?? process.env;
+  const launch = providerLaunch(input.command, input.argv, env);
+  const child = spawn(launch.command, launch.argv, {
+    cwd: input.cwd, env,
     shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
     detached: process.platform === 'linux',
   });
