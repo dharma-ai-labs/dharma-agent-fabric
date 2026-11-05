@@ -246,6 +246,10 @@ test('a replacement process cannot publish during stale primary inspection and r
       }, readFile: async (path: string, encoding: string) => {
         const text = await readFile(path, encoding as BufferEncoding);
         if (path === f.path && !interleaved) {
+          // A read-only check that saw the previous dead owner moves on to the mutex,
+          // where this live owner is found. Only that read under the mutex is paused.
+          const held = await stat(f.path + '.recovery').then(() => true, () => false);
+          if (!held) return 'corrupt-owner';
           interleaved = true;
           await writeFile(releaseOld, 'release'); await oldOwner;
           newOwner = child(script, f.path, readyNew, releaseNew);

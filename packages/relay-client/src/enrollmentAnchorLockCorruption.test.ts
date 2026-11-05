@@ -134,7 +134,9 @@ test('a contender cannot publish while the inspector holds the mutex over a NUL 
   let contender: Promise<void> | undefined, inspected = false;
   const acquire = await compiledAcquire({readFile: async (path: string, encoding: BufferEncoding) => {
     const text = await fs.readFile(path, encoding);
-    if (path === f.path && !inspected) {
+    // Only the read under the mutex is paused. The read-only check before it holds nothing.
+    const held = await fs.access(f.path + '.recovery').then(() => true, () => false);
+    if (path === f.path && !inspected && held) {
       inspected = true;
       contender = child(holderScript, f.path, started, ready, finish);
       contender.catch(() => undefined);
@@ -237,6 +239,45 @@ test('nothing is flushed while the recovery mutex exists', async t => {
   await fs.writeFile(dead.path, NUL_OWNER);
   await (await (await compiledAcquire(retried.context))(dead.path, undefined, 2000))();
   assert.deepEqual(retried.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink']);
+});
+
+test('a waiter held off by a live owner never creates the recovery mutex', async t => {
+  const f = await fixture(t), recorded = recordedLockFiles(f.path);
+  await fs.writeFile(f.path, `${process.pid}
+`);
+  const acquire = await compiledAcquire(recorded.context);
+  await assert.rejects(acquire(f.path, undefined, 200), /connection_anchor_busy/);
+  assert.deepEqual(recorded.events, ['flush']);
+  assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}
+`);
+  assert.deepEqual(await fs.readdir(f.root), ['anchor.lock']);
+});
+
+test('a waiter takes the recovery mutex once, after the live owner releases', async t => {
+  const f = await fixture(t), recorded = recordedLockFiles(f.path);
+  const holder = await acquireEnrollmentAnchorLock(f.path);
+  const acquire = await compiledAcquire(recorded.context);
+  const waiter = acquire(f.path, undefined, 5000);
+  await new Promise(accept => setTimeout(accept, 150));
+  await holder();
+  const release = await waiter;
+  await release.assertHeld();
+  await release();
+  assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink']);
+  assert.deepEqual(await fs.readdir(f.root), []);
+});
+
+test('a lock that looks dead is left alone while another process holds the mutex', async t => {
+  const f = await fixture(t), recovery = f.path + '.recovery';
+  await fs.writeFile(f.path, NUL_OWNER);
+  await fs.writeFile(recovery, `${process.pid}
+`);
+  const before = await fs.stat(f.path, {bigint: true});
+  await assert.rejects(acquireEnrollmentAnchorLock(f.path, undefined, 100), /connection_anchor_busy/);
+  const after = await fs.stat(f.path, {bigint: true});
+  assert.equal(after.ino, before.ino); assert.equal(after.dev, before.dev);
+  assert.deepEqual(await fs.readFile(f.path), NUL_OWNER);
+  assert.deepEqual((await fs.readdir(f.root)).sort(), ['anchor.lock', 'anchor.lock.recovery']);
 });
 
 test('a waiter flushes one candidate however long it retries, and removes it when it gives up', async t => {

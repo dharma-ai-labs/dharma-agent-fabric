@@ -77,6 +77,7 @@ async function inspectionFixture(input: {
   const scope = new HostOperationFence({signal: new AbortController().signal, current: async () => allowed});
   return {root, path, blocked, denial, acquire, scope,
     deniedReads: () => deniedReads, waits: () => waits,
+    links: () => effects.filter(effect => effect === 'link').length,
     effectsAfterWithdrawal: () => effects.slice(withdrawnAt ?? effects.length),
     checkTimer: () => {if (timerFailure) throw timerFailure;},
     cleanup: async () => {
@@ -108,6 +109,8 @@ test('persistent Windows inspection denial stays busy and preserves primary and 
       const before = await fs.stat(f.blocked, {bigint: true});
       await assert.rejects(f.acquire(f.path, undefined, 100), /connection_anchor_busy/);
       assert.ok(f.deniedReads() > 0); assert.equal(f.waits(), 4);
+      // An unreadable primary may have a live owner, so it never takes the mutex.
+      if (kind === 'primary') assert.equal(f.links(), 0);
       assert.equal(await fs.readFile(f.blocked, 'utf8'), '123\n');
       const after = await fs.stat(f.blocked, {bigint: true});
       assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino);
