@@ -49,7 +49,7 @@ import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureRecei
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
-import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
@@ -3236,7 +3236,7 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
   if (existing.backend === null && existing.state === 'disabled') return;
   if (existing.state === 'unavailable'
     && !(existing.backend === 'systemd-user' && existing.reason === 'autostart_conflict')) {
-    throw new Error('startup_preflight_unavailable: the owned startup manager is unavailable.');
+    throw new Error(`${existing.reason}: the owned startup manager is unavailable.`);
   }
   const anchor = await step(() => inspectOwnedRelayAutostart({ home }, { allowLegacy: true }));
   if (anchor.policy === null) return;
@@ -3250,12 +3250,13 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
   if (anchor.policy !== resolve(anchor.workspace, '.dharma', 'approved-policy.json')) {
     throw new Error('relay_workspace_conflict: startup policy is not canonical.');
   }
-  const authorized = await step(() => loadOrganizationPolicy(anchor.policy!));
+  const policyConflict = () => { throw new Error('relay_workspace_conflict: startup policy could not be verified.'); };
+  const authorized = await step(() => loadOrganizationPolicy(anchor.policy!)).catch(policyConflict);
   const canonical = (await step(() => registry())).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
     && row.organizationId === organizationId && row.path === anchor.workspace
     && row.routeHash === selected.routeHash && row.repositoryRemoteHash === selected.repositoryRemoteHash);
   if (canonical.length !== 1) throw new Error('relay_workspace_conflict: startup policy route changed.');
-  await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? ''));
+  await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? '')).catch(policyConflict);
   if (anchor.version !== VERSION) {
     throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
   }
@@ -3564,21 +3565,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     }
     catch (error) {
       await hostScope?.assert();
-      const code = error instanceof Error && error.message.startsWith('autostart_conflict:')
-        ? 'autostart_conflict' : error instanceof Error && error.message.startsWith('relay_runtime_upgrade_required:')
-          ? 'relay_runtime_upgrade_required' : error instanceof Error && error.message.startsWith('relay_workspace_conflict:')
-            ? 'relay_workspace_conflict' : error instanceof Error && error.message === 'wsl_host_startup_unavailable'
-              ? 'wsl_host_startup_unavailable' : 'startup_preflight_unavailable';
-      return { ok: false, stage: 'startup_preflight', code, grantRedeemed: false, enrollmentChanged: false,
-        message: code === 'relay_runtime_upgrade_required'
-          ? 'Upgrade the existing enrolled startup runtime through the supported same-device update flow before retrying; setup has not redeemed authority or changed enrollment.'
-          : code === 'autostart_conflict'
-          ? 'This Linux user already has a startup entry owned by another installation. Use the existing enrolled installation or an eligible clean client; setup has not redeemed authority or changed enrollment.'
-          : code === 'relay_workspace_conflict'
-          ? 'The existing startup anchor does not match this device and its approved repository policy. Recover that enrolled repository through the supported same-device flow before retrying; setup has not redeemed authority or changed enrollment.'
-          : code === 'wsl_host_startup_unavailable'
-          ? 'The WSL host startup owner could not be verified. Restore the supported user-logon host binding before retrying; setup has not redeemed authority or changed enrollment.'
-          : "Startup ownership could not be verified. Check that this user's startup service is running (systemd user service on Linux and WSL, launchd on macOS, Task Scheduler on Windows), then run setup again; setup has not redeemed authority or changed enrollment." };
+      return { ok: false, stage: 'startup_preflight', grantRedeemed: false, enrollmentChanged: false,
+        ...startupPreflightFailure(error) };
     }
   }
   if (grantMode === 'prompt') bootstrapToken = await readPrivateBootstrapGrant();

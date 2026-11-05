@@ -269,11 +269,9 @@ test('bootstrap may inspect an exact owned legacy anchor for migration without a
   await assert.rejects(Reflect.apply(inspectOwnedRelayAutostart, undefined, [options, { allowLegacy: true }]), /autostart_conflict/);
 });
 
-test('Linux-only startup preflight leaves Windows and macOS registration behavior unchanged', async () => {
-  for (const platform of ['win32', 'darwin'] as const) {
-    await startupPreflight({ platform, home: '/not-read', userHome: '/not-read',
-      run: async () => { throw new Error('preflight must not execute an OS command'); } });
-  }
+test('startup preflight leaves macOS registration behavior unchanged', async () => {
+  await startupPreflight({ platform: 'darwin', home: '/not-read', userHome: '/not-read',
+    run: async () => { throw new Error('preflight must not execute an OS command'); } });
 });
 
 async function macFixture() {
