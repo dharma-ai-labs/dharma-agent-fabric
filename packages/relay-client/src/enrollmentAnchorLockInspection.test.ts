@@ -43,8 +43,8 @@ async function inspectionFixture(input: {
     mkdir: async (name: string, options: {recursive: true; mode: number}) => {
       effects.push('mkdir'); return fs.mkdir(name, options);
     },
-    writeFile: async (name: string, value: string, options: {flag: string; mode: number}) => {
-      effects.push('write'); return fs.writeFile(name, value, options);
+    open: async (name: string, flags: string, mode: number) => {
+      effects.push('write'); return fs.open(name, flags, mode);
     },
     unlink: async (name: string) => {effects.push('unlink'); return fs.unlink(name);},
     rename: async (from: string, to: string) => {effects.push('rename'); return fs.rename(from, to);},
@@ -77,6 +77,7 @@ async function inspectionFixture(input: {
   const scope = new HostOperationFence({signal: new AbortController().signal, current: async () => allowed});
   return {root, path, blocked, denial, acquire, scope,
     deniedReads: () => deniedReads, waits: () => waits,
+    links: () => effects.filter(effect => effect === 'link').length,
     effectsAfterWithdrawal: () => effects.slice(withdrawnAt ?? effects.length),
     checkTimer: () => {if (timerFailure) throw timerFailure;},
     cleanup: async () => {
@@ -108,6 +109,8 @@ test('persistent Windows inspection denial stays busy and preserves primary and 
       const before = await fs.stat(f.blocked, {bigint: true});
       await assert.rejects(f.acquire(f.path, undefined, 100), /connection_anchor_busy/);
       assert.ok(f.deniedReads() > 0); assert.equal(f.waits(), 4);
+      // An unreadable primary may have a live owner, so it never takes the mutex.
+      if (kind === 'primary') assert.equal(f.links(), 0);
       assert.equal(await fs.readFile(f.blocked, 'utf8'), '123\n');
       const after = await fs.stat(f.blocked, {bigint: true});
       assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino);
@@ -132,12 +135,12 @@ test('other permission and publication denials are not reclassified as Windows i
   }
 });
 
-test('host withdrawal during an uninspectable-owner wait admits no subsequent filesystem step', async () => {
+test('host withdrawal during an uninspectable-owner wait admits only the removal of its own candidate', async () => {
   const f = await inspectionFixture({kind: 'recovery', withdrawOnWait: true});
   try {
     await assert.rejects(f.acquire(f.path, f.scope, 100), /relay_host_scope_unavailable/);
     assert.equal(f.deniedReads(), 1); assert.equal(f.waits(), 1);
-    assert.deepEqual(f.effectsAfterWithdrawal(), []);
+    assert.deepEqual(f.effectsAfterWithdrawal(), ['metadata', 'unlink']);
     assert.equal(await fs.readFile(f.blocked, 'utf8'), '123\n');
     assert.deepEqual(await fs.readdir(f.root), [basename(f.blocked)]);
   } finally {await f.cleanup();}

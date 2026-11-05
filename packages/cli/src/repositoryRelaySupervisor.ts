@@ -3,11 +3,17 @@ import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboard
 import { relayRestartDelayMs } from './relaySupervisor.js';
 
 export interface RepositoryRelayRegistration { workspaceId: string; policyPath: string }
-export type RepositoryRelayStage = 'policy_verification' | 'session_open' | 'vault_open' | 'trajectory_recovery' | 'evidence_sync'
-  | 'pending_capsule_sync' | 'evidence_request' | 'task_poll' | 'worker_run';
+export const REPOSITORY_RELAY_STAGES = ['policy_verification', 'session_open', 'vault_open', 'trajectory_recovery', 'evidence_sync',
+  'pending_capsule_sync', 'evidence_request', 'task_poll', 'worker_run'] as const;
+export type RepositoryRelayStage = typeof REPOSITORY_RELAY_STAGES[number];
 export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_ready' | 'policy_invalid' | 'unexpected';
+// Exact codes only: any other error message can quote a path or a server value.
+export const REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string> = new Set(['connection_anchor_lock_invalid', 'connection_anchor_busy',
+  'connection_anchor_recovery_required', 'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed',
+  'device_signing_control_unavailable']);
+const typedFailure = (value: unknown) => REPOSITORY_RELAY_FAILURE_CODES.has(value as string) ? { failureCode: value as string } : {};
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
-  category?: RepositoryRelayFailureCategory }
+  category?: RepositoryRelayFailureCategory; failureCode?: string }
 
 class StagedRepositoryRelayError extends Error {
   constructor(readonly stage: RepositoryRelayStage, cause: unknown) {
@@ -20,15 +26,33 @@ export async function withRepositoryRelayStage<T>(stage: RepositoryRelayStage, o
   catch (error) { throw error instanceof StagedRepositoryRelayError ? error : new StagedRepositoryRelayError(stage, error); }
 }
 
-function failureCategory(error: unknown): RepositoryRelayFailureCategory {
+function failureMessage(error: unknown) {
   const cause = error instanceof StagedRepositoryRelayError ? error.cause : error;
-  let message = '';
-  try { if (cause instanceof Error) message = cause.message; }
-  catch { return 'unexpected'; }
+  try { return cause instanceof Error ? cause.message : ''; }
+  catch { return ''; }
+}
+
+function failureCategory(error: unknown): RepositoryRelayFailureCategory {
+  const message = failureMessage(error);
   if (/^policy_boundary:/.test(message)) return 'policy_boundary';
   if (/^agent_fabric_retention_not_ready:/.test(message)) return 'retention_not_ready';
   if (/^agent_fabric_policy_invalid:/.test(message)) return 'policy_invalid';
   return 'unexpected';
+}
+
+// Status trusts a relay time only in the exact form the relay writes and never from the future.
+export function repositoryRelayTimestampMs(value: unknown, now = Date.now()) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at <= now + 30_000 ? at : null;
+}
+
+export function repositoryRelayFailureReceipt(event: Observation, binding: { organizationId: string; deviceId: string;
+  pid: number; relayPidMtimeMs: number; relayPidCtimeMs: number }, at: string) {
+  return { schema: 'dharma.local-repository-relay-failure/v1', organizationId: binding.organizationId,
+    deviceId: binding.deviceId, workspaceId: event.workspaceId, pid: binding.pid, relayPidMtimeMs: binding.relayPidMtimeMs,
+    relayPidCtimeMs: binding.relayPidCtimeMs, at, stage: event.stage, category: event.category,
+    ...(event.failureCode ? { failureCode: event.failureCode } : {}) };
 }
 
 export function currentRepositoryRelayFailure(input: { receipt: unknown; organizationId: string; deviceId: string;
@@ -39,17 +63,16 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     || value.organizationId !== input.organizationId || value.deviceId !== input.deviceId
     || value.workspaceId !== input.workspaceId || value.pid !== input.pid
     || !Number.isSafeInteger(input.pid) || input.pid <= 0
-    || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))
+    || typeof value.at !== 'string' || repositoryRelayTimestampMs(value.at, input.now) === null
     || !Number.isFinite(input.relayPidMtimeMs) || !Number.isFinite(input.relayPidCtimeMs)
     || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
-    || Date.parse(value.at) > (input.now ?? Date.now()) + 30_000
     || (input.lastSuccessfulPollAt && Date.parse(value.at) <= Date.parse(input.lastSuccessfulPollAt))
-    || !['policy_verification', 'session_open', 'vault_open', 'trajectory_recovery', 'evidence_sync', 'pending_capsule_sync',
-      'evidence_request', 'task_poll', 'worker_run'].includes(String(value.stage))
+    || !(REPOSITORY_RELAY_STAGES as readonly string[]).includes(String(value.stage))
     || !['policy_boundary', 'retention_not_ready', 'policy_invalid', 'unexpected'].includes(String(value.category))) {
     return null;
   }
-  return { at: value.at, stage: value.stage, category: value.category };
+  return { at: value.at, stage: value.stage, category: value.category,
+    ...typedFailure(value.failureCode) };
 }
 
 export async function selectRepositoryRelayRegistrations<T extends OnboardingWorkspaceRecord & { routeHash: string }>(
@@ -179,7 +202,8 @@ export async function runRegisteredRepositoryRelays(input: {
               worker.failed = true;
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
                 stage: error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run',
-                category: failureCategory(error) });
+                category: failureCategory(error),
+                ...typedFailure(failureMessage(error)) });
             }
           } finally {
             worker.done = true;
