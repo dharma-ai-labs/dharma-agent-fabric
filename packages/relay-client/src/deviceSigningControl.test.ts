@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import {randomUUID} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
+import {mkdir,readdir,rm,writeFile} from 'node:fs/promises';
+import {userInfo} from 'node:os';
+import {dirname,resolve} from 'node:path';
 import test from 'node:test';
+import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
 import * as relay from './index.js';
 
 type Lease={controllerInstanceId:string;processIdentityDigest:string;leaseDigest:string;assertHeld():Promise<void>};
@@ -45,4 +49,18 @@ test('expired async context cannot silently reenter a released control lease',as
   const run=api(),scope=input();let later!:()=>void;let detached!:Promise<unknown>;
   await run(scope,async()=>{detached=new Promise<void>(r=>{later=r;}).then(()=>run(scope,async()=>assert.fail('released context reused')));});
   later();await assert.rejects(detached,/device_signing_control_unavailable/);
+});
+
+test('a NUL lock left by a hard reset at the real signing path no longer blocks the device',async t=>{
+  const run=api(),scope=input(),user=userInfo();
+  const hash=(v:unknown)=>'sha256:'+createHash('sha256').update(canonicalize(v)).digest('hex');
+  const userHash=hash({home:user.homedir,user:user.username}).slice(7);
+  const namespace=hash({origin:scope.config.hqUrl,organizationId:scope.config.organizationId,deviceId:scope.config.deviceId,user:userHash});
+  const root=process.platform==='win32'?resolve(user.homedir,'AppData','Local','Temp'):'/tmp';
+  const path=resolve(root,'dharma-signing-controls-'+userHash.slice(0,32),namespace.slice(7)+'.lock');
+  await mkdir(dirname(path),{recursive:true,mode:0o700});
+  await writeFile(path,Buffer.alloc(5));
+  t.after(()=>rm(path,{force:true}));
+  assert.equal(await run(scope,async lease=>{await lease.assertHeld();return 'signed';}),'signed');
+  assert.equal((await readdir(dirname(path))).some(name=>name.startsWith(namespace.slice(7))),false);
 });

@@ -134,8 +134,9 @@ unconfirmed write fails closed; the helper never removes an anchor before updati
 Read-only probes do not create or migrate anchors. Synthetic helper tests do not
 qualify live Windows/WSL credential replacement or native device readiness.
 Keep concurrent CLI callers on the same reviewed release. Mixed versions require
-serialized supported recovery. A busy, corrupt or inaccessible lock fails closed. A verified dead primary process
-can be recovered automatically. An abandoned recovery mutex is preserved and returns
+serialized supported recovery. A busy or inaccessible lock fails closed. A verified dead primary process, or a
+primary lock whose contents cannot be a process ID, is recovered automatically under the recovery mutex. A live owner
+is never recovered. An abandoned recovery mutex, including one with such contents, is preserved and returns
 `connection_anchor_recovery_required`; device-bound support must verify it before
 any cleanup. Do not manually remove locks or retry enrollment to clear this state.
 For a legacy configuration without a keyset, a current approval's keyset must verify

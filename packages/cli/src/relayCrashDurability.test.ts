@@ -182,6 +182,124 @@ test('status replaces plain restarting with the current supervisor child failure
   assert.deepEqual(await reconnect(), {state: 'restarting', lastSuccessfulPollAt: null});
 });
 
+// The relay process is alive here, as on the wedged G11 device: only its session opens fail.
+async function runningRelayHome(t: {after(fn: () => Promise<void>): void}) {
+  const home = await temporaryRoot(t, 'dharma-status-open-failure-');
+  const workspaceId = randomUUID(), repository = join(home, 'relay', 'repositories', workspaceId);
+  const organizationId = 'org_test', deviceId = 'device_test', relayPid = join(home, 'relay', 'relay.pid');
+  await fs.mkdir(repository, {recursive: true});
+  await fs.writeFile(relayPid, `${process.pid}\n`);
+  await fs.writeFile(join(home, 'relay', 'supervisor.pid'), `${process.pid}\n`);
+  await fs.writeFile(join(home, 'relay', 'supervisor-workspace.json'), JSON.stringify({pid: process.pid, workspaceId}));
+  await fs.writeFile(join(home, 'device.json'), JSON.stringify({organizationId, deviceId}));
+  const {mtimeMs, ctimeMs} = await fs.stat(relayPid);
+  const at = new Date().toISOString();
+  const receipt = {schema: 'dharma.local-repository-relay-failure/v1', organizationId, deviceId, workspaceId,
+    pid: process.pid, relayPidMtimeMs: mtimeMs, relayPidCtimeMs: ctimeMs, at, stage: 'session_open',
+    category: 'unexpected', failureCode: 'connection_anchor_lock_invalid'};
+  const reconnect = async () => withHome(home, async () => (await run(['status']) as {reconnect: {state: string}}).reconnect);
+  return {home, workspaceId, repository, at, receipt, reconnect,
+    writeReceipt: (value: unknown) => fs.writeFile(join(repository, 'last-failure.json'), JSON.stringify(value))};
+}
+
+test('status says failing while a running relay fails every session open', async t => {
+  const f = await runningRelayHome(t);
+  const version = (await withHome(f.home, () => run(['status'])) as {version: string}).version;
+  const pollAt = new Date(Date.parse(f.at) - 60_000).toISOString();
+  await fs.writeFile(join(f.home, 'relay', 'last-successful-poll.json'),
+    JSON.stringify({at: pollAt, workspaceId: f.workspaceId, version}));
+  assert.equal((await f.reconnect()).state, 'acknowledged_recently');
+  await f.writeReceipt(f.receipt);
+  assert.deepEqual(await f.reconnect(), {state: 'failing', lastSuccessfulPollAt: pollAt, lastFailure: {
+    code: 'connection_anchor_lock_invalid', at: f.at, stage: 'session_open', category: 'unexpected'}});
+});
+
+test('a session open failure without a known code still reads as failing, with no free text', async t => {
+  const f = await runningRelayHome(t);
+  await f.writeReceipt({...f.receipt, failureCode: 'C:/Users/someone/.secret'});
+  const reconnect = await f.reconnect();
+  assert.deepEqual(reconnect, {state: 'failing', lastSuccessfulPollAt: null, lastFailure: {
+    code: 'repository_relay_failed', at: f.at, stage: 'session_open', category: 'unexpected'}});
+});
+
+test('status drops the session open failure once it is no longer current', async t => {
+  const f = await runningRelayHome(t);
+  const repositoryPoll = join(f.repository, 'last-successful-poll.json');
+  await f.writeReceipt(f.receipt);
+  assert.equal((await f.reconnect()).state, 'failing');
+  await fs.writeFile(repositoryPoll, JSON.stringify({at: new Date(Date.parse(f.at) + 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  await fs.rm(repositoryPoll);
+  for (const stale of [{...f.receipt, pid: process.pid + 1}, {...f.receipt, relayPidMtimeMs: 1},
+    {...f.receipt, stage: 'task_poll'}]) {
+    await f.writeReceipt(stale);
+    assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  }
+  await fs.writeFile(join(f.repository, 'last-failure.json'), NUL_STATE);
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+});
+
+test('status finds the failure under the workspace the loop used, not the supervisor alias', async t => {
+  const f = await runningRelayHome(t);
+  await f.writeReceipt(f.receipt);
+  await fs.writeFile(join(f.home, 'relay', 'supervisor-workspace.json'),
+    JSON.stringify({pid: process.pid, workspaceId: randomUUID()}));
+  assert.equal((await f.reconnect()).state, 'failing');
+});
+
+test('status ignores a failure record outside a workspace directory', async t => {
+  const f = await runningRelayHome(t);
+  const outside = join(f.home, 'relay', 'repositories', 'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(join(outside, 'last-failure.json'), JSON.stringify({...f.receipt, workspaceId: 'outside'}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+});
+
+test('a session that opens after the failure ends failing, even if that failure is written late', async t => {
+  const f = await runningRelayHome(t), opened = join(f.repository, 'last-session-open.json');
+  await f.writeReceipt(f.receipt);
+  assert.equal((await f.reconnect()).state, 'failing');
+  await fs.writeFile(opened, JSON.stringify({at: new Date(Date.parse(f.at) + 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  await f.writeReceipt(f.receipt);
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+  await fs.writeFile(opened, JSON.stringify({at: new Date(Date.parse(f.at) - 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'failing');
+});
+
+test('a success record from the future or in another form cannot end a session open failure', async t => {
+  const f = await runningRelayHome(t);
+  await f.writeReceipt(f.receipt);
+  const later = new Date(Date.parse(f.at) + 2000).toISOString();
+  for (const name of ['last-session-open.json', 'last-successful-poll.json']) {
+    const record = join(f.repository, name);
+    for (const at of ['9999-01-01T00:00:00.000Z', new Date(Date.now() + 3_600_000).toISOString(),
+      later.replace(/\.\d{3}Z$/, 'Z'), `${later}\n`]) {
+      await fs.writeFile(record, JSON.stringify({at}));
+      assert.equal((await f.reconnect()).state, 'failing', `${name} ${at}`);
+    }
+    await fs.rm(record);
+  }
+});
+
+test('a later success in any workspace outranks the failure of a stopped workspace', async t => {
+  const f = await runningRelayHome(t), other = join(f.home, 'relay', 'repositories', randomUUID());
+  await f.writeReceipt(f.receipt);
+  await fs.mkdir(other);
+  await fs.writeFile(join(other, 'last-successful-poll.json'), JSON.stringify({at: new Date(Date.parse(f.at) - 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'failing');
+  await fs.writeFile(join(other, 'last-successful-poll.json'), JSON.stringify({at: new Date(Date.parse(f.at) + 1000).toISOString()}));
+  assert.equal((await f.reconnect()).state, 'awaiting_acknowledgement');
+});
+
+test('the relay loop records a session open before any later stage runs', async () => {
+  const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const open = source.indexOf("withRepositoryRelayStage('session_open'");
+  const record = source.indexOf("'last-session-open.json'), { at:", open);
+  assert.ok(open > 0 && record > open);
+  assert.ok(record < source.indexOf('let policy = verifiedPolicy', open));
+});
+
 async function signedWorkspace(t: {after(fn: () => Promise<void>): void}) {
   const root = await temporaryRoot(t, 'dharma-relay-nul-');
   const home = join(root, 'home'), workspace = join(root, 'repo');
@@ -230,6 +348,26 @@ test('relay start on a NUL-filled replay state leaves a stable receipt before th
   assert.equal(validate(receipt), true, JSON.stringify(validate.errors));
   await assert.rejects(fs.stat(join(f.home, 'relay', 'relay.pid')), {code: 'ENOENT'});
   assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
+});
+
+test('verbose status drops a repository failure only once a valid session open follows it', async t => {
+  const f = await signedWorkspace(t);
+  const relayPid = join(f.home, 'relay', 'relay.pid'), repository = join(f.home, 'relay', 'repositories', f.workspaceId);
+  await fs.mkdir(repository, {recursive: true});
+  await fs.writeFile(relayPid, String(process.pid));
+  const {mtimeMs, ctimeMs} = await fs.stat(relayPid), at = new Date().toISOString();
+  await fs.writeFile(join(repository, 'last-failure.json'), JSON.stringify({schema: 'dharma.local-repository-relay-failure/v1',
+    organizationId: 'org_test', deviceId: 'device_test', workspaceId: f.workspaceId, pid: process.pid,
+    relayPidMtimeMs: mtimeMs, relayPidCtimeMs: ctimeMs, at, stage: 'session_open', category: 'unexpected',
+    failureCode: 'connection_anchor_lock_invalid'}));
+  const repository0 = async () => withHome(f.home, async () => (await run(['status', '--verbose']) as {
+    repositoryRelays: {repositories: Array<{lastFailure?: {failureCode?: string}}>}}).repositoryRelays.repositories[0]);
+  assert.equal((await repository0())?.lastFailure?.failureCode, 'connection_anchor_lock_invalid');
+  await fs.writeFile(join(repository, 'last-session-open.json'),
+    JSON.stringify({at: new Date(Date.parse(at) + 1000).toISOString()}));
+  assert.equal((await repository0())?.lastFailure, undefined);
+  await fs.writeFile(join(repository, 'last-session-open.json'), JSON.stringify({at: '9999-01-01T00:00:00.000Z'}));
+  assert.equal((await repository0())?.lastFailure?.failureCode, 'connection_anchor_lock_invalid');
 });
 
 test('a supervised relay on a NUL-filled replay state shows the failure in status', async t => {

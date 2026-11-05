@@ -20,7 +20,7 @@ import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
-  loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
+  loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, setupClaimFailureMessage, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type DeviceTelemetryOptions, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
@@ -46,7 +46,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
-  withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
@@ -160,7 +160,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.221';
+const VERSION = '0.2.222';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3574,7 +3574,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
           ? 'The existing startup anchor does not match this device and its approved repository policy. Recover that enrolled repository through the supported same-device flow before retrying; setup has not redeemed authority or changed enrollment.'
           : code === 'wsl_host_startup_unavailable'
           ? 'The WSL host startup owner could not be verified. Restore the supported user-logon host binding before retrying; setup has not redeemed authority or changed enrollment.'
-          : 'Startup ownership could not be verified. Resolve the supported startup prerequisite before retrying; setup has not redeemed authority or changed enrollment.' };
+          : "Startup ownership could not be verified. Check that this user's startup service is running (systemd user service on Linux and WSL, launchd on macOS, Task Scheduler on Windows), then run setup again; setup has not redeemed authority or changed enrollment." };
     }
   }
   if (grantMode === 'prompt') bootstrapToken = await readPrivateBootstrapGrant();
@@ -3603,6 +3603,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       hostScope,
       onFailureDiagnostic: diagnostic => {
         process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
+        const message = setupClaimFailureMessage(diagnostic);
+        if (message) process.stderr.write(`${message}\n`);
       },
       onRecipientApprovalRequired: async approval => {
         recipientApproval.required = true;
@@ -8898,6 +8900,34 @@ async function takeCachedSkillUpdate(input: {
 
 function relayChildFailurePath() { return resolve(dharmaHome(), 'relay', 'last-child-failure.json'); }
 
+// The relay process stays up while its repository loop fails, so relay.pid alone reads as healthy.
+async function currentSessionOpenFailure() {
+  const read = (path: string) => readFile(path, 'utf8')
+    .then(value => JSON.parse(value) as Record<string, unknown>).catch(() => null);
+  const relay = resolve(dharmaHome(), 'relay');
+  const config = await read(configPath());
+  const pid = await readFile(resolve(relay, 'relay.pid'), 'utf8').then(value => Number(value.trim())).catch(() => 0);
+  const pidState = await stat(resolve(relay, 'relay.pid')).catch(() => null);
+  // Session open is device-wide, so a later success in any workspace ends the failure.
+  let failure: ReturnType<typeof currentRepositoryRelayFailure> = null, latestSuccess = 0;
+  for (const workspaceId of await readdir(resolve(relay, 'repositories')).catch(() => [] as string[])) {
+    if (!UUID_PATTERN.test(workspaceId)) continue;
+    const repository = resolve(relay, 'repositories', workspaceId);
+    for (const name of ['last-successful-poll.json', 'last-session-open.json']) {
+      const at = repositoryRelayTimestampMs((await read(resolve(repository, name)))?.at);
+      if (at !== null && at > latestSuccess) latestSuccess = at;
+    }
+    const current = currentRepositoryRelayFailure({ receipt: await read(resolve(repository, 'last-failure.json')),
+      organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
+      relayPidMtimeMs: pidState?.mtimeMs ?? null, relayPidCtimeMs: pidState?.ctimeMs ?? null, lastSuccessfulPollAt: null });
+    if (current?.stage === 'session_open' && (!failure || Date.parse(String(current.at)) > Date.parse(String(failure.at)))) {
+      failure = current;
+    }
+  }
+  return failure && Date.parse(String(failure.at)) > latestSuccess ? { code: failure.failureCode ?? 'repository_relay_failed',
+    at: failure.at, stage: failure.stage, category: failure.category } : null;
+}
+
 async function relayStart(flags: Map<string, string | boolean>,
   startup: { workspaceId: string | null; leased: boolean } = { workspaceId: null, leased: false }): Promise<Output> {
   const anchor = resolve(required(flags, 'policy'));
@@ -8944,11 +8974,8 @@ async function relayStart(flags: Map<string, string | boolean>,
         const at = new Date().toISOString();
         const pidState = await relayPidState;
         if (!pidState) return;
-        const failure = {
-          schema: 'dharma.local-repository-relay-failure/v1', organizationId: config.organizationId,
-          deviceId: config.deviceId, workspaceId: event.workspaceId, pid: process.pid, ...pidState,
-          at, stage: event.stage, category: event.category,
-        };
+        const failure = repositoryRelayFailureReceipt(event, { organizationId: config.organizationId,
+          deviceId: config.deviceId, pid: process.pid, ...pidState }, at);
         let writer = diagnosticWriters.get(event.workspaceId);
         if (!writer) {
           writer = serializeRelayWork();
@@ -8999,6 +9026,9 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     () => loadVerifiedWorkspacePolicyUnlessReplayAhead(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
   const fabric = await withRepositoryRelayStage('session_open', async () => client(await relayAutostartReport()));
+  // The first poll receipt can follow a long task, so status needs this earlier success.
+  await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', canonicalWorkspace.workspaceId,
+    'last-session-open.json'), { at: new Date().toISOString() }).catch(() => undefined);
   // A kill or a denied restore between the two authorization writes leaves the replay
   // state ahead of the file. One fresh server authorization repairs the pair: it takes
   // the same signature and anti-rollback checks as any sync, and the file is verified
@@ -9689,11 +9719,13 @@ export async function run(argv: string[]): Promise<Output> {
       && lastPoll?.version === VERSION;
     const lastSuccessfulPollAt = acknowledgedWorkspace && typeof lastPoll?.at === 'string' ? lastPoll.at : null;
     const pollAge = lastSuccessfulPollAt ? Date.now() - Date.parse(lastSuccessfulPollAt) : NaN;
-    const lastFailure = relay !== 'running' && supervisor === 'running'
+    const sessionOpenFailure = relay === 'running' ? await currentSessionOpenFailure() : null;
+    const lastFailure = sessionOpenFailure ?? (relay !== 'running' && supervisor === 'running'
       ? currentRelayChildFailure(await readFile(relayChildFailurePath(), 'utf8')
-        .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null;
+        .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null);
     const reconnect = {
       state: relay !== 'running' ? (supervisor === 'running' ? (lastFailure ? 'failing' : 'restarting') : 'stopped')
+        : sessionOpenFailure ? 'failing'
         : !Number.isFinite(pollAge) ? 'awaiting_acknowledgement'
           : pollAge <= 300_000 && pollAge >= 0 ? 'acknowledged_recently' : 'stale',
       lastSuccessfulPollAt,
@@ -9723,10 +9755,14 @@ export async function run(argv: string[]): Promise<Output> {
               const lastSuccessfulPollAt = typeof observation?.at === 'string' ? observation.at : null;
               const failure = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
                 'last-failure.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              const opened = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
+                'last-session-open.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
+              const lastSuccess = [lastSuccessfulPollAt, opened?.at].filter(value => repositoryRelayTimestampMs(value) !== null)
+                .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
               const lastFailure = currentRepositoryRelayFailure({ receipt: failure,
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
-                relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt });
+                relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',

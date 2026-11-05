@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-repository-relay-failure/v1",
+  "title": "Device-local receipt for a failed repository relay loop; not an authority envelope",
+  "description": "Stored at relay/repositories/<workspaceId>/last-failure.json. The running relay writes it each time a repository loop fails. It holds stable values only, never error or stderr text. failureCode is present only when the failure is one of the listed codes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "deviceId", "workspaceId", "pid", "relayPidMtimeMs", "relayPidCtimeMs", "at", "stage", "category"],
+  "properties": {
+    "schema": {"const": "dharma.local-repository-relay-failure/v1"},
+    "organizationId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "deviceId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "workspaceId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "pid": {"type": "integer", "minimum": 1},
+    "relayPidMtimeMs": {"type": "number"},
+    "relayPidCtimeMs": {"type": "number"},
+    "at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$(?![\\s\\S])"},
+    "stage": {"enum": [
+      "policy_verification",
+      "session_open",
+      "vault_open",
+      "trajectory_recovery",
+      "evidence_sync",
+      "pending_capsule_sync",
+      "evidence_request",
+      "task_poll",
+      "worker_run"
+    ]},
+    "category": {"enum": ["policy_boundary", "retention_not_ready", "policy_invalid", "unexpected"]},
+    "failureCode": {"enum": [
+      "connection_anchor_lock_invalid",
+      "connection_anchor_busy",
+      "connection_anchor_recovery_required",
+      "connection_anchor_lock_unavailable",
+      "connection_anchor_lock_cleanup_unconfirmed",
+      "device_signing_control_unavailable"
+    ]}
+  }
+}

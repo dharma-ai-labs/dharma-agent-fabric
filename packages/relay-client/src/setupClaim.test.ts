@@ -10,6 +10,8 @@ import { sealSetupClaimCredential, signCanonicalObject, setupClaimSigningPayload
   type SetupClaimChallenge, type SealedSetupClaimCredential, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 
+const correlation = '55555555-5555-4555-8555-555555555555';
+const tokenShapedCode = `dharma_org_${'s'.repeat(48)}`;
 const scope = {
   hqUrl: 'https://hq.example', organizationId: 'org_demo',
   setupReference: '11111111-1111-4111-8111-111111111111',
@@ -41,7 +43,8 @@ test('claim failures expose only the locally observed phase, never vendor conten
     await assert.rejects(claimSetupReference({...scope, ...value.input, store: value.store,
       ...{onFailureDiagnostic}, fetcher: async () => { requests++; throw new Error('secret-canary'); }}),
     /^Error: setup_claim_failed$/);
-    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: value.phase}]);
+    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: value.phase,
+      ...(value.phase === 'challenge' ? {reason: 'network_unavailable'} : {})}]);
     assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
     assert.equal(requests, value.phase === 'challenge' ? 1 : 0);
   }
@@ -71,6 +74,18 @@ test('phase diagnostic schema rejects private fields and unbounded error classif
   for (const phase of phases) assert.equal((await validateContract(schemaDir, schemaId, {...report, phase})).ok, true);
   for (const extra of [{message: 'secret-canary'}, {exception: 'secret-canary'}, {response: {token: 'secret-canary'}},
     {phase: 'secret-canary'}, {code: 'safe_to_retry'}, {status: 'ready'}, {schema: 'foreign'}]) {
+    assert.equal((await validateContract(schemaDir, schemaId, {...report, ...extra})).ok, false);
+  }
+});
+test('additive failure fields stay bounded by the schema', async () => {
+  const schemaDir = resolve(import.meta.dirname, '../../../schemas');
+  const schemaId = 'https://schemas.dharma-ai.io/setup-claim-failure/v1';
+  const report = {schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'finalize'};
+  for (const reason of ['approval_expired', 'server_rejected', 'network_unavailable', 'response_invalid', 'canceled']) {
+    assert.equal((await validateContract(schemaDir, schemaId, {...report, reason, serverCode: 'setup_claim_expired',
+      correlationId: correlation})).ok, true);
+  }
+  for (const extra of [{reason: 'secret-canary'}, {serverCode: tokenShapedCode}, {correlationId: 'secret-canary'}]) {
     assert.equal((await validateContract(schemaDir, schemaId, {...report, ...extra})).ok, false);
   }
 });
@@ -191,7 +206,8 @@ test('post-challenge failures report finalize, approval, validation and commit d
             if (phase === 'finalize' && JSON.parse(String(init?.body)).action === 'finalize') throw new Error('secret-canary');
             return originalFetch(url, init);
           }, onRecipientApprovalRequired: () => { throw new Error('secret-canary'); }}), /^Error: setup_claim_failed$/);
-        assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase}]);
+        assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase,
+          ...(phase === 'finalize' ? {reason: 'network_unavailable'} : {})}]);
         assert.equal(JSON.stringify(reports).includes(f.secret), false);
         assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
         await assert.rejects(readFile(f.input.configPath), {code: 'ENOENT'});
@@ -293,6 +309,86 @@ test('expiry while recipient approval runs prevents another HTTP request/store w
     await assert.rejects(claimSetupReference({...f.input,onRecipientApprovalRequired:()=>f.advance(60_001)}),/^Error: setup_claim_failed$/);
     assert.equal(f.calls,2); assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}),null);
   } finally {await rm(f.root,{recursive:true,force:true});}
+});
+
+function unansweredApproval(f:Awaited<ReturnType<typeof fixture>>, headers:Record<string,string>={}) {
+  let approval:string|undefined; const sentAt:number[]=[];
+  const fetcher:typeof fetch=async(url,init)=>{
+    sentAt.push(f.input.now());
+    if(approval) return new Response(approval,{status:409,headers});
+    const response=await f.input.fetcher(url,init);
+    if(response.status===409) approval=await response.clone().text();
+    return response;
+  };
+  return {fetcher,sentAt};
+}
+test('an unanswered browser approval reports approval_expired at either deadline',async t=>{
+  for(const [name,maximumWaitMs] of [['challenge expiry',undefined],['local wait deadline',30_000]] as const) await t.test(name,async()=>{
+    const f=await fixture(undefined,true); const reports:unknown[]=[]; const limit=f.input.now()+(maximumWaitMs??60_000);
+    const {fetcher,sentAt}=unansweredApproval(f);
+    try{
+      await assert.rejects(claimSetupReference({...f.input,fetcher,...(maximumWaitMs?{maximumWaitMs}:{}),
+        onFailureDiagnostic:report=>{reports.push(report);}}),/^Error: setup_claim_failed$/);
+      assert.deepEqual(reports,[{schema:'dharma.setup-claim-failure/v1',code:'setup_claim_failed',phase:'finalize',reason:'approval_expired'}]);
+      assert.ok(sentAt.every(time=>time<limit));
+      assert.equal(JSON.stringify(reports).includes('#request='),false);
+    } finally {await rm(f.root,{recursive:true,force:true});}
+  });
+});
+test('approval expiry keeps the last server correlation ID',async()=>{
+  const f=await fixture(undefined,true); const reports:unknown[]=[];
+  const {fetcher}=unansweredApproval(f,{'x-dharma-correlation-id':correlation});
+  try{
+    await assert.rejects(claimSetupReference({...f.input,fetcher,onFailureDiagnostic:report=>{reports.push(report);}}),/^Error: setup_claim_failed$/);
+    assert.deepEqual(reports,[{schema:'dharma.setup-claim-failure/v1',code:'setup_claim_failed',phase:'finalize',reason:'approval_expired',correlationId:correlation}]);
+  } finally {await rm(f.root,{recursive:true,force:true});}
+});
+test('server expiry while approval is pending is the same approval_expired reason',async()=>{
+  const f=await fixture(undefined,true); const reports:unknown[]=[]; const {fetcher:pending,sentAt}=unansweredApproval(f);
+  const fetcher:typeof fetch=async(url,init)=>sentAt.length<3?pending(url,init)
+    :Response.json({ok:false,error:{code:'setup_claim_expired',message:'secret-canary',correlationId:correlation}},{status:410});
+  try{
+    await assert.rejects(claimSetupReference({...f.input,fetcher,onFailureDiagnostic:report=>{reports.push(report);}}),/^Error: setup_claim_failed$/);
+    assert.deepEqual(reports,[{schema:'dharma.setup-claim-failure/v1',code:'setup_claim_failed',phase:'finalize',
+      reason:'approval_expired',serverCode:'setup_claim_expired',correlationId:correlation}]);
+  } finally {await rm(f.root,{recursive:true,force:true});}
+});
+test('an explicit server rejection after the deadline is not reported as approval expiry',async()=>{
+  const f=await fixture(undefined,true); const reports:unknown[]=[]; const {fetcher:pending,sentAt}=unansweredApproval(f);
+  const fetcher:typeof fetch=async(url,init)=>{
+    if(sentAt.length<3) return pending(url,init);
+    f.advance(60_001);
+    return Response.json({ok:false,error:{code:'setup_claim_device_mismatch',message:'secret-canary',correlationId:correlation}},{status:403});
+  };
+  try{
+    await assert.rejects(claimSetupReference({...f.input,fetcher,onFailureDiagnostic:report=>{reports.push(report);}}),/^Error: setup_claim_failed$/);
+    assert.deepEqual(reports,[{schema:'dharma.setup-claim-failure/v1',code:'setup_claim_failed',phase:'finalize',
+      reason:'server_rejected',serverCode:'setup_claim_device_mismatch',correlationId:correlation}]);
+  } finally {await rm(f.root,{recursive:true,force:true});}
+});
+test('other finalize failures report a typed reason and server correlation, never server text',async t=>{
+  const header={'x-dharma-correlation-id':correlation};
+  const rejected=(code:unknown,status:number,id:unknown=correlation)=>
+    ()=>Response.json({ok:false,error:{code,message:'secret-canary',correlationId:id}},{status});
+  const cases:Array<[string,()=>Response,Record<string,string>]>=[
+    ['forbidden',rejected('setup_claim_device_mismatch',403),{reason:'server_rejected',serverCode:'setup_claim_device_mismatch',correlationId:correlation}],
+    ['conflict',rejected('setup_claim_consume_unavailable',409),{reason:'server_rejected',serverCode:'setup_claim_consume_unavailable',correlationId:correlation}],
+    ['unreadable body',()=>new Response('<html>secret-canary</html>',{status:502,headers:header}),{reason:'server_rejected',correlationId:correlation}],
+    ['unsafe code',rejected('secret canary https://hq.example/#request=x',403),{reason:'server_rejected',correlationId:correlation}],
+    ['token-shaped code',rejected(tokenShapedCode,403),{reason:'server_rejected',correlationId:correlation}],
+    ['unsafe correlation',rejected('setup_claim_proof_invalid',403,'secret-canary'),{reason:'server_rejected',serverCode:'setup_claim_proof_invalid'}],
+    ['malformed success',()=>Response.json({ok:true,status:'secret-canary'}),{reason:'response_invalid'}],
+    ['network',()=>{throw new Error('secret-canary');},{reason:'network_unavailable'}],
+  ];
+  for(const [name,respond,expected] of cases) await t.test(name,async()=>{
+    const f=await fixture(); const reports:unknown[]=[];
+    const fetcher:typeof fetch=async(url,init)=>JSON.parse(String(init?.body)).action==='finalize'?respond():f.input.fetcher(url,init);
+    try{
+      await assert.rejects(claimSetupReference({...f.input,fetcher,onFailureDiagnostic:report=>{reports.push(report);}}),/^Error: setup_claim_failed$/);
+      assert.deepEqual(reports,[{schema:'dharma.setup-claim-failure/v1',code:'setup_claim_failed',phase:'finalize',...expected}]);
+      assert.equal(JSON.stringify(reports).includes('secret-canary'),false);
+    } finally {await rm(f.root,{recursive:true,force:true});}
+  });
 });
 
 test('approval URL never allows another origin/path/query/signature/device context', async t=>{
@@ -623,14 +719,16 @@ test('owning host current scope completes the official encrypted claim without r
 });
 
 test('owning host cancellation interrupts the official approval sleep without another request', async () => {
-  const f = await fixture(undefined, true); const controller = new AbortController();
+  const f = await fixture(undefined, true); const controller = new AbortController(); const reports: unknown[] = [];
   try {
-    await assert.rejects(claimSetupReference({...f.input, sleep: undefined,
+    await assert.rejects(claimSetupReference({...f.input, sleep: undefined, onFailureDiagnostic: report => {reports.push(report);},
       hostScope: {signal: controller.signal, current: async () => true}, pollIntervalMs: 10000,
       onRecipientApprovalRequired: () => {setImmediate(() => controller.abort());}}), /^Error: setup_claim_failed$/);
     assert.equal(f.calls, 2);
     assert.equal(await loadOrganizationApiToken({...scope, store: f.memory}), null);
     await assert.rejects(readFile(f.input.configPath), {code: 'ENOENT'});
+    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed',
+      phase: 'recipient_approval', reason: 'canceled'}]);
   } finally {controller.abort(); await rm(f.root, {recursive: true, force: true});}
 });
 

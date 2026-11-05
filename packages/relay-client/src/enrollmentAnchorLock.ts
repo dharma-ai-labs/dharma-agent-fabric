@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {link, lstat, mkdir, readFile, rename, unlink, writeFile} from 'node:fs/promises';
+import {link, lstat, mkdir, open, readFile, rename, unlink} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import type {HostOperationFence} from './hostOperationScope.js';
 
@@ -13,6 +13,14 @@ export interface EnrollmentAnchorLockRelease {
 // A recovery mutex serializes dead-primary cleanup; an abandoned recovery mutex
 // is preserved for explicit recovery. Automatically reclaiming that mutex would
 // introduce another check-then-replace race.
+// Owner contents are flushed before publication, so a live owner's file always
+// holds its PID. Contents that cannot be a PID have no owner and count as dead.
+// That flush happens once, before the mutex: a flush under the mutex could commit
+// the mutex link without its later unlink, and a hard reset would then leave an
+// abandoned mutex. Nothing is flushed while the mutex exists: only link, unlink,
+// rename, lstat, readFile and process.kill run under it. For the same reason a
+// waiter keeps the mutex untouched while the lock has a live owner: every mutex
+// that exists is one a hard reset can leave behind.
 export async function acquireEnrollmentAnchorLock(
   lockPath: string, scope?: HostOperationFence, timeoutMs = 10_000,
 ): Promise<EnrollmentAnchorLockRelease> {
@@ -53,21 +61,23 @@ export async function acquireEnrollmentAnchorLock(
       owned.delete(path);
     } catch {throw Error('connection_anchor_lock_cleanup_unconfirmed');}
   };
-  const publish = async (path: string) => {
-    const candidate = `${path}.${process.pid}.${randomUUID()}.candidate`;
-    try {
-      await step(async () => {
-        await assertNamespace();
-        await writeFile(candidate, `${process.pid}\n`, {flag: 'wx', mode: 0o600});
-        owned.set(candidate, null);
-        owned.set(candidate, await metadata(candidate));
-      });
-      await step(async () => {
-        await link(candidate, path);
-        owned.set(path, owned.get(candidate)!);
-      });
-    } finally {await cleanup(candidate);}
+  const prepare = async () => {
+    const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
+    await step(async () => {
+      await assertNamespace();
+      const file = await open(candidate, 'wx', 0o600);
+      try {await file.writeFile(`${process.pid}\n`); await file.sync();}
+      finally {await file.close();}
+      owned.set(candidate, null);
+      owned.set(candidate, await metadata(candidate));
+    });
+    return candidate;
   };
+  const publish = (candidate: string, path: string) => step(async () => {
+    await assertNamespace();
+    await link(candidate, path);
+    owned.set(path, owned.get(candidate)!);
+  });
   const owner = async (path: string) => {
     let identity: Owned, text: string;
     try {
@@ -79,9 +89,8 @@ export async function acquireEnrollmentAnchorLock(
       if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') return null;
       throw error;
     }
-    if (!/^[1-9][0-9]*$/.test(text) || !Number.isSafeInteger(Number(text))) {
-      throw Error('connection_anchor_lock_invalid');
-    }
+    // process.kill refuses anything above this range, so no such owner can be checked.
+    if (!/^[1-9][0-9]*$/.test(text) || Number(text) > 0x7fffffff) return {identity, alive: false};
     let alive = true;
     try {await step(async () => {process.kill(Number(text), 0);});}
     catch (error) {
@@ -90,31 +99,43 @@ export async function acquireEnrollmentAnchorLock(
     }
     return {identity, alive};
   };
+  // undefined means the path is absent. null still means ownership is unknown.
+  const inspect = async (path: string) => {
+    try {return await owner(path);}
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return undefined;
+    }
+  };
+  const pause = () => step(() => new Promise<void>(accept => setTimeout(accept, 25)));
   try {
     await step(() => mkdir(directory, {recursive: true, mode: 0o700}));
     await step(assertNamespace);
+    const candidate = await prepare();
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (Date.now() >= deadline) throw Error('connection_anchor_busy');
+      // This read-only check can only decide to wait. It changes nothing, so a
+      // stale answer costs one more retry, and the owner is inspected again under
+      // the mutex before anything is published or quarantined.
+      const holder = await inspect(lockPath);
+      if (holder === null || holder?.alive) {await pause(); continue;}
       // Every primary publication participates in this mutex. An exiting owner
       // may release its primary during inspection, but no replacement can publish
       // until the inspector releases the mutex.
       const recovery = lockPath + '.recovery';
       let recovering = false;
-      try {await publish(recovery); recovering = true;}
+      try {await publish(candidate, recovery); recovering = true;}
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        try {
-          const current = await owner(recovery);
-          if (current && !current.alive) throw Error('connection_anchor_recovery_required');
-        } catch (inspection) {
-          if ((inspection as NodeJS.ErrnoException).code !== 'ENOENT') throw inspection;
-        }
+        const current = await inspect(recovery);
+        if (current && !current.alive) throw Error('connection_anchor_recovery_required');
       }
       if (recovering) {
         try {
           try {
-            await publish(lockPath);
+            await publish(candidate, lockPath);
+            await cleanup(candidate);
             let released: Promise<void> | undefined;
             return Object.assign(() => released ??= cleanup(lockPath), {assertHeld: async () => {
               if (released) throw Error('connection_anchor_lock_invalid');
@@ -125,15 +146,13 @@ export async function acquireEnrollmentAnchorLock(
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
           }
-          let current: Awaited<ReturnType<typeof owner>> | undefined;
-          try {current = await owner(lockPath);}
-          catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
+          const current = await inspect(lockPath);
           if (current && !current.alive) {
             const quarantine = `${lockPath}.dead.${randomUUID()}`;
             try {
               await step(async () => {
                 await rename(lockPath, quarantine);
-                owned.set(quarantine, current!.identity);
+                owned.set(quarantine, current.identity);
               });
               await cleanup(quarantine);
             } catch (error) {
@@ -142,7 +161,7 @@ export async function acquireEnrollmentAnchorLock(
           }
         } finally {await cleanup(recovery);}
       }
-      await step(() => new Promise<void>(accept => setTimeout(accept, 25)));
+      await pause();
     }
   } catch (error) {
     let failed = false;

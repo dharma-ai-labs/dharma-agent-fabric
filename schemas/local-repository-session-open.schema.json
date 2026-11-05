@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-repository-session-open/v1",
+  "title": "Device-local record of a repository relay session open; not an authority envelope",
+  "description": "Stored at relay/repositories/<workspaceId>/last-session-open.json. The relay loop writes it right after a session opens. dharma status reads it to end a failed session open. It holds the time only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["at"],
+  "properties": {
+    "at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$(?![\\s\\S])"}
+  }
+}

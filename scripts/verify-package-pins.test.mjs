@@ -54,3 +54,12 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
     });
   }
 }
+
+test('CLI pins a relay client published with setupClaimFailureMessage', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.36 is on npm without this export. CI links the workspace copy, but a published CLI
+  // pinned to 0.2.36 would stop at module load on every command, not only setup.
+  assert.ok(relay.version.localeCompare('0.2.37', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} is published without the export`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
