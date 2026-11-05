@@ -18,13 +18,41 @@ const SCOPES = ['agents:read', 'agents:run', 'evals:read', 'evals:run', 'traces:
   'skills:write', 'usage:read', 'reports:read', 'fabric:devices', 'fabric:tasks'];
 const fail = (): never => { throw new Error('setup_claim_failed'); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// Exact codes only: a character pattern would still let a token-shaped value through to stderr.
+const SERVER_CODES = new Set([
+  'setup_claim_approval_unavailable', 'setup_claim_client_unavailable', 'setup_claim_consume_unavailable',
+  'setup_claim_credentials_unavailable', 'setup_claim_device_mismatch', 'setup_claim_expired',
+  'setup_claim_proof_invalid', 'setup_claim_recipient_required', 'setup_claim_scope_unavailable',
+  'setup_claim_unavailable', 'agent_fabric_capability_disabled', 'agent_fabric_decisions_not_ready',
+  'agent_fabric_not_enabled', 'agent_fabric_retention_not_ready', 'agent_fabric_signing_expired',
+  'agent_fabric_signing_not_ready', 'agent_fabric_signing_rotation_required', 'internal_error',
+  'invalid_request', 'rate_limit_exceeded', 'rate_limit_unavailable', 'rate_limited']);
 
 export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
   | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
+export type SetupClaimFailureReason = 'approval_expired' | 'server_rejected' | 'network_unavailable'
+  | 'response_invalid' | 'canceled';
 export interface SetupClaimFailureDiagnostic {
   schema: 'dharma.setup-claim-failure/v1';
   code: 'setup_claim_failed';
   phase: SetupClaimFailurePhase;
+  reason?: SetupClaimFailureReason;
+  serverCode?: string;
+  correlationId?: string;
+}
+
+/** Fixed wording plus allowlisted fields only: never server text, approval URLs or caught errors. */
+export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureDiagnostic>): string | undefined {
+  if (!diagnostic.reason) return undefined;
+  const retry = 'Get a fresh setup prompt from Dharma and run it.';
+  const text = {
+    approval_expired: `Browser approval expired: setup did not receive an approval in time. ${retry}`,
+    server_rejected: `Dharma rejected this setup${diagnostic.serverCode ? ` (${diagnostic.serverCode})` : ''}. ${retry} If it fails again, send Dharma this line.`,
+    network_unavailable: `Could not reach Dharma. Check this machine's network connection. ${retry}`,
+    response_invalid: `Dharma's setup response could not be verified. ${retry} If it fails again, send Dharma this line.`,
+    canceled: `Setup was canceled before it finished. ${retry}`,
+  }[diagnostic.reason];
+  return `${diagnostic.code} (${diagnostic.reason}): ${text}${diagnostic.correlationId ? ` Correlation ID: ${diagnostic.correlationId}.` : ''}`;
 }
 
 export interface ClaimSetupReferenceInput {
@@ -114,6 +142,9 @@ export function parseSetupClaimRecipientApproval(value: unknown, challenge: Setu
  * only the existing protected store receives it. Network errors are never reflected. */
 export async function claimSetupReference(input: ClaimSetupReferenceInput): Promise<{config: DeviceConfig; scopes: string[]}> {
   let phase: SetupClaimFailurePhase = 'input_validation';
+  let failureReason: SetupClaimFailureReason | undefined, serverCode: string | undefined, correlationId: string | undefined;
+  let approvalDeadline: number | undefined, scopeSignal: AbortSignal | undefined;
+  const now = input.now ?? Date.now;
   try {
     const hqUrl = normalizeHqUrl(input.hqUrl);
     if (!hqUrl.startsWith('https:') || input.name.trim().length < 2 || input.name.length > 120
@@ -122,13 +153,12 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       || !/^org_[A-Za-z0-9]+$/.test(input.organizationId)
       || ![input.repositoryFingerprint, input.scopeDigest, input.contractDigest].every(v => /^sha256:[a-f0-9]{64}$/.test(v))
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.policyRevision)) return fail();
-    const now = input.now ?? Date.now;
     const maximumWaitMs = input.maximumWaitMs ?? 900_000;
     if (!Number.isFinite(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 900_000) return fail();
     const deadline = now() + maximumWaitMs;
     const hostScope = input.hostScope;
     const hostFence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
-    const scopeSignal = hostFence?.signal;
+    scopeSignal = hostFence?.signal;
     const assertScope = async () => {await hostFence?.assert();};
     const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
       await assertScope(); const result = await operation(); await assertScope(); return result;
@@ -170,15 +200,24 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     const send = async (body: unknown) => {
       await assertScope();
       const remaining = deadline - now(); if (remaining <= 0) return fail();
+      serverCode = undefined; failureReason = 'network_unavailable';
       const timeout = AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining)));
       const requestSignal = scopeSignal ? AbortSignal.any([scopeSignal, timeout]) : timeout;
       const response = await fetcher(`${hqUrl}${PATH}`, { method: 'POST', redirect: 'error',
         headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
         signal: requestSignal });
+      failureReason = response.status >= 300 ? 'server_rejected' : undefined;
+      const headerCorrelation = response.headers.get('x-dharma-correlation-id');
+      if (headerCorrelation && UUID.test(headerCorrelation)) correlationId = headerCorrelation;
       await assertScope();
-      if (response.redirected || (response.url && response.url !== `${hqUrl}${PATH}`)
-        || response.status >= 300 && ![409,429].includes(response.status)) return fail();
+      if (response.redirected || (response.url && response.url !== `${hqUrl}${PATH}`)) return fail();
       const parsed = await boundedJson(response, requestSignal);
+      if (response.status >= 300) {
+        const error = parsed.error as {code?: unknown; correlationId?: unknown} | null | undefined;
+        if (typeof error?.code === 'string' && SERVER_CODES.has(error.code)) serverCode = error.code;
+        if (typeof error?.correlationId === 'string' && UUID.test(error.correlationId)) correlationId = error.correlationId;
+        if (![409,429].includes(response.status)) return fail();
+      }
       await assertScope();
       return { response, body: parsed };
     };
@@ -218,12 +257,13 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       }
       if (result.response.status === 409 && result.body.ok === false
         && result.body.status === 'recipient_approval_required') {
-        phase = 'recipient_approval';
+        phase = 'recipient_approval'; failureReason = undefined;
         if (Object.keys(result.body).sort().join(',') !== 'approval,ok,status') return fail();
         const current = parseSetupClaimRecipientApproval(result.body.approval, challenge, signature, device, now());
+        approvalDeadline = Math.min(deadline, Date.parse(challenge.expiresAt));
         if (!pending) { pending = current; await guarded(async () => {await input.onRecipientApprovalRequired?.(current);}); }
         else if (JSON.stringify(pending) !== JSON.stringify(current)) return fail();
-        const remaining = Math.min(deadline, Date.parse(challenge.expiresAt)) - now();
+        const remaining = approvalDeadline - now();
         if (remaining <= 0) return fail();
         await sleep(
           Math.min(Math.max(input.pollIntervalMs ?? 3_000, 250), 10_000, remaining));
@@ -288,8 +328,14 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
   } catch {
     // Observers cannot replace the original sanitized failure or authorize retries.
     try {
+      // The approval wait ends locally: its deadline passes with no further request, so no server error exists.
+      const approvalExpired = approvalDeadline !== undefined && (phase === 'finalize' || phase === 'recipient_approval')
+        && (serverCode === 'setup_claim_expired' || (now() >= approvalDeadline && failureReason !== 'server_rejected'));
+      const reason = scopeSignal?.aborted ? 'canceled' : approvalExpired ? 'approval_expired'
+        : failureReason ?? (phase === 'challenge' || phase === 'finalize' ? 'response_invalid' : undefined);
       void Promise.resolve(input.onFailureDiagnostic?.(Object.freeze({
         schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase,
+        ...(reason ? {reason} : {}), ...(serverCode ? {serverCode} : {}), ...(correlationId ? {correlationId} : {}),
       }))).catch(() => undefined);
     } catch { /* Ignore local diagnostic observer failures. */ }
     return fail();
