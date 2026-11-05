@@ -531,8 +531,7 @@ async function claudeRequiredSkillFileInstructions(
     '<dharma_required_skill_files>',
     JSON.stringify(skillFiles, null, 2),
     '</dharma_required_skill_files>',
-  ].join('
-');
+  ].join('\n');
 }
 
 export function providerInstructionsForTask(task: TaskEnvelope): string {
