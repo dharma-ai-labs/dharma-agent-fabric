@@ -269,11 +269,9 @@ test('bootstrap may inspect an exact owned legacy anchor for migration without a
   await assert.rejects(Reflect.apply(inspectOwnedRelayAutostart, undefined, [options, { allowLegacy: true }]), /autostart_conflict/);
 });
 
-test('Linux-only startup preflight leaves Windows and macOS registration behavior unchanged', async () => {
-  for (const platform of ['win32', 'darwin'] as const) {
-    await startupPreflight({ platform, home: '/not-read', userHome: '/not-read',
-      run: async () => { throw new Error('preflight must not execute an OS command'); } });
-  }
+test('startup preflight leaves macOS registration behavior unchanged', async () => {
+  await startupPreflight({ platform: 'darwin', home: '/not-read', userHome: '/not-read',
+    run: async () => { throw new Error('preflight must not execute an OS command'); } });
 });
 
 async function macFixture() {
@@ -833,4 +831,83 @@ test('relay autostart telemetry reports enabled, disabled and omits an unknown s
   assert.equal(await relayAutostartTelemetry(options), undefined, 'An unreadable state is omitted, never reported');
   assert.equal(await relayAutostartTelemetry({...options, run: async () => { throw new Error('systemctl_missing'); }}),
     undefined, 'Telemetry never fails the caller');
+});
+
+function windowsPreflightFixture(root: string, scheduler: string) {
+  const commands: string[] = [];
+  return {commands, options: {platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
+    workspace: 'C:\\Repo', launcher: 'C:\\Repo\\.dharma\\bin\\dharma.cmd',
+    policy: 'C:\\Repo\\.dharma\\approved-policy.json', version: '0.2.220',
+    run: async (_file: string, args: string[]) => {
+      const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
+      commands.push(decoded);
+      return {stdout: decoded.includes("'exists'") ? `${scheduler}\n` : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : ''};
+    }}};
+}
+
+test('Windows preflight names a leftover startup task and its fix before any approval or write', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-preflight-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const {options} = windowsPreflightFixture(root, 'exists');
+  const conflict = (error: Error) => {
+    assert.match(error.message, /^autostart_conflict: /);
+    const task = error.message.match(/DharmaAgentFabric-[0-9a-f]{12}/)?.[0];
+    assert.ok(task, 'the task must be named');
+    assert.ok(error.message.includes(`Unregister-ScheduledTask -TaskName '${task}'`), 'the fix must be named');
+    return true;
+  };
+  await assert.rejects(startupPreflight(options), conflict);
+  await assert.rejects(enableRelayAutostart(options), conflict);
+  await assert.rejects(readFile(join(options.home, 'relay', 'autostart.json')), {code: 'ENOENT'});
+});
+
+test('Windows preflight admits a clean user and an owned receipt, and reports an unreadable scheduler', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-preflight-clean-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const f = windowsPreflightFixture(root, 'absent');
+  await startupPreflight(f.options);
+  assert.equal(f.commands.length, 1);
+  await enableRelayAutostart(f.options);
+  f.commands.length = 0;
+  await startupPreflight(f.options);
+  assert.deepEqual(f.commands, [], 'an existing receipt keeps the owned-task checks that already run later');
+  const fresh = {...f.options, home: join(root, 'fresh'), run: async () => { throw new Error('private scheduler output'); }};
+  await assert.rejects(startupPreflight(fresh), /^Error: task_scheduler_unavailable: /);
+});
+
+test('startup preflight failures report the real reason without private text', () => {
+  const failure = Reflect.get(startup, 'startupPreflightFailure');
+  assert.equal(typeof failure, 'function', 'setup must classify startup preflight failures');
+  const task = 'DharmaAgentFabric-0123456789ab';
+  const named = failure(new Error(`autostart_conflict: Windows startup task ${task} exists without this enrollment receipt. `
+    + `If it is left over from an earlier setup, run Unregister-ScheduledTask -TaskName '${task}' -Confirm:$false in PowerShell, then run setup again.`));
+  assert.equal(named.code, 'autostart_conflict');
+  assert.ok(named.message.includes(`Unregister-ScheduledTask -TaskName '${task}'`));
+  assert.match(named.message, /setup has not redeemed authority or changed enrollment/);
+  const foreign = failure(new Error('autostart_conflict: /private/path/unit.service'));
+  assert.equal(foreign.code, 'autostart_conflict');
+  assert.doesNotMatch(foreign.message, /private|Linux/);
+  for (const [text, reason, wording] of [
+    ['autostart_receipt_invalid: startup ownership could not be verified.', 'autostart_receipt_invalid', /autostart\.json/],
+    ['platform_mismatch: the owned startup manager is unavailable.', 'platform_mismatch', /another operating system/],
+    ['systemd_user_unavailable: the owned startup manager is unavailable.', 'systemd_user_unavailable', /systemd user manager/],
+    ['launchd_user_unavailable: a non-root signed-in user is required.', 'launchd_user_unavailable', /launchd/],
+    ['task_scheduler_unavailable: the Windows Task Scheduler could not be read.', 'task_scheduler_unavailable', /Task Scheduler/],
+    ['container_startup_unavailable: /private/entry', 'container_startup_unavailable', /container/],
+  ] as const) {
+    const result = failure(new Error(text));
+    assert.equal(result.code, 'startup_preflight_unavailable');
+    assert.equal(result.reason, reason);
+    assert.match(result.message, wording);
+    assert.doesNotMatch(result.message, /private/);
+  }
+  const denied = failure(Object.assign(new Error('EACCES: /private/unit'), {code: 'EACCES'}));
+  assert.equal(denied.reason, 'filesystem_EACCES');
+  assert.doesNotMatch(denied.message, /private/);
+  const unknown = failure(new Error('private unreadable path'));
+  assert.equal(unknown.reason, 'unclassified');
+  assert.doesNotMatch(unknown.message, /private/);
+  assert.equal(failure(new Error('wsl_host_startup_unavailable: x')).code, 'wsl_host_startup_unavailable');
+  assert.equal(failure(new Error('relay_runtime_upgrade_required: x')).code, 'relay_runtime_upgrade_required');
+  assert.equal(failure(new Error('relay_workspace_conflict: x')).code, 'relay_workspace_conflict');
 });

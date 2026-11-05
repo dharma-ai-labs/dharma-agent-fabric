@@ -269,10 +269,64 @@ async function ownsStartupFile(options: RelayAutostartOptions, registration: Reg
       registration.workspace, options.home, true));
 }
 
+async function assertNoUnreceiptedWindowsTask(run: Runner, name: string) {
+  let stdout: string;
+  try {
+    ({ stdout } = await run('powershell.exe', encodedPowerShell(
+      `$task = Get-ScheduledTask -TaskName ${psLiteral(name)} -ErrorAction SilentlyContinue; `
+      + `if ($null -ne $task) { 'exists' } else { 'absent' }`,
+    )));
+  } catch { throw new Error('task_scheduler_unavailable: the Windows Task Scheduler could not be read.'); }
+  if (stdout.trim() !== 'absent') {
+    throw new Error(`autostart_conflict: Windows startup task ${name} exists without this enrollment receipt. `
+      + `If it is left over from an earlier setup, run Unregister-ScheduledTask -TaskName '${name}' -Confirm:$false in PowerShell, then run setup again.`);
+  }
+}
+
+const LEFTOVER_WINDOWS_TASK = /^autostart_conflict: (Windows startup task DharmaAgentFabric-[0-9a-f]{12} .+)$/;
+const NOT_CHANGED = 'setup has not redeemed authority or changed enrollment.';
+const SERVICE_CHECK = "Check that this user's startup service is running, then run setup again;";
+const STARTUP_BLOCKERS: Readonly<Record<string, string>> = {
+  autostart_conflict: `This user already has a startup entry owned by another installation. Use the existing enrolled installation or an eligible clean client; ${NOT_CHANGED}`,
+  relay_runtime_upgrade_required: `Upgrade the existing enrolled startup runtime through the supported same-device update flow before retrying; ${NOT_CHANGED}`,
+  relay_workspace_conflict: `The existing startup anchor does not match this device and its approved repository policy. Recover that enrolled repository through the supported same-device flow before retrying; ${NOT_CHANGED}`,
+  wsl_host_startup_unavailable: `The WSL host startup owner could not be verified. Restore the supported user-logon host binding before retrying; ${NOT_CHANGED}`,
+};
+const STARTUP_UNAVAILABLE: Readonly<Record<string, string>> = {
+  autostart_receipt_invalid: `The startup receipt relay/autostart.json in this DHARMA_HOME is invalid. Use a separate DHARMA_HOME or restore that file before retrying; ${NOT_CHANGED}`,
+  platform_mismatch: `The startup receipt in this DHARMA_HOME belongs to another operating system. Use a separate DHARMA_HOME; ${NOT_CHANGED}`,
+  systemd_user_unavailable: `The systemd user manager did not answer. ${SERVICE_CHECK} ${NOT_CHANGED}`,
+  launchd_user_unavailable: `launchd did not answer for this signed-in user. ${SERVICE_CHECK} ${NOT_CHANGED}`,
+  task_scheduler_unavailable: `Windows Task Scheduler did not answer. ${SERVICE_CHECK} ${NOT_CHANGED}`,
+  container_startup_unavailable: `The container startup entry could not be verified. Check that the container entrypoint owns the relay, then run setup again; ${NOT_CHANGED}`,
+};
+
+/** Fixed setup text only: a task name is the sole value taken from the failure, and it holds no path or secret. */
+export function startupPreflightFailure(error: unknown): { code: string; reason?: string; message: string } {
+  const text = error instanceof Error ? error.message : '';
+  const leftoverTask = LEFTOVER_WINDOWS_TASK.exec(text)?.[1];
+  if (leftoverTask) return { code: 'autostart_conflict', message: `${leftoverTask} So far, ${NOT_CHANGED}` };
+  const token = /^[a-z_]+(?=:|$)/.exec(text)?.[0] ?? '';
+  if (Object.hasOwn(STARTUP_BLOCKERS, token)) return { code: token, message: STARTUP_BLOCKERS[token]! };
+  const code = 'startup_preflight_unavailable';
+  if (Object.hasOwn(STARTUP_UNAVAILABLE, token)) return { code, reason: token, message: STARTUP_UNAVAILABLE[token]! };
+  const errno = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (typeof errno === 'string' && /^E[A-Z]+$/.test(errno)) {
+    return { code, reason: `filesystem_${errno}`,
+      message: `A startup file could not be read (${errno}). Check the permissions on this DHARMA_HOME and this user's startup folder, then run setup again; ${NOT_CHANGED}` };
+  }
+  return { code, reason: 'unclassified',
+    message: `Startup ownership could not be verified. Check that this user's startup service is running (systemd user service on Linux and WSL, launchd on macOS, Task Scheduler on Windows), then run setup again; ${NOT_CHANGED}` };
+}
+
 // A fresh device home is not a fresh OS-user startup context. Check before
 // enrollment; the existing enable-time guard still protects against races.
 export async function assertRelayStartupOwnership(options: RelayAutostartOptions & { version?: string }): Promise<void> {
-  if ((options.platform || process.platform) !== 'linux') return;
+  const platform = options.platform || process.platform;
+  if (platform === 'win32' && !await readRegistration(options)) {
+    await assertNoUnreceiptedWindowsTask(options.run || defaultRunner, taskName(options.home));
+  }
+  if (platform !== 'linux') return;
   if (options.version !== undefined && !VERSION.test(options.version)) throw new Error('Invalid startup runtime version.');
   if (await containerEntrypointAvailable(options)) {
     await assertContainerStartupOwnership(options, options.version);
@@ -457,15 +511,7 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     await containerStartupControl(options, registration as ContainerRelayRegistration, !options.pauseForSigningMaintenance);
     return containerStartupState(options, registration as ContainerRelayRegistration);
   }
-  if (platform === 'win32' && !previous) {
-    const probe = await run('powershell.exe', encodedPowerShell(
-      `$task = Get-ScheduledTask -TaskName ${psLiteral(registration.taskName!)} -ErrorAction SilentlyContinue; `
-      + `if ($null -ne $task) { 'exists' } else { 'absent' }`,
-    ));
-    if (probe.stdout.trim() !== 'absent') {
-      throw new Error('autostart_conflict: a Windows startup task exists without this enrollment receipt.');
-    }
-  }
+  if (platform === 'win32' && !previous) await assertNoUnreceiptedWindowsTask(run, registration.taskName!);
   const destination = startupPath({ ...options, userHome }, backend);
   if (platform === 'darwin') {
     const stat = await lstat(destination).catch((error: NodeJS.ErrnoException) => {
