@@ -17,7 +17,10 @@ export interface EnrollmentAnchorLockRelease {
 // holds its PID. Contents that cannot be a PID have no owner and count as dead.
 // That flush happens once, before the mutex: a flush under the mutex could commit
 // the mutex link without its later unlink, and a hard reset would then leave an
-// abandoned mutex. Only link and unlink run while the mutex exists.
+// abandoned mutex. Nothing is flushed while the mutex exists: only link, unlink,
+// rename, lstat, readFile and process.kill run under it. For the same reason a
+// waiter keeps the mutex untouched while the lock has a live owner: every mutex
+// that exists is one a hard reset can leave behind.
 export async function acquireEnrollmentAnchorLock(
   lockPath: string, scope?: HostOperationFence, timeoutMs = 10_000,
 ): Promise<EnrollmentAnchorLockRelease> {
@@ -96,6 +99,15 @@ export async function acquireEnrollmentAnchorLock(
     }
     return {identity, alive};
   };
+  // undefined means the path is absent. null still means ownership is unknown.
+  const inspect = async (path: string) => {
+    try {return await owner(path);}
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return undefined;
+    }
+  };
+  const pause = () => step(() => new Promise<void>(accept => setTimeout(accept, 25)));
   try {
     await step(() => mkdir(directory, {recursive: true, mode: 0o700}));
     await step(assertNamespace);
@@ -103,6 +115,11 @@ export async function acquireEnrollmentAnchorLock(
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (Date.now() >= deadline) throw Error('connection_anchor_busy');
+      // This read-only check can only decide to wait. It changes nothing, so a
+      // stale answer costs one more retry, and the owner is inspected again under
+      // the mutex before anything is published or quarantined.
+      const holder = await inspect(lockPath);
+      if (holder === null || holder?.alive) {await pause(); continue;}
       // Every primary publication participates in this mutex. An exiting owner
       // may release its primary during inspection, but no replacement can publish
       // until the inspector releases the mutex.
@@ -111,12 +128,8 @@ export async function acquireEnrollmentAnchorLock(
       try {await publish(candidate, recovery); recovering = true;}
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        try {
-          const current = await owner(recovery);
-          if (current && !current.alive) throw Error('connection_anchor_recovery_required');
-        } catch (inspection) {
-          if ((inspection as NodeJS.ErrnoException).code !== 'ENOENT') throw inspection;
-        }
+        const current = await inspect(recovery);
+        if (current && !current.alive) throw Error('connection_anchor_recovery_required');
       }
       if (recovering) {
         try {
@@ -133,15 +146,13 @@ export async function acquireEnrollmentAnchorLock(
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
           }
-          let current: Awaited<ReturnType<typeof owner>> | undefined;
-          try {current = await owner(lockPath);}
-          catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
+          const current = await inspect(lockPath);
           if (current && !current.alive) {
             const quarantine = `${lockPath}.dead.${randomUUID()}`;
             try {
               await step(async () => {
                 await rename(lockPath, quarantine);
-                owned.set(quarantine, current!.identity);
+                owned.set(quarantine, current.identity);
               });
               await cleanup(quarantine);
             } catch (error) {
@@ -150,7 +161,7 @@ export async function acquireEnrollmentAnchorLock(
           }
         } finally {await cleanup(recovery);}
       }
-      await step(() => new Promise<void>(accept => setTimeout(accept, 25)));
+      await pause();
     }
   } catch (error) {
     let failed = false;
