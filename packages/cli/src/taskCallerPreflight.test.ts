@@ -120,6 +120,7 @@ function fixture() {
     postTaskOutcome: async () => { calls.push('outcome'); },
     createActionDecisionPublicKeyResolver: () => { throw new Error('unexpected keyset path'); },
     installedRepositoryKnowledge: async () => { throw new Error('unexpected knowledge read'); },
+    requiredSkillFilesForTask: async () => [],
     prepareSignedTaskTrajectory: () => { throw new Error('unexpected trajectory preparation'); },
     stageSignedTaskTrajectoryRecovery: async () => { throw new Error('unexpected trajectory staging'); },
     finalizeRecoveredSignedTaskTrajectories: async () => { throw new Error('unexpected trajectory recovery'); },
