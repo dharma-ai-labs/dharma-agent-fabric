@@ -182,6 +182,7 @@ export type ProviderTaskExecutor = (input: {
   allowedCommandArgv: string[][];
   allowWrites: boolean;
   taskKnowledge?: TaskKnowledgeToolScope;
+  requiredSkillPaths?: string[];
   externalIdempotencyKey?: string;
   actionDigest?: string;
   signal?: AbortSignal;
@@ -1215,6 +1216,7 @@ export async function executeTask(input: {
       timeoutSeconds: providerTimeBudgetSeconds,
       allowedCommandArgv: allowedCommands,
       allowWrites: input.task.authority.writePaths.length > 0,
+      ...(skillFileInstructions ? { requiredSkillPaths: (input.requiredSkillFiles ?? []).map(({ path }) => path) } : {}),
       ...(knowledgeDirectory && input.verifiedRepositoryKnowledge && input.task.target.provider === 'codex' ? {
         taskKnowledge: {
           directory: knowledgeDirectory,
