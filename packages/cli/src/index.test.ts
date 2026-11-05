@@ -36,6 +36,7 @@ import {
   nativeSkillDirectory,
   nativeSkillDirectoryForWorkspace,
   nativeSkillRootMatchingAuthorization,
+  requiredSkillFilesForTask,
   normalizeGitRemoteIdentity,
   postTaskOutcome,
   parseCliOptions,
@@ -2573,6 +2574,21 @@ test('Claude uses its project skill when another workspace owns the global skill
   assert.equal(installed.nativeSkillDirectory, join(workspace, '.claude', 'skills'));
   assert.equal((await verifyAgentFabricSkillInstallation({ provider: 'claude', workspace, home })).ready, true);
   assert.equal(await readFile(join(globalSkill, 'SKILL.md'), 'utf8'), '# First signed workspace\n');
+});
+
+test('Claude tasks get the installed file path for each required skill', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-required-skill-files-'));
+  const home = join(root, 'home');
+  const workspace = join(root, 'repo');
+  await mkdir(workspace, { recursive: true });
+  const requiredSkills = [{ skillId: 'dharma-agent-fabric', version: '5.0.0', commit: 'a'.repeat(40), contentHash: `sha256:${'b'.repeat(64)}` }];
+  const task = { workspaceId: 'workspace_files', requiredSkills, target: { deviceId: 'device', provider: 'claude' as const } };
+  const skillRoot = await nativeSkillDirectoryForWorkspace({ provider: 'claude', workspaceId: task.workspaceId, workspace, home });
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [
+    { skillId: 'dharma-agent-fabric', path: join(skillRoot, 'dharma-agent-fabric', 'SKILL.md') },
+  ]);
+  assert.deepEqual(await requiredSkillFilesForTask({ ...task, requiredSkills: [] }, workspace, { home }), []);
+  assert.deepEqual(await requiredSkillFilesForTask({ ...task, target: { deviceId: 'device', provider: 'codex' } }, workspace, { home }), []);
 });
 
 test('project-scoped skill resolution rejects a linked native directory', async () => {
