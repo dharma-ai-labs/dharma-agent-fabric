@@ -102,7 +102,8 @@ test('Codex startup resolution is protected and does not skip an unsafe first ex
   await assert.rejects(resolveRepositoryCodexDirectory({searchPath: relative(process.cwd(), good) + ':' + good}),
     /relay_startup_codex_path_invalid/);
   await chmod(unsafe, 0o777);
-  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: unsafe + ':' + good}), /relay_startup_codex_path_invalid/);
+  await assert.rejects(resolveRepositoryCodexDirectory({searchPath: unsafe + ':' + good}),
+    /^Error: relay_startup_codex_path_invalid: .*Put your own codex first on PATH, or remove the other one from PATH\.$/);
   await chmod(binary, 0o722);
   await assert.rejects(resolveRepositoryCodexDirectory({searchPath: good}), /relay_startup_codex_path_invalid/);
   await chmod(binary, 0o700);

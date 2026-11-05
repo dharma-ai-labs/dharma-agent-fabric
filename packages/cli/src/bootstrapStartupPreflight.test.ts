@@ -170,6 +170,7 @@ test('source-connected bootstrap rejects unavailable startup manager before clai
   const result = await f.run();
   assert.equal(result.ok, false);
   assert.equal(result.code, 'startup_preflight_unavailable');
+  assert.match(result.message, /Check that this user's startup service is running/);
   assert.equal(result.grantRedeemed, false);
   assert.equal(result.enrollmentChanged, false);
   assert.deepEqual(f.effects, ['startup_preflight']);
