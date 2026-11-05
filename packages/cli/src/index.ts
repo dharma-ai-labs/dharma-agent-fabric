@@ -20,7 +20,7 @@ import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
   isDefinitiveAgentFabricRejection, recoverDeviceEnrollmentConsistency,
-  loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, saveDeviceConfig, saveDeviceEnrollmentAnchor,
+  loadOrganizationApiToken, redeemBootstrapGrant, claimSetupReference, setupClaimSourceRegistration, setupClaimFailureMessage, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   saveOrganizationApiToken, saveDeviceConnectionPreference, type DeviceConfig, type DeviceTelemetryOptions, type SecureSecretStore,
 } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
@@ -3574,7 +3574,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
           ? 'The existing startup anchor does not match this device and its approved repository policy. Recover that enrolled repository through the supported same-device flow before retrying; setup has not redeemed authority or changed enrollment.'
           : code === 'wsl_host_startup_unavailable'
           ? 'The WSL host startup owner could not be verified. Restore the supported user-logon host binding before retrying; setup has not redeemed authority or changed enrollment.'
-          : 'Startup ownership could not be verified. Resolve the supported startup prerequisite before retrying; setup has not redeemed authority or changed enrollment.' };
+          : "Startup ownership could not be verified. Check that this user's startup service is running (systemd user service on Linux and WSL, launchd on macOS, Task Scheduler on Windows), then run setup again; setup has not redeemed authority or changed enrollment." };
     }
   }
   if (grantMode === 'prompt') bootstrapToken = await readPrivateBootstrapGrant();
@@ -3603,6 +3603,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       hostScope,
       onFailureDiagnostic: diagnostic => {
         process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
+        const message = setupClaimFailureMessage(diagnostic);
+        if (message) process.stderr.write(`${message}\n`);
       },
       onRecipientApprovalRequired: async approval => {
         recipientApproval.required = true;

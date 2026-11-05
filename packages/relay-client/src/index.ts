@@ -34,8 +34,8 @@ export {prepareOwnedSigningRecovery,submitOwnedSigningRecoveryPreparation,progre
   type PrepareOwnedSigningRecoveryInput,type OwnedSigningRecoveryHandle,type OwnedSigningRecoveryState} from './signingRecoveryHost.js';
 export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
-export { claimSetupReference, setupClaimSourceRegistration, type ClaimSetupReferenceInput,
-  type SetupClaimFailurePhase, type SetupClaimFailureDiagnostic } from './setupClaim.js';
+export { claimSetupReference, setupClaimSourceRegistration, setupClaimFailureMessage, type ClaimSetupReferenceInput,
+  type SetupClaimFailurePhase, type SetupClaimFailureReason, type SetupClaimFailureDiagnostic } from './setupClaim.js';
 export {planDeviceSigningRecovery, type DeviceSigningRecoveryPlanInput, type DeviceSigningRecoverySourceSelection,
   type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding,
   planDeviceSigningMaintenance, type DeviceSigningMaintenancePlanInput, type DeviceTrustMaintenanceController} from './signingRecoveryPlan.js';
