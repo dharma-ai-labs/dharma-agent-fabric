@@ -11,6 +11,7 @@ import {
   defaultProcessRunner,
   executableVersion,
   executeProviderTask,
+  hasClaudeRequiredSkillReads,
   hermesCapability,
   hermesAdapter,
   parseHermesSessionExport,
@@ -718,6 +719,32 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   assert.ok(argv.includes('Read,Edit,Write,Bash(npm test)'));
   assert.ok(argv.includes('WebFetch,WebSearch'));
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
+});
+
+test('Claude tasks with required skills fail unless each skill file was read', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-provider-skill-read-'));
+  const skillPath = join(root, 'skills', 'dharma-agent-fabric', 'SKILL.md');
+  const events = (toolResult: Record<string, unknown>) => [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: skillPath } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'skill', ...toolResult }] } },
+  ].map(event => JSON.stringify(event)).join('\n');
+  const read = events({});
+  const failedRead = events({ is_error: true });
+  const otherFile = read.replaceAll(JSON.stringify(skillPath), JSON.stringify(join(root, 'README.md')));
+  assert.equal(hasClaudeRequiredSkillReads(read, [skillPath]), true);
+  assert.equal(hasClaudeRequiredSkillReads(failedRead, [skillPath]), false);
+  assert.equal(hasClaudeRequiredSkillReads(otherFile, [skillPath]), false);
+  assert.equal(hasClaudeRequiredSkillReads('', [skillPath]), false);
+
+  const run = (stdout: string) => executeProviderTask({
+    provider: 'claude', workspace: root, instructions: 'Use the skill.', timeoutSeconds: 30, allowedCommandArgv: [], allowWrites: false,
+    requiredSkillPaths: [skillPath],
+    runner: async () => ({ exitCode: 0, signal: null, timedOut: false, stdout: Buffer.from(stdout), stderr: Buffer.alloc(0) }),
+  });
+  assert.equal((await run(read)).exitCode, 0);
+  const notRead = await run(failedRead);
+  assert.equal(notRead.exitCode, 1);
+  assert.match(notRead.stderr, /required_skill_not_read/);
 });
 
 test('Agy task execution creates an isolated project and uses supported plan-mode arguments', async () => {
