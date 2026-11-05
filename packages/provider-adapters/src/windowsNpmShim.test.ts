@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import test from 'node:test';
+import { openCodexAppServerTransport } from './codexAppServerTransport.js';
 import * as adapters from './index.js';
 
 const nodeShim = (target: string) => '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\n'
@@ -73,4 +74,31 @@ test('Windows task runner starts a CLI installed only as an npm shim and keeps a
     timeoutMs: 15_000, environment: {PATH: f.bin, Path: f.bin}});
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout.toString('utf8').trim(), `fake 1.2.3 ${JSON.stringify([argument])}`);
+});
+
+// npm Codex is a Node wrapper over a native child that shares its stdio.
+const nativeServer = `
+require('node:readline').createInterface({input: process.stdin}).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') process.stdout.write(JSON.stringify({id: message.id, result: {userAgent: 'test'}}) + String.fromCharCode(10));
+});
+setInterval(() => {}, 1_000);
+`;
+const wrapper = `
+const {spawn} = require('node:child_process');
+const child = spawn(process.execPath, [require('node:path').join(__dirname, 'native.js')], {stdio: 'inherit'});
+require('node:fs').writeFileSync(require('node:path').join(__dirname, 'native.pid'), String(child.pid));
+setInterval(() => {}, 1_000);
+`;
+
+test('Windows Codex transport starts a shim and closes its whole process tree', windows, async t => {
+  const f = await shimFixture(t), directory = dirname(f.target);
+  await writeFile(f.target, wrapper);
+  await writeFile(join(directory, 'native.js'), nativeServer);
+  const transport = await openCodexAppServerTransport({command: 'fakeprovider', argv: [], cwd: f.root,
+    environment: {...process.env, PATH: f.bin, Path: f.bin}});
+  const native = Number(await readFile(join(directory, 'native.pid'), 'utf8'));
+  t.after(() => { try { process.kill(native); } catch { /* Already gone. */ } });
+  await transport.close();
+  assert.throws(() => process.kill(native, 0), {code: 'ESRCH'}, 'The native child must not outlive the transport');
 });

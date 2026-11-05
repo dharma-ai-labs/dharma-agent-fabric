@@ -270,7 +270,7 @@ for (const signed of [false, true]) {
     const actual = await runCodexBootstrapHost(input(f.root), () => api.assertRepositoryInstallerOwnership(f.root, 'synthetic'));
     assert.equal(actual, signed ? 'signed' : 'installer');
     await assert.rejects(runCodexBootstrapHost(input(f.root), () => api.assertRepositoryInstallerOwnership(f.root, 'foreign')),
-      {message: /^Invalid or foreign repository skill ownership marker\. Move \.agents\/skills\/dharma-agent-fabric out of this repository.*--resume/});
+      {message: /^Invalid or foreign repository skill ownership marker\. Move \.agents\/skills\/dharma-agent-fabric out of this repository.*for dharma onboard, add --resume/});
     assert.equal(await fs.readFile(marker, 'utf8'), bytes);
   });
 }
@@ -283,7 +283,7 @@ for (const [name, bytes] of [['malformed', '{'], ['non-object', '[]']] as const)
     await fs.writeFile(marker, bytes);
     const api = await module();
     await assert.rejects(runCodexBootstrapHost(input(f.root), () => api.assertRepositoryInstallerOwnership(f.root, 'synthetic')),
-      {message: /Move \.agents\/skills\/dharma-agent-fabric out of this repository.*--resume/});
+      {message: /Move \.agents\/skills\/dharma-agent-fabric out of this repository.*for dharma onboard, add --resume/});
     assert.equal(await fs.readFile(marker, 'utf8'), bytes);
   });
 }
