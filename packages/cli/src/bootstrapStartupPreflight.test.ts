@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { compileFunction } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import * as startup from './relayAutostart.js';
 
 // Execute the actual bootstrap prefix through the first claim-installation
 // boundary. Synthetic dependencies never enroll, access credentials or start a relay.
@@ -46,6 +47,7 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false, an
       if (failure) throw failure;
       if (withdraw) withdrawn = true;
     },
+    startupPreflightFailure: Reflect.get(startup, 'startupPreflightFailure'),
     readPrivateBootstrapGrant: async () => { effects.push('private_input'); return 'fixture'; },
     process: { stderr: { write: () => { throw new Error('unexpected stderr'); } } },
   };
@@ -54,6 +56,8 @@ async function fixture(mode = 'reference', failure?: Error, withdraw = false, an
     ...dependencies,
     relayAutostartStatus: async () => anchorFailure === 'manager-unavailable'
       ? { state: 'unavailable', backend: 'systemd-user', reason: 'systemd_user_unavailable' }
+      : anchorFailure === 'wsl-host' ? { state: 'unavailable', backend: 'systemd-user', reason: 'wsl_host_startup_unavailable' }
+      : anchorFailure === 'windows-conflict' ? { state: 'unavailable', backend: 'windows-task', reason: 'autostart_conflict' }
       : anchorFailure === 'legacy' ? { state: 'unavailable', backend: 'systemd-user', reason: 'autostart_conflict' }
       : anchorFailure ? { state: 'enabled', backend: 'systemd-user' } : { state: 'disabled', backend: null },
     inspectOwnedRelayAutostart: async () => ({ workspace: '/fixture/anchor',
@@ -155,6 +159,7 @@ for (const kind of ['missing-workspace', 'missing-policy', 'foreign-route', 'inv
     assert.equal(result.grantRedeemed, false);
     assert.equal(result.enrollmentChanged, false);
     assert.equal(JSON.stringify(result).includes('private policy'), false);
+    assert.equal(result.code, 'relay_workspace_conflict');
     assert.deepEqual(f.effects, ['startup_preflight']);
   });
 }
@@ -170,9 +175,30 @@ test('source-connected bootstrap rejects unavailable startup manager before clai
   const result = await f.run();
   assert.equal(result.ok, false);
   assert.equal(result.code, 'startup_preflight_unavailable');
+  assert.equal(result.reason, 'systemd_user_unavailable');
+  assert.match(result.message, /systemd user manager did not answer/);
   assert.match(result.message, /Check that this user's startup service is running/);
   assert.equal(result.grantRedeemed, false);
   assert.equal(result.enrollmentChanged, false);
+  assert.deepEqual(f.effects, ['startup_preflight']);
+});
+
+test('source-connected bootstrap keeps the status reason instead of the catch-all', async () => {
+  const wsl = await (await fixture('reference', undefined, false, 'wsl-host')).run();
+  assert.equal(wsl.code, 'wsl_host_startup_unavailable');
+  const windows = await (await fixture('reference', undefined, false, 'windows-conflict')).run();
+  assert.equal(windows.code, 'autostart_conflict');
+  assert.doesNotMatch(windows.message, /Linux/);
+});
+
+test('source-connected bootstrap shows the Windows task and fix from the preclaim check', async () => {
+  const task = 'DharmaAgentFabric-0123456789ab';
+  const f = await fixture('reference', new Error(`autostart_conflict: Windows startup task ${task} exists without this enrollment receipt. `
+    + `If it is left over from an earlier setup, run Unregister-ScheduledTask -TaskName '${task}' -Confirm:$false in PowerShell, then run setup again.`));
+  const result = await f.run();
+  assert.equal(result.code, 'autostart_conflict');
+  assert.ok(result.message.includes(`Unregister-ScheduledTask -TaskName '${task}'`));
+  assert.equal(result.grantRedeemed, false);
   assert.deepEqual(f.effects, ['startup_preflight']);
 });
 
