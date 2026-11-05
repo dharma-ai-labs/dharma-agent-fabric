@@ -4,9 +4,8 @@ import {createRequire} from 'node:module';
 import test from 'node:test';
 import {Ajv2020} from 'ajv/dist/2020.js';
 import type {FormatsPlugin} from 'ajv-formats';
-import * as supervisor from './repositoryRelaySupervisor.js';
-import {currentRepositoryRelayFailure, runRegisteredRepositoryRelays,
-  withRepositoryRelayStage, type RepositoryRelayStage} from './repositoryRelaySupervisor.js';
+import {currentRepositoryRelayFailure, REPOSITORY_RELAY_FAILURE_CODES, REPOSITORY_RELAY_STAGES, repositoryRelayFailureReceipt,
+  runRegisteredRepositoryRelays, withRepositoryRelayStage, type RepositoryRelayStage} from './repositoryRelaySupervisor.js';
 
 for (const stage of ['session_open', 'vault_open']) {
   test(`current-process diagnostics retain ${stage} without private error text`, () => {
@@ -77,10 +76,6 @@ test('the failure receipt reader returns a known code and drops any other value'
   assert.equal(read({...receipt,at:'Fri, 16 Oct 2026 22:00:00 GMT (C:/Users/someone/.secret)'}), null);
 });
 
-const contract = supervisor as unknown as {REPOSITORY_RELAY_STAGES: readonly string[];
-  REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string>;
-  repositoryRelayFailureReceipt(event: unknown, binding: Record<string, unknown>, at: string): Record<string, unknown>};
-
 async function schema(name: string) {
   return JSON.parse(await readFile(new URL(`./schemas/${name}.schema.json`, import.meta.url), 'utf8'));
 }
@@ -92,19 +87,19 @@ async function validator(name: string) {
 
 test('the failure receipt schema lists exactly the stages and codes the relay writes', async () => {
   const {properties} = await schema('local-repository-relay-failure');
-  assert.deepEqual(properties.stage.enum, [...contract.REPOSITORY_RELAY_STAGES]);
-  assert.deepEqual(properties.failureCode.enum, [...contract.REPOSITORY_RELAY_FAILURE_CODES]);
+  assert.deepEqual(properties.stage.enum, [...REPOSITORY_RELAY_STAGES]);
+  assert.deepEqual(properties.failureCode.enum, [...REPOSITORY_RELAY_FAILURE_CODES]);
 });
 
 test('receipts built from real relay events match the failure receipt schema', async () => {
   const validate = await validator('local-repository-relay-failure'), at = new Date().toISOString();
-  const receipt = (event: unknown) => contract.repositoryRelayFailureReceipt(event, {organizationId: 'org_a',
+  const receipt = (event: unknown) => repositoryRelayFailureReceipt(event as Parameters<typeof repositoryRelayFailureReceipt>[0], {organizationId: 'org_a',
     deviceId: 'device_a', pid: 50, relayPidMtimeMs: 1.5, relayPidCtimeMs: 2.5}, at);
   for (const message of [...lockCodes, 'private-key-and-response-body']) {
     const [event] = await observedFailure(Error(message));
     const value = receipt(event);
     assert.equal(validate(value), true, JSON.stringify(validate.errors));
-    assert.equal(value.failureCode, lockCodes.includes(message) ? message : undefined);
+    assert.equal((value as {failureCode?: string}).failureCode, lockCodes.includes(message) ? message : undefined);
     assert.equal(value.workspaceId, 'workspace_a');
   }
   const [event] = await observedFailure(Error('connection_anchor_busy'));

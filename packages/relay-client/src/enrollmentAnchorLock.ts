@@ -15,6 +15,9 @@ export interface EnrollmentAnchorLockRelease {
 // introduce another check-then-replace race.
 // Owner contents are flushed before publication, so a live owner's file always
 // holds its PID. Contents that cannot be a PID have no owner and count as dead.
+// That flush happens once, before the mutex: a flush under the mutex could commit
+// the mutex link without its later unlink, and a hard reset would then leave an
+// abandoned mutex. Only link and unlink run while the mutex exists.
 export async function acquireEnrollmentAnchorLock(
   lockPath: string, scope?: HostOperationFence, timeoutMs = 10_000,
 ): Promise<EnrollmentAnchorLockRelease> {
@@ -55,23 +58,23 @@ export async function acquireEnrollmentAnchorLock(
       owned.delete(path);
     } catch {throw Error('connection_anchor_lock_cleanup_unconfirmed');}
   };
-  const publish = async (path: string) => {
-    const candidate = `${path}.${process.pid}.${randomUUID()}.candidate`;
-    try {
-      await step(async () => {
-        await assertNamespace();
-        const file = await open(candidate, 'wx', 0o600);
-        try {await file.writeFile(`${process.pid}\n`); await file.sync();}
-        finally {await file.close();}
-        owned.set(candidate, null);
-        owned.set(candidate, await metadata(candidate));
-      });
-      await step(async () => {
-        await link(candidate, path);
-        owned.set(path, owned.get(candidate)!);
-      });
-    } finally {await cleanup(candidate);}
+  const prepare = async () => {
+    const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
+    await step(async () => {
+      await assertNamespace();
+      const file = await open(candidate, 'wx', 0o600);
+      try {await file.writeFile(`${process.pid}\n`); await file.sync();}
+      finally {await file.close();}
+      owned.set(candidate, null);
+      owned.set(candidate, await metadata(candidate));
+    });
+    return candidate;
   };
+  const publish = (candidate: string, path: string) => step(async () => {
+    await assertNamespace();
+    await link(candidate, path);
+    owned.set(path, owned.get(candidate)!);
+  });
   const owner = async (path: string) => {
     let identity: Owned, text: string;
     try {
@@ -96,6 +99,7 @@ export async function acquireEnrollmentAnchorLock(
   try {
     await step(() => mkdir(directory, {recursive: true, mode: 0o700}));
     await step(assertNamespace);
+    const candidate = await prepare();
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (Date.now() >= deadline) throw Error('connection_anchor_busy');
@@ -104,7 +108,7 @@ export async function acquireEnrollmentAnchorLock(
       // until the inspector releases the mutex.
       const recovery = lockPath + '.recovery';
       let recovering = false;
-      try {await publish(recovery); recovering = true;}
+      try {await publish(candidate, recovery); recovering = true;}
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         try {
@@ -117,7 +121,8 @@ export async function acquireEnrollmentAnchorLock(
       if (recovering) {
         try {
           try {
-            await publish(lockPath);
+            await publish(candidate, lockPath);
+            await cleanup(candidate);
             let released: Promise<void> | undefined;
             return Object.assign(() => released ??= cleanup(lockPath), {assertHeld: async () => {
               if (released) throw Error('connection_anchor_lock_invalid');

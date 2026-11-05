@@ -48,7 +48,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
-  withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
@@ -8990,8 +8990,8 @@ async function currentSessionOpenFailure() {
     if (!UUID_PATTERN.test(workspaceId)) continue;
     const repository = resolve(relay, 'repositories', workspaceId);
     for (const name of ['last-successful-poll.json', 'last-session-open.json']) {
-      const at = Date.parse(String((await read(resolve(repository, name)))?.at));
-      if (at > latestSuccess) latestSuccess = at;
+      const at = repositoryRelayTimestampMs((await read(resolve(repository, name)))?.at);
+      if (at !== null && at > latestSuccess) latestSuccess = at;
     }
     const current = currentRepositoryRelayFailure({ receipt: await read(resolve(repository, 'last-failure.json')),
       organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
@@ -9050,12 +9050,8 @@ async function relayStart(flags: Map<string, string | boolean>,
         const at = new Date().toISOString();
         const pidState = await relayPidState;
         if (!pidState) return;
-        const failure = {
-          schema: 'dharma.local-repository-relay-failure/v1', organizationId: config.organizationId,
-          deviceId: config.deviceId, workspaceId: event.workspaceId, pid: process.pid, ...pidState,
-          at, stage: event.stage, category: event.category,
-          ...(event.failureCode ? { failureCode: event.failureCode } : {}),
-        };
+        const failure = repositoryRelayFailureReceipt(event, { organizationId: config.organizationId,
+          deviceId: config.deviceId, pid: process.pid, ...pidState }, at);
         let writer = diagnosticWriters.get(event.workspaceId);
         if (!writer) {
           writer = serializeRelayWork();
@@ -9849,7 +9845,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 'last-failure.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
               const opened = await readFile(resolve(dharmaHome(), 'relay', 'repositories', row.workspaceId,
                 'last-session-open.json'), 'utf8').then(value => JSON.parse(value)).catch(() => null);
-              const lastSuccess = [lastSuccessfulPollAt, opened?.at].filter(value => typeof value === 'string')
+              const lastSuccess = [lastSuccessfulPollAt, opened?.at].filter(value => repositoryRelayTimestampMs(value) !== null)
                 .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
               const lastFailure = currentRepositoryRelayFailure({ receipt: failure,
                 organizationId: config.organizationId, deviceId: config.deviceId,

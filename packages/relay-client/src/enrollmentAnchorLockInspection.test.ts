@@ -132,12 +132,12 @@ test('other permission and publication denials are not reclassified as Windows i
   }
 });
 
-test('host withdrawal during an uninspectable-owner wait admits no subsequent filesystem step', async () => {
+test('host withdrawal during an uninspectable-owner wait admits only the removal of its own candidate', async () => {
   const f = await inspectionFixture({kind: 'recovery', withdrawOnWait: true});
   try {
     await assert.rejects(f.acquire(f.path, f.scope, 100), /relay_host_scope_unavailable/);
     assert.equal(f.deniedReads(), 1); assert.equal(f.waits(), 1);
-    assert.deepEqual(f.effectsAfterWithdrawal(), []);
+    assert.deepEqual(f.effectsAfterWithdrawal(), ['metadata', 'unlink']);
     assert.equal(await fs.readFile(f.blocked, 'utf8'), '123\n');
     assert.deepEqual(await fs.readdir(f.root), [basename(f.blocked)]);
   } finally {await f.cleanup();}
