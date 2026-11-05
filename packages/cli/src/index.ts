@@ -7679,6 +7679,9 @@ async function executeOneTask(
       && task.authority.writePaths.length === 0 && task.authority.commands.length === 0
       && task.authority.network === 'deny' && task.authority.readPaths.includes('.')
       ? await installedRepositoryKnowledge(workspace, task.target.provider) : null;
+    const requiredSkillRoot = task.target.provider === 'claude' && task.requiredSkills?.length
+      ? await nativeSkillDirectoryForWorkspace({ provider: 'claude', workspaceId: task.workspaceId, workspace: workspace.path })
+      : null;
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
       ...(repositoryKnowledge && activeSkill ? { verifiedRepositoryKnowledge: {
@@ -7686,6 +7689,9 @@ async function executeOneTask(
         bundleId: activeSkill.bundleId, bundleHash: activeSkill.bundleHash,
         catalogBytes: repositoryKnowledge.catalogBytes, manifestBytes: repositoryKnowledge.manifestBytes,
       } } : {}),
+      ...(requiredSkillRoot ? { requiredSkillFiles: task.requiredSkills.map(({ skillId }) => ({
+        skillId, path: resolve(requiredSkillRoot, skillId, 'SKILL.md'),
+      })) } : {}),
       ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
