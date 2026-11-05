@@ -95,6 +95,28 @@ export function providerFailureCategory(input: {
   return 'unknown';
 }
 
+export function hasClaudeRequiredSkillReads(stdout: string, requiredPaths: string[]): boolean {
+  const comparable = (path: string) => (process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
+  const pendingReads = new Map<string, string>();
+  const completedReads = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    let event: { message?: { content?: unknown } };
+    try { event = JSON.parse(line); } catch { continue; }
+    const content = event?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Array<Record<string, unknown>>) {
+      const filePath = (block?.input as { file_path?: unknown } | undefined)?.file_path;
+      if (block?.type === 'tool_use' && block.name === 'Read' && typeof block.id === 'string' && typeof filePath === 'string') {
+        pendingReads.set(block.id, comparable(filePath));
+      } else if (block?.type === 'tool_result' && block.is_error !== true) {
+        const path = pendingReads.get(String(block.tool_use_id));
+        if (path) completedReads.add(path);
+      }
+    }
+  }
+  return requiredPaths.every(path => completedReads.has(comparable(path)));
+}
+
 export function hasVerifiedCodexKnowledgeRead(stdout: string, scope: TaskKnowledgeScope): boolean {
   for (const line of stdout.split(/\r?\n/)) {
     if (line.length > 131_072) continue;
@@ -262,6 +284,7 @@ export async function executeProviderTask(input: {
   allowedCommandArgv: string[][];
   allowWrites: boolean;
   taskKnowledge?: TaskKnowledgeScope;
+  requiredSkillPaths?: string[];
   externalIdempotencyKey?: string;
   actionDigest?: string;
   signal?: AbortSignal;
@@ -396,6 +419,11 @@ export async function executeProviderTask(input: {
       && !hasVerifiedCodexKnowledgeRead(result.stdout.toString('utf8'), input.taskKnowledge)) {
       exitCode = 1;
       stderr = `${stderr}${stderr ? '\n' : ''}task_knowledge_not_read: no completed, hash-verified task knowledge tool call.`;
+    }
+    if (input.provider === 'claude' && input.requiredSkillPaths?.length && exitCode === 0
+      && !hasClaudeRequiredSkillReads(result.stdout.toString('utf8'), input.requiredSkillPaths)) {
+      exitCode = 1;
+      stderr = `${stderr}${stderr ? '\n' : ''}required_skill_not_read: no completed Read of every required skill file.`;
     }
     if (input.provider === 'agy') {
       let log = '';

@@ -7679,6 +7679,7 @@ async function executeOneTask(
       && task.authority.writePaths.length === 0 && task.authority.commands.length === 0
       && task.authority.network === 'deny' && task.authority.readPaths.includes('.')
       ? await installedRepositoryKnowledge(workspace, task.target.provider) : null;
+    const requiredSkillFiles = await requiredSkillFilesForTask(task, workspace.path);
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
       ...(repositoryKnowledge && activeSkill ? { verifiedRepositoryKnowledge: {
@@ -7686,6 +7687,7 @@ async function executeOneTask(
         bundleId: activeSkill.bundleId, bundleHash: activeSkill.bundleHash,
         catalogBytes: repositoryKnowledge.catalogBytes, manifestBytes: repositoryKnowledge.manifestBytes,
       } } : {}),
+      requiredSkillFiles,
       ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
@@ -7789,6 +7791,18 @@ export function nativeSkillDirectory(
   if (provider === 'claude') return resolve(env.CLAUDE_CONFIG_DIR || resolve(home, '.claude'), 'skills');
   if (provider === 'hermes') return resolve(env.HERMES_HOME || resolve(home, '.hermes'), 'skills');
   return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
+}
+
+export async function requiredSkillFilesForTask(
+  task: Pick<TaskEnvelope, 'workspaceId' | 'requiredSkills' | 'target'>,
+  workspace: string,
+  options: { env?: NodeJS.ProcessEnv; home?: string } = {},
+) {
+  if (task.target.provider !== 'claude' || !task.requiredSkills?.length) return [];
+  const root = await nativeSkillDirectoryForWorkspace({
+    provider: 'claude', workspaceId: task.workspaceId, workspace, ...options,
+  });
+  return task.requiredSkills.map(({ skillId }) => ({ skillId, path: resolve(root, skillId, 'SKILL.md') }));
 }
 
 export async function nativeSkillDirectoryForWorkspace(input: {
