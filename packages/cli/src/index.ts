@@ -7791,8 +7791,28 @@ export async function requiredSkillFilesForTask(
   if (task.target.provider !== 'claude' || !task.requiredSkills?.length) return [];
   const root = await nativeSkillDirectoryForWorkspace({
     provider: 'claude', workspaceId: task.workspaceId, workspace, ...options,
-  });
-  return task.requiredSkills.map(({ skillId }) => ({ skillId, path: resolve(root, skillId, 'SKILL.md') }));
+  }).catch(() => null);
+  if (!root) return [];
+  const active = resolve(root, '.dharma-managed', 'workspaces', task.workspaceId, 'active');
+  const files = await Promise.all(task.requiredSkills.map(skill => signedActiveSkillFile(active, skill)));
+  return files.filter(file => file !== null);
+}
+
+// The native copy is mutable and carries an ownership marker, so only the
+// receipt-pinned active tree can be checked against the signed content hash.
+// A skill that fails the check is left out, and the task runner then fails the task.
+async function signedActiveSkillFile(active: string, required: { skillId: string; contentHash: string }) {
+  try {
+    const bundle = JSON.parse(await readFile(resolve(active, 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+    const signed = bundle.skills.find(skill => skill.skillId === required.skillId);
+    if (!signed) return null;
+    const directory = resolve(active, required.skillId);
+    // Signed hashes name the source directory, which can differ from the skill id.
+    const actual = await contentHash(directory, currentBootstrapHostScope(), basename(signed.path));
+    return actual === required.contentHash ? { skillId: required.skillId, path: resolve(directory, 'SKILL.md') } : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function nativeSkillDirectoryForWorkspace(input: {
