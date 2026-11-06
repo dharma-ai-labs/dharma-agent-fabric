@@ -59,3 +59,34 @@ test('reports each pending observation with elapsed time before waiting again', 
     { ...observation('published'), attempts: 2, elapsedMs: 5_000, maximumWaitMs: 10_000 },
   ]);
 });
+
+// G11 F14 (2026-11-06): 58 attempts ended with a bare pending and no error code. The wait now
+// asks for the relay's recorded reason once, at the deadline, and returns it with the result.
+test('returns the recorded reason with a pending result at the deadline', async () => {
+  let clock = 0;
+  let explained = 0;
+  const result = await waitForRepositoryReadiness(async () => observation('published'), {
+    maximumWaitMs: 10_000, intervalMs: 5_000, now: () => clock,
+    wait: async delayMs => { clock += delayMs; },
+    explainPending: async () => { explained += 1; return 'repository_package_access_denied'; },
+  });
+  assert.deepEqual(result, { ...observation('published'), outcome: 'pending', attempts: 3,
+    code: 'repository_package_access_denied' });
+  assert.equal(explained, 1);
+});
+
+test('does not ask for a reason when the package becomes ready or blocked', async () => {
+  for (const observed of [observation('published', true), observation('blocked')]) {
+    const result = await waitForRepositoryReadiness(async () => observed, {
+      explainPending: async () => { throw new Error('must not explain'); },
+    });
+    assert.equal(Object.hasOwn(result, 'code'), false);
+  }
+});
+
+test('a failed reason lookup leaves the pending result unchanged', async () => {
+  const result = await waitForRepositoryReadiness(async () => observation('absent'), {
+    maximumWaitMs: 0, explainPending: async () => { throw new Error('unreadable'); },
+  });
+  assert.deepEqual(result, { ...observation('absent'), outcome: 'pending', attempts: 1 });
+});
