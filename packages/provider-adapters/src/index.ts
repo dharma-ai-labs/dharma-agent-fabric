@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { EvidenceState, ProviderCapability, ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { validateTaskKnowledgeScope, type TaskKnowledgeScope } from './knowledge-server.js';
+import { providerLaunch } from './windowsNpmShim.js';
+
+export { providerLaunch } from './windowsNpmShim.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,6 +90,28 @@ export function providerFailureCategory(input: {
   return 'unknown';
 }
 
+export function hasClaudeRequiredSkillReads(stdout: string, requiredPaths: string[]): boolean {
+  const comparable = (path: string) => (process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
+  const pendingReads = new Map<string, string>();
+  const completedReads = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    let event: { message?: { content?: unknown } };
+    try { event = JSON.parse(line); } catch { continue; }
+    const content = event?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Array<Record<string, unknown>>) {
+      const filePath = (block?.input as { file_path?: unknown } | undefined)?.file_path;
+      if (block?.type === 'tool_use' && block.name === 'Read' && typeof block.id === 'string' && typeof filePath === 'string') {
+        pendingReads.set(block.id, comparable(filePath));
+      } else if (block?.type === 'tool_result' && block.is_error !== true) {
+        const path = pendingReads.get(String(block.tool_use_id));
+        if (path) completedReads.add(path);
+      }
+    }
+  }
+  return requiredPaths.every(path => completedReads.has(comparable(path)));
+}
+
 export function hasVerifiedCodexKnowledgeRead(stdout: string, scope: TaskKnowledgeScope): boolean {
   for (const line of stdout.split(/\r?\n/)) {
     if (line.length > 131_072) continue;
@@ -158,9 +183,11 @@ function terminateProcessTree(child: ReturnType<typeof spawn>, force: boolean) {
 }
 
 export const defaultProcessRunner: ProviderProcessRunner = (input) => new Promise((accept, reject) => {
-  const child = spawn(input.command, input.argv, {
+  const env = { ...providerProcessEnvironment(), ...(input.environment || {}) };
+  const launch = providerLaunch(input.command, input.argv, env);
+  const child = spawn(launch.command, launch.argv, {
     cwd: input.cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...providerProcessEnvironment(), ...(input.environment || {}) },
+    env,
     detached: process.platform !== 'win32',
   });
   const maximum = 5_000_000;
@@ -254,6 +281,7 @@ export async function executeProviderTask(input: {
   allowedCommandArgv: string[][];
   allowWrites: boolean;
   taskKnowledge?: TaskKnowledgeScope;
+  requiredSkillPaths?: string[];
   externalIdempotencyKey?: string;
   actionDigest?: string;
   signal?: AbortSignal;
@@ -381,6 +409,11 @@ export async function executeProviderTask(input: {
       exitCode = 1;
       stderr = `${stderr}${stderr ? '\n' : ''}task_knowledge_not_read: no completed, hash-verified task knowledge tool call.`;
     }
+    if (input.provider === 'claude' && input.requiredSkillPaths?.length && exitCode === 0
+      && !hasClaudeRequiredSkillReads(result.stdout.toString('utf8'), input.requiredSkillPaths)) {
+      exitCode = 1;
+      stderr = `${stderr}${stderr ? '\n' : ''}required_skill_not_read: no completed Read of every required skill file.`;
+    }
     if (input.provider === 'agy') {
       let log = '';
       try { log = await readFile(agyLogPath!, 'utf8'); } catch {}
@@ -427,11 +460,9 @@ export async function executableVersion(
   ) => { status: number | null; stdout: string; stderr: string },
 ): Promise<string | null> {
   const run = probe || (await import('node:child_process')).spawnSync;
-  const result = run(command, ['--version'], {
-    encoding: 'utf8',
-    timeout: 5_000,
-    env: providerProcessEnvironment(source),
-  });
+  const env = providerProcessEnvironment(source);
+  const launch = providerLaunch(command, ['--version'], env);
+  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env });
   if (result.status !== 0) return null;
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout?.toString('utf8') || '';
   const stderr = typeof result.stderr === 'string' ? result.stderr : result.stderr?.toString('utf8') || '';
@@ -455,12 +486,9 @@ export async function providerTaskReadiness(
   probe?: SynchronousProbe,
 ): Promise<'available' | 'partial'> {
   const run = probe || (await import('node:child_process')).spawnSync;
-  const argv = provider === 'claude' ? ['auth', 'status'] : ['login', 'status'];
-  const result = run(command, argv, {
-    encoding: 'utf8',
-    timeout: 5_000,
-    env: providerProcessEnvironment(source),
-  });
+  const env = providerProcessEnvironment(source);
+  const launch = providerLaunch(command, provider === 'claude' ? ['auth', 'status'] : ['login', 'status'], env);
+  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env });
   const stdout = probeText(result.stdout);
   const stderr = probeText(result.stderr);
   if (result.status !== 0) return 'partial';
@@ -1106,10 +1134,12 @@ export const hermesAdapter: ProviderAdapter = {
     }
     const argv = ['sessions', 'export', '-', '--format', 'jsonl', '--cwd', resolve(request.workspace), '--yes', '--redact'];
     if (request.since) argv.push('--after', request.since.toISOString());
-    const { stdout } = await execFileAsync('hermes', argv, {
+    const env = providerProcessEnvironment();
+    const launch = providerLaunch('hermes', argv, env);
+    const { stdout } = await execFileAsync(launch.command, launch.argv, {
       timeout: 60_000,
       maxBuffer: 67_108_864,
-      env: providerProcessEnvironment(),
+      env,
     });
     return parseHermesSessionExport(String(stdout), request.workspace, request);
   },

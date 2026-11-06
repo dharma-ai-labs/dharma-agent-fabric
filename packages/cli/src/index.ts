@@ -2,8 +2,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { constants as fsConstants, realpathSync } from 'node:fs';
-import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { access, chmod, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -15,7 +15,7 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -47,7 +47,7 @@ import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureRecei
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
-import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, stopRelayAutostart } from './relayAutostart.js';
+import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
 import { appendRecoveredWorkspace, applyRegistryRecoveryFile, inspectRegistryRecoveryFile,
@@ -160,7 +160,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.222';
+const VERSION = '0.2.223';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3232,7 +3232,7 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
   if (existing.backend === null && existing.state === 'disabled') return;
   if (existing.state === 'unavailable'
     && !(existing.backend === 'systemd-user' && existing.reason === 'autostart_conflict')) {
-    throw new Error('startup_preflight_unavailable: the owned startup manager is unavailable.');
+    throw new Error(`${existing.reason}: the owned startup manager is unavailable.`);
   }
   const anchor = await step(() => inspectOwnedRelayAutostart({ home }, { allowLegacy: true }));
   if (anchor.policy === null) return;
@@ -3246,12 +3246,13 @@ async function assertBootstrapStartupAnchor(organizationId: string, deviceId: st
   if (anchor.policy !== resolve(anchor.workspace, '.dharma', 'approved-policy.json')) {
     throw new Error('relay_workspace_conflict: startup policy is not canonical.');
   }
-  const authorized = await step(() => loadOrganizationPolicy(anchor.policy!));
+  const policyConflict = () => { throw new Error('relay_workspace_conflict: startup policy could not be verified.'); };
+  const authorized = await step(() => loadOrganizationPolicy(anchor.policy!)).catch(policyConflict);
   const canonical = (await step(() => registry())).filter(row => row.workspaceId === authorized.serverAuthorization?.workspaceId
     && row.organizationId === organizationId && row.path === anchor.workspace
     && row.routeHash === selected.routeHash && row.repositoryRemoteHash === selected.repositoryRemoteHash);
   if (canonical.length !== 1) throw new Error('relay_workspace_conflict: startup policy route changed.');
-  await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? ''));
+  await step(() => loadVerifiedWorkspacePolicy(anchor.policy!, authorized.serverAuthorization?.workspaceId ?? '')).catch(policyConflict);
   if (anchor.version !== VERSION) {
     throw new Error('relay_runtime_upgrade_required: upgrade the existing startup anchor before connecting another repository.');
   }
@@ -3560,21 +3561,8 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     }
     catch (error) {
       await hostScope?.assert();
-      const code = error instanceof Error && error.message.startsWith('autostart_conflict:')
-        ? 'autostart_conflict' : error instanceof Error && error.message.startsWith('relay_runtime_upgrade_required:')
-          ? 'relay_runtime_upgrade_required' : error instanceof Error && error.message.startsWith('relay_workspace_conflict:')
-            ? 'relay_workspace_conflict' : error instanceof Error && error.message === 'wsl_host_startup_unavailable'
-              ? 'wsl_host_startup_unavailable' : 'startup_preflight_unavailable';
-      return { ok: false, stage: 'startup_preflight', code, grantRedeemed: false, enrollmentChanged: false,
-        message: code === 'relay_runtime_upgrade_required'
-          ? 'Upgrade the existing enrolled startup runtime through the supported same-device update flow before retrying; setup has not redeemed authority or changed enrollment.'
-          : code === 'autostart_conflict'
-          ? 'This Linux user already has a startup entry owned by another installation. Use the existing enrolled installation or an eligible clean client; setup has not redeemed authority or changed enrollment.'
-          : code === 'relay_workspace_conflict'
-          ? 'The existing startup anchor does not match this device and its approved repository policy. Recover that enrolled repository through the supported same-device flow before retrying; setup has not redeemed authority or changed enrollment.'
-          : code === 'wsl_host_startup_unavailable'
-          ? 'The WSL host startup owner could not be verified. Restore the supported user-logon host binding before retrying; setup has not redeemed authority or changed enrollment.'
-          : "Startup ownership could not be verified. Check that this user's startup service is running (systemd user service on Linux and WSL, launchd on macOS, Task Scheduler on Windows), then run setup again; setup has not redeemed authority or changed enrollment." };
+      return { ok: false, stage: 'startup_preflight', grantRedeemed: false, enrollmentChanged: false,
+        ...startupPreflightFailure(error) };
     }
   }
   if (grantMode === 'prompt') bootstrapToken = await readPrivateBootstrapGrant();
@@ -5758,8 +5746,10 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               if (!binding) throw new Error('named_session_binding_unavailable');
               const retained = await readCodexPublicContext(transport!, { threadId: binding.sessionId, workspaceRoot: binding.workspaceRoot });
               taskStateFailure = 'runtime_version_unavailable';
-              const version = (await execFileAsync('codex', ['--version'], { timeout: 10_000, maxBuffer: 4096,
-                env: providerProcessEnvironment(process.env) })).stdout.trim();
+              const versionEnvironment = providerProcessEnvironment(process.env);
+              const versionLaunch = providerLaunch('codex', ['--version'], versionEnvironment);
+              const version = (await execFileAsync(versionLaunch.command, versionLaunch.argv, { timeout: 10_000, maxBuffer: 4096,
+                env: versionEnvironment })).stdout.trim();
               if (!/^codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version)) {
                 throw new Error('named_session_runtime_version_unavailable');
               }
@@ -7604,6 +7594,7 @@ async function executeOneTask(
       && task.authority.writePaths.length === 0 && task.authority.commands.length === 0
       && task.authority.network === 'deny' && task.authority.readPaths.includes('.')
       ? await installedRepositoryKnowledge(workspace, task.target.provider) : null;
+    const requiredSkillFiles = await requiredSkillFilesForTask(task, workspace.path);
     receipt = await executeTask({
       task, policy: taskPolicy, workspace: workspace.path, relayStateDirectory: resolve(dharmaHome(), 'relay'), serverPublicKey,
       ...(repositoryKnowledge && activeSkill ? { verifiedRepositoryKnowledge: {
@@ -7611,6 +7602,7 @@ async function executeOneTask(
         bundleId: activeSkill.bundleId, bundleHash: activeSkill.bundleHash,
         catalogBytes: repositoryKnowledge.catalogBytes, manifestBytes: repositoryKnowledge.manifestBytes,
       } } : {}),
+      requiredSkillFiles,
       ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
@@ -7714,6 +7706,49 @@ export function nativeSkillDirectory(
   if (provider === 'claude') return resolve(env.CLAUDE_CONFIG_DIR || resolve(home, '.claude'), 'skills');
   if (provider === 'hermes') return resolve(env.HERMES_HOME || resolve(home, '.hermes'), 'skills');
   return resolve(env.AGY_CONFIG_DIR || resolve(home, '.gemini', 'antigravity-cli'), 'plugins', 'dharma-agent-fabric', 'skills');
+}
+
+export async function requiredSkillFilesForTask(
+  task: Pick<TaskEnvelope, 'workspaceId' | 'requiredSkills' | 'target'>,
+  workspace: string,
+  options: { env?: NodeJS.ProcessEnv; home?: string } = {},
+) {
+  if (task.target.provider !== 'claude' || !task.requiredSkills?.length) return [];
+  const root = await nativeSkillDirectoryForWorkspace({
+    provider: 'claude', workspaceId: task.workspaceId, workspace, ...options,
+  }).catch(() => null);
+  if (!root) return [];
+  const active = resolve(root, '.dharma-managed', 'workspaces', task.workspaceId, 'active');
+  const files = await Promise.all(task.requiredSkills.map(skill => signedActiveSkillFile(active, skill)));
+  return files.filter(file => file !== null);
+}
+
+// The native copy is mutable and carries an ownership marker, so only the
+// receipt-pinned active tree can be checked against the signed content hash.
+// A skill that fails the check is left out, and the task runner then fails the task.
+async function signedActiveSkillFile(active: string, required: { skillId: string; contentHash: string }) {
+  let staging: string | null = null;
+  try {
+    const bundle = JSON.parse(await readFile(resolve(active, 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+    const signed = bundle.skills.find(skill => skill.skillId === required.skillId);
+    if (!signed) return null;
+    const directory = resolve(active, required.skillId);
+    // contentHash covers the directory name, and a remediation skill is signed
+    // under its source directory, not its skill id, so hash a copy with that name.
+    const signedName = basename(signed.path);
+    let tree = directory;
+    if (signedName !== required.skillId) {
+      staging = await mkdtemp(resolve(tmpdir(), 'dharma-skill-hash-'));
+      tree = resolve(staging, signedName);
+      await cp(directory, tree, { recursive: true });
+    }
+    const actual = await contentHash(tree, currentBootstrapHostScope());
+    return actual === required.contentHash ? { skillId: required.skillId, path: resolve(directory, 'SKILL.md') } : null;
+  } catch {
+    return null;
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function nativeSkillDirectoryForWorkspace(input: {

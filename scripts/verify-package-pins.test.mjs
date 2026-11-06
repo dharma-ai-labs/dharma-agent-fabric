@@ -63,3 +63,23 @@ test('CLI pins a relay client published with setupClaimFailureMessage', async ()
   assert.ok(relay.version.localeCompare('0.2.37', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} is published without the export`);
   assert.equal(cli.dependencies[relay.name], relay.version);
 });
+
+test('CLI pins runtime packages published with providerLaunch and requiredSkillFiles', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const [cli, provider, runner, evidence, vault, lifecycle] = await Promise.all(
+    ['cli', 'provider-adapters', 'task-runner', 'evidence-reduction', 'local-vault', 'lifecycle-adapter'].map(manifest));
+  const atLeast = (version, floor) => version.localeCompare(floor, undefined, {numeric: true}) >= 0;
+  // provider-adapters 0.1.39 is on npm without providerLaunch, so a published CLI pinned to it
+  // would stop at module load. task-runner 0.1.41 would silently ignore requiredSkillFiles.
+  assert.ok(atLeast(provider.version, '0.1.40'), `provider-adapters ${provider.version} is published without providerLaunch`);
+  assert.ok(atLeast(runner.version, '0.1.42'), `task-runner ${runner.version} is published without requiredSkillFiles`);
+  assert.equal(cli.dependencies[provider.name], provider.version);
+  assert.equal(cli.dependencies[runner.name], runner.version);
+  // One provider-adapters copy in the install: the packages that pin it move with it.
+  assert.equal(runner.dependencies[provider.name], provider.version);
+  assert.equal(evidence.dependencies[provider.name], provider.version);
+  assert.equal(vault.dependencies[evidence.name], evidence.version);
+  assert.equal(lifecycle.dependencies[evidence.name], evidence.version);
+  assert.equal(cli.dependencies[evidence.name], evidence.version);
+  assert.equal(cli.dependencies[vault.name], vault.version);
+});
