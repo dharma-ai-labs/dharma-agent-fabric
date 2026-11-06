@@ -77,6 +77,8 @@ import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionS
 import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
+import { nextSkillActivationResult, readRelaySkillActivationState, relaySkillActivationPath, repositoryReadinessPendingCode,
+  requireActiveSkillInstall, SkillActivationError, skillActivationErrorCode, type SkillActivationResult, type SkillActivationStage } from './skillActivationResult.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { collectRepositorySourceRestoration } from './repositorySourceRestoration.js';
 import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
@@ -160,7 +162,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.223';
+const VERSION = '0.2.224';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -3802,6 +3804,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   if (!sharedRepositoryReady && relay.state === 'running') {
     const workspaceId = String(onboarded.workspaceId || '');
     const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision} --provider ${provider}`;
+    const waitStartedAt = Date.now();
     repositoryReadiness = await step(() => withOnboardingStage('readiness', workspaceId, resumeCommand,
       () => waitForRepositoryReadiness(async () => {
         const current = (await step(() => registry())).find(item => item.workspaceId === workspaceId
@@ -3816,7 +3819,11 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         if (progress.attempts % 6 !== 1) return;
         process.stderr.write(`Waiting for the shared repository package to install on this device (package ${progress.state}, `
           + `${Math.round(progress.elapsedMs / 1000)} s of ${Math.round(progress.maximumWaitMs / 1000)} s).\n`);
-      } })));
+      }, explainPending: async () => repositoryReadinessPendingCode(
+        await readRelaySkillActivationState(dharmaHome(), workspaceId), provider, waitStartedAt) })));
+    if (repositoryReadiness.code) {
+      process.stderr.write(`The shared repository package did not install on this device: ${repositoryReadiness.code}.\n`);
+    }
     sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
   }
   const apiFlags = new Map<string, string | boolean>([
@@ -3889,6 +3896,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       : !roleReady ? 'role_registration_pending'
       : !relayReady ? 'synchronization_pending'
       : !startupReady ? 'autostart_pending' : 'complete',
+    ...(!sharedRepositoryReady && repositoryReadiness?.code ? { code: repositoryReadiness.code } : {}),
     repositorySelection,
     localStage: 'complete',
     sharedRepositoryReady,
@@ -8721,10 +8729,15 @@ async function activatePreparedSkillUpdate(input: {
   provider: ProviderId;
   policyPath: string;
   flags: Map<string, string | boolean>;
-}): Promise<Output> {
+}): Promise<{ ok: true; rolloutId: string; bundleId: string; status: string; changed: true }> {
   const { prepared, workspaceId, provider, policyPath, flags } = input;
   const { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery } = prepared;
   try {
+    const organizationApprovalId = typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined;
+    if ((bundle.riskClass === 'R3' || bundle.riskClass === 'R4') && !organizationApprovalId) {
+      throw new SkillActivationError('approval_required',
+        `${bundle.riskClass} skill bundles require organization approval; run dharma skills sync with --approval-id.`);
+    }
     const previousAnchor = await loadActiveSkillAuthorizationAnchor({
       config,
       workspaceId,
@@ -8754,7 +8767,7 @@ async function activatePreparedSkillUpdate(input: {
       workspaceId,
       provider,
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
-      organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
+      organizationApprovalId,
       ...(provider === 'agy' ? {
         providerActivationCheck: () => attestAgySkillBundleActivation({
           bundle,
@@ -9146,6 +9159,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let skillActivationsCompleted = 0;
   let skillActivationFailures = 0;
   const skillActivationFailuresByProvider: Partial<Record<ProviderId, number>> = {};
+  const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = {};
   let nextSkillActivationAt = 0;
   const skillPreparationPump = startSkillPreparationPump({
     prepare: async assertRunning => {
@@ -9363,6 +9377,13 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
       if (!stopping && !result.taskId && performance.now() >= nextSkillActivationAt) {
         for (const adapter of providerAdapters) {
+          let activating: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>> | null = null;
+          const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>) => {
+            if (!isLocalProviderId(adapter.providerId)) return;
+            skillActivationResults[adapter.providerId] = nextSkillActivationResult(skillActivationResults[adapter.providerId],
+              { at: new Date().toISOString(), rolloutId: activating?.rollout.id ?? null,
+                bundleId: activating?.bundle.bundleId ?? null, ...result });
+          };
           try {
             const capability = await adapter.capability();
             if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) continue;
@@ -9376,16 +9397,29 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                   provider, policyPath, fabric, automatic: true });
                 if (!prepared) return;
                 if (!cached) skillPreparationsCompleted += 1;
-                await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
+                activating = prepared;
+                const activated = await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
                   provider, policyPath, flags: new Map() });
+                requireActiveSkillInstall(activated.status);
                 skillActivationsCompleted += 1;
               });
             });
-          } catch {
+            record({ outcome: activating ? 'activated' : 'no_rollout', errorCode: null });
+          } catch (error) {
             skillActivationFailures += 1;
             skillActivationFailuresByProvider[adapter.providerId] = (skillActivationFailuresByProvider[adapter.providerId] || 0) + 1;
+            const stage: SkillActivationStage = activating ? 'activation' : 'preparation';
+            record({ outcome: 'failed', errorCode: skillActivationErrorCode(error, stage) });
           }
         }
+        // Setup's readiness wait and `dharma status` read this; a write failure must not stop the relay.
+        await writeJsonAtomic(relaySkillActivationPath(dharmaHome(), canonicalWorkspace.workspaceId), {
+          schema: 'dharma.relay-skill-activation/v1', workspaceId: canonicalWorkspace.workspaceId,
+          updatedAt: new Date().toISOString(),
+          counters: { preparationsCompleted: skillPreparationsCompleted, preparationFailures: skillPreparationFailures,
+            activationsCompleted: skillActivationsCompleted, activationFailures: skillActivationFailures },
+          providers: skillActivationResults,
+        }).catch(() => {});
         nextSkillActivationAt = performance.now() + 60_000;
       }
       if (canonicalWorkspace.accessMode !== 'knowledge_only' && !stopping && !sourceScanFlight
@@ -9801,7 +9835,8 @@ export async function run(argv: string[]): Promise<Output> {
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
-                lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}) });
+                lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
+                skillActivation: await readRelaySkillActivationState(dharmaHome(), row.workspaceId) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }
