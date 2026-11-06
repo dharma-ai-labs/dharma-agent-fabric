@@ -220,6 +220,29 @@ raw exception text, replace enrollment or establish signed readiness. Preserve
 encrypted evidence; do not delete it or repeat unchanged bootstrap to bypass a
 failure. Require the full readiness receipt after recovery.
 
+## Why the shared repository package is still pending
+
+The relay records its last automatic skill activation result per provider in
+`relay/repositories/<workspaceId>/skill-activation.json`, with fixed error
+codes only. When setup ends with `shared_repository_pending`, the result's
+`code` (and `repositoryReadiness.code`) gives the reason, for example:
+
+- `repository_package_expired`: the package delivery expired; HQ must issue a
+  fresh one.
+- `repository_package_access_denied` or another HQ code: HQ refused the delivery.
+- `approval_required`: the release is R3 or R4. Install it with
+  `dharma skills sync --approval-id <evaluation-authorization-id>`.
+- `rollout_not_offered`: HQ offered no release to this endpoint.
+- `installed_bundle_lacks_repository_knowledge`: a release installed but it
+  carries no shared repository knowledge.
+- `install_failed[:<errno>]` or `preparation_failed[:<errno>]`: a local failure.
+- `install_failed:failed` or `install_failed:rolled_back`: the install finished
+  without an active bundle; its receipt was `failed` or `rolled_back`.
+- `skill_activation_not_observed`: the relay made no attempt during the wait.
+
+`dharma status --diagnostic` shows the same record, with the relay's counters,
+under each entry of `repositoryRelays.repositories[].skillActivation`.
+
 ## Demo peer collaboration
 
 After a recipient approves a Demo device, run these commands for the exact
