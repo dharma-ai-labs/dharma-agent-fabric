@@ -2625,8 +2625,8 @@ test('Claude tasks return no required skill files when the native root is reject
   assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), []);
 });
 
-test('Claude tasks match skills installed by a signed bundle, including one signed under another directory name', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-required-skill-install-'));
+async function installedRequiredSkillsFixture(prefix: string, scope: 'native' | 'project' = 'native') {
+  const root = await mkdtemp(join(tmpdir(), prefix));
   const home = join(root, 'home');
   const workspace = join(root, 'repo');
   const source = join(root, 'source');
@@ -2657,7 +2657,8 @@ test('Claude tasks match skills installed by a signed bundle, including one sign
     createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
   };
   const bundleHash = calculateBundleHash(unsigned);
-  const skillRoot = await nativeSkillDirectoryForWorkspace({ provider: 'claude', workspaceId, workspace, home });
+  const skillRoot = scope === 'project' ? join(workspace, '.claude', 'skills')
+    : await nativeSkillDirectoryForWorkspace({ provider: 'claude', workspaceId, workspace, home });
   await installSkillBundle({
     bundle: { ...unsigned, bundleHash, signature: signCanonicalObject({ ...unsigned, bundleHash }, server.privateKey) },
     sourceDirectory: source, nativeSkillDirectory: skillRoot,
@@ -2669,15 +2670,62 @@ test('Claude tasks match skills installed by a signed bundle, including one sign
     workspaceId, target: { deviceId, provider: 'claude' as const },
     requiredSkills: signed.map(({ skillId, version, commit, contentHash }) => ({ skillId, version, commit, contentHash })),
   };
+  const [sameName, renamed] = skills.map(({ skillId }) => ({ skillId, path: join(active, skillId, 'SKILL.md') }));
+  return { home, workspace, workspaceId, skillRoot, active, skills, task, sameName: sameName!, renamed: renamed! };
+}
+
+test('Claude tasks match skills installed by a signed bundle, including one signed under another directory name', async () => {
+  const { home, workspace, skillRoot, active, skills, task, sameName, renamed } = await installedRequiredSkillsFixture('dharma-required-skill-install-');
   for (const { skillId } of skills) {
     await stat(join(skillRoot, skillId, '.dharma-agent-fabric.json'));
     await assert.rejects(() => stat(join(active, skillId, '.dharma-agent-fabric.json')), /ENOENT/);
   }
-  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }),
-    skills.map(({ skillId }) => ({ skillId, path: join(active, skillId, 'SKILL.md') })));
-  await writeFile(join(active, 'verifier', 'SKILL.md'), '# Edited after install\n');
-  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }),
-    [{ skillId: skills[1]!.skillId, path: join(active, skills[1]!.skillId, 'SKILL.md') }]);
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [sameName, renamed]);
+  await writeFile(sameName.path, '# Edited after install\n');
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [renamed]);
+});
+
+test('Claude tasks for another workspace get nothing from a tree installed for this one', async () => {
+  const { home, workspace, task, sameName, renamed } = await installedRequiredSkillsFixture('dharma-required-skill-other-workspace-');
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [sameName, renamed]);
+  assert.deepEqual(await requiredSkillFilesForTask({ ...task, workspaceId: 'workspace_other' }, workspace, { home }), []);
+});
+
+test('Claude tasks get the active file from a real install into the project root', async () => {
+  const { home, workspace, workspaceId, skills, task } = await installedRequiredSkillsFixture('dharma-required-skill-project-', 'project');
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), skills.map(({ skillId }) => ({
+    skillId, path: join(workspace, '.claude', 'skills', '.dharma-managed', 'workspaces', workspaceId, 'active', skillId, 'SKILL.md'),
+  })));
+});
+
+test('Claude tasks leave out an edited skill signed under another directory name', async () => {
+  const { home, workspace, task, sameName, renamed } = await installedRequiredSkillsFixture('dharma-required-skill-renamed-edit-');
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [sameName, renamed]);
+  await writeFile(renamed.path, '# Edited after install\n');
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [sameName]);
+});
+
+test('Claude tasks leave out every required skill when AUTHORIZATION.json is missing', async () => {
+  const { home, workspace, active, task } = await installedRequiredSkillsFixture('dharma-required-skill-no-authorization-');
+  await rm(join(active, 'AUTHORIZATION.json'));
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), []);
+});
+
+test('Claude tasks leave out every required skill when AUTHORIZATION.json is malformed', async () => {
+  const { home, workspace, active, task } = await installedRequiredSkillsFixture('dharma-required-skill-bad-authorization-');
+  await writeFile(join(active, 'AUTHORIZATION.json'), '{ not json');
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), []);
+});
+
+test('Claude tasks leave out a required skill absent from AUTHORIZATION.json', async () => {
+  const { home, workspace, active, task, sameName, renamed } = await installedRequiredSkillsFixture('dharma-required-skill-unauthorized-');
+  const path = join(active, 'AUTHORIZATION.json');
+  const authorization = JSON.parse(await readFile(path, 'utf8')) as SkillBundle;
+  const without = (skillId: string) => JSON.stringify({ ...authorization, skills: authorization.skills.filter(skill => skill.skillId !== skillId) });
+  await writeFile(path, without(renamed.skillId));
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [sameName]);
+  await writeFile(path, without(sameName.skillId));
+  assert.deepEqual(await requiredSkillFilesForTask(task, workspace, { home }), [renamed]);
 });
 
 test('project-scoped skill resolution rejects a linked native directory', async () => {
