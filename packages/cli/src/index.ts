@@ -2,8 +2,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
 import { constants as fsConstants, realpathSync } from 'node:fs';
-import { access, chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { access, chmod, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -7716,8 +7716,39 @@ export async function requiredSkillFilesForTask(
   if (task.target.provider !== 'claude' || !task.requiredSkills?.length) return [];
   const root = await nativeSkillDirectoryForWorkspace({
     provider: 'claude', workspaceId: task.workspaceId, workspace, ...options,
-  });
-  return task.requiredSkills.map(({ skillId }) => ({ skillId, path: resolve(root, skillId, 'SKILL.md') }));
+  }).catch(() => null);
+  if (!root) return [];
+  const active = resolve(root, '.dharma-managed', 'workspaces', task.workspaceId, 'active');
+  const files = await Promise.all(task.requiredSkills.map(skill => signedActiveSkillFile(active, skill)));
+  return files.filter(file => file !== null);
+}
+
+// The native copy is mutable and carries an ownership marker, so only the
+// receipt-pinned active tree can be checked against the signed content hash.
+// A skill that fails the check is left out, and the task runner then fails the task.
+async function signedActiveSkillFile(active: string, required: { skillId: string; contentHash: string }) {
+  let staging: string | null = null;
+  try {
+    const bundle = JSON.parse(await readFile(resolve(active, 'AUTHORIZATION.json'), 'utf8')) as SkillBundle;
+    const signed = bundle.skills.find(skill => skill.skillId === required.skillId);
+    if (!signed) return null;
+    const directory = resolve(active, required.skillId);
+    // contentHash covers the directory name, and a remediation skill is signed
+    // under its source directory, not its skill id, so hash a copy with that name.
+    const signedName = basename(signed.path);
+    let tree = directory;
+    if (signedName !== required.skillId) {
+      staging = await mkdtemp(resolve(tmpdir(), 'dharma-skill-hash-'));
+      tree = resolve(staging, signedName);
+      await cp(directory, tree, { recursive: true });
+    }
+    const actual = await contentHash(tree, currentBootstrapHostScope());
+    return actual === required.contentHash ? { skillId: required.skillId, path: resolve(directory, 'SKILL.md') } : null;
+  } catch {
+    return null;
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function nativeSkillDirectoryForWorkspace(input: {
