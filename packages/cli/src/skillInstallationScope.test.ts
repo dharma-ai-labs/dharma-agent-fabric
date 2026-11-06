@@ -54,5 +54,5 @@ test('all actual CLI skill-manager effect calls and authorization builders carry
     }
     ts.forEachChild(node, visit);
   };
-  visit(source); assert.equal(calls, 10); assert.equal(builders, 2);
+  visit(source); assert.equal(calls, 11); assert.equal(builders, 2);
 });
