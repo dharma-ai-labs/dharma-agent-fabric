@@ -7,6 +7,7 @@ export type RepositoryReadinessObservation = {
 export type RepositoryReadinessResult = RepositoryReadinessObservation & {
   outcome: 'ready' | 'blocked' | 'pending';
   attempts: number;
+  code?: string;
 };
 
 export type RepositoryReadinessProgress = RepositoryReadinessObservation & {
@@ -23,6 +24,7 @@ export async function waitForRepositoryReadiness(
     now?: () => number;
     wait?: (delayMs: number) => Promise<void>;
     onProgress?: (progress: RepositoryReadinessProgress) => void;
+    explainPending?: () => Promise<string | null>;
   } = {},
 ): Promise<RepositoryReadinessResult> {
   const maximumWaitMs = options.maximumWaitMs ?? 300_000;

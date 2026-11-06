@@ -19,6 +19,7 @@ import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js
 import { readNamedSessionPackageContent, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import {observeNamedCodexSkill} from './namedCodexSkillDiscovery.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
+import { SkillActivationError } from './skillActivationResult.js';
 
 const keys = generateKeyPairSync('ed25519');
 const ROOT = '.agents/skills/dharma-agent-fabric/';
@@ -501,6 +502,24 @@ test('package delivery checks expiry after index await before requesting any chu
   request.fetchIndex = async () => { calls.index++; clock.milliseconds = Date.parse(EXPIRES); return input.plan.index; };
   await assert.rejects(receiveRepositoryPackageDelivery(request));
   assert.deepEqual(calls, { index: 1, chunks: [] });
+});
+
+// G11 F14 (2026-11-06): an expired descriptor was indistinguishable from a scope mismatch, so the
+// relay could not tell setup that the shared package had expired.
+test('package delivery names an expired descriptor and still makes no fetch', async () => {
+  const input = fixture();
+  const { request, calls, clock } = harness(input);
+  clock.milliseconds = Date.parse(EXPIRES);
+  await assert.rejects(receiveRepositoryPackageDelivery(request),
+    (error: unknown) => error instanceof SkillActivationError && error.code === 'repository_package_expired');
+  assert.deepEqual(calls, { index: 0, chunks: [] });
+  clock.milliseconds = Date.parse(EXPIRES) - 1;
+  const result = await receiveRepositoryPackageDelivery(request);
+  clock.milliseconds = Date.parse(EXPIRES);
+  assert.throws(() => result.assertCurrent(),
+    (error: unknown) => error instanceof SkillActivationError && error.code === 'repository_package_expired');
+  clock.milliseconds = Date.parse(CREATED) - 1;
+  assert.throws(() => result.assertCurrent(), (error: unknown) => !(error instanceof SkillActivationError));
 });
 
 test('package delivery checks expiry before each subsequent chunk read', async () => {
