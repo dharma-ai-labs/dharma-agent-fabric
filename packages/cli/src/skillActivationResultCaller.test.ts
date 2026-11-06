@@ -18,6 +18,8 @@ test('actual relay records each automatic activation result with a bounded error
   assert.match(tick, /\} catch \(error\) \{[\s\S]*skillActivationFailures \+= 1;[\s\S]*skillActivationErrorCode\(error, stage\)/);
   assert.match(tick, /outcome: activating \? 'activated' : 'no_rollout'/);
   assert.match(tick, /nextSkillActivationResult\(/);
+  // A receipt of 'failed' or 'rolled_back' must reach the catch above, not be recorded as activated.
+  assert.match(tick, /const activated = await activatePreparedSkillUpdate\([^;]*\);\s*requireActiveSkillInstall\(activated\.status\);\s*skillActivationsCompleted \+= 1;/);
   const write = relay.slice(relay.indexOf('nextSkillActivationAt = performance.now() + 60_000;') - 600,
     relay.indexOf('nextSkillActivationAt = performance.now() + 60_000;'));
   assert.match(write, /writeJsonAtomic\(relaySkillActivationPath\(dharmaHome\(\), canonicalWorkspace\.workspaceId\)/);

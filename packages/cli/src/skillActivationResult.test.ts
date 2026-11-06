@@ -9,7 +9,8 @@ import type { FormatsPlugin } from 'ajv-formats';
 import { AgentFabricRequestError } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
   nextSkillActivationResult, parseRelaySkillActivationState, readRelaySkillActivationState, relaySkillActivationPath,
-  repositoryReadinessPendingCode, SkillActivationError, skillActivationErrorCode, type RelaySkillActivationState,
+  repositoryReadinessPendingCode, requireActiveSkillInstall, SkillActivationError, skillActivationErrorCode,
+  type RelaySkillActivationState,
   type SkillActivationResult,
 } from './skillActivationResult.js';
 
@@ -61,6 +62,22 @@ test('other failures report the stage and an errno code only', () => {
   assert.equal(skillActivationErrorCode(new Error('Prepared skill tree does not match the signed content hash.'), 'activation'),
     'install_failed');
   assert.equal(skillActivationErrorCode('not an error', 'preparation'), 'preparation_failed');
+});
+
+test('an install receipt that is not active is a failed activation the readiness wait reports', () => {
+  assert.doesNotThrow(() => requireActiveSkillInstall('active'));
+  const since = Date.parse('2026-11-06T06:20:00.000Z');
+  for (const status of ['failed', 'rolled_back']) {
+    let caught: unknown;
+    try { requireActiveSkillInstall(status); } catch (error) { caught = error; }
+    assert.ok(caught instanceof SkillActivationError, status);
+    const errorCode = skillActivationErrorCode(caught, 'activation');
+    assert.equal(errorCode, `install_failed:${status}`);
+    const recorded = state({ codex: { at: '2026-11-06T06:30:00.000Z', outcome: 'failed', rolloutId: ROLLOUT,
+      bundleId: BUNDLE, errorCode } });
+    assert.deepEqual(parseRelaySkillActivationState(structuredClone(recorded), WORKSPACE), recorded);
+    assert.equal(repositoryReadinessPendingCode(recorded, 'codex', since), `install_failed:${status}`);
+  }
 });
 
 test('an empty poll after an activation stays recorded as the installed release', () => {

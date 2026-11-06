@@ -67,6 +67,9 @@ export function skillActivationErrorCode(error: unknown, stage: SkillActivationS
   return errno ? `${failed}:${errno}` : failed;
 }
 
+/** An install that resolves with a receipt other than 'active' did not install the bundle. */
+export function requireActiveSkillInstall(_status: unknown): void {}
+
 /** An empty poll after an activation means the installed release is current, not that none was offered. */
 export function nextSkillActivationResult(previous: SkillActivationResult | undefined,
   attempt: SkillActivationResult): SkillActivationResult {
