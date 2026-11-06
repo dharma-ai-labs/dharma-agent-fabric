@@ -236,6 +236,8 @@ codes only. When setup ends with `shared_repository_pending`, the result's
 - `installed_bundle_lacks_repository_knowledge`: a release installed but it
   carries no shared repository knowledge.
 - `install_failed[:<errno>]` or `preparation_failed[:<errno>]`: a local failure.
+- `install_failed:failed` or `install_failed:rolled_back`: the install finished
+  without an active bundle; its receipt was `failed` or `rolled_back`.
 - `skill_activation_not_observed`: the relay made no attempt during the wait.
 
 `dharma status --diagnostic` shows the same record, with the relay's counters,

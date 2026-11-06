@@ -80,7 +80,7 @@ import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmi
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
 import { nextSkillActivationResult, readRelaySkillActivationState, relaySkillActivationPath, repositoryReadinessPendingCode,
-  SkillActivationError, skillActivationErrorCode, type SkillActivationResult, type SkillActivationStage } from './skillActivationResult.js';
+  requireActiveSkillInstall, SkillActivationError, skillActivationErrorCode, type SkillActivationResult, type SkillActivationStage } from './skillActivationResult.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { collectRepositorySourceRestoration } from './repositorySourceRestoration.js';
 import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
@@ -8807,7 +8807,7 @@ async function activatePreparedSkillUpdate(input: {
   provider: ProviderId;
   policyPath: string;
   flags: Map<string, string | boolean>;
-}): Promise<Output> {
+}): Promise<{ ok: true; rolloutId: string; bundleId: string; status: string; changed: true }> {
   const { prepared, workspaceId, provider, policyPath, flags } = input;
   const { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery } = prepared;
   try {
@@ -9476,8 +9476,9 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 if (!prepared) return;
                 if (!cached) skillPreparationsCompleted += 1;
                 activating = prepared;
-                await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
+                const activated = await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
                   provider, policyPath, flags: new Map() });
+                requireActiveSkillInstall(activated.status);
                 skillActivationsCompleted += 1;
               });
             });
