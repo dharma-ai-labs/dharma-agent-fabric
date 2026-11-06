@@ -16,8 +16,7 @@ test('actual relay records each automatic activation result with a bounded error
   assert.ok(tick.length > 0);
   assert.doesNotMatch(tick, /\} catch \{\s*skillActivationFailures \+= 1;/, 'the error must not be discarded');
   assert.match(tick, /\} catch \(error\) \{[\s\S]*skillActivationFailures \+= 1;[\s\S]*skillActivationErrorCode\(error, stage\)/);
-  assert.match(tick, /outcome: 'no_rollout'/);
-  assert.match(tick, /outcome: 'activated'/);
+  assert.match(tick, /outcome: activating \? 'activated' : 'no_rollout'/);
   assert.match(tick, /nextSkillActivationResult\(/);
   const write = relay.slice(relay.indexOf('nextSkillActivationAt = performance.now() + 60_000;') - 600,
     relay.indexOf('nextSkillActivationAt = performance.now() + 60_000;'));

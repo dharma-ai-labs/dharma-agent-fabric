@@ -5,6 +5,7 @@ import { validateContract, verifyCanonicalObject, type ProviderId } from '@dharm
 import { verifySkillBundle, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { validateRepositoryReleaseMetadata } from './repositoryReleaseMetadata.js';
 import { createRepositoryPackageTransferReceiverV2, type RepositoryTransferIndexV2 } from './repositoryPackageTransfer.js';
+import { SkillActivationError } from './skillActivationResult.js';
 
 const ROOT = '.agents/skills/dharma-agent-fabric';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\s\S])/;
@@ -105,7 +106,10 @@ export async function receiveRepositoryPackageDelivery(input: {
   const assertCurrent = () => {
     const now = (input.now || (() => new Date()))();
     const milliseconds = Date.prototype.getTime.call(now);
-    requireFact(Number.isFinite(milliseconds) && parentCreated <= milliseconds && created <= milliseconds && expires > milliseconds);
+    requireFact(Number.isFinite(milliseconds) && parentCreated <= milliseconds && created <= milliseconds);
+    if (expires <= milliseconds) {
+      throw new SkillActivationError('repository_package_expired', 'Repository package delivery has expired; HQ must issue a fresh delivery.');
+    }
     verifySkillBundle(bundle, input.serverPublicKey, now);
   };
   assertCurrent();

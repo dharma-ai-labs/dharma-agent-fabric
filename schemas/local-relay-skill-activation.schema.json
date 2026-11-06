@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-relay-skill-activation/v1",
+  "title": "Device-local record of the relay's automatic skill activation results; not an authority envelope",
+  "description": "Stored at relay/repositories/<workspaceId>/skill-activation.json. The running relay rewrites it after each automatic skill activation pass. Counters cover the current relay process. Each provider entry holds the last result and a fixed error code only, never error, server or stderr text. Setup's repository readiness wait and dharma status --diagnostic read it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workspaceId", "updatedAt", "counters", "providers"],
+  "$defs": {
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$(?![\\s\\S])"},
+    "identifier": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$(?![\\s\\S])"},
+    "count": {"type": "integer", "minimum": 0},
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "outcome", "rolloutId", "bundleId", "errorCode"],
+      "properties": {
+        "at": {"$ref": "#/$defs/timestamp"},
+        "outcome": {"enum": ["activated", "up_to_date", "no_rollout", "failed"]},
+        "rolloutId": {"$ref": "#/$defs/identifier"},
+        "bundleId": {"$ref": "#/$defs/identifier"},
+        "errorCode": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}(?::[a-z0-9_]{1,32})?$(?![\\s\\S])"}
+      },
+      "if": {"properties": {"outcome": {"const": "failed"}}},
+      "then": {"properties": {"errorCode": {"type": "string"}}},
+      "else": {"properties": {"errorCode": {"type": "null"}}}
+    }
+  },
+  "properties": {
+    "schema": {"const": "dharma.relay-skill-activation/v1"},
+    "workspaceId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "updatedAt": {"$ref": "#/$defs/timestamp"},
+    "counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preparationsCompleted", "preparationFailures", "activationsCompleted", "activationFailures"],
+      "properties": {
+        "preparationsCompleted": {"$ref": "#/$defs/count"},
+        "preparationFailures": {"$ref": "#/$defs/count"},
+        "activationsCompleted": {"$ref": "#/$defs/count"},
+        "activationFailures": {"$ref": "#/$defs/count"}
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "codex": {"$ref": "#/$defs/result"},
+        "claude": {"$ref": "#/$defs/result"},
+        "agy": {"$ref": "#/$defs/result"},
+        "hermes": {"$ref": "#/$defs/result"}
+      }
+    }
+  }
+}

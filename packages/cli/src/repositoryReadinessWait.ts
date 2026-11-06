@@ -41,7 +41,11 @@ export async function waitForRepositoryReadiness(
     if (observed.ready) return { ...observed, outcome: 'ready', attempts };
     if (observed.state === 'blocked') return { ...observed, outcome: 'blocked', attempts };
     const remaining = deadline - now();
-    if (remaining <= 0) return { ...observed, outcome: 'pending', attempts };
+    if (remaining <= 0) {
+      // A diagnostic lookup must never change the readiness result itself.
+      const code = await options.explainPending?.().catch(() => null);
+      return { ...observed, outcome: 'pending', attempts, ...(code ? { code } : {}) };
+    }
     options.onProgress?.({ ...observed, attempts, elapsedMs: maximumWaitMs - remaining, maximumWaitMs });
     await wait(Math.min(intervalMs, remaining));
   }

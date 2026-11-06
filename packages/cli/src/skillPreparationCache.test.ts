@@ -15,6 +15,7 @@ import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './sk
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
+import { nextSkillActivationResult, relaySkillActivationPath, skillActivationErrorCode } from './skillActivationResult.js';
 
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 type PublishInput = { home: string; workspaceId: string; provider: 'codex'; sourceRoot: string;
@@ -399,6 +400,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       return {};
     },
     writeJsonAtomic: async () => {},
+    relaySkillActivationPath, nextSkillActivationResult, skillActivationErrorCode,
   }) as Record<string, unknown>;
   assert.equal(vaultCloses, 1); assert.equal(transportCalls, holdSourceScan ? 2 : 1);
   assert.equal(sourceScans, 1, 'source scan must remain single-flight');

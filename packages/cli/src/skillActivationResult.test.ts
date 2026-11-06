@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import type { FormatsPlugin } from 'ajv-formats';
 import { AgentFabricRequestError } from '@dharma-ai-labs/agent-fabric-relay-client';
 import {
   nextSkillActivationResult, parseRelaySkillActivationState, readRelaySkillActivationState, relaySkillActivationPath,
@@ -121,5 +124,29 @@ test('relay activation state is read from the per-workspace relay directory', as
     assert.equal(await readRelaySkillActivationState(home, WORKSPACE), null);
   } finally {
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('the relay activation record matches its local schema and the parser agrees', async () => {
+  const ajv = new Ajv2020({ strict: true, strictRequired: false });
+  (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
+  const validate = ajv.compile(JSON.parse(await readFile(
+    new URL('./schemas/local-relay-skill-activation.schema.json', import.meta.url), 'utf8')));
+  const valid = state({
+    codex: failed(skillActivationErrorCode(Object.assign(new Error('x'), { code: 'EACCES' }), 'activation')),
+    claude: { at: '2026-11-06T06:30:00.000Z', outcome: 'up_to_date', rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: null },
+  });
+  assert.equal(validate(valid), true, JSON.stringify(validate.errors));
+  for (const invalid of [
+    { ...valid, detail: 'free text' },
+    { ...valid, updatedAt: '2026-11-06T06:30:00Z' },
+    { ...valid, providers: { codex: { ...failed('approval_required'), errorCode: null } } },
+    { ...valid, providers: { codex: { at: '2026-11-06T06:30:00.000Z', outcome: 'activated', rolloutId: ROLLOUT,
+      bundleId: BUNDLE, errorCode: 'approval_required' } } },
+    { ...valid, providers: { codex: failed('C:/Users/someone/.secret') } },
+    { ...valid, providers: { shell: failed('approval_required') } },
+  ]) {
+    assert.equal(validate(invalid), false, JSON.stringify(invalid));
+    assert.equal(parseRelaySkillActivationState(invalid, WORKSPACE), null, JSON.stringify(invalid));
   }
 });
