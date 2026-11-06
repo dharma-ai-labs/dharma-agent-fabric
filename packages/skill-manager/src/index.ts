@@ -80,11 +80,10 @@ function assertContained(root: string, candidate: string): string {
   return resolve(candidate);
 }
 
-/** `rootName` is the directory name the tree was signed under, when it now sits under another name. */
-async function contentHash(path: string, hostScope?: SkillInstallationHostScope, rootName = basename(path)): Promise<string> {
-  return withInstallationAdmission(hostScope, () => contentHashInScope(path, rootName));
+async function contentHash(path: string, hostScope?: SkillInstallationHostScope): Promise<string> {
+  return withInstallationAdmission(hostScope, () => contentHashInScope(path));
 }
-async function contentHashInScope(path: string, rootName: string): Promise<string> {
+async function contentHashInScope(path: string): Promise<string> {
   const hash = createHash('sha256');
   const visit = async (entryPath: string, prefix = ''): Promise<void> => {
     const metadata = await lstat(entryPath);
@@ -99,7 +98,7 @@ async function contentHashInScope(path: string, rootName: string): Promise<strin
     hash.update(await readFile(entryPath));
     hash.update('\0');
   };
-  await visit(path, rootName + '/');
+  await visit(path, basename(path) + '/');
   return `sha256:${hash.digest('hex')}`;
 }
 
