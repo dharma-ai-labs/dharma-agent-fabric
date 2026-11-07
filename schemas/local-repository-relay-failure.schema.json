@@ -36,7 +36,8 @@
       "device_signing_control_unavailable",
       "connection_identity_requires_recovery",
       "connection_trust_requires_recovery",
-      "connection_identity_store_unavailable"
+      "connection_identity_store_unavailable",
+      "connection_identity_store_busy"
     ]}
   }
 }

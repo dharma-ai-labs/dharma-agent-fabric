@@ -2,7 +2,7 @@
 // Only exact error forms map to a code. The error text itself is never recorded:
 // it can quote a path, a store's stderr or a server value.
 export const RELAY_OPEN_FAILURE_CODES = ['connection_identity_requires_recovery', 'connection_trust_requires_recovery',
-  'connection_identity_store_unavailable'] as const;
+  'connection_identity_store_unavailable', 'connection_identity_store_busy'] as const;
 export type RelayOpenFailureCode = typeof RELAY_OPEN_FAILURE_CODES[number] | 'connection_anchor_lock_unavailable';
 
 const IDENTITY_MESSAGES = new Set(['relay_host_device_identity_unavailable',
@@ -12,9 +12,10 @@ const TRUST_MESSAGES = new Set([
   'Device configuration does not match the secure enrollment anchor. Run dharma login again.',
   'Device enrollment is not anchored in secure storage. Run dharma login again.',
   'Protected enrollment anchor is corrupt.']);
-// Codes the secure-store package sets on a failed credential read.
-const STORE_READ_CODES = new Set(['read_response_invalid', 'read_response_too_large', 'read_timeout',
-  'read_helper_unavailable', 'read_helper_exited', 'read_helper_closed', 'secure_store_unreadable']);
+// Codes the secure-store package sets on a failed credential read. An unreadable answer needs the user;
+// a helper that timed out or went away is transient and keeps the normal short retry.
+const STORE_UNREADABLE_CODES = new Set(['read_response_invalid', 'read_response_too_large', 'secure_store_unreadable']);
+const STORE_BUSY_CODES = new Set(['read_timeout', 'read_helper_unavailable', 'read_helper_exited', 'read_helper_closed']);
 const STORE_FAILURE_PREFIXES = ['Windows Credential Manager failed: ', 'Linux Secret Service failed: ', 'macOS Keychain failed: '];
 // The OS-user enrollment and signing-control lock directories (relay-client enrollmentAnchorLock callers).
 const LOCK_PATH = /[\\/]dharma-(?:enrollment-locks|signing-controls)-[a-f0-9]{32}[\\/]/;
@@ -26,7 +27,8 @@ function field(error: unknown, name: string): unknown {
 
 export function relayOpenFailureCode(error: unknown): RelayOpenFailureCode | undefined {
   const message = field(error, 'message'), code = field(error, 'code');
-  if (typeof code === 'string' && STORE_READ_CODES.has(code)) return 'connection_identity_store_unavailable';
+  if (typeof code === 'string' && STORE_UNREADABLE_CODES.has(code)) return 'connection_identity_store_unavailable';
+  if (typeof code === 'string' && STORE_BUSY_CODES.has(code)) return 'connection_identity_store_busy';
   // A raw errno escapes acquireEnrollmentAnchorLock when it runs without a host scope.
   if (typeof code === 'string' && /^E[A-Z]+$/.test(code) && code !== 'ENOENT'
     && (field(error, 'syscall') === 'kill' || [field(error, 'path'), field(error, 'dest')]
@@ -34,7 +36,8 @@ export function relayOpenFailureCode(error: unknown): RelayOpenFailureCode | und
   if (typeof message !== 'string') return undefined;
   if (IDENTITY_MESSAGES.has(message)) return 'connection_identity_requires_recovery';
   if (TRUST_MESSAGES.has(message)) return 'connection_trust_requires_recovery';
-  if (STORE_FAILURE_PREFIXES.some(prefix => message.startsWith(prefix))) return 'connection_identity_store_unavailable';
+  // A store command that exited non-zero gives no sign that the credential is gone.
+  if (STORE_FAILURE_PREFIXES.some(prefix => message.startsWith(prefix))) return 'connection_identity_store_busy';
   return undefined;
 }
 
@@ -48,6 +51,8 @@ export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform 
       : 'Device credentials cannot be read from the OS keychain. Unlock it for this user or re-enroll this device.';
     case 'connection_identity_store_unavailable': return platform === 'win32' ? WINDOWS_CREDENTIALS_REMEDY
       : 'The OS credential store cannot be read. Unlock it for this user; the relay retries on its own.';
+    case 'connection_identity_store_busy':
+      return 'The credential store did not answer in time; the relay keeps retrying.';
     case 'connection_trust_requires_recovery':
       return 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.';
     case 'connection_anchor_lock_unavailable':

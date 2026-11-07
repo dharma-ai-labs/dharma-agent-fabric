@@ -14,6 +14,7 @@ export const REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string> = new Set(['con
   'device_signing_control_unavailable', ...RELAY_OPEN_FAILURE_CODES]);
 const typedFailure = (value: unknown) => REPOSITORY_RELAY_FAILURE_CODES.has(value as string) ? { failureCode: value as string } : {};
 // An unreadable device identity or store needs the user, so a retry every 30 s only repeats the failure.
+// connection_identity_store_busy is transient and stays on the short relayRestartDelayMs schedule.
 const DEVICE_CREDENTIAL_FAILURES: ReadonlySet<string> = new Set(['connection_identity_requires_recovery',
   'connection_identity_store_unavailable']);
 const DEVICE_CREDENTIAL_FAILURE_LIMIT = 5;
