@@ -250,3 +250,50 @@ test('the submission-time check fails loudly while any placeholder is unsubstitu
   assert.match(checklist, /^- \[ \] Placeholders substituted .*`node scripts\/openai-app-submission-filled\.mjs <substituted-copy\.json>` passes/m,
     'the checklist requires the submission-time placeholder check');
 });
+
+test('trajectory IDs are recorded per seed build, so a rebuild or a second organization never reuses one', () => {
+  // agent_fabric_trajectories.id is a global primary key, so an ID ingested in
+  // one organization cannot be ingested again in a rebuilt or copied seed.
+  const trajectoryIds = ['T1', 'T2', 'T3', 'T4', 'T5'].map(id => `REVIEWER_${id}_ID`);
+  for (const [name, text] of [['chatgpt-app-submission.json', JSON.stringify(submission)], ['REVIEWER_GUIDE.md', guide], ['REVIEWER_SEED_PLAN.md', seedPlan]]) {
+    assert.doesNotMatch(text, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i, `${name} must not hard-code a trajectory UUID`);
+  }
+  assert.doesNotMatch(seedPlan, /fixed and are not placeholders/);
+  for (const name of trajectoryIds) assert.ok(seedPlan.includes(`\`{{${name}}}\``), `REVIEWER_SEED_PLAN.md must define {{${name}}}`);
+  const listing = testCaseById('TC-3');
+  const order = trajectoryIds.slice().reverse().map(name => listing.expected_output.indexOf(`{{${name}}}`));
+  assert.ok(order.every((position, index) => position > 0 && (index === 0 || position > order[index - 1])), 'TC-3 must list T5 to T1 newest first by placeholder');
+  const evidence = testCaseById('TC-4');
+  assert.match(evidence.user_prompt, /\{\{REVIEWER_T1_ID\}\}/);
+  assert.match(evidence.expected_output, /trajectoryId \{\{REVIEWER_T1_ID\}\}/);
+  assert.match(seedPlan, /new random[^.]*UUID[^.]*every seed build/i, 'each seed build generates new trajectory IDs');
+  assert.match(seedPlan, /own (organi[sz]ation|seed build)[^.]*own placeholder values/i, 'a guided-check copy is a separate seed build with its own values');
+});
+
+test('every declared write tool has a run-order rule and a reset, and TC-6 does not depend on the reviewer never writing', () => {
+  const writeTools = Object.keys(submission.tools).filter(name => snapshotByName.get(name).annotations.readOnlyHint === false);
+  assert.ok(writeTools.length > 0);
+  const reset = seedPlan.slice(seedPlan.indexOf('## Reset'));
+  assert.doesNotMatch(reset, /nothing needs resetting/i);
+  assert.doesNotMatch(reset, /\| Nothing\./);
+  for (const name of writeTools) {
+    assert.ok(reset.includes(`\`${name}\``), `the seed plan reset table must cover write tool ${name}`);
+  }
+  const runOrder = guide.slice(guide.indexOf('## Run order'));
+  assert.ok(guide.includes('## Run order') && guide.indexOf('## Run order') < guide.indexOf('## Submitted test cases'), 'REVIEWER_GUIDE.md states the run order before the cases');
+  assert.match(runOrder, /after[^.]*web and[^.]*mobile/i, 'write tools run only after the web and mobile runs');
+  assert.doesNotMatch(guide, /you can run them in any order/, 'order does not hold once a write tool has run');
+  const sessions = testCaseById('TC-6');
+  assert.match(sessions.expected_output, /Seed provisioning/, 'TC-6 shows the operator conversation is never listed');
+  assert.match(sessions.expected_output, /only conversations the reviewer account created/);
+});
+
+test('the seed is rebuilt before capsule retention can change TC-4', () => {
+  const retention = Number(dataAndSecurity.match(/Default capsules become tombstones (\d+) days after upload/)?.[1]);
+  assert.ok(retention > 0, 'DATA_AND_SECURITY.md states the default capsule retention');
+  const maxAge = Number(seedPlan.match(/younger than (\d+) days/)?.[1]);
+  assert.ok(maxAge > 0, 'the seed plan states a maximum seed age');
+  assert.ok(maxAge <= retention - 14, `a ${maxAge}-day seed age leaves less than a 14-day review window before the ${retention}-day tombstone`);
+  assert.ok(seedPlan.includes(`${retention}-day`), 'the seed plan names the capsule retention it works around');
+  assert.match(seedPlan.slice(seedPlan.indexOf('## Reset')), /retention/i, 'the reset table covers the retention tombstone');
+});
