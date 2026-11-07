@@ -5,13 +5,27 @@ import { dirname, join, posix, win32 } from 'node:path';
 
 type Launchers = { shell: string; windows: string };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
-type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; codexDirectory?: string};
-const UNSAFE_CODEX_ON_PATH = 'relay_startup_codex_path_invalid: the first codex on PATH belongs to another user or is not protected. Put your own codex first on PATH, or remove the other one from PATH.';
+// providerDirectory lists the bin directories of the set-up providers, the first one first on PATH.
+type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string;
+  providerDirectory?: string | readonly string[]};
+// Executable names of the local provider adapters. A launcher prepends the bin directories of the ones set up.
+const PROVIDER_COMMANDS = ['codex', 'claude', 'agy', 'hermes'] as const;
+export type ProviderCommand = typeof PROVIDER_COMMANDS[number];
+const unsafeProviderOnPath = (provider: ProviderCommand) => `relay_startup_${provider}_path_invalid: the first ${provider} on PATH `
+  + `belongs to another user or is not protected. Put your own ${provider} first on PATH, or remove the other one from PATH.`
+  + ` If you set up another provider, pass --provider <${PROVIDER_COMMANDS.join('|')}>.`;
 
-function codexDirectoryPath(value: string) {
+/** The resolved provider bin directories, once each, in the order of the PATH they were resolved from. */
+export function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[], searchPath: string | undefined): string[] {
+  const order = (searchPath ?? '').split(':');
+  return [...new Set(directories.filter((directory): directory is string => directory !== undefined))]
+    .sort((left, right) => order.indexOf(left) - order.indexOf(right));
+}
+
+function providerDirectoryPath(value: string) {
   if (!value || value.length > 4096 || !posix.isAbsolute(value) || value === '/'
     || posix.resolve(value) !== value || /[\x00-\x1f\x7f:]/.test(value)) {
-    throw new Error('relay_startup_codex_path_invalid');
+    throw new Error('relay_startup_provider_path_invalid');
   }
   return value;
 }
@@ -46,11 +60,16 @@ export function stableRepositoryLauncherContents(version: string,
     const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
     shellInvocation = `${quote(posix.join(runtime.nodeDirectory, 'node'))} ${quote(entry)} ${npmArguments}`;
   }
-  if (runtime?.codexDirectory !== undefined) {
-    if (runtime.platform !== 'linux') throw new Error('relay_startup_codex_path_invalid');
-    const directory = codexDirectoryPath(runtime.codexDirectory);
-    // Preserve only the qualified provider bin directory, not the login environment.
-    shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
+  if (runtime?.providerDirectory !== undefined) {
+    const directories = typeof runtime.providerDirectory === 'string' ? [runtime.providerDirectory] : [...runtime.providerDirectory];
+    if (runtime.platform !== 'linux' || !directories.length || new Set(directories).size !== directories.length) {
+      throw new Error('relay_startup_provider_path_invalid');
+    }
+    // Preserve only the qualified provider bin directories, not the login environment. Each line prepends, so the
+    // last one written is first on PATH.
+    for (const directory of directories.reverse().map(providerDirectoryPath)) {
+      shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
+    }
   }
   return { shell: `#!/bin/sh\n${shellEnvironment}${privatePackageFiles ? 'umask 077\n' : ''}exec ${shellInvocation} "$@"\n`,
     windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n` };
@@ -64,8 +83,10 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
     let shell = launchers.shell.replace('\numask 077\nexec ', '\nexec ')
       .replace(' exec --yes --umask=077 -- ', ' exec --yes -- ');
     const providerPrefix = platform === 'linux'
-      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\nexport PATH='([^\n]*)':"\$PATH"\n/) : undefined;
-    const codexDirectory = providerPrefix ? codexDirectoryPath(providerPrefix[2]!.replace(/'\\''/g, "'")) : undefined;
+      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\n((?:export PATH='[^\n]*':"\$PATH"\n)+)/) : undefined;
+    const providerDirectories = providerPrefix ? [...providerPrefix[2]!.matchAll(/export PATH='([^\n]*)':"\$PATH"\n/g)]
+      .map(line => providerDirectoryPath(line[1]!.replace(/'\\''/g, "'"))).reverse() : undefined;
+    const providerDirectory = providerDirectories?.length === 1 ? providerDirectories[0] : providerDirectories;
     if (providerPrefix) shell = `#!/bin/sh\nexport PATH='${providerPrefix[1]}':"$PATH"\n` + shell.slice(providerPrefix[0].length);
     const captured = platform === 'win32'
       ? launchers.windows.match(/^@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "PATH=([^\r\n]*);%PATH%"\r\n/)?.[1]
@@ -84,7 +105,7 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
       }
     }
     const runtime = {platform, nodeDirectory: directory, ...(npmCliPath === undefined ? {} : {npmCliPath}),
-      ...(codexDirectory === undefined ? {} : {codexDirectory})};
+      ...(providerDirectory === undefined ? {} : {providerDirectory})};
     const expected = stableRepositoryLauncherContents(version, runtime);
     return expected.shell === launchers.shell && expected.windows === launchers.windows ? runtime : undefined;
   } catch { return undefined; }
@@ -137,8 +158,8 @@ export async function resolveRepositoryNpmCli(options: {npmExecPath?: string; se
   throw new Error('relay_startup_npm_unavailable');
 }
 
-async function protectedCodexDirectory(directory: string, nodePath = process.execPath) {
-  codexDirectoryPath(directory);
+async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath = process.execPath) {
+  providerDirectoryPath(directory);
   if (await realpath(directory) !== directory) throw Error();
   const protectParents = async (path: string) => {
     for (let current = path; ; current = dirname(current)) {
@@ -151,9 +172,14 @@ async function protectedCodexDirectory(directory: string, nodePath = process.exe
     }
   };
   await protectParents(directory);
-  const executable = await realpath(join(directory, 'codex'));
+  const executable = await realpath(join(directory, provider));
   await protectParents(dirname(executable));
-  await protectedBinaryHash(executable, 'linux');
+  if (provider === 'codex') await protectedBinaryHash(executable, 'linux');
+  else {
+    // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
+    const stat = await lstat(executable);
+    if (!stat.isFile() || ![0, process.getuid!()].includes(stat.uid) || (stat.mode & 0o022)) throw Error();
+  }
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
   let hasNode = true;
   try {await lstat(join(directory, 'node'));} catch (error) {
@@ -170,18 +196,30 @@ async function protectedCodexDirectory(directory: string, nodePath = process.exe
   return directory;
 }
 
-export async function resolveRepositoryCodexDirectory(options: {searchPath?: string; platform?: NodeJS.Platform} = {}) {
+export async function resolveRepositoryProviderDirectory(options: {provider?: ProviderCommand; searchPath?: string;
+  platform?: NodeJS.Platform} = {}) {
   if ((options.platform ?? process.platform) !== 'linux') return undefined;
+  const provider = options.provider ?? 'codex';
   for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
     if (!directory) continue;
-    try {await lstat(join(directory, 'codex'));} catch (error) {
+    try {await lstat(join(directory, provider));} catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw new Error(UNSAFE_CODEX_ON_PATH);
+      throw new Error(unsafeProviderOnPath(provider));
     }
-    // Do not skip an unsafe first match and silently select a different provider.
-    try {return await protectedCodexDirectory(directory);} catch {throw new Error(UNSAFE_CODEX_ON_PATH);}
+    // Do not skip an unsafe first match and silently select a different executable.
+    try {return await protectedProviderDirectory(directory, provider);} catch {throw new Error(unsafeProviderOnPath(provider));}
   }
   return undefined;
+}
+
+// A recorded launcher names only the directories. Verify each for one of the set-up providers; when none is known,
+// accept a directory once any provider command in it passes.
+async function protectedRecordedProviderDirectory(directory: string, providers: ProviderCommand | readonly ProviderCommand[] | undefined,
+  nodePath: string) {
+  for (const command of providers === undefined ? PROVIDER_COMMANDS : typeof providers === 'string' ? [providers] : providers) {
+    try {return await protectedProviderDirectory(directory, command, nodePath);} catch {}
+  }
+  throw Error();
 }
 
 async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
@@ -204,25 +242,32 @@ async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
   } finally { await file.close(); }
 }
 
+type VerifiedRuntime = {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string;
+  provider?: ProviderCommand | readonly ProviderCommand[]};
+
 export async function verifyRecordedRepositoryLaunchers(version: string, launchers: Launchers,
-  runtime: {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string} = { platform: process.platform, nodePath: process.execPath }): Promise<boolean> {
+  runtime: VerifiedRuntime = { platform: process.platform, nodePath: process.execPath }): Promise<boolean> {
   return verifyRecordedRuntime(version, launchers, runtime, 'active');
 }
 
 // Recovery compares stored bytes but never executes the recorded replacement launcher.
-export async function verifyRollbackRepositoryLaunchers(version: string, launchers: Launchers): Promise<boolean> {
-  return verifyRecordedRuntime(version, launchers, {platform: process.platform, nodePath: process.execPath}, 'recorded');
+export async function verifyRollbackRepositoryLaunchers(version: string, launchers: Launchers,
+  provider?: ProviderCommand | readonly ProviderCommand[]): Promise<boolean> {
+  return verifyRecordedRuntime(version, launchers, {platform: process.platform, nodePath: process.execPath,
+    ...(provider === undefined ? {} : {provider})}, 'recorded');
 }
 
 async function verifyRecordedRuntime(version: string, launchers: Launchers,
-  runtime: {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string}, npmContext: 'active' | 'recorded'): Promise<boolean> {
+  runtime: VerifiedRuntime, npmContext: 'active' | 'recorded'): Promise<boolean> {
   const recorded = recordedRuntime(version, launchers, runtime.platform);
   if (!recorded) return false;
   const directory = recorded.nodeDirectory;
   // A changed npm cache path is not a new trust root: require the already running Node bytes.
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
-    if (recorded.codexDirectory !== undefined) await protectedCodexDirectory(recorded.codexDirectory, runtime.nodePath);
+    for (const providerDirectory of [recorded.providerDirectory ?? []].flat()) {
+      await protectedRecordedProviderDirectory(providerDirectory, runtime.provider, runtime.nodePath);
+    }
     if (recorded.npmCliPath !== undefined) {
       const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)
         : await resolveRepositoryNpmCli({npmExecPath: runtime.npmCliPath, platform: runtime.platform});

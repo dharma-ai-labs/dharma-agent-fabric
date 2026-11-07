@@ -97,7 +97,7 @@ async function fixture(t: test.TestContext) {
     fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8'), ts.ScriptTarget.Latest, true);
   const names = ['joinExistingRepository', 'bindRepositoryAgent', 'reconcileWorkspaceRegistration',
     'canonicalRepositoryPackage', 'canonicalRepositoryPackagePolicyGeneration', 'canonicalEndpointRole',
-    'repositoryRoleScope', 'repositorySharedReady'];
+    'repositoryRoleScope', 'repositorySharedReady', 'setupProviderSharedReady'];
   const bodies = names.map(name => {
     const nodes = source.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
     assert.equal(nodes.length, 1); return nodes[0]!.getText(source).replace(/^export\s+/, '');
@@ -227,4 +227,21 @@ test('knowledge join refuses a foreign connection on resume without overwriting 
   await assert.rejects(f.run(), /repository_join_connection_scope_conflict/);
   assert.equal(await fs.readFile(path, 'utf8'), bytes);
   assert.equal(f.calls.includes('bootstrap_fixture'), false);
+});
+
+// PR #425 review round 5 (2): join reported ready on a release held by any provider, so a Claude join could say
+// ready while only codex held the release. Join readiness is keyed to the provider it set up, as onboard's is.
+test('a Claude knowledge join stays pending while only codex holds the release', async t => {
+  const f = await fixture(t); f.flags.set('provider', 'claude');
+  f.dependencies.isLocalProviderId = (provider: string) => ['codex', 'claude'].includes(provider);
+  f.dependencies.syncWorkspacePolicy = async (_fabric: unknown, item: Row) =>
+    ({ ok: true, organizationId: f.config.organizationId, workspace: { id: item.workspaceId, status: 'active' } });
+  const probed: unknown[] = [];
+  f.dependencies.installedRepositoryKnowledge = async (_workspace: unknown, provider?: string) => {
+    probed.push(provider ?? null); return provider === 'codex' ? { verified: true } : null; };
+  const result = await f.run();
+  assert.equal(result.ok, true);
+  assert.deepEqual(probed, ['claude']);
+  assert.equal(result.sharedRepositoryReady, false);
+  assert.equal(result.stage, 'shared_repository_pending');
 });
