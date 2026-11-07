@@ -82,6 +82,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     UUID_PATTERN: /^[0-9a-f-]{36}$/i,
     installStableRepositoryLauncher: async () => { await record('launcher');
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
+    registry: async () => [], recordedProviderIds,
     dharmaHome: () => '/fixture-home',
     VERSION: '0.2.102',
     relayAutostartStatus: async () => ({ state: 'disabled', backend: null }),
@@ -332,6 +333,7 @@ test('joining an existing package registers only a managed knowledge endpoint', 
     startRelayDaemon: async () => ({ state: 'running' }),
     repositorySharedReady: async () => true,
     isLocalProviderId: (value: string) => value === 'codex', recordedProviderIds,
+    setUpProviderIds: async (entry: {providerIds?: string[]}, added: string[]) => recordedProviderIds(entry.providerIds as never, added as never),
     basename,
   };
   const result = await (await caller('joinExistingRepository', dependencies))(

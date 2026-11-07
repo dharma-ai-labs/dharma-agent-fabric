@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -2093,11 +2093,11 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 }
 
 export function stableRepositoryLauncherContents(version = VERSION,
-  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; providerDirectory?: string }) {
+  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; providerDirectory?: string | readonly string[] }) {
   return repositoryLauncherContents(version, runtime);
 }
 
-async function installStableRepositoryLauncher(workspace: string, provider: ProviderId) {
+async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
   const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
   const shellPath = resolve(launcherRoot, 'dharma');
@@ -2105,14 +2105,18 @@ async function installStableRepositoryLauncher(workspace: string, provider: Prov
   await scope?.assert();
   const npmCliPath = process.platform === 'linux' ? await (scope
     ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
-  // The relay service starts with the user manager PATH, not this shell's. Carry the bin directory
-  // of the provider setup selected, so the relay probes and installs for that provider as setup did.
-  const providerDirectory = await (scope
-    ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath: providerProcessEnvironment(process.env).PATH}))
-    : resolveRepositoryProviderDirectory({provider, searchPath: providerProcessEnvironment(process.env).PATH}));
+  // The relay service starts with the user manager PATH, not this shell's. Carry the bin directory of every
+  // provider set up in this checkout, so the relay probes and installs for each of them as setup did.
+  const searchPath = providerProcessEnvironment(process.env).PATH;
+  const resolved: (string | undefined)[] = [];
+  for (const provider of providers) {
+    resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
+      : resolveRepositoryProviderDirectory({provider, searchPath})));
+  }
+  const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
-      ...(providerDirectory === undefined ? {} : {providerDirectory}) });
+      ...(providerDirectory.length ? {providerDirectory} : {}) });
   if (scope) {
     await scope.assert();
     if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
@@ -2192,6 +2196,8 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     const hint = providerHintFromEnvironment();
     const known = requested ?? selected.providerIds?.[0] ?? (hint && holders.includes(hint) ? hint : holders[0]) ?? hint ?? undefined;
     const provider = known ?? 'codex';
+    // A record without providers keeps the protected holders its relay served, then adds the chosen provider.
+    const launcherProviders = selected.providerIds ?? (known ? await setUpProviderIds(selected, [known]) : [provider]);
     // The chosen provider is recorded once its launcher is written and before the new relay starts, so that relay
     // loads it. Only providerIds changes on the current row; rollback, or a failed upgrade, removes it again.
     const recordsProvider = Boolean(known && !selected.providerIds && flags.has('apply') && !flags.has('rollback') && !maintenance);
@@ -2201,13 +2207,18 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       const current = (await registry()).find(item => item.workspaceId === selected.workspaceId);
       if (!current) throw new Error('relay_upgrade_workspace_unregistered');
       const { providerIds: _recorded, ...unrecorded } = current;
-      await saveWorkspaceRecord(record ? { ...unrecorded, providerIds: [known!] } : unrecorded, { expected: current });
+      await saveWorkspaceRecord(record ? { ...unrecorded, providerIds: launcherProviders } : unrecorded, { expected: current });
       providerRecorded = record;
     };
     // A rollback that could not finish still removes the record it added; the receipt reports the failure.
     const unrecordProvider = () => recordProvider(false).catch(() => {});
-    const providerDirectory = !flags.has('rollback')
-      ? await resolveRepositoryProviderDirectory({provider, searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
+    // The launcher carries the bin directory of every provider the record names, as setup writes it.
+    const searchPath = providerProcessEnvironment(process.env).PATH;
+    const resolved: (string | undefined)[] = [];
+    if (!flags.has('rollback')) {
+      for (const item of launcherProviders) resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));
+    }
+    const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
@@ -2251,15 +2262,16 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       },
       launcherContents: version => stableRepositoryLauncherContents(version,
         { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
-          ...(providerDirectory === undefined ? {} : {providerDirectory}) }),
+          ...(providerDirectory.length ? {providerDirectory} : {}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
       // A recorded launcher was written for whichever provider was known then, so any protected provider command
-      // in its directory passes. Only the launcher this run writes is checked for the set-up provider.
+      // in its directory passes. Only the launcher this run writes is checked for the set-up providers.
       verifyPriorLaunchers: (version, contents) => verifyRecordedRepositoryLaunchers(version, contents,
         { platform: process.platform, nodePath: process.execPath }),
       recordNextLaunchers: process.platform === 'linux',
       verifyRecoveryLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents),
-      verifyNextLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents, known),
+      verifyNextLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents,
+        known && launcherProviders),
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
@@ -3787,8 +3799,11 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       repository: onboarded,
     };
   }
+  // The launcher carries every provider the record names, so setting up a second one keeps the first reachable.
+  const launcherProviders = recordedProviderIds((await step(() => registry()))
+    .find(item => item.workspaceId === onboarded.workspaceId)?.providerIds, [provider]);
   const {launcher, autostart} = flags.has('no-relay-daemon')
-    ? {launcher: await step(() => installStableRepositoryLauncher(workspace, provider)),
+    ? {launcher: await step(() => installStableRepositoryLauncher(workspace, launcherProviders)),
       autostart: {state: 'disabled' as const, backend: null}}
     : await step(() => withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
@@ -3798,7 +3813,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         await assertBootstrapStartupAnchor(organizationId, config.deviceId, step);
         // Keep previous launcher bytes intact until startup ownership and version
         // admit this operation; the supported upgrade relies on those exact bytes.
-        const launcher = await step(() => installStableRepositoryLauncher(workspace, provider));
+        const launcher = await step(() => installStableRepositoryLauncher(workspace, launcherProviders));
         const autostart = await step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
           version: VERSION, preserveStandardAnchor: true,
@@ -5144,18 +5159,31 @@ async function activeSkillBundle(workspace: WorkspaceRecord, provider: ProviderI
   }
 }
 
-async function relayProviderIds(workspace: WorkspaceRecord,
-  onUnprotected?: (provider: ProviderId) => void): Promise<ProviderId[] | null> {
-  if (!workspace.providerIds) return null;
+async function protectedBundleHolders(workspace: WorkspaceRecord, skip: readonly ProviderId[] = [],
+  onUnprotected?: (provider: ProviderId) => void): Promise<ProviderId[]> {
   const holders: ProviderId[] = [];
-  for (const provider of await providersHoldingInstalledBundle(workspace, workspace.providerIds)) {
+  for (const provider of await providersHoldingInstalledBundle(workspace, skip)) {
     // Setup never checked a holder's executable, and the first one on the relay PATH can belong to another
     // user. Apply setup's protection check before anything probes it.
     const protectedExecutable = await resolveRepositoryProviderDirectory({provider,
       searchPath: providerProcessEnvironment(process.env).PATH}).then(() => true, () => false);
     if (protectedExecutable) holders.push(provider); else onUnprotected?.(provider);
   }
-  return scopedRelayProviderIds(workspace.providerIds, holders);
+  return holders;
+}
+
+/**
+ * The providers a record names once `added` is set up there. A record from before providers were recorded had
+ * its relay serve every provider, so it starts from the protected holders of its bundle: none stops getting releases.
+ */
+async function setUpProviderIds(workspace: WorkspaceRecord, added: readonly ProviderId[]): Promise<ProviderId[]> {
+  return recordedProviderIds(workspace.providerIds ?? await protectedBundleHolders(workspace), added);
+}
+
+async function relayProviderIds(workspace: WorkspaceRecord,
+  onUnprotected?: (provider: ProviderId) => void): Promise<ProviderId[] | null> {
+  if (!workspace.providerIds) return null;
+  return scopedRelayProviderIds(workspace.providerIds, await protectedBundleHolders(workspace, workspace.providerIds, onUnprotected));
 }
 
 export async function receiptAwareProviderCapabilities(
@@ -6192,7 +6220,7 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
   item = reconcileWorkspaceRegistration(await registry(), item, synchronized);
   item = await bindRepositoryAgent(fabric, item, bindingId);
   // As onboard does, so the joined relay registers and installs only the providers set up here.
-  const joinedProviders = recordedProviderIds(item.providerIds, [provider]);
+  const joinedProviders = await setUpProviderIds(item, [provider]);
   if (canonicalize(item.providerIds ?? null) !== canonicalize(joinedProviders)) {
     item = { ...item, providerIds: joinedProviders };
     await saveWorkspaceRecord(item);
@@ -6911,7 +6939,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
   registered = prepared.registered;
   // Later policy syncs and the relay read this record, so they register and install only these providers.
-  const recordedProviders = providerIds && recordedProviderIds(registered.providerIds, providerIds);
+  const recordedProviders = providerIds && await setUpProviderIds(registered, providerIds);
   if (recordedProviders && canonicalize(registered.providerIds ?? null) !== canonicalize(recordedProviders)) {
     registered = { ...registered, providerIds: recordedProviders };
     await saveWorkspaceRecord(registered);
@@ -8767,7 +8795,7 @@ async function heldSkillRelease(nativeSkillDirectory: string, workspaceId: strin
 export async function prepareSkillUpdate(input: {
   workspaceId: string; provider: ProviderId; policyPath: string;
   fabric?: AgentFabricClient; store?: SecureSecretStore;
-  automatic?: boolean; assertRunning?: () => void; clearOnly?: boolean;
+  automatic?: boolean; assertRunning?: () => void; clearOnly?: boolean; onOfferIgnored?: () => void;
 }) {
   const { workspaceId, provider, policyPath } = input;
   const assertRunning = input.assertRunning || (() => {});
@@ -8821,8 +8849,12 @@ export async function prepareSkillUpdate(input: {
   if (!rollout) return null;
   // Nothing is installed from an ignored offer, so it is dropped before any package download. A holder still takes
   // a rollback to an install bundle it held before, so a bad release does not stay active on it.
+  // The caller is told, so an ignored release is not reported as an empty poll.
   if (input.clearOnly && (rollout.bundle as SkillBundle).operation !== 'clear'
-    && !await heldSkillRelease(destination, workspaceId, (rollout.bundle as SkillBundle).bundleId)) return null;
+    && !await heldSkillRelease(destination, workspaceId, (rollout.bundle as SkillBundle).bundleId)) {
+    input.onOfferIgnored?.();
+    return null;
+  }
   let bundle = rollout.bundle as SkillBundle;
   if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills)
     || (bundle.operation === 'install' && bundle.skills.length === 0)
@@ -9606,13 +9638,14 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
             // A provider served only because it holds a bundle takes a clear or a rollback to a bundle it held,
             // never a new release.
             const clearOnly = Boolean(scopedProviders && !canonicalWorkspace.providerIds?.includes(provider));
+            let offerIgnored = false;
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
               await withSkillPreparationTransaction({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,
                 provider, assertCurrent: () => { if (stopping) throw new Error('Relay is stopping.'); } }, async () => {
                 const cached = clearOnly ? null : await takeCachedSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
                   provider, policyPath, fabric });
                 const prepared = cached || await prepareSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
-                  provider, policyPath, fabric, automatic: true, clearOnly });
+                  provider, policyPath, fabric, automatic: true, clearOnly, onOfferIgnored: () => { offerIgnored = true; } });
                 if (!prepared) return;
                 if (!cached) skillPreparationsCompleted += 1;
                 activating = prepared;
@@ -9622,6 +9655,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 skillActivationsCompleted += 1;
               });
             });
+            // A release withheld from a provider not set up here is not an empty poll: status must not call it current.
+            if (offerIgnored) { record({ outcome: 'failed', errorCode: 'provider_not_set_up' }); continue; }
             // An empty poll after a failure clears it only once the provider's active bundle shows a current install.
             const installed = !activating && skillActivationResults[provider]?.outcome === 'failed'
               ? await activeSkillBundle(canonicalWorkspace, provider) : null;
@@ -9865,7 +9900,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
           verifyDemoDevice(scope, await createDemoDeviceTransport(scope))); },
         exclusive: operation => withRelayStartupMutation(operation),
         prepareStartup: async () => {
-          const launcher = await installStableRepositoryLauncher(workspace, provider);
+          const launcher = await installStableRepositoryLauncher(workspace, [provider]);
           await enableRelayAutostart({ home: dharmaHome(), workspace, policy: null, version: VERSION,
             launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell) });
         },

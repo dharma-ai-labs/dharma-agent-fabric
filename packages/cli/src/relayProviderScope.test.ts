@@ -48,10 +48,15 @@ test('setting up a second provider in the same checkout keeps the first in provi
   assert.deepEqual(recorded(['claude', 'codex'], ['claude']), ['claude', 'codex']);
   const text = await source();
   const onboard = between(text, 'async function onboard(flags', 'async function evidenceSync(');
-  assert.match(onboard, /recordedProviders = providerIds && recordedProviderIds\(registered\.providerIds, providerIds\);/);
+  // Fix round 2 (1): a record without providers starts from the protected holders of its bundle.
+  assert.match(onboard, /recordedProviders = providerIds && await setUpProviderIds\(registered, providerIds\);/);
   assert.doesNotMatch(onboard, /providerIds: providerIds\b/);
   const join = between(text, "const workspace = resolve(dharmaHome(), 'joined-repositories', bindingId);", "const roleInput = {");
-  assert.match(join, /recordedProviderIds\(item\.providerIds, \[provider\]\)/);
+  assert.match(join, /await setUpProviderIds\(item, \[provider\]\)/);
+  const seed = between(text, 'async function setUpProviderIds(', '\n}\n');
+  assert.match(seed, /recordedProviderIds\(workspace\.providerIds \?\? await protectedBundleHolders\(workspace\), added\)/);
+  const relay = between(text, 'async function relayProviderIds(', 'export async function receiptAwareProviderCapabilities(');
+  assert.match(relay, /await protectedBundleHolders\(workspace, workspace\.providerIds, onUnprotected\)/);
   assert.doesNotMatch(join, /providerIds: \[provider\]/);
 });
 
@@ -110,11 +115,17 @@ test('actual bootstrap returns the overlaid repository block', async () => {
 test('actual setup and relay upgrade put the set-up provider bin directory on the relay launcher PATH', async () => {
   const text = await source();
   const bootstrap = between(text, 'const {launcher, autostart} = flags.has(\'no-relay-daemon\')', 'let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;');
-  assert.equal((bootstrap.match(/installStableRepositoryLauncher\(workspace, provider\)/g) || []).length, 2);
+  // Fix round 2 (2): the launcher carries the bin directory of every provider the record names, not only this one.
+  assert.match(between(text, '// The launcher carries every provider the record names, so', 'const {launcher, autostart} ='),
+    /const launcherProviders = recordedProviderIds\(\(await step\(\(\) => registry\(\)\)\)\s*\.find\(item => item\.workspaceId === onboarded\.workspaceId\)\?\.providerIds, \[provider\]\);/);
+  assert.equal((bootstrap.match(/installStableRepositoryLauncher\(workspace, launcherProviders\)/g) || []).length, 2);
   const installer = between(text, 'async function installStableRepositoryLauncher(', "return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };");
-  assert.match(installer, /resolveRepositoryProviderDirectory\(\{provider, searchPath: providerProcessEnvironment\(process\.env\)\.PATH\}\)/);
+  assert.match(installer, /for \(const provider of providers\)/);
+  assert.match(installer, /resolveRepositoryProviderDirectory\(\{provider, searchPath\}\)/);
+  assert.match(installer, /providerDirectoriesInPathOrder\(/);
   const upgrade = between(text, 'async function relayUpgrade(', 'const upgrade=maintenance?');
-  assert.match(upgrade, /resolveRepositoryProviderDirectory\(\{provider, searchPath: providerProcessEnvironment\(process\.env\)\.PATH\}\)/);
+  assert.match(upgrade, /for \(const item of launcherProviders\)/);
+  assert.match(upgrade, /resolveRepositoryProviderDirectory\(\{provider: item, searchPath\}\)/);
 });
 
 // PR #425 review (5): a provider kept only for rollback has no bin directory on the launcher PATH, and the relay
@@ -133,15 +144,16 @@ test('actual relay activation records a scoped provider it cannot reach instead 
 
 test('actual upgrade and the relay share one reader of providers that hold an installed bundle', async () => {
   const text = await source();
-  const relay = between(text, 'async function relayProviderIds(', 'export async function receiptAwareProviderCapabilities(');
-  assert.match(relay, /providersHoldingInstalledBundle\(workspace, workspace\.providerIds\)/);
+  const relay = between(text, 'async function protectedBundleHolders(', 'async function setUpProviderIds(');
+  assert.match(relay, /providersHoldingInstalledBundle\(workspace, skip\)/);
   const upgrade = between(text, 'async function relayUpgrade(', 'const upgrade=maintenance?');
   assert.match(upgrade, /await providersHoldingInstalledBundle\(selected\)/);
 });
 
 // PR #425 review round 2 (1): a provider kept only because it holds a bundle still got every new release, and the
 // relay ran its executable from the user-manager PATH, where on the F13 host codex is another user's binary.
-async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install' | 'clear' }) {
+async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install' | 'clear';
+  previous?: Record<string, unknown> }) {
   const ts = (await import('typescript')).default;
   const { resolve } = await import('node:path');
   const { runInNewContext } = await import('node:vm');
@@ -151,7 +163,8 @@ async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install
     = await import('./skillActivationResult.js');
   const text = await source();
   const ast = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true);
-  const declarations = ['relayWorkspaceLoop', 'relayProviderIds', 'scopedRelayProviderIds', 'selectedProviderAdapters'].map(name => {
+  const declarations = ['relayWorkspaceLoop', 'relayProviderIds', 'protectedBundleHolders', 'scopedRelayProviderIds',
+    'selectedProviderAdapters'].map(name => {
     const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
     assert.equal(nodes.length, 1, name);
     return nodes[0]!.getText(ast);
@@ -182,7 +195,7 @@ async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install
     writeJsonAtomic: async (_path: string, value: Record<string, any>) => { written.push(value); },
     RepositorySourceWatcher: class { invalidate() {} }, BlockedRepositorySourceRetry: class { consider() { return false; } },
     openBootstrapVault: async () => ({ close: async () => {} }), rawLocalRetentionDays: () => 1,
-    readRelaySkillActivationState: async () => null,
+    readRelaySkillActivationState: async () => scenario.previous ? { providers: { codex: scenario.previous } } : null,
     providersHoldingInstalledBundle: async () => ['codex'],
     providerProcessEnvironment: (env: Record<string, string>) => env,
     resolveRepositoryProviderDirectory: async (input: { provider: string }) => {
@@ -195,12 +208,14 @@ async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install
       pump = input.prepare(() => {});
       return { requestStop: () => {}, stop: async () => { await pump; } };
     },
-    prepareSkillUpdate: async (input: { provider: string; assertRunning?: unknown; clearOnly?: unknown }) => {
+    prepareSkillUpdate: async (input: { provider: string; assertRunning?: unknown; clearOnly?: unknown;
+      onOfferIgnored?: () => void }) => {
       if (input.assertRunning) { pumped.push(input.provider); return null; }
       polled.push({ provider: input.provider, clearOnly: input.clearOnly });
       const prepared = offered(input.provider);
-      // As the real preparation does, a clear-only poll ignores an offered install.
-      return input.clearOnly && prepared.bundle.operation !== 'clear' ? null : prepared;
+      // As the real preparation does, a clear-only poll ignores an offered install and says so.
+      if (input.clearOnly && prepared.bundle.operation !== 'clear') { input.onOfferIgnored?.(); return null; }
+      return prepared;
     },
     takeCachedSkillUpdate: async () => null,
     activatePreparedSkillUpdate: async (input: { provider: string }) => { activated.push(input.provider); return { status: 'active' }; },
@@ -236,7 +251,28 @@ test('actual relay gives a protected holder only a clear, never a new release', 
   assert.deepEqual(install.pumped, ['claude'], 'background preparation is for the set-up provider only');
   assert.deepEqual(install.polled, [{ provider: 'codex', clearOnly: true }, { provider: 'claude', clearOnly: false }]);
   assert.deepEqual(install.activated, ['claude'], 'the holder must not receive the new release');
-  assert.equal(install.providers.codex?.outcome, 'no_rollout');
+  assert.equal(install.providers.codex?.outcome, 'failed');
+  assert.equal(install.providers.codex?.errorCode, 'provider_not_set_up');
   const clear = await runRelayTick({ codexProtected: true, offer: 'clear' });
   assert.deepEqual(clear.activated, ['codex', 'claude'], 'rollback to the clear baseline still reaches the holder');
+});
+
+// PR #425 fix round 2 (1): an install dropped for a holder was recorded as no_rollout, which turned an earlier
+// activated or up_to_date result into up_to_date, so status said the holder was current while it kept an old release.
+test('actual relay reports a release withheld from a holder, never up to date', async () => {
+  for (const outcome of ['activated', 'up_to_date']) {
+    const previous = { at: '2026-11-05T06:30:00.000Z', outcome, rolloutId: null, bundleId: 'bundle-old', errorCode: null };
+    const run = await runRelayTick({ codexProtected: true, offer: 'install', previous });
+    assert.deepEqual(run.activated, ['claude'], outcome);
+    assert.equal(run.providers.codex?.outcome, 'failed', outcome);
+    assert.equal(run.providers.codex?.errorCode, 'provider_not_set_up', outcome);
+    const { parseRelaySkillActivationState } = await import('./skillActivationResult.js');
+    assert.ok(parseRelaySkillActivationState({ schema: 'dharma.relay-skill-activation/v1', workspaceId: 'w',
+      updatedAt: '2026-11-06T06:30:00.000Z', counters: { preparationsCompleted: 0, preparationFailures: 0,
+        activationsCompleted: 0, activationFailures: 0 }, providers: { codex: run.providers.codex } }, 'w'),
+    'setup and status can read the recorded reason');
+  }
+  const current = await runRelayTick({ codexProtected: true, offer: 'clear',
+    previous: { at: '2026-11-05T06:30:00.000Z', outcome: 'failed', rolloutId: null, bundleId: null, errorCode: 'provider_not_set_up' } });
+  assert.equal(current.providers.codex?.outcome, 'activated', 'a clear the holder takes still reaches it');
 });

@@ -751,7 +751,8 @@ test('concurrent actual bootstrap-to-onboard clients preserve a sibling durable 
         return new Response(JSON.stringify({ok: true}), {status: 201});
       }})},
     loadOrganizationApiToken: async () => 'synthetic-existing-token',
-    parseSelectedProviderIds: () => ['codex'], recordedProviderIds, inspectRegistryRecoveryFile: async () => ({kind: 'valid'}),
+    parseSelectedProviderIds: () => ['codex'], recordedProviderIds,
+    setUpProviderIds: async (item: {providerIds?: string[]}, added: string[]) => recordedProviderIds(item.providerIds as never, added as never), inspectRegistryRecoveryFile: async () => ({kind: 'valid'}),
     saveWorkspaceRecord: async () => undefined,
     registerWorkspaceBeforeRepositoryBind: async (fabric: AgentFabricClient) => {
       await fabric.registerWorkspace({workspaceId: f.row.workspaceId});

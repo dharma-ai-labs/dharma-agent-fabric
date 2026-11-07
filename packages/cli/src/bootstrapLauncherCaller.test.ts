@@ -8,6 +8,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import {currentBootstrapHostScope, runCodexBootstrapHost} from './bootstrapHostScope.js';
 import {writeBootstrapHostText} from './bootstrapHostFiles.js';
+import * as launcherModule from './repositoryLaunchers.js';
 import {stableRepositoryLauncherContents} from './repositoryLaunchers.js';
 const npmCliPath = process.platform === 'linux' ? '/synthetic/npm/bin/npm-cli.js' : undefined;
 const providerDirectory = process.platform === 'linux' ? '/synthetic/codex/bin' : undefined;
@@ -36,26 +37,27 @@ async function caller(overrides: Record<string, unknown> = {}) {
   assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${output.outputText}\ninstallStableRepositoryLauncher`, {...fs, process, resolve, dirname,
     currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents,
+    providerDirectoriesInPathOrder: (launcherModule as Record<string, unknown>).providerDirectoriesInPathOrder,
     resolveRepositoryNpmCli: async () => npmCliPath,
     providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/fallback/bin'}),
     resolveRepositoryProviderDirectory: async (input: {provider: string; searchPath?: string}) => {
       assert.equal(input.provider, 'codex');
       assert.equal(input.searchPath, '/synthetic/codex/bin:/synthetic/fallback/bin'); return providerDirectory;
     }, VERSION: '0.2.153', ...overrides},
-    {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as (workspace: string, provider: string) => Promise<{shell: string; windows: string}>;
+    {timeout: 1000, contextCodeGeneration: {strings: false, wasm: false}}) as (workspace: string, providers: string[]) => Promise<{shell: string; windows: string}>;
 }
 
 test('actual launcher installer denies a withdrawn owner before creating directories', async t => {
   const f = await fixture(t), install = await caller();
   await assert.rejects(runCodexBootstrapHost(f.input, async ({scope}) => {
-    scope.close(); return install(f.root, 'codex');
+    scope.close(); return install(f.root, ['codex']);
   }), {message: 'codex_setup_host_scope_unavailable'});
   assert.deepEqual(await fs.readdir(f.root), []);
 });
 
 test('actual launcher installer publishes exact pinned bytes under the original owning scope', async t => {
   const f = await fixture(t), install = await caller();
-  const result = await runCodexBootstrapHost(f.input, () => install(f.root, 'codex'));
+  const result = await runCodexBootstrapHost(f.input, () => install(f.root, ['codex']));
   assert.equal(result.shell, '.dharma/bin/dharma'); assert.equal(result.windows, '.dharma/bin/dharma.cmd');
   const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
     nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
@@ -75,7 +77,7 @@ test('actual launcher installer cannot continue to the second file after authori
   await fs.writeFile(resolve(f.bin, 'dharma'), 'prior-shell\n');
   await fs.writeFile(resolve(f.bin, 'dharma.cmd'), 'prior-cmd\n');
   const input = {...f.input, current: async () => readFileSync(resolve(f.bin, 'dharma'), 'utf8') === 'prior-shell\n'};
-  await assert.rejects(runCodexBootstrapHost(input, () => install(f.root, 'codex')), {message: 'codex_setup_host_scope_unavailable'});
+  await assert.rejects(runCodexBootstrapHost(input, () => install(f.root, ['codex'])), {message: 'codex_setup_host_scope_unavailable'});
   assert.match(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), /agent-fabric@0\.2\.153/);
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma.cmd'), 'utf8'), 'prior-cmd\n');
   // A completed first publication is retained, not falsely reported as rolled back.
@@ -86,7 +88,7 @@ test('actual launcher installer rejects an aliased setup directory without writi
   const f = await fixture(t), other = await fixture(t), install = await caller();
   await fs.writeFile(resolve(other.root, 'preserve'), 'sibling\n');
   await fs.symlink(other.root, resolve(f.root, '.dharma'), process.platform === 'win32' ? 'junction' : 'dir');
-  await assert.rejects(runCodexBootstrapHost(f.input, () => install(f.root, 'codex')), {message: 'codex_setup_host_launcher_path_invalid'});
+  await assert.rejects(runCodexBootstrapHost(f.input, () => install(f.root, ['codex'])), {message: 'codex_setup_host_launcher_path_invalid'});
   assert.deepEqual(await fs.readdir(other.root), ['preserve']);
   assert.equal(existsSync(resolve(other.root, 'bin')), false);
 });
@@ -94,7 +96,7 @@ test('actual launcher installer rejects an aliased setup directory without writi
 test('actual launcher installer cannot report success after its final publication loses acknowledgement', async t => {
   const f = await fixture(t), install = await caller();
   const cmd = resolve(f.bin, 'dharma.cmd');
-  await assert.rejects(runCodexBootstrapHost({...f.input, current: async () => !existsSync(cmd)}, () => install(f.root, 'codex')),
+  await assert.rejects(runCodexBootstrapHost({...f.input, current: async () => !existsSync(cmd)}, () => install(f.root, ['codex'])),
     {message: 'codex_setup_host_scope_unavailable'});
   assert.match(await fs.readFile(cmd, 'utf8'), /agent-fabric@0\.2\.153/);
   assert.match(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), /agent-fabric@0\.2\.153/);
@@ -102,7 +104,7 @@ test('actual launcher installer cannot report success after its final publicatio
 
 test('legacy launcher installation retains its existing supported contents without a native scope', async t => {
   const f = await fixture(t), install = await caller();
-  await install(f.root, 'codex');
+  await install(f.root, ['codex']);
   assert.match(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), /agent-fabric@0\.2\.153/);
 });
 
@@ -110,7 +112,7 @@ test('actual launcher installer stops before publishing an unsafe provider path'
   const f = await fixture(t), install = await caller({resolveRepositoryProviderDirectory: async () => {
     throw new Error('relay_startup_codex_path_invalid');
   }});
-  await assert.rejects(runCodexBootstrapHost(f.input, () => install(f.root, 'codex')), {message: 'relay_startup_codex_path_invalid'});
+  await assert.rejects(runCodexBootstrapHost(f.input, () => install(f.root, ['codex'])), {message: 'relay_startup_codex_path_invalid'});
   assert.equal(existsSync(f.bin), false);
 });
 
@@ -118,7 +120,7 @@ test('actual launcher installer cannot publish after provider resolution loses i
   const f = await fixture(t);
   let close = () => {};
   const install = await caller({resolveRepositoryProviderDirectory: async () => {close(); return providerDirectory;}});
-  await assert.rejects(runCodexBootstrapHost(f.input, async ({scope}) => {close = () => scope.close(); return install(f.root, 'codex');}),
+  await assert.rejects(runCodexBootstrapHost(f.input, async ({scope}) => {close = () => scope.close(); return install(f.root, ['codex']);}),
     {message: 'codex_setup_host_scope_unavailable'});
   assert.equal(existsSync(f.bin), false);
 });
@@ -131,6 +133,25 @@ test('actual launcher installer resolves the bin directory of the provider that 
       requested.push(input.provider); return undefined;
     },
   });
-  await runCodexBootstrapHost(f.input, () => install(f.root, 'claude'));
+  await runCodexBootstrapHost(f.input, () => install(f.root, ['claude']));
   assert.deepEqual(requested, ['claude']);
+});
+
+// PR #425 fix round 2 (2): setting up a second provider rewrote the launcher with only that provider's bin directory.
+test('actual launcher installer carries the bin directory of every provider set up in the checkout', async t => {
+  const f = await fixture(t), requested: string[] = [];
+  const directory = (provider: string) => process.platform === 'linux' ? `/synthetic/${provider}/bin` : undefined;
+  const install = await caller({
+    providerProcessEnvironment: () => ({PATH: '/synthetic/claude/bin:/synthetic/codex/bin'}),
+    resolveRepositoryProviderDirectory: async (input: {provider: string; searchPath?: string}) => {
+      assert.equal(input.searchPath, '/synthetic/claude/bin:/synthetic/codex/bin');
+      requested.push(input.provider); return directory(input.provider);
+    },
+  });
+  await runCodexBootstrapHost(f.input, () => install(f.root, ['codex', 'claude']));
+  assert.deepEqual(requested, ['codex', 'claude']);
+  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+    ...(process.platform === 'linux' ? {providerDirectory: ['/synthetic/claude/bin', '/synthetic/codex/bin']} : {})});
+  assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
 });

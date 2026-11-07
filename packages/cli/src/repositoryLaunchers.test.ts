@@ -365,3 +365,57 @@ test('recorded-launcher verification checks the set-up provider, else accepts an
 function stableLauncher(launchers: Record<string, any>, runtime: Record<string, unknown>): {shell: string; windows: string} {
   return launchers.stableRepositoryLauncherContents('0.2.224', runtime);
 }
+
+// PR #425 fix round 2 (2): the launcher carried only the provider being set up, so setting up codex after claude in
+// one checkout, or relay upgrade with providerIds [claude, codex], dropped the other provider's bin directory.
+test('Linux launcher carries the bin directory of every set-up provider, the first one first on PATH', async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const runtime = {platform: 'linux' as const, nodeDirectory: '/approved/node/bin', npmCliPath: '/approved/npm/bin/npm-cli.js'};
+  const single = launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory: '/approved/claude/bin'});
+  assert.deepEqual(launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory: ['/approved/claude/bin']}), single,
+    'one directory keeps the bytes written before');
+  const both = launchers.stableRepositoryLauncherContents('0.2.224',
+    {...runtime, providerDirectory: ['/approved/claude/bin', '/approved/codex/bin']});
+  assert.ok(both.shell.startsWith(`#!/bin/sh\nexport PATH='/approved/node/bin':"$PATH"\n`
+    + `export PATH='/approved/codex/bin':"$PATH"\nexport PATH='/approved/claude/bin':"$PATH"\n`));
+  assert.equal(launchers.recordedRepositoryNodeDirectory('0.2.224', both, 'linux'), '/approved/node/bin');
+  assert.throws(() => launchers.stableRepositoryLauncherContents('0.2.224',
+    {...runtime, providerDirectory: ['/approved/codex/bin', '/approved/codex/bin']}), /relay_startup_provider_path_invalid/);
+  assert.throws(() => launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory: []}),
+    /relay_startup_provider_path_invalid/);
+  assert.equal(typeof launchers.providerDirectoriesInPathOrder, 'function');
+  assert.deepEqual(launchers.providerDirectoriesInPathOrder(['/b', undefined, '/a', '/b'], '/x:/a:/b'), ['/a', '/b'],
+    'directories keep the order of the PATH each provider was resolved from');
+});
+
+test('actual Linux launcher with two set-up providers reaches both and verifies each directory', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-two-providers-')));
+  try {
+    const nodeDirectory = join(root, 'node'), npmDirectory = join(root, 'npm');
+    const claudeDirectory = join(root, 'local', 'bin'), codexDirectory = join(root, 'npm-global', 'bin');
+    for (const directory of [nodeDirectory, npmDirectory, claudeDirectory, codexDirectory]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await copyFile(process.execPath, join(nodeDirectory, 'node')); await chmod(join(nodeDirectory, 'node'), 0o700);
+    const npmCliPath = join(npmDirectory, 'bin', 'npm-cli.js'); await mkdir(dirname(npmCliPath), {mode: 0o700});
+    await writeFile(join(npmDirectory, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+    await writeFile(npmCliPath, "const c=require('node:child_process');process.stdout.write(JSON.stringify(['claude','codex'].map(n=>c.spawnSync(n,[],{encoding:'utf8'}).stdout)));", {mode: 0o600});
+    await writeFile(join(claudeDirectory, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    await writeFile(join(codexDirectory, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
+    const searchPath = `${claudeDirectory}:${codexDirectory}`;
+    const resolved = await Promise.all(['codex', 'claude'].map(provider => launchers.resolveRepositoryProviderDirectory({provider, searchPath})));
+    const providerDirectory = launchers.providerDirectoriesInPathOrder(resolved, searchPath);
+    assert.deepEqual(providerDirectory, [claudeDirectory, codexDirectory]);
+    const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory, npmCliPath, providerDirectory});
+    await writeFile(join(root, 'after.sh'), after.shell);
+    const {stdout} = await promisify(execFile)('/bin/sh', [join(root, 'after.sh')], {env: {PATH: join(root, 'absent'), HOME: root}});
+    assert.deepEqual(JSON.parse(stdout), ['own-claude', 'own-codex'], 'the relay reaches both set-up providers');
+    const verify = () => launchers.verifyRecordedRepositoryLaunchers('0.2.224', after, {platform: 'linux', nodePath: process.execPath, npmCliPath});
+    assert.equal(await verify(), true);
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, ['claude', 'codex']), true);
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, ['claude']), false,
+      'each directory must hold a set-up provider');
+    await chmod(join(codexDirectory, 'codex'), 0o722);
+    assert.equal(await verify(), false, 'every recorded directory is checked, not only the first');
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, ['claude', 'codex']), false);
+  } finally {await rm(root, {recursive: true, force: true});}
+});

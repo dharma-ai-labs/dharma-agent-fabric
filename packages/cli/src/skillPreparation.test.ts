@@ -161,19 +161,22 @@ test('actual clear-only preparation ignores an offered install and still prepare
   };
   const clear = signed({ ...structuredClone(f.bundle), bundleId: '66666666-6666-4666-8666-666666666666',
     operation: 'clear', skills: [] });
-  let offer: SkillBundle = f.bundle, polls = 0;
+  let offer: SkillBundle = f.bundle, polls = 0, ignored = 0;
   const fabric = { pollSkill: async () => { polls++; return { ok: true, organizationId: 'org_test', rollout: { id: 'rollout', bundle: offer } }; },
     signedGet: async () => { throw new Error('Unexpected package transport.'); } } as unknown as AgentFabricClient;
   try {
     const operation = () => prepareSkillUpdate({ workspaceId: WORKSPACE, provider: 'codex', policyPath: f.policyPath,
-      fabric, store: f.store, automatic: true, clearOnly: true });
+      fabric, store: f.store, automatic: true, clearOnly: true, onOfferIgnored: () => { ignored++; } });
     assert.equal(await operation(), null, 'an install offered to a holder is not prepared');
     assert.equal(polls, 1);
+    // PR #425 fix round 2 (1): the relay must tell an ignored offer from an empty poll.
+    assert.equal(ignored, 1, 'the ignored install is reported to the caller');
     assert.deepEqual(await readdir(skillPreparationScopeRoot(f.home, WORKSPACE, 'codex')).catch(() => []), [],
       'nothing is staged for the ignored install');
     offer = clear;
     const prepared = await operation();
     assert.equal(prepared?.bundle.operation, 'clear');
+    assert.equal(ignored, 1, 'a clear is not an ignored offer');
     await rm(prepared!.sourceRoot, { recursive: true, force: true });
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;

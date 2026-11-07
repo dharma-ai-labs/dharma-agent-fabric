@@ -5,13 +5,22 @@ import { dirname, join, posix, win32 } from 'node:path';
 
 type Launchers = { shell: string; windows: string };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
-type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; providerDirectory?: string};
-// Executable names of the local provider adapters. A launcher prepends the bin directory of the one setup selected.
+// providerDirectory lists the bin directories of the set-up providers, the first one first on PATH.
+type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string;
+  providerDirectory?: string | readonly string[]};
+// Executable names of the local provider adapters. A launcher prepends the bin directories of the ones set up.
 const PROVIDER_COMMANDS = ['codex', 'claude', 'agy', 'hermes'] as const;
 export type ProviderCommand = typeof PROVIDER_COMMANDS[number];
 const unsafeProviderOnPath = (provider: ProviderCommand) => `relay_startup_${provider}_path_invalid: the first ${provider} on PATH `
   + `belongs to another user or is not protected. Put your own ${provider} first on PATH, or remove the other one from PATH.`
   + ` If you set up another provider, pass --provider <${PROVIDER_COMMANDS.join('|')}>.`;
+
+/** The resolved provider bin directories, once each, in the order of the PATH they were resolved from. */
+export function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[], searchPath: string | undefined): string[] {
+  const order = (searchPath ?? '').split(':');
+  return [...new Set(directories.filter((directory): directory is string => directory !== undefined))]
+    .sort((left, right) => order.indexOf(left) - order.indexOf(right));
+}
 
 function providerDirectoryPath(value: string) {
   if (!value || value.length > 4096 || !posix.isAbsolute(value) || value === '/'
@@ -52,10 +61,15 @@ export function stableRepositoryLauncherContents(version: string,
     shellInvocation = `${quote(posix.join(runtime.nodeDirectory, 'node'))} ${quote(entry)} ${npmArguments}`;
   }
   if (runtime?.providerDirectory !== undefined) {
-    if (runtime.platform !== 'linux') throw new Error('relay_startup_provider_path_invalid');
-    const directory = providerDirectoryPath(runtime.providerDirectory);
-    // Preserve only the qualified provider bin directory, not the login environment.
-    shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
+    const directories = typeof runtime.providerDirectory === 'string' ? [runtime.providerDirectory] : [...runtime.providerDirectory];
+    if (runtime.platform !== 'linux' || !directories.length || new Set(directories).size !== directories.length) {
+      throw new Error('relay_startup_provider_path_invalid');
+    }
+    // Preserve only the qualified provider bin directories, not the login environment. Each line prepends, so the
+    // last one written is first on PATH.
+    for (const directory of directories.reverse().map(providerDirectoryPath)) {
+      shellEnvironment += `export PATH='${directory.replace(/'/g, "'\\''")}':"$PATH"\n`;
+    }
   }
   return { shell: `#!/bin/sh\n${shellEnvironment}${privatePackageFiles ? 'umask 077\n' : ''}exec ${shellInvocation} "$@"\n`,
     windows: `@echo off\r\n${windowsEnvironment}${invocation} %*\r\n` };
@@ -69,8 +83,10 @@ function recordedRuntime(version: string, launchers: Launchers, platform: NodeJS
     let shell = launchers.shell.replace('\numask 077\nexec ', '\nexec ')
       .replace(' exec --yes --umask=077 -- ', ' exec --yes -- ');
     const providerPrefix = platform === 'linux'
-      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\nexport PATH='([^\n]*)':"\$PATH"\n/) : undefined;
-    const providerDirectory = providerPrefix ? providerDirectoryPath(providerPrefix[2]!.replace(/'\\''/g, "'")) : undefined;
+      ? shell.match(/^#!\/bin\/sh\nexport PATH='([^\n]*)':"\$PATH"\n((?:export PATH='[^\n]*':"\$PATH"\n)+)/) : undefined;
+    const providerDirectories = providerPrefix ? [...providerPrefix[2]!.matchAll(/export PATH='([^\n]*)':"\$PATH"\n/g)]
+      .map(line => providerDirectoryPath(line[1]!.replace(/'\\''/g, "'"))).reverse() : undefined;
+    const providerDirectory = providerDirectories?.length === 1 ? providerDirectories[0] : providerDirectories;
     if (providerPrefix) shell = `#!/bin/sh\nexport PATH='${providerPrefix[1]}':"$PATH"\n` + shell.slice(providerPrefix[0].length);
     const captured = platform === 'win32'
       ? launchers.windows.match(/^@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "PATH=([^\r\n]*);%PATH%"\r\n/)?.[1]
@@ -196,11 +212,11 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
   return undefined;
 }
 
-// A recorded launcher names only the directory. Verify it for the set-up provider; when none is known,
-// accept the directory once any provider command in it passes.
-async function protectedRecordedProviderDirectory(directory: string, provider: ProviderCommand | undefined, nodePath: string) {
-  if (provider) return protectedProviderDirectory(directory, provider, nodePath);
-  for (const command of PROVIDER_COMMANDS) {
+// A recorded launcher names only the directories. Verify each for one of the set-up providers; when none is known,
+// accept a directory once any provider command in it passes.
+async function protectedRecordedProviderDirectory(directory: string, providers: ProviderCommand | readonly ProviderCommand[] | undefined,
+  nodePath: string) {
+  for (const command of providers === undefined ? PROVIDER_COMMANDS : typeof providers === 'string' ? [providers] : providers) {
     try {return await protectedProviderDirectory(directory, command, nodePath);} catch {}
   }
   throw Error();
@@ -226,7 +242,8 @@ async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
   } finally { await file.close(); }
 }
 
-type VerifiedRuntime = {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string; provider?: ProviderCommand};
+type VerifiedRuntime = {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string;
+  provider?: ProviderCommand | readonly ProviderCommand[]};
 
 export async function verifyRecordedRepositoryLaunchers(version: string, launchers: Launchers,
   runtime: VerifiedRuntime = { platform: process.platform, nodePath: process.execPath }): Promise<boolean> {
@@ -235,7 +252,7 @@ export async function verifyRecordedRepositoryLaunchers(version: string, launche
 
 // Recovery compares stored bytes but never executes the recorded replacement launcher.
 export async function verifyRollbackRepositoryLaunchers(version: string, launchers: Launchers,
-  provider?: ProviderCommand): Promise<boolean> {
+  provider?: ProviderCommand | readonly ProviderCommand[]): Promise<boolean> {
   return verifyRecordedRuntime(version, launchers, {platform: process.platform, nodePath: process.execPath,
     ...(provider === undefined ? {} : {provider})}, 'recorded');
 }
@@ -248,8 +265,8 @@ async function verifyRecordedRuntime(version: string, launchers: Launchers,
   // A changed npm cache path is not a new trust root: require the already running Node bytes.
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
-    if (recorded.providerDirectory !== undefined) {
-      await protectedRecordedProviderDirectory(recorded.providerDirectory, runtime.provider, runtime.nodePath);
+    for (const providerDirectory of [recorded.providerDirectory ?? []].flat()) {
+      await protectedRecordedProviderDirectory(providerDirectory, runtime.provider, runtime.nodePath);
     }
     if (recorded.npmCliPath !== undefined) {
       const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)
