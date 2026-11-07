@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { RELAY_OPEN_FAILURE_CODES, relayOpenFailureRemedy } from './relayOpenFailure.js';
 
@@ -24,4 +25,10 @@ test('every open failure code has one bounded line and other codes have none', (
       assert.equal(relayOpenFailureRemedy(code, platform), undefined);
     }
   }
+});
+
+test('the relay guide names every open failure code and the Windows password reset loss', async () => {
+  const guide = (await readFile(new URL('../../../docs/03-local-relay-and-vault.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  for (const code of [...RELAY_OPEN_FAILURE_CODES, 'connection_anchor_lock_unavailable']) assert.ok(guide.includes(`\`${code}\``), code);
+  assert.match(guide, /Registration or a preserved profile path alone does not prove protected-store recovery[^.]*\. An administrator reset of a local Windows account's password, including a cloud console password reset[^.]*, makes the stored device credentials unrecoverable[^.]*\. Users must change their own password instead/);
 });
