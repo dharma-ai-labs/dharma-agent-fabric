@@ -3,8 +3,10 @@
 // live tools, carries the inputs the server requires, and is documented in the
 // reviewer guide and seed plan. No network, server process or credentials.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 const appDir = resolve(import.meta.dirname, '..', 'plugins/dharma-agent-fabric/openai-app');
@@ -26,6 +28,11 @@ const PLACEHOLDER = /\{\{([A-Z0-9_]+)\}\}/g;
 // skill release, rollout and remediation release tools count as deployment.
 const MERGE_OR_DEPLOY = /merge|release|rollout|rollback|expand/;
 const testCaseById = id => submission.test_cases.find(testCase => testCase.description.startsWith(`${id}. `));
+// Owner-decision blocks still open in a document, one string per block.
+const openDecisions = text => [...text.matchAll(/\[NICK-DECIDES:([^\]]*)\]/g)].map(match => match[1].replace(/\s+/g, ' '));
+// The paragraph (blank-line bounded) that starts with the given text.
+const paragraphStarting = (text, start) => text.split(/\n\s*\n/).find(paragraph => paragraph.startsWith(start)) ?? '';
+const PRIVACY_POLICY_VERSION = '2026-10-31';
 const toolsOf = testCase => String(testCase.tools_triggered).split(',').map(name => name.trim()).filter(Boolean);
 
 test('catalog matches the checked-in live tool snapshot exactly', () => {
@@ -61,8 +68,9 @@ test('the submission declares exactly the ChatGPT profile, with no merge or depl
   const profile = catalog.tools.filter(tool => tool.chatgptProfile).map(tool => tool.name);
   assert.deepEqual(Object.keys(submission.tools), profile, 'submission must declare the ChatGPT profile, in catalog order');
   assert.deepEqual(profile.filter(name => MERGE_OR_DEPLOY.test(name)), [], 'ChatGPT profile must not contain merge, release or rollout tools');
-  assert.match(readme, /Owner decision \(Nick, 2026-10-31\): ship a server-side filter keyed to the ChatGPT OAuth\s+client[\s\S]*AGENTS\.md stays unchanged/,
-    'README.md must record the owner decision: a server-side ChatGPT filter, with AGENTS.md unchanged');
+  const filterDecision = paragraphStarting(readme, 'Owner decision (Nick, 2026-10-31): ship a server-side filter');
+  assert.match(filterDecision, /keyed to the ChatGPT OAuth\s+client/, 'README.md must record the server-side ChatGPT filter decision');
+  assert.match(filterDecision, /AGENTS\.md stays unchanged/, 'the same decision paragraph must say AGENTS.md stays unchanged');
   assert.doesNotMatch(readme, /NICK-DECIDES/, 'README.md has no open owner decision left');
   assert.match(checklist, /^- \[ \] The ChatGPT app is not given merge or deployment tools in practice\..*server-side filter/m,
     'the checklist keeps the filter item open until the filter ships');
@@ -72,8 +80,13 @@ test('the seed plan records the owner decisions on the reviewer role and organiz
   assert.match(seedPlan, /Owner decision \(Nick, 2026-10-31\): the reviewer account is `developer`/);
   assert.match(seedPlan, /Owner decision \(Nick, 2026-10-31\): a dedicated reviewer organization/);
   assert.match(seedPlan, /asks Nick\s+before creating/);
-  assert.doesNotMatch(seedPlan, /NICK-DECIDES: the reviewer account role/);
-  assert.doesNotMatch(seedPlan, /NICK-DECIDES: reuse the existing reviewer organization/);
+  // Topic-scoped: no open owner-decision block may still ask about the
+  // reviewer role or which reviewer organization to use, whatever its wording.
+  for (const block of openDecisions(seedPlan)) {
+    assert.doesNotMatch(block, /role|developer|viewer/i, `seed plan reopens the decided reviewer role: ${block.trim()}`);
+    assert.doesNotMatch(block, /(reuse|existing|dedicated|new|separate|which)\s+(the\s+)?reviewer organi[sz]ation/i,
+      `seed plan reopens the decided reviewer organization: ${block.trim()}`);
+  }
 });
 
 test('test cases are single turn: they name the organization and give any confirmation in the prompt', () => {
@@ -148,9 +161,23 @@ test('the seed plan enrolls only through a CLI path that succeeds with the repos
   assert.match(seedPlan, /`trajectoryCount` 0/);
 });
 
+test('the published privacy policy closes its gate, and owner approval and retention proof stay open', () => {
+  // https://www.dharma-ai.io/privacy has served policy version 2026-10-31 since 2026-10-31.
+  assert.match(checklist, new RegExp(String.raw`^- \[x\] Privacy policy published in its revised form, policy version ${'`'}${PRIVACY_POLICY_VERSION}${'`'}`, 'm'),
+    'the published-policy item is checked and names the published policy version');
+  assert.doesNotMatch(checklist, /^- \[ \] Privacy policy published/m);
+  assert.doesNotMatch(checklist, /that fix is not yet published/);
+  // R-OAI-1 needs the owner's approval of DATA_AND_SECURITY.md; the retention
+  // item needs a recorded production retention receipt. Neither is recorded.
+  assert.match(checklist, /^- \[ \] R-OAI-1/m, 'R-OAI-1 stays open until the owner approves DATA_AND_SECURITY.md');
+  assert.match(checklist, /^- \[ \] Data retention/m, 'retention item stays open until a retention receipt is recorded');
+  const header = dataAndSecurity.split(/\n## /)[0];
+  assert.ok(header.includes(`policy version \`${PRIVACY_POLICY_VERSION}\``), 'DATA_AND_SECURITY.md names the published policy version it follows');
+  assert.doesNotMatch(header, /Until that revision is published/, 'the policy is published; the draft gate is the owner approval only');
+  assert.ok(openDecisions(header).some(block => /approval of this text/.test(block)), 'the owner approval of this text stays an open decision');
+});
+
 test('the checklist gates on the privacy fix and the security summary names every outside recipient', () => {
-  assert.doesNotMatch(checklist, /^- \[x\] Privacy policy/m, 'privacy policy item stays open until the privacy fix is published');
-  assert.doesNotMatch(checklist, /^- \[x\] Data retention/m, 'retention item stays open until the privacy fix is published');
   assert.match(checklist, /^- \[ \] .*R-OAI-1/m);
   assert.doesNotMatch(dataAndSecurity, /both are limited to organization admins/);
   assert.doesNotMatch(dataAndSecurity, /Full local evidence remains in the encrypted local\s+vault unless/);
@@ -188,4 +215,38 @@ test('the three negative cases call no tool and no live tool offers what they as
     assert.deepEqual(names.filter(name => pattern.test(name)), [], `no live tool may match ${pattern}`);
   }
   for (const name of catalog.forbiddenTools) assert.equal(names.includes(name), false, name);
+});
+
+test('the submission-time check fails loudly while any placeholder is unsubstituted', () => {
+  // {{REVIEWER_ORG_ID}} stays a placeholder in the repository until the owner
+  // provides the reviewer organization. The copy pasted into the OpenAI form
+  // must pass this check first.
+  const script = resolve(import.meta.dirname, 'openai-app-submission-filled.mjs');
+  const committed = spawnSync(process.execPath, [script, resolve(appDir, 'chatgpt-app-submission.json')], { encoding: 'utf8' });
+  assert.equal(committed.status, 1, 'the committed package still holds placeholders and must not pass');
+  assert.match(committed.stderr, /\{\{REVIEWER_ORG_ID\}\} at test_cases\[0\]\.user_prompt/);
+  assert.match(committed.stderr, /^not ready to submit: \d+ unsubstituted placeholder/m);
+
+  const dir = mkdtempSync(join(tmpdir(), 'openai-app-filled-'));
+  try {
+    const filledPath = join(dir, 'filled.json');
+    const filled = JSON.stringify(submission).replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, name) => `seed-${name.toLowerCase()}`);
+    writeFileSync(filledPath, filled);
+    const ok = spawnSync(process.execPath, [script, filledPath], { encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.deepEqual(JSON.parse(ok.stdout), { ok: true, placeholders: 0 });
+
+    // A half-substituted copy (braces removed, name left) is still refused.
+    writeFileSync(filledPath, filled.replace('seed-reviewer_org_id', 'REVIEWER_ORG_ID'));
+    const half = spawnSync(process.execPath, [script, filledPath], { encoding: 'utf8' });
+    assert.equal(half.status, 1);
+    assert.match(half.stderr, /REVIEWER_ORG_ID at /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const usage = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  assert.equal(usage.status, 2);
+  assert.match(checklist, /^- \[ \] Placeholders substituted .*`node scripts\/openai-app-submission-filled\.mjs <substituted-copy\.json>` passes/m,
+    'the checklist requires the submission-time placeholder check');
 });
