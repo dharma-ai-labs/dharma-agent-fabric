@@ -148,6 +148,39 @@ for (const scenario of ['success', 'foreign selector', 'tampered tree', 'stop af
   });
 }
 
+// PR #425 review round 2 (1): a provider kept only because it holds a bundle takes a clear, never a new release,
+// and must not download or stage one.
+test('actual clear-only preparation ignores an offered install and still prepares a clear', async () => {
+  const f = await fixture();
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = f.home;
+  const signed = (bundle: SkillBundle) => {
+    const { signature: _signature, bundleHash: _hash, ...unsigned } = bundle;
+    const hashed = { ...unsigned, bundleHash: calculateBundleHash(unsigned) };
+    return { ...hashed, signature: signCanonicalObject(hashed, f.keys.privateKey) } as SkillBundle;
+  };
+  const clear = signed({ ...structuredClone(f.bundle), bundleId: '66666666-6666-4666-8666-666666666666',
+    operation: 'clear', skills: [] });
+  let offer: SkillBundle = f.bundle, polls = 0;
+  const fabric = { pollSkill: async () => { polls++; return { ok: true, organizationId: 'org_test', rollout: { id: 'rollout', bundle: offer } }; },
+    signedGet: async () => { throw new Error('Unexpected package transport.'); } } as unknown as AgentFabricClient;
+  try {
+    const operation = () => prepareSkillUpdate({ workspaceId: WORKSPACE, provider: 'codex', policyPath: f.policyPath,
+      fabric, store: f.store, automatic: true, clearOnly: true });
+    assert.equal(await operation(), null, 'an install offered to a holder is not prepared');
+    assert.equal(polls, 1);
+    assert.deepEqual(await readdir(skillPreparationScopeRoot(f.home, WORKSPACE, 'codex')).catch(() => []), [],
+      'nothing is staged for the ignored install');
+    offer = clear;
+    const prepared = await operation();
+    assert.equal(prepared?.bundle.operation, 'clear');
+    await rm(prepared!.sourceRoot, { recursive: true, force: true });
+  } finally {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+    await rm(f.home, { recursive: true, force: true });
+  }
+});
+
 for (const scenario of ['knowledge inline', 'knowledge missing content', 'source missing content', 'automatic missing content'] as const) {
   test(`explicit knowledge preparation without Git: ${scenario}`, async () => {
     const f = await fixture();

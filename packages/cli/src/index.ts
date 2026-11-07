@@ -2190,9 +2190,6 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     const provider = known ?? 'codex';
     const providerDirectory = !flags.has('rollback')
       ? await resolveRepositoryProviderDirectory({provider, searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
-    if (known && !selected.providerIds && flags.has('apply') && !flags.has('rollback')) {
-      await saveWorkspaceRecord({ ...selected, providerIds: [provider] });
-    }
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
@@ -2238,11 +2235,13 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
           ...(providerDirectory === undefined ? {} : {providerDirectory}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
-      // Recorded launchers are checked for the set-up provider; with none known, any protected provider command passes.
+      // A recorded launcher was written for whichever provider was known then, so any protected provider command
+      // in its directory passes. Only the launcher this run writes is checked for the set-up provider.
       verifyPriorLaunchers: (version, contents) => verifyRecordedRepositoryLaunchers(version, contents,
-        { platform: process.platform, nodePath: process.execPath, ...(known === undefined ? {} : {provider: known}) }),
+        { platform: process.platform, nodePath: process.execPath }),
       recordNextLaunchers: process.platform === 'linux',
-      verifyRecoveryLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents, known),
+      verifyRecoveryLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents),
+      verifyNextLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents, known),
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
@@ -2286,6 +2285,12 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       maintenance?'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1'
         :'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
     if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
+    // Record the provider only once its launcher is live, so a failed upgrade leaves the record as it was and
+    // the record names the provider the launcher carries.
+    if (known && !selected.providerIds?.includes(known) && receipt.state === 'completed'
+      && flags.has('apply') && !flags.has('rollback')) {
+      await saveWorkspaceRecord({ ...selected, providerIds: [known] });
+    }
     return receipt;
   });
 }
@@ -5108,9 +5113,18 @@ async function providersHoldingInstalledBundle(workspace: WorkspaceRecord, skip:
   return installed;
 }
 
-async function relayProviderIds(workspace: WorkspaceRecord): Promise<ProviderId[] | null> {
+async function relayProviderIds(workspace: WorkspaceRecord,
+  onUnprotected?: (provider: ProviderId) => void): Promise<ProviderId[] | null> {
   if (!workspace.providerIds) return null;
-  return scopedRelayProviderIds(workspace.providerIds, await providersHoldingInstalledBundle(workspace, workspace.providerIds));
+  const holders: ProviderId[] = [];
+  for (const provider of await providersHoldingInstalledBundle(workspace, workspace.providerIds)) {
+    // Setup never checked a holder's executable, and the first one on the relay PATH can belong to another
+    // user. Apply setup's protection check before anything probes it.
+    const protectedExecutable = await resolveRepositoryProviderDirectory({provider,
+      searchPath: providerProcessEnvironment(process.env).PATH}).then(() => true, () => false);
+    if (protectedExecutable) holders.push(provider); else onUnprotected?.(provider);
+  }
+  return scopedRelayProviderIds(workspace.providerIds, holders);
 }
 
 export async function receiptAwareProviderCapabilities(
@@ -8714,7 +8728,7 @@ export function parseSkillRolloutResponse(response: unknown, organizationId: str
 export async function prepareSkillUpdate(input: {
   workspaceId: string; provider: ProviderId; policyPath: string;
   fabric?: AgentFabricClient; store?: SecureSecretStore;
-  automatic?: boolean; assertRunning?: () => void;
+  automatic?: boolean; assertRunning?: () => void; clearOnly?: boolean;
 }) {
   const { workspaceId, provider, policyPath } = input;
   const assertRunning = input.assertRunning || (() => {});
@@ -8766,6 +8780,8 @@ export async function prepareSkillUpdate(input: {
   assertRunning();
   const rollout = parseSkillRolloutResponse(response, config.organizationId);
   if (!rollout) return null;
+  // Nothing is installed from an ignored offer, so it is dropped before any package download.
+  if (input.clearOnly && (rollout.bundle as SkillBundle).operation !== 'clear') return null;
   let bundle = rollout.bundle as SkillBundle;
   if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills)
     || (bundle.operation === 'install' && bundle.skills.length === 0)
@@ -9308,7 +9324,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let nextSkillActivationAt = 0;
   const skillPreparationPump = startSkillPreparationPump({
     prepare: async assertRunning => {
-      await prepareProvidersIndependently(selectedProviderAdapters(await relayProviderIds(canonicalWorkspace)), assertRunning, async adapter => {
+      // Background preparation stages new releases, so only the set-up providers take part.
+      await prepareProvidersIndependently(selectedProviderAdapters(canonicalWorkspace.providerIds ?? null), assertRunning, async adapter => {
         assertRunning();
         const capability = await adapter.capability();
         assertRunning();
@@ -9522,7 +9539,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       if (result.taskId) tasksCompleted += 1;
       if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
       if (!stopping && !result.taskId && performance.now() >= nextSkillActivationAt) {
-        const scopedProviders = await relayProviderIds(canonicalWorkspace);
+        const scopedProviders = await relayProviderIds(canonicalWorkspace, provider => {
+          skillActivationResults[provider] = { at: new Date().toISOString(), outcome: 'failed', rolloutId: null,
+            bundleId: null, errorCode: 'provider_unsafe_path' };
+        });
         for (const adapter of selectedProviderAdapters(scopedProviders)) {
           let activating: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>> | null = null;
           const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>) => {
@@ -9541,13 +9561,15 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
               continue;
             }
             const provider = adapter.providerId;
+            // A provider served only because it holds a bundle takes a clear on rollback, never a new release.
+            const clearOnly = Boolean(scopedProviders && !canonicalWorkspace.providerIds?.includes(provider));
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
               await withSkillPreparationTransaction({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,
                 provider, assertCurrent: () => { if (stopping) throw new Error('Relay is stopping.'); } }, async () => {
-                const cached = await takeCachedSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
+                const cached = clearOnly ? null : await takeCachedSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
                   provider, policyPath, fabric });
                 const prepared = cached || await prepareSkillUpdate({ workspaceId: canonicalWorkspace.workspaceId,
-                  provider, policyPath, fabric, automatic: true });
+                  provider, policyPath, fabric, automatic: true, clearOnly });
                 if (!prepared) return;
                 if (!cached) skillPreparationsCompleted += 1;
                 activating = prepared;

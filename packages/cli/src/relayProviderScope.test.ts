@@ -50,7 +50,7 @@ test('actual relay policy sync, preparation pump and activation loop use the wor
   const text = await source();
   const relay = between(text, 'async function relayWorkspaceLoop(', 'export async function run(');
   assert.match(relay, /await syncWorkspacePolicy\(fabric, canonicalWorkspace, policy\.revision, true,\s*await relayProviderIds\(canonicalWorkspace\)\)/);
-  assert.match(relay, /prepareProvidersIndependently\(selectedProviderAdapters\(await relayProviderIds\(canonicalWorkspace\)\), assertRunning/);
+  assert.match(relay, /prepareProvidersIndependently\(selectedProviderAdapters\(canonicalWorkspace\.providerIds \?\? null\), assertRunning/);
   assert.match(relay, /for \(const adapter of selectedProviderAdapters\(scopedProviders\)\) \{/);
   assert.doesNotMatch(relay, /prepareProvidersIndependently\(providerAdapters,/);
   assert.doesNotMatch(relay, /for \(const adapter of providerAdapters\)/);
@@ -106,7 +106,7 @@ test('actual setup and relay upgrade put the set-up provider bin directory on th
 test('actual relay activation records a scoped provider it cannot reach instead of skipping it silently', async () => {
   const text = await source();
   const relay = between(text, 'async function relayWorkspaceLoop(', 'export async function run(');
-  assert.match(relay, /const scopedProviders = await relayProviderIds\(canonicalWorkspace\);\s*for \(const adapter of selectedProviderAdapters\(scopedProviders\)\) \{/);
+  assert.match(relay, /const scopedProviders = await relayProviderIds\(canonicalWorkspace, provider => \{[\s\S]{0,240}\}\);\s*for \(const adapter of selectedProviderAdapters\(scopedProviders\)\) \{/);
   assert.match(relay, /if \(capability\.skillInstall === 'unavailable'\) \{\s*(?:\/\/.*\s*)*if \(scopedProviders\) record\(\{ outcome: 'failed', errorCode: 'provider_unreachable' \}\);\s*continue;\s*\}/);
   const { parseRelaySkillActivationState } = await import('./skillActivationResult.js');
   assert.ok(parseRelaySkillActivationState({ schema: 'dharma.relay-skill-activation/v1', workspaceId: 'w', updatedAt: '2026-11-06T06:30:00.000Z',
@@ -121,4 +121,106 @@ test('actual upgrade and the relay share one reader of providers that hold an in
   assert.match(relay, /providersHoldingInstalledBundle\(workspace, workspace\.providerIds\)/);
   const upgrade = between(text, 'async function relayUpgrade(', 'const upgrade=maintenance?');
   assert.match(upgrade, /await providersHoldingInstalledBundle\(selected\)/);
+});
+
+// PR #425 review round 2 (1): a provider kept only because it holds a bundle still got every new release, and the
+// relay ran its executable from the user-manager PATH, where on the F13 host codex is another user's binary.
+async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install' | 'clear' }) {
+  const ts = (await import('typescript')).default;
+  const { resolve } = await import('node:path');
+  const { runInNewContext } = await import('node:vm');
+  const { prepareProvidersIndependently } = await import('./skillPreparationPump.js');
+  const { withRepositoryRelayStage } = await import('./repositoryRelaySupervisor.js');
+  const { nextSkillActivationResult, relaySkillActivationPath, requireActiveSkillInstall, skillActivationErrorCode }
+    = await import('./skillActivationResult.js');
+  const text = await source();
+  const ast = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true);
+  const declarations = ['relayWorkspaceLoop', 'relayProviderIds', 'scopedRelayProviderIds', 'selectedProviderAdapters'].map(name => {
+    const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.equal(nodes.length, 1, name);
+    return nodes[0]!.getText(ast);
+  });
+  const output = ts.transpileModule(declarations.join('\n'), { compilerOptions: {
+    target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None } });
+  const home = resolve('/fixture-home');
+  const workspace = { workspaceId: '11111111-1111-4111-8111-111111111111', organizationId: 'org_test', path: resolve('/fixture-work'),
+    accessMode: 'knowledge_only', providerIds: ['claude'], repositoryAgentId: '22222222-2222-4222-8222-222222222222' };
+  const policyPath = resolve(workspace.path, '.dharma', 'approved-policy.json');
+  const probed: string[] = [], pumped: string[] = [], polled: { provider: string; clearOnly: unknown }[] = [];
+  const activated: string[] = [], synced: unknown[] = [], written: Record<string, any>[] = [];
+  let pump: Promise<void> | undefined;
+  const adapter = (providerId: string) => ({ providerId,
+    capability: async () => { probed.push(providerId); return { skillInstall: 'available' }; } });
+  const offered = (provider: string) => ({ workspace, rollout: { id: `rollout-${provider}` }, sourceRoot: resolve(home, provider),
+    bundle: { bundleId: `bundle-${provider}`, operation: provider === 'codex' ? scenario.offer : 'install' } });
+  const context = {
+    exports: {}, resolve, Date, Map, Promise, Number, Error, performance: { now: () => 0 }, process: { env: { PATH: '/fixture/bin' } },
+    VERSION: '0.2.224', LOCAL_PROVIDER_IDS: ['codex', 'claude', 'agy', 'hermes'],
+    providerAdapters: ['codex', 'claude', 'agy', 'hermes'].map(adapter),
+    required: (flags: Map<string, unknown>, name: string) => flags.get(name),
+    loadOrganizationPolicy: async () => ({ organizationId: 'org_test', serverAuthorization: { workspaceId: workspace.workspaceId } }),
+    registry: async () => [workspace], withRepositoryRelayStage,
+    loadVerifiedWorkspacePolicyUnlessReplayAhead: async () => ({ revision: 'policy' }),
+    loadVerifiedWorkspacePolicy: async () => ({ revision: 'policy' }),
+    client: async () => ({ fixture: true }), relayAutostartReport: async () => ({}), dharmaHome: () => home,
+    writeJsonAtomic: async (_path: string, value: Record<string, any>) => { written.push(value); },
+    RepositorySourceWatcher: class { invalidate() {} }, BlockedRepositorySourceRetry: class { consider() { return false; } },
+    openBootstrapVault: async () => ({ close: async () => {} }), rawLocalRetentionDays: () => 1,
+    readRelaySkillActivationState: async () => null,
+    providersHoldingInstalledBundle: async () => ['codex'],
+    providerProcessEnvironment: (env: Record<string, string>) => env,
+    resolveRepositoryProviderDirectory: async (input: { provider: string }) => {
+      if (input.provider === 'codex' && !scenario.codexProtected) throw new Error('relay_startup_codex_path_invalid');
+      return undefined;
+    },
+    isLocalProviderId: () => true, prepareProvidersIndependently,
+    withSkillPreparationTransaction: async (_input: unknown, operation: () => Promise<void>) => operation(),
+    startSkillPreparationPump: (input: { prepare: (assertRunning: () => void) => Promise<void> }) => {
+      pump = input.prepare(() => {});
+      return { requestStop: () => {}, stop: async () => { await pump; } };
+    },
+    prepareSkillUpdate: async (input: { provider: string; assertRunning?: unknown; clearOnly?: unknown }) => {
+      if (input.assertRunning) { pumped.push(input.provider); return null; }
+      polled.push({ provider: input.provider, clearOnly: input.clearOnly });
+      const prepared = offered(input.provider);
+      // As the real preparation does, a clear-only poll ignores an offered install.
+      return input.clearOnly && prepared.bundle.operation !== 'clear' ? null : prepared;
+    },
+    takeCachedSkillUpdate: async () => null,
+    activatePreparedSkillUpdate: async (input: { provider: string }) => { activated.push(input.provider); return { status: 'active' }; },
+    withWorkspaceSkillActivationLock: async (_workspaceId: string, _provider: string, operation: () => Promise<void>) => operation(),
+    deferUnavailableRelayRetention: async (operation: () => Promise<unknown>) => ({ state: 'completed', value: await operation() }),
+    finalizeRecoveredSignedTaskTrajectories: async () => [],
+    syncWorkspacePolicy: async (...input: unknown[]) => { synced.push(input[4]); },
+    executeOneTask: async () => { await pump; return {}; },
+    readFile: async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); },
+    waitForRelayRefresh: async () => {}, repositorySharedReady: async () => false,
+    nextSkillActivationResult, relaySkillActivationPath, requireActiveSkillInstall, skillActivationErrorCode,
+  };
+  const compiled = runInNewContext(`${output.outputText}\n({relayWorkspaceLoop})`, context) as
+    { relayWorkspaceLoop: (...input: unknown[]) => Promise<Record<string, unknown>> };
+  await compiled.relayWorkspaceLoop(new Map<string, unknown>([['policy', policyPath], ['once', true]]),
+    new AbortController().signal, (operation: () => Promise<unknown>) => operation());
+  return { probed, pumped, polled, activated, synced, providers: written.at(-1)?.providers ?? {} };
+}
+
+test('actual relay never runs an unprotected holder executable and never gives it a new release', async () => {
+  const run = await runRelayTick({ codexProtected: false, offer: 'install' });
+  assert.deepEqual(run.synced, [['claude']], 'policy sync must not probe the unprotected codex');
+  assert.deepEqual(run.pumped, ['claude'], 'background preparation is for the set-up provider only');
+  assert.ok(!run.probed.includes('codex'), 'the other user codex must not be executed');
+  assert.deepEqual(run.activated, ['claude']);
+  assert.equal(run.providers.codex?.outcome, 'failed');
+  assert.equal(run.providers.codex?.errorCode, 'provider_unsafe_path');
+  assert.equal(run.providers.claude?.outcome, 'activated');
+});
+
+test('actual relay gives a protected holder only a clear, never a new release', async () => {
+  const install = await runRelayTick({ codexProtected: true, offer: 'install' });
+  assert.deepEqual(install.pumped, ['claude'], 'background preparation is for the set-up provider only');
+  assert.deepEqual(install.polled, [{ provider: 'codex', clearOnly: true }, { provider: 'claude', clearOnly: false }]);
+  assert.deepEqual(install.activated, ['claude'], 'the holder must not receive the new release');
+  assert.equal(install.providers.codex?.outcome, 'no_rollout');
+  const clear = await runRelayTick({ codexProtected: true, offer: 'clear' });
+  assert.deepEqual(clear.activated, ['codex', 'claude'], 'rollback to the clear baseline still reaches the holder');
 });
