@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryCodexDirectory } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -99,6 +99,8 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import {classifyCodexSetupFailure, reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
+import { openWithFirstAvailableOpener } from './verificationOpener.js';
+import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath } from './relayProviderGuard.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
@@ -2085,11 +2087,11 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 }
 
 export function stableRepositoryLauncherContents(version = VERSION,
-  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; codexDirectory?: string }) {
+  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; providerDirectory?: string | readonly string[] }) {
   return repositoryLauncherContents(version, runtime);
 }
 
-async function installStableRepositoryLauncher(workspace: string) {
+async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
   const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
   const shellPath = resolve(launcherRoot, 'dharma');
@@ -2097,12 +2099,18 @@ async function installStableRepositoryLauncher(workspace: string) {
   await scope?.assert();
   const npmCliPath = process.platform === 'linux' ? await (scope
     ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
-  const codexDirectory = await (scope
-    ? scope.step(() => resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}))
-    : resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}));
+  // The relay service starts with the user manager PATH, not this shell's. Carry the bin directory of the
+  // provider set up in this checkout, so the relay probes and installs for it as setup did.
+  const searchPath = providerProcessEnvironment(process.env).PATH;
+  const resolved: (string | undefined)[] = [];
+  for (const provider of providers) {
+    resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
+      : resolveRepositoryProviderDirectory({provider, searchPath})));
+  }
+  const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
-      ...(codexDirectory === undefined ? {} : {codexDirectory}) });
+      ...(providerDirectory.length ? {providerDirectory} : {}) });
   if (scope) {
     await scope.assert();
     if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
@@ -2171,8 +2179,19 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
   };
   return withRelayStartupMutation(async () => {
     const npmCliPath = process.platform === 'linux' && !flags.has('rollback') ? await resolveRepositoryNpmCli() : undefined;
-    const codexDirectory = !flags.has('rollback')
-      ? await resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
+    // The relay serves every adapter, so the launcher keeps each protected provider already holding the installed
+    // bundle, and adds the provider this upgrade is for: --provider, else the calling agent, else codex as before.
+    // A holder never displaces the calling agent (PR #425 review round 5).
+    const requested = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : [])?.[0];
+    const provider = requested ?? providerHintFromEnvironment() ?? 'codex';
+    const launcherProviders = [...new Set([...await protectedBundleHolders(selected), provider])];
+    // The launcher carries the bin directory of each of these providers.
+    const searchPath = providerProcessEnvironment(process.env).PATH;
+    const resolved: (string | undefined)[] = [];
+    if (!flags.has('rollback')) {
+      for (const item of launcherProviders) resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));
+    }
+    const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
@@ -2216,11 +2235,15 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       },
       launcherContents: version => stableRepositoryLauncherContents(version,
         { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
-          ...(codexDirectory === undefined ? {} : {codexDirectory}) }),
+          ...(providerDirectory.length ? {providerDirectory} : {}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
-      verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
+      // A recorded launcher was written for whichever provider was known then, so any protected provider command
+      // in its directory passes. Only the launcher this run writes is checked for the set-up providers.
+      verifyPriorLaunchers: (version, contents) => verifyRecordedRepositoryLaunchers(version, contents,
+        { platform: process.platform, nodePath: process.execPath }),
       recordNextLaunchers: process.platform === 'linux',
-      verifyRecoveryLaunchers: verifyRollbackRepositoryLaunchers,
+      verifyRecoveryLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents),
+      verifyNextLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents, launcherProviders),
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
@@ -3747,7 +3770,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     };
   }
   const {launcher, autostart} = flags.has('no-relay-daemon')
-    ? {launcher: await step(() => installStableRepositoryLauncher(workspace)),
+    ? {launcher: await step(() => installStableRepositoryLauncher(workspace, [provider])),
       autostart: {state: 'disabled' as const, backend: null}}
     : await step(() => withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
@@ -3757,7 +3780,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         await assertBootstrapStartupAnchor(organizationId, config.deviceId, step);
         // Keep previous launcher bytes intact until startup ownership and version
         // admit this operation; the supported upgrade relies on those exact bytes.
-        const launcher = await step(() => installStableRepositoryLauncher(workspace));
+        const launcher = await step(() => installStableRepositoryLauncher(workspace, [provider]));
         const autostart = await step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
           version: VERSION, preserveStandardAnchor: true,
@@ -3813,7 +3836,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         if (!current) throw new Error('Enrolled repository workspace disappeared during publication.');
         return {
           state: current.repositoryPackage?.state || 'absent',
-          ready: await repositorySharedReady(current),
+          ready: await setupProviderSharedReady(current, provider),
           candidateId: current.repositoryPackage?.candidateId || null,
         };
       }, { onProgress: progress => {
@@ -3910,7 +3933,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       recipientApproval,
       rebind,
     },
-    repository: onboarded,
+    repository: repositoryAfterReadiness(onboarded, repositoryReadiness),
     launcher,
     autostart: observedAutostart,
     provider,
@@ -4168,13 +4191,7 @@ async function openVerificationUri(url: string) {
           ['rundll32.exe', ['url.dll,FileProtocolHandler', url]],
           ['xdg-open', [url]],
         ];
-  for (const [command, argv] of attempts) {
-    try {
-      await execFileAsync(command, argv, { timeout: 10_000 });
-      return true;
-    } catch {}
-  }
-  return false;
+  return openWithFirstAvailableOpener(attempts);
 }
 
 export type ControlAgentCliClient = Pick<AgentFabricClient,
@@ -5046,6 +5063,41 @@ function selectedProviderAdapters(providerIds: ProviderId[] | null) {
     : providerAdapters;
 }
 
+async function providersHoldingInstalledBundle(workspace: WorkspaceRecord): Promise<ProviderId[]> {
+  const installed: ProviderId[] = [];
+  for (const provider of LOCAL_PROVIDER_IDS) {
+    // An unreadable native tree counts as holding a bundle, so its provider stays on the launcher PATH.
+    const holdsBundle = await nativeSkillDirectoryForWorkspace({ provider, workspaceId: workspace.workspaceId, workspace: workspace.path })
+      .then(root => pathExists(resolve(root, '.dharma-managed', 'workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE')), () => true);
+    if (holdsBundle) installed.push(provider);
+  }
+  return installed;
+}
+
+/** The bundle a provider has active for the workspace and when it became active, for status only. */
+async function activeSkillBundle(workspace: WorkspaceRecord, provider: ProviderId): Promise<{ bundleId: string; at: string } | null> {
+  try {
+    const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId: workspace.workspaceId, workspace: workspace.path });
+    const pointer = resolve(root, '.dharma-managed', 'workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE');
+    const [bundleId, metadata] = await Promise.all([readFile(pointer, 'utf8'), stat(pointer)]);
+    return { bundleId: bundleId.trim(), at: metadata.mtime.toISOString() };
+  } catch {
+    return null;
+  }
+}
+
+/** The providers holding an installed bundle whose executable passes setup's protection check. */
+async function protectedBundleHolders(workspace: WorkspaceRecord): Promise<ProviderId[]> {
+  const holders: ProviderId[] = [];
+  for (const provider of await providersHoldingInstalledBundle(workspace)) {
+    // The first one on the relay PATH can belong to another user; such a holder is not put on the launcher PATH.
+    const protectedExecutable = await resolveRepositoryProviderDirectory({provider,
+      searchPath: providerProcessEnvironment(process.env).PATH}).then(() => true, () => false);
+    if (protectedExecutable) holders.push(provider);
+  }
+  return holders;
+}
+
 export async function receiptAwareProviderCapabilities(
   providers: ProviderCapability[],
   now = new Date(),
@@ -5135,6 +5187,25 @@ export async function repositorySharedReady(
 ) {
   try { return Boolean(await loadInstalled(item)); }
   catch { return false; }
+}
+
+/** Setup is ready only when the provider it set up holds the release, not when any provider on this device does. */
+export function setupProviderSharedReady(
+  item: WorkspaceRecord,
+  provider: ProviderId,
+  loadInstalled: (workspace: WorkspaceRecord, provider: ProviderId) => Promise<unknown> = installedRepositoryKnowledge,
+) {
+  return repositorySharedReady(item, workspace => loadInstalled(workspace, provider));
+}
+
+/** The onboard result with the readiness wait's outcome, so the inner block agrees with the top level. */
+export function repositoryAfterReadiness<T extends Record<string, unknown>>(onboarded: T,
+  readiness: Pick<RepositoryReadinessResult, 'outcome'> | null): T {
+  if (readiness?.outcome === 'blocked') return { ...onboarded, stage: 'shared_repository_blocked' };
+  if (readiness?.outcome !== 'ready') return onboarded;
+  const shared = onboarded.sharedRepository as Record<string, unknown> | undefined;
+  return { ...onboarded, stage: 'ready', sharedRepositoryReady: true,
+    sharedRepository: { ...shared, authority: 'signed_repository_release', activation: true } };
 }
 
 export function canonicalRepositoryPackage(value: unknown): NonNullable<WorkspaceRecord['repositoryPackage']> {
@@ -5868,7 +5939,7 @@ async function syncWorkspacePolicy(
 // of a policy sync. A slow CLI must not stall every signed request on this device.
 async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] | null) {
   return receiptAwareProviderCapabilities(
-    await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
+    await Promise.all(selectedProviderAdapters(providerIds).map(async (adapter) => (await relayProviderCapability(adapter)).capability)),
   );
 }
 
@@ -6056,7 +6127,8 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
     workspace, workspaceId: item.workspaceId, organizationId: config.organizationId, hqUrl: config.hqUrl });
   const relay = flags.has('no-relay-daemon') ? { started: false, state: 'not_started' }
     : await startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json'));
-  const sharedRepositoryReady = await repositorySharedReady(item);
+  // As onboard's, join readiness counts only a release installed for the provider it set up.
+  const sharedRepositoryReady = await setupProviderSharedReady(item, provider);
   return { ok: true, stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
     localStage: 'ready', sharedRepositoryReady, organizationId: config.organizationId,
     workspaceId: item.workspaceId, deviceId: config.deviceId, accessMode: 'knowledge_only',
@@ -6890,7 +6962,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const relay = flags.has('no-relay-daemon')
     ? { started: false, state: 'not_started' }
     : await staged('relay_start', async () => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')));
-  const sharedRepositoryReady = await staged('readiness', async () => repositorySharedReady(registered));
+  const sharedRepositoryReady = await staged('readiness', async () => providerIds?.length === 1
+    ? setupProviderSharedReady(registered, providerIds[0]!) : repositorySharedReady(registered));
   return {
     ok: true,
     stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
@@ -7559,6 +7632,10 @@ async function executeOneTask(
     fabric,
   );
   assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
+  if (await relayProviderUnsafePath(task.target.provider)) {
+    await fabric.postTaskEvent(task.taskId, 'failed', { phase: 'preflight', code: PROVIDER_UNSAFE_PATH });
+    return { ok: false, taskId: task.taskId, code: PROVIDER_UNSAFE_PATH };
+  }
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const waitingHeartbeats: Promise<unknown>[] = [];
   const waitingHeartbeat = setInterval(() => {
@@ -9162,13 +9239,15 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let skillActivationsCompleted = 0;
   let skillActivationFailures = 0;
   const skillActivationFailuresByProvider: Partial<Record<ProviderId, number>> = {};
-  const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = {};
+  // Seed from the record setup and `dharma status` read, so a relay restart does not erase the last reason.
+  const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = {
+    ...(await readRelaySkillActivationState(dharmaHome(), canonicalWorkspace.workspaceId))?.providers };
   let nextSkillActivationAt = 0;
   const skillPreparationPump = startSkillPreparationPump({
     prepare: async assertRunning => {
       await prepareProvidersIndependently(providerAdapters, assertRunning, async adapter => {
         assertRunning();
-        const capability = await adapter.capability();
+        const capability = (await relayProviderCapability(adapter)).capability;
         assertRunning();
         if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) return;
         const provider = adapter.providerId;
@@ -9381,14 +9460,18 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       if (!stopping && !result.taskId && performance.now() >= nextSkillActivationAt) {
         for (const adapter of providerAdapters) {
           let activating: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>> | null = null;
-          const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>) => {
+          const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>,
+            installed?: Awaited<ReturnType<typeof activeSkillBundle>>) => {
             if (!isLocalProviderId(adapter.providerId)) return;
             skillActivationResults[adapter.providerId] = nextSkillActivationResult(skillActivationResults[adapter.providerId],
               { at: new Date().toISOString(), rolloutId: activating?.rollout.id ?? null,
-                bundleId: activating?.bundle.bundleId ?? null, ...result });
+                bundleId: activating?.bundle.bundleId ?? null, ...result }, installed);
           };
           try {
-            const capability = await adapter.capability();
+            // Setup refuses a provider whose first executable on PATH is unsafe; the relay never runs it either.
+            const probed = await relayProviderCapability(adapter);
+            if (probed.unsafePath) { record({ outcome: 'failed', errorCode: PROVIDER_UNSAFE_PATH }); continue; }
+            const capability = probed.capability;
             if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) continue;
             const provider = adapter.providerId;
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
@@ -9407,7 +9490,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 skillActivationsCompleted += 1;
               });
             });
-            record({ outcome: activating ? 'activated' : 'no_rollout', errorCode: null });
+            // An empty poll after a failure clears it only once the provider's active bundle shows a current install.
+            const installed = !activating && skillActivationResults[provider]?.outcome === 'failed'
+              ? await activeSkillBundle(canonicalWorkspace, provider) : null;
+            record({ outcome: activating ? 'activated' : 'no_rollout', errorCode: null }, installed);
           } catch (error) {
             skillActivationFailures += 1;
             skillActivationFailuresByProvider[adapter.providerId] = (skillActivationFailuresByProvider[adapter.providerId] || 0) + 1;
@@ -9635,7 +9721,7 @@ export async function run(argv: string[]): Promise<Output> {
           verifyDemoDevice(scope, await createDemoDeviceTransport(scope))); },
         exclusive: operation => withRelayStartupMutation(operation),
         prepareStartup: async () => {
-          const launcher = await installStableRepositoryLauncher(workspace);
+          const launcher = await installStableRepositoryLauncher(workspace, [provider]);
           await enableRelayAutostart({ home: dharmaHome(), workspace, policy: null, version: VERSION,
             launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell) });
         },
