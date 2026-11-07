@@ -1801,7 +1801,10 @@ async function saveRegistry(items: WorkspaceRecord[]): Promise<void> {
 }
 
 async function saveWorkspaceRecord(entry: WorkspaceRecord, guard?: {
-  expected: WorkspaceRecord; beforeSave?: () => Promise<void>;
+  // Only setup (onboard, join, upgrade) records providerIds. Another writer holding an older copy keeps the
+  // stored value, so setup recording a provider while the relay runs is not undone by the relay's next save.
+  keepStoredProviderIds?: true;
+  expected?: WorkspaceRecord; beforeSave?: () => Promise<void>;
   preparePackage?: () => Promise<WorkspaceRecord['repositoryPackage']>;
   afterSave?: (saved: WorkspaceRecord) => Promise<void>;
 }): Promise<void> {
@@ -1821,6 +1824,11 @@ async function saveWorkspaceRecord(entry: WorkspaceRecord, guard?: {
     if (!Array.isArray(items)) throw new Error('Workspace registry is invalid; preserve it for recovery.');
     if (expected && canonicalize(items.find(item => item.workspaceId === snapshot.workspaceId) ?? null) !== canonicalize(expected)) {
       throw new Error('workspace_registry_compare_and_swap_failed');
+    }
+    if (guard?.keepStoredProviderIds) {
+      const stored = items.find(item => item.workspaceId === snapshot.workspaceId)?.providerIds;
+      const { providerIds: _held, ...rest } = snapshot;
+      snapshot = stored ? { ...rest, providerIds: stored } : rest;
     }
     if (guard?.beforeSave) await step(guard.beforeSave);
     if (guard?.preparePackage) snapshot = { ...snapshot, repositoryPackage: await step(guard.preparePackage) };
@@ -9356,7 +9364,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
           ...canonicalWorkspace.repositoryPackage, localBaselineSnapshotHash: recovered,
           publishedLocalSnapshotHash: recovered,
         } };
-        await saveWorkspaceRecord(canonicalWorkspace);
+        await saveWorkspaceRecord(canonicalWorkspace, { keepStoredProviderIds: true });
       }
     } catch { repositorySourceBaselineAvailable = false; }
   }
@@ -9516,7 +9524,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
             repositorySourceWatcher.invalidate();
           }
         }
-        await saveWorkspaceRecord(canonicalWorkspace);
+        await saveWorkspaceRecord(canonicalWorkspace, { keepStoredProviderIds: true });
       }
     }
     nextRepositorySourceScanAt = performance.now() + (sourceCycle.state === 'debouncing' ? 15_000 : 60_000);

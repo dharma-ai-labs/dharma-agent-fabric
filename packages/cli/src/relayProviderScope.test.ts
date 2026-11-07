@@ -305,3 +305,57 @@ test('actual onboard records the selected providers before the first policy sync
   const saved = onboard.indexOf('await saveWorkspaceRecord(registered);');
   assert.ok(saved > 0 && saved < bind, 'providerIds must be saved before the sync that materializes the policy');
 });
+
+// PR #425 review round 4 (1): the relay saved its WorkspaceRecord snapshot without a guard, so a source-scan save
+// after `bootstrap --provider codex` recorded codex wrote the relay's stale providerIds back and dropped codex.
+async function relaySaveAfterSetup(call: string) {
+  const ts = (await import('typescript')).default;
+  const { mkdtemp, mkdir, readFile, rm, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { resolve } = await import('node:path');
+  const { runInNewContext } = await import('node:vm');
+  const { canonicalize } = await import('@dharma-ai-labs/agent-fabric-contracts');
+  const text = await source();
+  const ast = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true);
+  const declarations = ['saveWorkspaceRecord', 'saveRegistry', 'workspaceRegistryPath'].map(name => {
+    const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.equal(nodes.length, 1, name);
+    return nodes[0]!.getText(ast);
+  });
+  const output = ts.transpileModule(declarations.join('\n'), { compilerOptions: {
+    target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None } });
+  const home = await mkdtemp(resolve(tmpdir(), 'fabric-relay-provider-save-'));
+  try {
+    const path = resolve(home, 'registry', 'workspaces.json');
+    await mkdir(resolve(home, 'registry'), { recursive: true });
+    const started = { workspaceId: '11111111-1111-4111-8111-111111111111', organizationId: 'org_test',
+      providerIds: ['claude'], repositoryPackage: { localBaselineSnapshotHash: 'sha256:old' } };
+    await writeFile(path, JSON.stringify([started]));
+    // The relay holds the row it read at start; setup then records codex on the stored row.
+    const canonicalWorkspace = structuredClone(started);
+    await writeFile(path, JSON.stringify([{ ...started, providerIds: ['claude', 'codex'] }]));
+    canonicalWorkspace.repositoryPackage.localBaselineSnapshotHash = 'sha256:new';
+    const context = { resolve, readFile, mkdir, canonicalize, structuredClone, JSON, Array, Error,
+      dharmaHome: () => home, currentBootstrapHostScope: () => undefined,
+      acquirePidLock: async () => async () => {},
+      writeJsonAtomic: async (target: string, value: unknown) => writeFile(target, JSON.stringify(value)),
+      canonicalWorkspace };
+    await runInNewContext(`${output.outputText}\n(async () => { await ${call}; })()`, context);
+    return JSON.parse(await readFile(path, 'utf8'))[0] as { providerIds?: string[];
+      repositoryPackage: { localBaselineSnapshotHash: string } };
+  } finally { await rm(home, { recursive: true, force: true }); }
+}
+
+test('actual relay saves after setup recorded a provider keep that provider', async () => {
+  const text = await source();
+  const relay = between(text, 'async function relayWorkspaceLoop(', 'export async function run(');
+  const scan = between(relay, 'const applyReadySourceScan = async () => {', 'const consumeSourceScan = async');
+  const recovery = between(relay, 'await recoverPublishedLocalSourceBaseline({', '} catch { repositorySourceBaselineAvailable = false; }');
+  for (const [name, block] of [['source scan', scan], ['baseline recovery', recovery]] as const) {
+    const calls = [...block.matchAll(/await (saveWorkspaceRecord\(canonicalWorkspace\b[^;]*\));/g)].map(match => match[1]!);
+    assert.equal(calls.length, 1, `${name} saves the record once`);
+    const stored = await relaySaveAfterSetup(calls[0]!);
+    assert.deepEqual(stored.providerIds, ['claude', 'codex'], `${name} save must keep the provider setup recorded`);
+    assert.equal(stored.repositoryPackage.localBaselineSnapshotHash, 'sha256:new', `${name} save still writes its change`);
+  }
+});
