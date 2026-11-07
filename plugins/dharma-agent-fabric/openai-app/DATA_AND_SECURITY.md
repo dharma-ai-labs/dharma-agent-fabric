@@ -1,9 +1,10 @@
 # Data, Privacy, and Security Summary
 
 This summary follows the revised Dharma privacy policy for Agent Fabric and the
-ChatGPT app. Until that revision is published at
-`https://www.dharma-ai.io/privacy`, this file is a draft and the publication
-checklist keeps the privacy items open.
+ChatGPT app, policy version `2026-10-31`, published at
+`https://www.dharma-ai.io/privacy` since 2026-10-31. This file stays a draft
+until the owner approves it against that version; the publication checklist
+keeps R-OAI-1 open until then.
 
 [NICK-DECIDES: approval of this text together with the privacy policy
 revision, including the public disclosure of content synchronization

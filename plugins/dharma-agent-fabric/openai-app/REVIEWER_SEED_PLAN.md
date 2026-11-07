@@ -55,7 +55,9 @@ review channel. They are never committed.
 
 The submission uses these placeholders. Before the package is pasted into the
 OpenAI form, the operator replaces each one with the value recorded in the
-private seed receipt. The substituted copy is never committed.
+private seed receipt. The substituted copy is never committed. Before
+pasting, run `node scripts/openai-app-submission-filled.mjs <substituted-copy.json>`:
+it fails and names the field while any placeholder is left.
 
 | Placeholder | Value | Recorded in step |
 | --- | --- | --- |
