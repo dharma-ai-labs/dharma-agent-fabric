@@ -15,6 +15,7 @@ import {assertConnectionScope, assertInstallationContinuity, assertUnenrolledHom
 import {automaticBootstrapResume} from './deviceConnection.js';
 import {bootstrapGrantMode} from './privateGrantInput.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
+import {recordedProviderIds} from './index.js';
 
 // Execute the actual CLI caller. Only browser, network and OS-keychain effects
 // are replaced; configuration reads/writes use real isolated filesystem state.
@@ -750,7 +751,7 @@ test('concurrent actual bootstrap-to-onboard clients preserve a sibling durable 
         return new Response(JSON.stringify({ok: true}), {status: 201});
       }})},
     loadOrganizationApiToken: async () => 'synthetic-existing-token',
-    parseSelectedProviderIds: () => ['codex'], inspectRegistryRecoveryFile: async () => ({kind: 'valid'}),
+    parseSelectedProviderIds: () => ['codex'], recordedProviderIds, inspectRegistryRecoveryFile: async () => ({kind: 'valid'}),
     saveWorkspaceRecord: async () => undefined,
     registerWorkspaceBeforeRepositoryBind: async (fabric: AgentFabricClient) => {
       await fabric.registerWorkspace({workspaceId: f.row.workspaceId});

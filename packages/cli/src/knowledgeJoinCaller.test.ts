@@ -10,7 +10,7 @@ import ts from 'typescript';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
-import { scopedRelayProviderIds } from './index.js';
+import { recordedProviderIds, scopedRelayProviderIds } from './index.js';
 
 type Row = Record<string, any>;
 type Join = (flags: Map<string, string | boolean>, binding: string, fingerprint: string) => Promise<Row>;
@@ -50,7 +50,7 @@ async function fixture(t: test.TestContext) {
     saveWorkspaceRecord: save,
     gitValue: prohibited, execFileAsync: prohibited, setupClaimSourceRegistration: prohibited,
     preflightBootstrapWorkspaceIdentity: prohibited, captureWorkspaceEvidence: prohibited,
-    isLocalProviderId: (provider: string) => provider === 'codex',
+    isLocalProviderId: (provider: string) => provider === 'codex', recordedProviderIds,
     client: async () => ({
       connectRepositoryAgent: async (input: Row) => {
         calls.push('connect');

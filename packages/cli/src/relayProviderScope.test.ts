@@ -33,10 +33,26 @@ test('the relay serves only the onboarded providers plus any provider that alrea
 test('actual onboard records the selected providers on the workspace before the first learning sync', async () => {
   const text = await source();
   const onboard = between(text, 'async function onboard(flags', 'async function evidenceSync(');
-  const recorded = onboard.indexOf('providerIds: providerIds');
+  const recorded = onboard.indexOf('providerIds: recordedProviders');
   assert.ok(recorded > 0, 'onboard must save providerIds on the workspace record');
   assert.ok(recorded < onboard.indexOf("staged('first_learning_sync'"), 'the record must hold them before capture syncs policy');
   assert.match(text, /interface WorkspaceRecord \{[\s\S]*providerIds\?: ProviderId\[\];[\s\S]*\n\}/);
+});
+
+// PR #425 fix round 1 (2): onboard and join replaced providerIds, so setting up codex after claude in the same
+// checkout dropped claude from the relay's release scope.
+test('setting up a second provider in the same checkout keeps the first in providerIds', async () => {
+  assert.equal(typeof exported.recordedProviderIds, 'function');
+  const recorded = exported.recordedProviderIds as (existing: string[] | undefined, added: string[]) => string[];
+  assert.deepEqual(recorded(recorded(undefined, ['claude']), ['codex']), ['claude', 'codex']);
+  assert.deepEqual(recorded(['claude', 'codex'], ['claude']), ['claude', 'codex']);
+  const text = await source();
+  const onboard = between(text, 'async function onboard(flags', 'async function evidenceSync(');
+  assert.match(onboard, /recordedProviders = providerIds && recordedProviderIds\(registered\.providerIds, providerIds\);/);
+  assert.doesNotMatch(onboard, /providerIds: providerIds\b/);
+  const join = between(text, "const workspace = resolve(dharmaHome(), 'joined-repositories', bindingId);", "const roleInput = {");
+  assert.match(join, /recordedProviderIds\(item\.providerIds, \[provider\]\)/);
+  assert.doesNotMatch(join, /providerIds: \[provider\]/);
 });
 
 test('actual content-transmission policy refresh probes the workspace provider scope, not every adapter', async () => {

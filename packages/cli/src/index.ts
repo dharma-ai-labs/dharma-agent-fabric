@@ -5110,6 +5110,11 @@ function selectedProviderAdapters(providerIds: ProviderId[] | null) {
     : providerAdapters;
 }
 
+/** A provider set up in a checkout adds to the ones already set up there; it never replaces them. */
+export function recordedProviderIds(existing: readonly ProviderId[] | undefined, added: readonly ProviderId[]): ProviderId[] {
+  return [...new Set([...(existing ?? []), ...added])];
+}
+
 /** The onboarded providers, plus any provider that still holds an installed bundle so rollback and clear reach it. */
 export function scopedRelayProviderIds(providerIds: ProviderId[] | undefined, installed: readonly ProviderId[]): ProviderId[] | null {
   return providerIds ? LOCAL_PROVIDER_IDS.filter(provider => providerIds.includes(provider) || installed.includes(provider)) : null;
@@ -6186,9 +6191,10 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
   const synchronized = await syncWorkspacePolicy(fabric, item, required(flags, 'policy-revision'), true, [provider]);
   item = reconcileWorkspaceRegistration(await registry(), item, synchronized);
   item = await bindRepositoryAgent(fabric, item, bindingId);
-  // As onboard does, so the joined relay registers and installs only this provider.
-  if (canonicalize(item.providerIds ?? null) !== canonicalize([provider])) {
-    item = { ...item, providerIds: [provider] };
+  // As onboard does, so the joined relay registers and installs only the providers set up here.
+  const joinedProviders = recordedProviderIds(item.providerIds, [provider]);
+  if (canonicalize(item.providerIds ?? null) !== canonicalize(joinedProviders)) {
+    item = { ...item, providerIds: joinedProviders };
     await saveWorkspaceRecord(item);
   }
   if (item.repositoryPackage?.state !== 'published' || !item.repositoryAgentId || !item.endpointId) {
@@ -6905,8 +6911,9 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
   registered = prepared.registered;
   // Later policy syncs and the relay read this record, so they register and install only these providers.
-  if (providerIds && canonicalize(registered.providerIds ?? null) !== canonicalize(providerIds)) {
-    registered = { ...registered, providerIds: providerIds };
+  const recordedProviders = providerIds && recordedProviderIds(registered.providerIds, providerIds);
+  if (recordedProviders && canonicalize(registered.providerIds ?? null) !== canonicalize(recordedProviders)) {
+    registered = { ...registered, providerIds: recordedProviders };
     await saveWorkspaceRecord(registered);
   }
   const synced = prepared.synchronized as Record<string, unknown>;

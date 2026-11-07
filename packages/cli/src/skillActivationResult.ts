@@ -76,13 +76,16 @@ export function requireActiveSkillInstall(status: unknown): void {
 
 /** Failures that say the relay could not reach the provider; a later poll for it shows they no longer apply. */
 const PROVIDER_UNREACHED = new Set(['provider_unreachable', 'provider_unsafe_path']);
+/** Server decisions and install receipts; an empty poll is not newer news about them. Other failures clear on it. */
+const DECISION_CODES = new Set(['approval_required', 'repository_package_expired', 'repository_package_superseded',
+  'install_failed:failed', 'install_failed:rolled_back', 'install_failed:unknown']);
 
 /**
  * An empty poll after an activation means the installed release is current, not that none was offered.
- * An empty poll after a failure carries no newer reason, so the failure stays the reported one, with the time
- * it was observed: a readiness wait that began later must not report it as current. It ends once the provider's
- * active bundle is the one that failed or became active after the failure, or, for a provider the relay could not
- * reach, once a poll for it succeeds.
+ * An empty poll after a server decision carries no newer reason, so the decision stays the reported one, with the
+ * time it was observed: a readiness wait that began later must not report it as current. It ends once the provider's
+ * active bundle is the one that failed or became active after the failure. Any other failure, such as a transient
+ * poll error or a provider the relay could not reach, clears once a poll for it succeeds.
  */
 export function nextSkillActivationResult(previous: SkillActivationResult | undefined,
   attempt: SkillActivationResult, installed?: { bundleId: string; at: string } | null): SkillActivationResult {
@@ -90,8 +93,9 @@ export function nextSkillActivationResult(previous: SkillActivationResult | unde
     return { ...previous, at: attempt.at, outcome: 'up_to_date' };
   }
   if (attempt.outcome === 'no_rollout' && previous?.outcome === 'failed') {
-    const active = installed && IDENTIFIER.test(installed.bundleId) ? installed : null;
     const unreached = PROVIDER_UNREACHED.has(previous.errorCode ?? '');
+    if (!unreached && !DECISION_CODES.has(previous.errorCode ?? '')) return attempt;
+    const active = installed && IDENTIFIER.test(installed.bundleId) ? installed : null;
     if (active && (unreached || active.bundleId === previous.bundleId || Date.parse(active.at) > Date.parse(previous.at))) {
       return { at: attempt.at, outcome: 'up_to_date', rolloutId: null, bundleId: active.bundleId, errorCode: null };
     }

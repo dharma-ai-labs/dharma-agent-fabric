@@ -11,7 +11,7 @@ import { bootstrapGrantMode } from './privateGrantInput.js';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
 import { assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost } from './bootstrapHostScope.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
-import { repositoryAfterReadiness, setupProviderSharedReady } from './index.js';
+import { recordedProviderIds, repositoryAfterReadiness, setupProviderSharedReady } from './index.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -331,7 +331,7 @@ test('joining an existing package registers only a managed knowledge endpoint', 
     installAvailableNativeAgentFabricBootstraps: async () => { calls.push('native_bootstrap'); return { installed: ['codex'], failures: [] }; },
     startRelayDaemon: async () => ({ state: 'running' }),
     repositorySharedReady: async () => true,
-    isLocalProviderId: (value: string) => value === 'codex',
+    isLocalProviderId: (value: string) => value === 'codex', recordedProviderIds,
     basename,
   };
   const result = await (await caller('joinExistingRepository', dependencies))(
