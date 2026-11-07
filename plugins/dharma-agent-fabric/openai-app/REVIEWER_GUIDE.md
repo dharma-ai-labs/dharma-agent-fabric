@@ -32,9 +32,11 @@ private review channel. They are never committed to this repository.
   Values in `{{...}}` are filled in from the private seed receipt.
 - The seed already contains everything a first call would otherwise create,
   including the organization control agent. No submitted case writes, so the
-  submitted cases give the same results in any order among themselves. Fields
-  not named in an expected output (timestamps, correlation IDs) can differ
-  between runs.
+  submitted cases give the same results in any order among themselves. A
+  declared write tool called before them does not change their results
+  either: TC-3 and TC-6 say in their expected outputs which extra rows a
+  write adds and allow them. Fields not named in an expected output
+  (timestamps, correlation IDs) can differ between runs.
 
 ## Run order
 
@@ -43,9 +45,9 @@ private review channel. They are never committed to this repository.
 2. Call a declared write tool (`fabric_dispatch_task`,
    `fabric_control_agent_create_session` or
    `fabric_control_agent_send_message`) only after both the web and the
-   mobile runs are complete, and do not run a submitted case again after it in
-   the same round. A control-agent message records a new trajectory, which
-   changes TC-3, and a conversation you create appears in TC-6.
+   mobile runs are complete. This keeps the seed clean, not the results: a
+   control-agent message records a new trajectory above T5 in TC-3, and a
+   conversation you create appears in TC-6. Both cases allow that.
 3. Before the next review round, Dharma rebuilds the seed if any write ran
    (see Reset in `REVIEWER_SEED_PLAN.md`) and sends the new values through the
    private review channel.
@@ -85,14 +87,16 @@ you do not need to call them in the reviewer organization.
 
 ### TC-3 Trajectory capsules
 
-- Tool: `fabric_list_trajectories` (read), with `limit` 5.
+- Tool: `fabric_list_trajectories` (read), with `limit` 50 (the default).
 - Seed: exactly the five trajectories T1 to T5, ingested in order.
-- Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list the 5 most recent
+- Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list up to 50
   redacted trajectory capsules.
-- Expected: exactly 5 trajectories, newest first: T5, T4, T3, T2, T1 (IDs
-  `{{REVIEWER_T5_ID}}` down to `{{REVIEWER_T1_ID}}`). Each has
+- Expected: the list, newest first, contains T5, T4, T3, T2, T1 in that order
+  (IDs `{{REVIEWER_T5_ID}}` down to `{{REVIEWER_T1_ID}}`). Each of them has
   provider `codex`, evidence mode `structured`, status `observed`, latest
-  revision 1 and workspace `{{REVIEWER_WORKSPACE_ID}}`. No evidence is expanded.
+  revision 1 and workspace `{{REVIEWER_WORKSPACE_ID}}`. On the seed they are
+  the only rows. Each earlier control-agent message adds one newer managed
+  trajectory above T5, which is allowed. No evidence is expanded.
 
 ### TC-4 Evidence expansion, confirmed in the prompt
 
@@ -129,8 +133,9 @@ you do not need to call them in the reviewer organization.
   control-agent conversations.
 - Expected: `ok` true and a `sessions` list that holds only conversations
   the reviewer account created. The operator's `Seed provisioning`
-  conversation is never in it. Before any write tool has run (see Run order)
-  the list is empty. No model runs and no credits are used.
+  conversation is never in it. On a fresh seed it holds none, and it also
+  lists any conversation the reviewer account created earlier. No model runs
+  and no credits are used.
 
 ### Negative cases
 
