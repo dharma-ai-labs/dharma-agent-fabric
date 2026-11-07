@@ -273,3 +273,38 @@ test('only current-device aliases with matching canonical routes and organizatio
   await assert.rejects(selectRepositoryRelayRegistrations([alias('/a'), alias('/a')], enrollment,
     async () => ({ organizationId: enrollment.organizationId })), /Ambiguous registry/);
 });
+
+// Start times of one repository whose session opens fail with the given error per attempt.
+async function failedSessionOpenStarts(errorFor: (attempt: number) => Error, attempts: number) {
+  const controller = new AbortController();
+  let clock = 0;
+  const starts: number[] = [];
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a], now: () => clock,
+    run: () => {
+      const attempt = starts.push(clock);
+      return withRepositoryRelayStage('session_open', async () => { throw errorFor(attempt); });
+    },
+    wait: async () => {
+      await new Promise(accept => setImmediate(accept));
+      clock += 10_000;
+      if (starts.length > attempts || clock > 10_000_000) controller.abort();
+    } });
+  return starts.slice(1).map((at, index) => at - starts[index]!);
+}
+const identityLost = () => Error('relay_host_device_identity_unavailable');
+const storeUnreadable = () => Object.assign(Error('Windows Credential Manager fresh read failed: secure_store_unreadable.'),
+  { code: 'secure_store_unreadable' });
+
+test('five consecutive device identity or store failures back the retry off to ten minutes', async () => {
+  const gaps = await failedSessionOpenStarts(attempt => attempt % 2 ? identityLost() : storeUnreadable(), 7);
+  assert.equal(gaps.length, 7);
+  for (const gap of gaps.slice(0, 4)) assert.ok(gap <= 60_000, `short retry before the fifth failure: ${gaps}`);
+  for (const gap of gaps.slice(4)) assert.ok(gap >= 600_000 && gap <= 620_000, `ten-minute retry after five: ${gaps}`);
+});
+
+test('any other failure keeps the short retry and restarts the device credential count', async () => {
+  const other = await failedSessionOpenStarts(() => Error('connection_transport_unavailable private detail'), 8);
+  assert.ok(other.every(gap => gap <= 60_000), `other failures: ${other}`);
+  const mixed = await failedSessionOpenStarts(attempt => attempt % 5 === 0 ? Error('worker failed') : identityLost(), 10);
+  assert.ok(mixed.every(gap => gap <= 60_000), `interrupted credential failures: ${mixed}`);
+});
