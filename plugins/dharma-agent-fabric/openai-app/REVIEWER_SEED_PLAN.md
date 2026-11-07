@@ -29,8 +29,19 @@ run.
 Writes (task dispatch, control-agent conversations and messages) and cases
 that consume state (a rollback that only works once, an analysis window, a
 model-written answer) are not submitted. They are guided checks in
-`REVIEWER_GUIDE.md`, run in a separate copy of the seed, never in the reviewer
+`REVIEWER_GUIDE.md`. A Dharma operator shows them in a separate guided-check
+organization, built with the steps below as its own seed build, with its own
+placeholder values and its own trajectory IDs, never in the reviewer
 organization.
+
+The three write tools the app declares (`fabric_dispatch_task`,
+`fabric_control_agent_create_session` and
+`fabric_control_agent_send_message`) are still callable by the reviewer
+account, and nothing on the server stops a `developer` member from calling
+them. So the reviewer guide fixes a run order: every submitted case runs on
+ChatGPT web and then on ChatGPT mobile before any write tool is called, and
+the Reset section below says what each write changes and when the seed is
+rebuilt.
 
 ## Accounts
 
@@ -65,18 +76,18 @@ it fails and names the field while any placeholder is left.
 | `{{REVIEWER_WORKSPACE_ID}}` | Workspace ID of the demo repository | 3 |
 | `{{REVIEWER_AGENT_KEY}}` | Agent key of the repository agent | 3 |
 | `{{REVIEWER_CODEX_ENDPOINT_ID}}` | ID of the one active Codex endpoint | 3 |
+| `{{REVIEWER_T1_ID}}` to `{{REVIEWER_T5_ID}}` | IDs of trajectories T1 to T5 (`{{REVIEWER_T1_ID}}`, `{{REVIEWER_T2_ID}}`, `{{REVIEWER_T3_ID}}`, `{{REVIEWER_T4_ID}}`, `{{REVIEWER_T5_ID}}`) | 4 |
 | `{{REVIEWER_T1_CAPSULE_HASH}}` | `capsule_hash` of trajectory 1, revision 1 | 4 |
 | `{{REVIEWER_CONTROL_ENDPOINT_ID}}` | ID of the control agent's managed runtime endpoint | 7 |
 
-The five trajectory IDs are fixed and are not placeholders:
-
-| Trajectory | ID |
-| --- | --- |
-| T1 | `5eed0000-0000-4000-8000-000000000001` |
-| T2 | `5eed0000-0000-4000-8000-000000000002` |
-| T3 | `5eed0000-0000-4000-8000-000000000003` |
-| T4 | `5eed0000-0000-4000-8000-000000000004` |
-| T5 | `5eed0000-0000-4000-8000-000000000005` |
+The trajectory IDs are placeholders too. A trajectory ID is a primary key
+across all organizations, and the old organization's rows stay when a seed is
+rebuilt, so an ID ingested once can never be ingested again: a second seed
+with the same IDs fails with a primary-key conflict. The operator generates
+five new random version 4 UUIDs for T1 to T5 at every seed build, including a
+rebuild and the guided-check organization, and records them in that build's
+receipt. The expected outputs name the trajectories only by placeholder, so a
+rebuild changes the substituted copy and never the committed package.
 
 ## Required state
 
@@ -181,17 +192,20 @@ private seed receipt.
 4. **Trajectories.** From the enrolled seed device, submit five
    device-signed trajectory capsules through the relay's trajectory sync
    (`POST /api/v1/orgs/{organizationId}/agent-fabric/trajectories`), one at a
-   time in order T1 to T5, with the fixed IDs above, revision 1, provider
-   `codex`, evidence mode `structured` and status `completed`. Then call
-   `fabric_get_trajectory_evidence` for T1 as the operator and record its
+   time in order T1 to T5, with the IDs generated for this build (see
+   Placeholders; never an ID from an earlier build or another organization),
+   revision 1, provider `codex`, evidence mode `structured` and status
+   `completed`. Record the five IDs as `{{REVIEWER_T1_ID}}` to
+   `{{REVIEWER_T5_ID}}` and the time T1 was submitted as the seed time. Then
+   call `fabric_get_trajectory_evidence` for T1 as the operator and record its
    revision 1 `capsule_hash` as `{{REVIEWER_T1_CAPSULE_HASH}}`.
    [NICK-DECIDES: whether a small signed-capsule seed writer may be added to
    the private operations repository for this step, or whether the operator
    runs five short scripted Codex sessions in the demo repository and accepts
-   the IDs the relay assigns. The second option makes the trajectory IDs
-   placeholders too, and the relay's capture policy, not this plan, then sets
-   status, evidence mode and order. The count check in step 6 catches a
-   mismatch either way.]
+   the IDs the relay assigns. In the second option the relay-assigned IDs are
+   recorded as the same placeholders, and the relay's capture policy, not this
+   plan, then sets status, evidence mode and order. The count check in step 6
+   catches a mismatch either way.]
 5. **Stop the relay.** Stop the relay on the seed device and leave the device
    enrolled. No new trajectory can arrive after this.
 6. **Trajectory count check.** As the operator, call
@@ -213,9 +227,21 @@ private seed receipt.
    as `{{REVIEWER_CONTROL_ENDPOINT_ID}}`. Call `fabric_list_trajectories`
    again with `limit` 10: it must still return exactly T1 to T5.
 8. **Freeze the seed.** Record the seed receipt privately: every placeholder
-   value, the step 6 and step 7 readbacks and the time. From now on nobody
+   value, the step 6 and step 7 readbacks, the seed time from step 4 and the
+   time of the freeze. From now on nobody
    uses the operator or reviewer account in this organization except for the
    acceptance runs below.
+
+## Seed age
+
+Default device-synced capsules, which the seed capsules are, become content
+tombstones after the 90-day capsule retention (see `DATA_AND_SECURITY.md`).
+After that, T1's evidence shows a tombstone instead of the redacted capsule
+summary that TC-4 expects. So the seed is usable for review only while it is
+younger than 60 days, counted from the seed time in step 4. That leaves at
+least a 30-day review window before any capsule reaches the 90-day limit.
+Before submitting, and before every new review round, read the seed age from
+the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
 
 ## Acceptance before submission
 
@@ -223,7 +249,7 @@ private seed receipt.
    reviewer account.
 2. Run TC-1 to TC-6 and the three negative cases on ChatGPT web, then on
    ChatGPT mobile, with the substituted prompts. Then run them again in the
-   opposite order.
+   opposite order. Call no write tool during acceptance.
 3. Each result must match its expected output in `chatgpt-app-submission.json`.
    Fields the expected output does not name (timestamps, correlation IDs) may
    differ.
@@ -239,12 +265,24 @@ before submitting. Do not submit expected outputs that were not observed.
 
 ## Reset
 
-| Created by a test run | Effect on other cases | Reset needed |
-| --- | --- | --- |
-| Nothing. Every submitted case is a read or a refused read. | None | No |
+The submitted cases are reads or refused reads and change nothing. What can
+change them is a write tool call, the capsule retention or a mistake during
+operation:
 
-Between OpenAI review rounds nothing needs resetting. If the seed is damaged
-(for example the relay was restarted and new trajectories arrived, another
-agent was created, or the reviewer account created a conversation), do not try
-to delete individual records. Rebuild the reviewer organization from step 1
-and record new placeholder values.
+| Cause | Effect on submitted cases | Reset |
+| --- | --- | --- |
+| `fabric_dispatch_task` called in the reviewer organization | Adds one task with status `offered` (the relay is stopped, so it never runs). No submitted case lists tasks. | None needed |
+| `fabric_control_agent_create_session` called by the reviewer account | Adds a conversation to the reviewer's own list. TC-6 then lists it, which its expected output allows (only the reviewer's own conversations, never the operator's), but the list is no longer empty. | Rebuild before the next review round |
+| `fabric_control_agent_send_message` called in the reviewer organization | Records a managed trajectory, which becomes the newest row and pushes T1 out of TC-3's 5-row list. The turn is also metered. | Rebuild before the next run of TC-3 |
+| Seed age reaches 60 days (capsule retention, see Seed age) | Approaches the 90-day tombstone that changes TC-4 | Rebuild before the next review round |
+| Relay restarted, another agent or device added, or any other change to the steps 6 and 7 readbacks | Changes TC-2 or TC-3 | Rebuild before the next review round |
+
+Before every review round, including a resubmission after a rejection, the
+operator checks the seed age and repeats the step 6 and step 7 readbacks as
+the operator. If any of them differs, or a write in the table above needs a
+rebuild, rebuild.
+
+To rebuild, do not try to delete individual records. Build a new reviewer
+organization from step 1, generate new trajectory IDs, record new placeholder
+values in a new receipt, run the acceptance above again and substitute the new
+values into a new copy of the package. The committed package does not change.

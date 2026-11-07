@@ -31,13 +31,27 @@ private review channel. They are never committed to this repository.
   `REVIEWER_SEED_PLAN.md`. Each test case below lists the seed items it reads.
   Values in `{{...}}` are filled in from the private seed receipt.
 - The seed already contains everything a first call would otherwise create,
-  including the organization control agent. Because no submitted case writes,
-  you can run them in any order, on ChatGPT web and then on ChatGPT mobile, and
-  get the same results. Fields not named in an expected output (timestamps,
-  correlation IDs) can differ between runs.
-- Please do not create control-agent conversations or dispatch tasks with the
-  reviewer account in the reviewer organization. A conversation you create
-  appears in TC-6 on the next run. Ask for the guided checks instead.
+  including the organization control agent. No submitted case writes, so the
+  submitted cases give the same results in any order among themselves. Fields
+  not named in an expected output (timestamps, correlation IDs) can differ
+  between runs.
+
+## Run order
+
+1. Run the six submitted cases and the three negative cases on ChatGPT web,
+   then on ChatGPT mobile. Their order among themselves does not matter.
+2. Call a declared write tool (`fabric_dispatch_task`,
+   `fabric_control_agent_create_session` or
+   `fabric_control_agent_send_message`) only after both the web and the
+   mobile runs are complete, and do not run a submitted case again after it in
+   the same round. A control-agent message records a new trajectory, which
+   changes TC-3, and a conversation you create appears in TC-6.
+3. Before the next review round, Dharma rebuilds the seed if any write ran
+   (see Reset in `REVIEWER_SEED_PLAN.md`) and sends the new values through the
+   private review channel.
+
+The guided checks below show the write tools in a separate organization, so
+you do not need to call them in the reviewer organization.
 
 ## Submitted test cases
 
@@ -76,16 +90,18 @@ private review channel. They are never committed to this repository.
 - Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list the 5 most recent
   redacted trajectory capsules.
 - Expected: exactly 5 trajectories, newest first: T5, T4, T3, T2, T1 (IDs
-  `5eed0000-0000-4000-8000-000000000005` down to `...000000000001`). Each has
+  `{{REVIEWER_T5_ID}}` down to `{{REVIEWER_T1_ID}}`). Each has
   provider `codex`, evidence mode `structured`, status `observed`, latest
   revision 1 and workspace `{{REVIEWER_WORKSPACE_ID}}`. No evidence is expanded.
 
 ### TC-4 Evidence expansion, confirmed in the prompt
 
 - Tool: `fabric_get_trajectory_evidence` (sensitive read, needs confirmation).
-- Seed: T1, revision 1, capsule hash `{{REVIEWER_T1_CAPSULE_HASH}}`.
+- Seed: T1 (`{{REVIEWER_T1_ID}}`), revision 1, capsule hash
+  `{{REVIEWER_T1_CAPSULE_HASH}}`, younger than the seed age limit in
+  `REVIEWER_SEED_PLAN.md`, so its capsule is not yet a retention tombstone.
 - Prompt: I confirm that I want to open the bounded evidence for trajectory
-  `5eed0000-0000-4000-8000-000000000001` in Dharma organization
+  `{{REVIEWER_T1_ID}}` in Dharma organization
   `{{REVIEWER_ORG_ID}}`. Open it now.
 - Expected: one call with `confirmed` true, in the same turn. The result shows
   trajectory T1, provider `codex`, and exactly one revision (1) with capsule
@@ -111,8 +127,10 @@ private review channel. They are never committed to this repository.
   conversations it created.
 - Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list my Dharma
   control-agent conversations.
-- Expected: `ok` true and an empty `sessions` list. No model runs and no
-  credits are used.
+- Expected: `ok` true and a `sessions` list that holds only conversations
+  the reviewer account created. The operator's `Seed provisioning`
+  conversation is never in it. Before any write tool has run (see Run order)
+  the list is empty. No model runs and no credits are used.
 
 ### Negative cases
 
@@ -126,9 +144,10 @@ private review channel. They are never committed to this repository.
 
 These checks write, so ChatGPT asks for its own approval before the call and
 the outcome depends on that second turn. Some also depend on model-written
-text. A Dharma operator shows them on request in a separate copy of the seed,
-never in the reviewer organization, because each one adds a record that the
-submitted cases would then see.
+text. A Dharma operator shows them on request in a separate guided-check
+organization, built as its own seed build with its own IDs, never in the
+reviewer organization, because a conversation or a message adds a record that
+the submitted cases would then see.
 
 - **Bounded task dispatch.** `fabric_dispatch_task` with `confirmed` true,
   task type `remediation_smoke`, read path `README.md` only, no write paths, no
