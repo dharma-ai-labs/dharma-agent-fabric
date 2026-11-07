@@ -24,8 +24,9 @@ while ($null -ne ($line=[Console]::In.ReadLine())) {
     $credential.RetrievePassword();
     $response=@{id=$request.id;status=0;value=$credential.Password};
   } catch {
-    $status=1;
-    if ($_.Exception.GetBaseException().HResult -eq -2147023728) {$status=3}
+    $status=1; $hr=$_.Exception.GetBaseException().HResult;
+    if ($hr -eq -2147023728) {$status=3}
+    elseif ($hr -ge -2146893824 -and $hr -le -2146828289) {$status=4}
     $response=@{id=$request.id;status=$status;value=$null}
   }
   [Console]::Out.WriteLine(($response | ConvertTo-Json -Compress));
@@ -87,10 +88,11 @@ export function createWindowsFreshReader(options: Options) {
       let response: { id?: unknown; status?: unknown; value?: unknown };
       try { response = JSON.parse(line); }
       catch { stop(failure('read_response_invalid')); return; }
+      // Status 1 is any other vault exception and stays read_response_invalid.
       if (!response || !active || buffer.length || response.id !== active.id
-        || response.status !== 0 && response.status !== 3
+        || response.status !== 0 && response.status !== 3 && response.status !== 4
         || response.status === 0 && typeof response.value !== 'string'
-        || response.status === 3 && response.value !== null) {
+        || response.status !== 0 && response.value !== null) {
         stop(failure('read_response_invalid')); return;
       }
       const pending = active;
@@ -99,7 +101,9 @@ export function createWindowsFreshReader(options: Options) {
       reference(process, false);
       idle = setTimeout(() => { if (child === process && !active) stop(); }, options.idleMs ?? 30_000);
       idle.unref();
-      pending.accept(response.value as string | null);
+      // Status 4: the entry exists but cannot be decrypted (security facility 0x8009xxxx, for example DPAPI).
+      if (response.status === 4) pending.reject(failure('secure_store_unreadable'));
+      else pending.accept(response.value as string | null);
     });
     return process;
   };
