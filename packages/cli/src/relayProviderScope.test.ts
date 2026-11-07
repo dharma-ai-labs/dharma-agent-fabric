@@ -53,7 +53,7 @@ test('setting up a second provider in the same checkout keeps the first in provi
   assert.doesNotMatch(onboard, /providerIds: providerIds\b/);
   const join = between(text, "const workspace = resolve(dharmaHome(), 'joined-repositories', bindingId);", "const roleInput = {");
   assert.match(join, /await setUpProviderIds\(item, \[provider\]\)/);
-  const seed = between(text, 'async function setUpProviderIds(', '\n}\n');
+  const seed = between(text, 'async function setUpProviderIds(', 'async function relayProviderIds(');
   assert.match(seed, /recordedProviderIds\(workspace\.providerIds \?\? await protectedBundleHolders\(workspace\), added\)/);
   const relay = between(text, 'async function relayProviderIds(', 'export async function receiptAwareProviderCapabilities(');
   assert.match(relay, /await protectedBundleHolders\(workspace, workspace\.providerIds, onUnprotected\)/);
