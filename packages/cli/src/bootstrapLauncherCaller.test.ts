@@ -10,6 +10,7 @@ import {currentBootstrapHostScope, runCodexBootstrapHost} from './bootstrapHostS
 import {writeBootstrapHostText} from './bootstrapHostFiles.js';
 import * as launcherModule from './repositoryLaunchers.js';
 import {stableRepositoryLauncherContents} from './repositoryLaunchers.js';
+import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 const npmCliPath = process.platform === 'linux' ? '/synthetic/npm/bin/npm-cli.js' : undefined;
 const providerDirectory = process.platform === 'linux' ? '/synthetic/codex/bin' : undefined;
 
@@ -32,11 +33,16 @@ async function caller(overrides: Record<string, unknown> = {}) {
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'installStableRepositoryLauncher');
   assert.equal(nodes.length, 1);
-  const output = ts.transpileModule(nodes[0]!.getText(ast), {compilerOptions: {
+  // The bundle-holder helper it may call runs as written; its filesystem readers stay fixtures.
+  const helpers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'protectedBundleHolders')
+    .map(node => node.getText(ast).replace(/^export\s+/, ''));
+  const output = ts.transpileModule([nodes[0]!.getText(ast), ...helpers].join('\n'), {compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None}, reportDiagnostics: true});
   assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${output.outputText}\ninstallStableRepositoryLauncher`, {...fs, process, resolve, dirname,
     currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents,
+    readDeviceConfig: async () => null, registry: async () => [], selectDeviceWorkspace,
+    providersHoldingInstalledBundle: async () => [],
     providerDirectoriesInPathOrder: (launcherModule as Record<string, unknown>).providerDirectoriesInPathOrder,
     resolveRepositoryNpmCli: async () => npmCliPath,
     providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/fallback/bin'}),
@@ -153,5 +159,50 @@ test('actual launcher installer carries the bin directory of every provider set 
   const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
     nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
     ...(process.platform === 'linux' ? {providerDirectory: ['/synthetic/claude/bin', '/synthetic/codex/bin']} : {})});
+  assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
+});
+
+// PR #424 review (F1): re-running setup from a second agent rewrote the launcher with only that agent's bin directory,
+// so the relay lost the protected codex directory that holds the installed bundle. Relay upgrade already keeps holders.
+async function holderFixture(t: {after(fn: () => Promise<void>): void}, holderDirectory: (provider: string) => Promise<string | undefined>) {
+  const f = await fixture(t), requested: string[] = [];
+  const config = {organizationId: 'org_demo', deviceId: 'device_demo'};
+  const record = {workspaceId: workspaceIdForDevice({...config, path: f.root}), organizationId: config.organizationId,
+    deviceId: config.deviceId, path: f.root, repositoryRemoteHash: null};
+  const install = await caller({
+    readDeviceConfig: async () => config, registry: async () => [record],
+    providersHoldingInstalledBundle: async (workspace: unknown) => {assert.equal(workspace, record); return ['codex'];},
+    providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/claude/bin'}),
+    resolveRepositoryProviderDirectory: async (input: {provider: string; searchPath?: string}) => {
+      assert.equal(input.searchPath, '/synthetic/codex/bin:/synthetic/claude/bin');
+      requested.push(input.provider); return holderDirectory(input.provider);
+    },
+  });
+  return {f, requested, install};
+}
+
+test('actual launcher installer keeps each protected bundle holder of the registered workspace', async t => {
+  const linux = process.platform === 'linux';
+  const {f, requested, install} = await holderFixture(t, async provider => linux ? `/synthetic/${provider}/bin` : undefined);
+  await runCodexBootstrapHost(f.input, () => install(f.root, ['claude']));
+  // The holder's protection check, then the launcher resolution of the holder and of the set-up provider.
+  assert.deepEqual(requested, ['codex', 'codex', 'claude']);
+  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+    ...(linux ? {providerDirectory: ['/synthetic/codex/bin', '/synthetic/claude/bin']} : {})});
+  assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
+});
+
+test('actual launcher installer leaves out a bundle holder whose executable fails the protection check', async t => {
+  const linux = process.platform === 'linux';
+  const {f, requested, install} = await holderFixture(t, async provider => {
+    if (provider === 'codex') throw new Error('relay_startup_codex_path_invalid');
+    return linux ? `/synthetic/${provider}/bin` : undefined;
+  });
+  await runCodexBootstrapHost(f.input, () => install(f.root, ['claude']));
+  assert.deepEqual(requested, ['codex', 'claude']);
+  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+    ...(linux ? {providerDirectory: '/synthetic/claude/bin'} : {})});
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
 });
