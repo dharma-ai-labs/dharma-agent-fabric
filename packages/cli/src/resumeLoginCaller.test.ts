@@ -751,6 +751,7 @@ test('concurrent actual bootstrap-to-onboard clients preserve a sibling durable 
       }})},
     loadOrganizationApiToken: async () => 'synthetic-existing-token',
     parseSelectedProviderIds: () => ['codex'], inspectRegistryRecoveryFile: async () => ({kind: 'valid'}),
+    saveWorkspaceRecord: async () => undefined,
     registerWorkspaceBeforeRepositoryBind: async (fabric: AgentFabricClient) => {
       await fabric.registerWorkspace({workspaceId: f.row.workspaceId});
       return {registered: {...f.row, repositoryAgentId: 'agent-existing'}, synchronized: {localPolicy: f.policy}};
