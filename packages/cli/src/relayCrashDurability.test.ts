@@ -13,6 +13,7 @@ import {Ajv2020} from 'ajv/dist/2020.js';
 import type {FormatsPlugin} from 'ajv-formats';
 import ts from 'typescript';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
+import {createSystemSecureStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {applyServerEvidencePolicy, materializeWorkspacePolicy, run} from './index.js';
 import {workspaceIdForDevice} from './onboardingWorkspace.js';
 import {currentRelayChildFailure, relayChildExitReceipt, relayChildFailureCode, relayStartFailureReceipt} from './relayChildFailure.js';
@@ -212,6 +213,31 @@ test('status says failing while a running relay fails every session open', async
   await f.writeReceipt(f.receipt);
   assert.deepEqual(await f.reconnect(), {state: 'failing', lastSuccessfulPollAt: pollAt, lastFailure: {
     code: 'connection_anchor_lock_invalid', at: f.at, stage: 'session_open', category: 'unexpected'}});
+});
+
+test('status gives a one-line remedy when the relay cannot open its device identity', async t => {
+  const f = await runningRelayHome(t);
+  const windows = 'Device credentials cannot be read. If the Windows password was reset by an administrator, '
+    + 'restore the previous password or re-enroll this device.';
+  // WSL reads the Windows vault, so it gets the Windows text too.
+  const win32 = await createSystemSecureStore().then(store => store.backend === 'windows-credential-manager',
+    () => process.platform === 'win32');
+  const remedies: Record<string, string> = {
+    connection_identity_requires_recovery: win32 ? windows
+      : 'Device credentials cannot be read from the OS keychain. Unlock it for this user or re-enroll this device.',
+    connection_identity_store_unavailable: win32 ? windows
+      : 'The OS credential store cannot be read. Unlock it for this user; the relay retries on its own.',
+    connection_identity_store_busy: 'The credential store did not answer in time; the relay keeps retrying.',
+    connection_trust_requires_recovery: 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.',
+    connection_anchor_lock_unavailable: 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; '
+      + 'the relay retries on its own.',
+  };
+  for (const [failureCode, remedy] of Object.entries(remedies)) {
+    await f.writeReceipt({...f.receipt, failureCode});
+    assert.deepEqual(await f.reconnect(), {state: 'failing', lastSuccessfulPollAt: null, lastFailure: {
+      code: failureCode, at: f.at, stage: 'session_open', category: 'unexpected', remedy}});
+    assert.match(remedy, /^[^\n]{1,200}$/);
+  }
 });
 
 test('a session open failure without a known code still reads as failing, with no free text', async t => {

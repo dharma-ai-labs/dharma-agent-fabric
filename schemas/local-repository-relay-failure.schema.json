@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.dharma-ai.io/local-repository-relay-failure/v1",
   "title": "Device-local receipt for a failed repository relay loop; not an authority envelope",
-  "description": "Stored at relay/repositories/<workspaceId>/last-failure.json. The running relay writes it each time a repository loop fails. It holds stable values only, never error or stderr text. failureCode is present only when the failure is one of the listed codes.",
+  "description": "Stored at relay/repositories/<workspaceId>/last-failure.json. The running relay writes it each time a repository loop fails. It holds stable values only, never error or stderr text. failureCode is present only when the failure is one of the listed codes: a signing lock failure, or a session open that cannot read or trust the device identity.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "organizationId", "deviceId", "workspaceId", "pid", "relayPidMtimeMs", "relayPidCtimeMs", "at", "stage", "category"],
@@ -33,7 +33,11 @@
       "connection_anchor_recovery_required",
       "connection_anchor_lock_unavailable",
       "connection_anchor_lock_cleanup_unconfirmed",
-      "device_signing_control_unavailable"
+      "device_signing_control_unavailable",
+      "connection_identity_requires_recovery",
+      "connection_trust_requires_recovery",
+      "connection_identity_store_unavailable",
+      "connection_identity_store_busy"
     ]}
   }
 }
