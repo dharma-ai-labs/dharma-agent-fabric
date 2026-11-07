@@ -113,3 +113,87 @@ test('the session open record matches its schema', async () => {
   for (const value of [{}, {at: '2026-11-04T00:00:00Z'}, {at: '2026-11-04T00:00:00.000Z\n'},
     {at: new Date().toISOString(), detail: 'free text'}]) assert.equal(validate(value), false);
 });
+
+const errno = (code: string, fields: Record<string, string>) =>
+  Object.assign(Error(`${code}: operation not permitted, ${fields.path ?? fields.syscall}`), {code, errno: -1, ...fields});
+const separator = process.platform === 'win32' ? '\\' : '/';
+const lockDirectory = process.platform === 'win32' ? ['C:', 'Users', 'someone', 'AppData', 'Local', 'Temp'].join(separator) : '/tmp';
+// AgentFabricClient.open errors at session_open, by the code the relay must record.
+const openFailures: Array<[string, () => Error]> = [
+  ['connection_identity_requires_recovery', () => Error('relay_host_device_identity_unavailable')],
+  ['connection_identity_requires_recovery', () => Error('Enrolled device identity does not match the secure store.')],
+  ['connection_trust_requires_recovery', () => Error('Legacy device enrollment must be reauthenticated with dharma login before relay access.')],
+  ['connection_trust_requires_recovery', () => Error('Device configuration does not match the secure enrollment anchor. Run dharma login again.')],
+  ['connection_trust_requires_recovery', () => Error('Protected enrollment anchor is corrupt.')],
+  ['connection_trust_requires_recovery', () => Error('Device enrollment is not anchored in secure storage. Run dharma login again.')],
+  ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_response_invalid.'),
+    {code: 'read_response_invalid'})],
+  ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_timeout.'),
+    {code: 'read_timeout'})],
+  ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: secure_store_unreadable.'),
+    {code: 'secure_store_unreadable'})],
+  // The code decides, not the text around it.
+  ['connection_identity_store_unavailable', () => Object.assign(Error('C:/Users/someone/.secret sk_live_token_value'),
+    {code: 'read_helper_exited'})],
+  ['connection_identity_store_unavailable', () => Error('Windows Credential Manager failed: C:/Users/someone/.secret')],
+  ['connection_identity_store_unavailable', () => Error('Linux Secret Service failed: sk_live_token_value')],
+  ['connection_identity_store_unavailable', () => Error('macOS Keychain failed: private detail')],
+  ['connection_anchor_lock_unavailable', () => errno('EPERM', {syscall: 'kill'})],
+  ['connection_anchor_lock_unavailable', () => errno('EPERM', {syscall: 'open',
+    path: [lockDirectory, `dharma-enrollment-locks-${'a'.repeat(32)}`, 'x.lock'].join(separator)})],
+  ['connection_anchor_lock_unavailable', () => errno('EACCES', {syscall: 'link',
+    path: [lockDirectory, `dharma-signing-controls-${'b'.repeat(32)}`, 'y.lock.candidate'].join(separator)})],
+];
+
+for (const [failureCode, error] of openFailures) {
+  test(`a session open that fails with "${error().message.slice(0, 48)}" records ${failureCode}`, async () => {
+    const events = await observedFailure(error());
+    assert.deepEqual(events, [{workspaceId:'workspace_a',code:'repository_relay_failed',stage:'session_open',category:'unexpected',failureCode}]);
+    assert.doesNotMatch(JSON.stringify(events), /secret|sk_live|private|Users|tmp|Temp|lock\b/i);
+  });
+}
+
+test('session open errors outside the known forms keep no code', async () => {
+  for (const error of [Error('relay_host_device_identity_unavailable C:/Users/someone/.secret'),
+    Error('request_failed: relay_host_device_identity_unavailable'), Error('Protected enrollment anchor is corrupt'),
+    Object.assign(Error('read_response_invalid'), {code: 'read_response_invalid_extra'}),
+    Object.assign(Error('read_timeout'), {code: 7}),
+    errno('EPERM', {syscall: 'rename', path: '/home/someone/.dharma/device.json'}),
+    errno('ENOENT', {syscall: 'kill'}),
+    errno('EPERM', {syscall: 'open', path: '/home/someone/dharma-enrollment-locks-short/x.lock'})]) {
+    assert.deepEqual(await observedFailure(error),
+      [{workspaceId:'workspace_a',code:'repository_relay_failed',stage:'session_open',category:'unexpected'}]);
+  }
+});
+
+test('open error forms are classified only at session_open', async () => {
+  for (const stage of ['policy_verification', 'vault_open', 'task_poll'] as const) {
+    const controller = new AbortController(), events: unknown[] = [];
+    let ticks = 0;
+    await runRegisteredRepositoryRelays({signal:controller.signal,
+      list:async()=>[{workspaceId:'workspace_a',policyPath:'/a/.dharma/approved-policy.json'}],
+      run:()=>withRepositoryRelayStage(stage,async()=>{throw Error('relay_host_device_identity_unavailable');}),
+      observe:event=>{events.push(event);},now:()=>0,
+      wait:async()=>{await Promise.resolve();await Promise.resolve();if(++ticks===4)controller.abort();}});
+    assert.deepEqual(events, [{workspaceId:'workspace_a',code:'repository_relay_failed',stage,category:'unexpected'}]);
+  }
+});
+
+test('device credential failure receipts match the schema and read back for status', async () => {
+  const validate = await validator('local-repository-relay-failure'), at = new Date().toISOString();
+  const mtime = Date.parse(at) - 1000;
+  const seen = new Set<string>();
+  for (const [failureCode, error] of openFailures) {
+    const [event] = await observedFailure(error());
+    const value = repositoryRelayFailureReceipt(event as Parameters<typeof repositoryRelayFailureReceipt>[0],
+      {organizationId: 'org_a', deviceId: 'device_a', pid: 50, relayPidMtimeMs: mtime, relayPidCtimeMs: mtime}, at);
+    assert.equal(validate(value), true, JSON.stringify(validate.errors));
+    assert.equal((value as {failureCode?: string}).failureCode, failureCode);
+    assert.deepEqual(currentRepositoryRelayFailure({receipt: value, organizationId: 'org_a', deviceId: 'device_a',
+      workspaceId: 'workspace_a', pid: 50, relayPidMtimeMs: mtime, relayPidCtimeMs: mtime, lastSuccessfulPollAt: null,
+      now: Date.parse(at) + 1000}), {at, stage: 'session_open', category: 'unexpected', failureCode});
+    seen.add(failureCode);
+  }
+  assert.deepEqual([...seen].sort(), ['connection_anchor_lock_unavailable', 'connection_identity_requires_recovery',
+    'connection_identity_store_unavailable', 'connection_trust_requires_recovery']);
+});
