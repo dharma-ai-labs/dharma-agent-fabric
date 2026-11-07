@@ -214,6 +214,28 @@ test('status says failing while a running relay fails every session open', async
     code: 'connection_anchor_lock_invalid', at: f.at, stage: 'session_open', category: 'unexpected'}});
 });
 
+test('status gives a one-line remedy when the relay cannot open its device identity', async t => {
+  const f = await runningRelayHome(t);
+  const windows = 'Device credentials cannot be read. If the Windows password was reset by an administrator, '
+    + 'restore the previous password or re-enroll this device.';
+  const win32 = process.platform === 'win32';
+  const remedies: Record<string, string> = {
+    connection_identity_requires_recovery: win32 ? windows
+      : 'Device credentials cannot be read from the OS keychain. Unlock it for this user or re-enroll this device.',
+    connection_identity_store_unavailable: win32 ? windows
+      : 'The OS credential store cannot be read. Unlock it for this user; the relay retries on its own.',
+    connection_trust_requires_recovery: 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.',
+    connection_anchor_lock_unavailable: 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; '
+      + 'the relay retries on its own.',
+  };
+  for (const [failureCode, remedy] of Object.entries(remedies)) {
+    await f.writeReceipt({...f.receipt, failureCode});
+    assert.deepEqual(await f.reconnect(), {state: 'failing', lastSuccessfulPollAt: null, lastFailure: {
+      code: failureCode, at: f.at, stage: 'session_open', category: 'unexpected', remedy}});
+    assert.match(remedy, /^[^\n]{1,200}$/);
+  }
+});
+
 test('a session open failure without a known code still reads as failing, with no free text', async t => {
   const f = await runningRelayHome(t);
   await f.writeReceipt({...f.receipt, failureCode: 'C:/Users/someone/.secret'});
