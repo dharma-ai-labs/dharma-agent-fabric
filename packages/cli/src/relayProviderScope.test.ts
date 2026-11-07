@@ -153,7 +153,7 @@ test('actual upgrade and the relay share one reader of providers that hold an in
 // PR #425 review round 2 (1): a provider kept only because it holds a bundle still got every new release, and the
 // relay ran its executable from the user-manager PATH, where on the F13 host codex is another user's binary.
 async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install' | 'clear';
-  previous?: Record<string, unknown> }) {
+  previous?: Record<string, unknown>; holders?: string[]; providerIdsAfterStart?: string[] }) {
   const ts = (await import('typescript')).default;
   const { resolve } = await import('node:path');
   const { runInNewContext } = await import('node:vm');
@@ -178,6 +178,7 @@ async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install
   const probed: string[] = [], pumped: string[] = [], polled: { provider: string; clearOnly: unknown }[] = [];
   const activated: string[] = [], synced: unknown[] = [], written: Record<string, any>[] = [];
   let pump: Promise<void> | undefined;
+  let registryReads = 0;
   const adapter = (providerId: string) => ({ providerId,
     capability: async () => { probed.push(providerId); return { skillInstall: 'available' }; } });
   const offered = (provider: string) => ({ workspace, rollout: { id: `rollout-${provider}` }, sourceRoot: resolve(home, provider),
@@ -188,7 +189,10 @@ async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install
     providerAdapters: ['codex', 'claude', 'agy', 'hermes'].map(adapter),
     required: (flags: Map<string, unknown>, name: string) => flags.get(name),
     loadOrganizationPolicy: async () => ({ organizationId: 'org_test', serverAuthorization: { workspaceId: workspace.workspaceId } }),
-    registry: async () => [workspace], withRepositoryRelayStage,
+    // Setup can record another provider after the relay read the row at start.
+    registry: async () => registryReads++ && scenario.providerIdsAfterStart
+      ? [{ ...workspace, providerIds: scenario.providerIdsAfterStart }] : [workspace],
+    withRepositoryRelayStage,
     loadVerifiedWorkspacePolicyUnlessReplayAhead: async () => ({ revision: 'policy' }),
     loadVerifiedWorkspacePolicy: async () => ({ revision: 'policy' }),
     client: async () => ({ fixture: true }), relayAutostartReport: async () => ({}), dharmaHome: () => home,
@@ -196,7 +200,8 @@ async function runRelayTick(scenario: { codexProtected: boolean; offer: 'install
     RepositorySourceWatcher: class { invalidate() {} }, BlockedRepositorySourceRetry: class { consider() { return false; } },
     openBootstrapVault: async () => ({ close: async () => {} }), rawLocalRetentionDays: () => 1,
     readRelaySkillActivationState: async () => scenario.previous ? { providers: { codex: scenario.previous } } : null,
-    providersHoldingInstalledBundle: async () => ['codex'],
+    providersHoldingInstalledBundle: async (_workspace: unknown, skip: string[] = []) =>
+      (scenario.holders ?? ['codex']).filter(provider => !skip.includes(provider)),
     providerProcessEnvironment: (env: Record<string, string>) => env,
     resolveRepositoryProviderDirectory: async (input: { provider: string }) => {
       if (input.provider === 'codex' && !scenario.codexProtected) throw new Error('relay_startup_codex_path_invalid');
@@ -275,4 +280,28 @@ test('actual relay reports a release withheld from a holder, never up to date', 
   const current = await runRelayTick({ codexProtected: true, offer: 'clear',
     previous: { at: '2026-11-05T06:30:00.000Z', outcome: 'failed', rolloutId: null, bundleId: null, errorCode: 'provider_not_set_up' } });
   assert.equal(current.providers.codex?.outcome, 'activated', 'a clear the holder takes still reaches it');
+});
+
+// PR #425 fix round 3 (1): the relay read providerIds once at start, so `bootstrap --provider codex` after claude in
+// the same checkout left the running relay on [claude]: codex held no bundle, was never polled or registered, and
+// its setup readiness wait could not finish until the relay restarted.
+test('actual running relay serves a provider set up after it started, without a restart', async () => {
+  const run = await runRelayTick({ codexProtected: true, offer: 'install', holders: [],
+    providerIdsAfterStart: ['claude', 'codex'] });
+  assert.deepEqual(run.synced, [['codex', 'claude']], 'the policy refresh registers the newly set-up provider');
+  assert.deepEqual(run.pumped.sort(), ['claude', 'codex'], 'background preparation includes the new provider');
+  assert.deepEqual(run.polled, [{ provider: 'codex', clearOnly: false }, { provider: 'claude', clearOnly: false }]);
+  assert.deepEqual(run.activated, ['codex', 'claude'], 'the new provider receives its release');
+  assert.equal(run.providers.codex?.outcome, 'activated');
+});
+
+// PR #425 fix round 3 (1), case 2: onboard wrote approved-policy.json before it recorded providerIds, so an already
+// running supervisor could start the new workspace's relay unscoped, serving and probing every adapter for its life.
+test('actual onboard records the selected providers before the first policy sync writes the relay policy', async () => {
+  const text = await source();
+  const onboard = between(text, 'async function onboard(flags', 'async function evidenceSync(');
+  const bind = onboard.indexOf('await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds)');
+  assert.ok(bind > 0, 'onboard registers the workspace before the repository bind');
+  const saved = onboard.indexOf('await saveWorkspaceRecord(registered);');
+  assert.ok(saved > 0 && saved < bind, 'providerIds must be saved before the sync that materializes the policy');
 });

@@ -6936,6 +6936,13 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   }
   if (!registered) throw new Error('Workspace registration failed.');
   const fabric = await client();
+  // A running supervisor starts this workspace's relay once the first sync writes its policy, so the record names
+  // the selected providers before that sync; a relay started unscoped would serve every adapter.
+  const selectedProviders = providerIds && await setUpProviderIds(registered, providerIds);
+  if (selectedProviders && canonicalize(registered.providerIds ?? null) !== canonicalize(selectedProviders)) {
+    registered = { ...registered, providerIds: selectedProviders };
+    await saveWorkspaceRecord(registered);
+  }
   const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
   registered = prepared.registered;
   // Later policy syncs and the relay read this record, so they register and install only these providers.
@@ -9395,8 +9402,18 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = {
     ...(await readRelaySkillActivationState(dharmaHome(), canonicalWorkspace.workspaceId))?.providers };
   let nextSkillActivationAt = 0;
+  // Setup can add a provider to this checkout while the relay runs, so each scoping decision reads the record's
+  // current providers rather than the copy read at start. Keeping the copy current also keeps the package CAS true.
+  const readProviderScope = async () => {
+    const current = (await registry()).find(item => item.workspaceId === canonicalWorkspace.workspaceId);
+    if (!current) return;
+    const { providerIds: _held, ...held } = canonicalWorkspace;
+    canonicalWorkspace = current.providerIds ? { ...held, providerIds: current.providerIds } : held;
+  };
   const skillPreparationPump = startSkillPreparationPump({
     prepare: async assertRunning => {
+      await readProviderScope();
+      assertRunning();
       // Background preparation stages new releases, so only the set-up providers take part.
       await prepareProvidersIndependently(selectedProviderAdapters(canonicalWorkspace.providerIds ?? null), assertRunning, async adapter => {
         assertRunning();
@@ -9522,6 +9539,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     do {
       if (stopping) break;
       await consumeSourceScan();
+      await readProviderScope();
       if (Date.now() >= nextPolicyRefreshAt) {
         try {
           await syncWorkspacePolicy(fabric, canonicalWorkspace, policy.revision, true,
