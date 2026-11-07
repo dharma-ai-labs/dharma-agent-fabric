@@ -9,7 +9,7 @@ interface Options {
   idleMs?: number;
 }
 
-const script = `
+export const windowsFreshReadScript = `
 $ErrorActionPreference="Stop";
 [Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false);
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);
@@ -69,7 +69,7 @@ export function createWindowsFreshReader(options: Options) {
     if (child) return child;
     decoder = new StringDecoder('utf8');
     const process = spawn(options.command, [...options.prefixArgs,
-      '-NoProfile', '-NonInteractive', '-Command', script],
+      '-NoProfile', '-NonInteractive', '-Command', windowsFreshReadScript],
     { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     child = process;
     process.stderr.on('data', () => { /* Never forward credential-helper output. */ });
