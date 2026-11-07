@@ -1,5 +1,6 @@
 import { isAbsolute, resolve, win32 } from 'node:path';
 import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboardingWorkspace.js';
+import { RELAY_OPEN_FAILURE_CODES, relayOpenFailureCode } from './relayOpenFailure.js';
 import { relayRestartDelayMs } from './relaySupervisor.js';
 
 export interface RepositoryRelayRegistration { workspaceId: string; policyPath: string }
@@ -10,7 +11,7 @@ export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_
 // Exact codes only: any other error message can quote a path or a server value.
 export const REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string> = new Set(['connection_anchor_lock_invalid', 'connection_anchor_busy',
   'connection_anchor_recovery_required', 'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed',
-  'device_signing_control_unavailable']);
+  'device_signing_control_unavailable', ...RELAY_OPEN_FAILURE_CODES]);
 const typedFailure = (value: unknown) => REPOSITORY_RELAY_FAILURE_CODES.has(value as string) ? { failureCode: value as string } : {};
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
   category?: RepositoryRelayFailureCategory; failureCode?: string }
@@ -26,8 +27,12 @@ export async function withRepositoryRelayStage<T>(stage: RepositoryRelayStage, o
   catch (error) { throw error instanceof StagedRepositoryRelayError ? error : new StagedRepositoryRelayError(stage, error); }
 }
 
+function failureCause(error: unknown) {
+  return error instanceof StagedRepositoryRelayError ? error.cause : error;
+}
+
 function failureMessage(error: unknown) {
-  const cause = error instanceof StagedRepositoryRelayError ? error.cause : error;
+  const cause = failureCause(error);
   try { return cause instanceof Error ? cause.message : ''; }
   catch { return ''; }
 }
@@ -200,10 +205,11 @@ export async function runRegisteredRepositoryRelays(input: {
           } catch (error) {
             if (!controller.signal.aborted) {
               worker.failed = true;
-              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
-                stage: error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run',
-                category: failureCategory(error),
-                ...typedFailure(failureMessage(error)) });
+              const stage = error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run';
+              const typed = typedFailure(failureMessage(error));
+              const openCode = !typed.failureCode && stage === 'session_open' ? relayOpenFailureCode(failureCause(error)) : undefined;
+              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed', stage,
+                category: failureCategory(error), ...typed, ...(openCode ? { failureCode: openCode } : {}) });
             }
           } finally {
             worker.done = true;
