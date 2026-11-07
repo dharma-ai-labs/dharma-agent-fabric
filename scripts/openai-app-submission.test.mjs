@@ -316,7 +316,7 @@ test('the submitted cases hold whatever order they run in, including after a dec
   const sessions = testCaseById('TC-6');
   assert.match(sessions.expected_output, /whether or not a write tool ran/i, 'TC-6 says in the submitted text that a prior write does not change it');
   const tc3Guide = guide.slice(guide.indexOf('### TC-3 '), guide.indexOf('### TC-4 '));
-  assert.doesNotMatch(tc3Guide, /limit` 5|exactly 5 trajectories/, 'REVIEWER_GUIDE.md TC-3 matches the submitted case');
+  assert.doesNotMatch(tc3Guide, /limit` 5\b|exactly 5 trajectories/, 'REVIEWER_GUIDE.md TC-3 matches the submitted case');
   const tc6Guide = guide.slice(guide.indexOf('### TC-6 '), guide.indexOf('### Negative cases'));
   assert.doesNotMatch(tc6Guide, /list is empty/, 'REVIEWER_GUIDE.md TC-6 matches the submitted case');
   const reset = seedPlan.slice(seedPlan.indexOf('## Reset'));
