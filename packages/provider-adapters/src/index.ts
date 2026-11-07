@@ -1182,24 +1182,35 @@ function defaultRoots(provider: ProviderId): string[] {
   return [resolve(process.env.AGY_CONFIG_DIR || resolve(homedir(), '.gemini', 'antigravity-cli'), 'history.jsonl')];
 }
 
+function cliCapability(provider: Exclude<ProviderId, 'agy' | 'hermes'>, version: string | null,
+  taskExecution: ProviderCapability['taskExecution']): ProviderCapability & { skillRollback: 'available' | 'unavailable' } {
+  return {
+    provider,
+    version,
+    evidence: 'available',
+    configuredAssets: 'partial',
+    taskExecution,
+    sessionContinuation: 'unavailable',
+    skillInstall: version ? 'available' : 'unavailable',
+    activation: 'next_session',
+    skillRollback: version ? 'available' : 'unavailable',
+    usageEvidence: 'partial',
+  };
+}
+
+/** What a provider's adapter reports when its executable is not on PATH, without running anything. */
+export function providerCapabilityWithoutExecutable(provider: ProviderId): ProviderCapability & { skillRollback: 'available' | 'unavailable' } {
+  if (provider === 'agy') return agyCapability(null);
+  if (provider === 'hermes') return hermesCapability(null);
+  return cliCapability(provider, null, 'unavailable');
+}
+
 function adapter(provider: Exclude<ProviderId, 'agy' | 'hermes'>, command: string): ProviderAdapter {
   return {
     providerId: provider,
     async capability() {
       const version = await executableVersion(command);
-      const taskExecution = version ? await providerTaskReadiness(provider, command) : 'unavailable';
-      return {
-        provider,
-        version,
-        evidence: 'available',
-        configuredAssets: 'partial',
-        taskExecution,
-        sessionContinuation: 'unavailable',
-        skillInstall: version ? 'available' : 'unavailable',
-        activation: 'next_session',
-        skillRollback: version ? 'available' : 'unavailable',
-        usageEvidence: 'partial',
-      };
+      return cliCapability(provider, version, version ? await providerTaskReadiness(provider, command) : 'unavailable');
     },
     async discover(request) {
       const sessions: ProviderSession[] = [];

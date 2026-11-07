@@ -26,6 +26,16 @@ test('actual relay records each automatic activation result with a bounded error
   assert.match(write, /schema: 'dharma\.relay-skill-activation\/v1'/);
 });
 
+// PR #425 review round 3 (3): an empty poll after a failure must see the provider's active bundle to clear it.
+test('actual relay passes the active bundle to an empty poll that follows a failure', async () => {
+  const text = await source();
+  const relay = text.slice(text.indexOf('async function relayStart('), text.indexOf('export async function run('));
+  const tick = relay.slice(relay.indexOf('performance.now() >= nextSkillActivationAt'), relay.indexOf('nextSkillActivationAt = performance.now() + 60_000;'));
+  assert.match(tick, /nextSkillActivationResult\(skillActivationResults\[adapter\.providerId\],[^;]*installed\)/);
+  assert.match(tick, /const installed = !activating && skillActivationResults\[provider\]\?\.outcome === 'failed'\s*\? await activeSkillBundle\(canonicalWorkspace, provider\) : null;/);
+  assert.match(tick, /record\(\{ outcome: activating \? 'activated' : 'no_rollout', errorCode: null \}, installed\);/);
+});
+
 test('actual activation refuses an R3 or R4 bundle without approval before installing, with a code', async () => {
   const text = await source();
   const activation = text.slice(text.indexOf('async function activatePreparedSkillUpdate('), text.indexOf('async function skillSync('));
@@ -49,4 +59,14 @@ test('actual diagnostic status shows each repository relay activation counters a
   const text = await source();
   const status = text.slice(text.indexOf("if (command === 'status') {"), text.indexOf("if (command === 'assistant')"));
   assert.match(status, /skillActivation: await readRelaySkillActivationState\(dharmaHome\(\), row\.workspaceId\)/);
+});
+
+// PR #424 review (6): the relay kept results only in memory, so a restart wrote an empty record over
+// the reason setup and `dharma status` were reporting.
+test('actual relay seeds activation results from the recorded file before its first activation tick', async () => {
+  const text = await source();
+  const relay = text.slice(text.indexOf('async function relayWorkspaceLoop('), text.indexOf('export async function run('));
+  const seeded = relay.search(/const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = \{\s*\.\.\.\(await readRelaySkillActivationState\(dharmaHome\(\), canonicalWorkspace\.workspaceId\)\)\?\.providers \};/);
+  assert.ok(seeded > 0, 'the in-memory results must start from skill-activation.json');
+  assert.ok(seeded < relay.indexOf('performance.now() >= nextSkillActivationAt'));
 });

@@ -72,6 +72,7 @@ function fixture() {
   let registered = true;
   let refreshFailure: Error | null = null;
   let activeSkill: { bundleId: string; bundleHash: string } | null = null;
+  let unsafeProviders: string[] = [];
   const config = { deviceId: task.target.deviceId, organizationId: task.organizationId,
     serverPublicKeyEd25519: 'synthetic_key_never_parsed' };
   const fabric = {
@@ -89,6 +90,11 @@ function fixture() {
       calls.push('policy-refresh');
       if (refreshFailure) throw refreshFailure;
       return policy;
+    },
+    PROVIDER_UNSAFE_PATH: 'provider_unsafe_path',
+    relayProviderUnsafePath: async (provider: string) => {
+      if (!unsafeProviders.includes(provider)) return false;
+      calls.push(`unsafe-provider:${provider}`); return true;
     },
     configPath: () => '/fixture/config.json',
     readFile: async (path: string) => {
@@ -128,7 +134,8 @@ function fixture() {
   return { task, workspace, policy, config, calls, events, fabric, dependencies, intervalIds,
     unregister: () => { registered = false; },
     failRefresh: () => { refreshFailure = new Error('fixture policy refresh denied'); },
-    setActiveSkill: (value: typeof activeSkill) => { activeSkill = value; } };
+    setActiveSkill: (value: typeof activeSkill) => { activeSkill = value; },
+    setUnsafeProviders: (value: string[]) => { unsafeProviders = value; } };
 }
 
 const beforeDeviceRejection = ['poll', 'registry', 'policy-refresh', 'config-read',
@@ -174,6 +181,17 @@ test('stale bundle pin posts failed preflight and releases its timer and lock wi
   await assert.rejects((await taskCaller(f.dependencies))(f.fabric, 30), /Task skill bundle does not match/);
   assert.deepEqual(f.calls, [...beforeDeviceRejection, 'public-key', 'active-skill', 'event:failed',
     'activation-lock-release', 'interval-clear:1']);
+  assert.equal(f.intervalIds.size, 0);
+});
+
+// PR #427 review (3x8=24): the first executable of the task's provider on PATH can belong to another user.
+test('task for a provider whose first executable on PATH is unsafe is refused before config, lock or execution', async () => {
+  const f = fixture(); f.setUnsafeProviders(['claude']);
+  const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+  assert.deepEqual({ ...result }, { ok: false, taskId: f.task.taskId, code: 'provider_unsafe_path' });
+  assert.deepEqual(f.calls, ['poll', 'registry', 'policy-refresh', 'unsafe-provider:claude', 'event:failed']);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.events)), [{ taskId: f.task.taskId, event: 'failed',
+    payload: { phase: 'preflight', code: 'provider_unsafe_path' } }]);
   assert.equal(f.intervalIds.size, 0);
 });
 

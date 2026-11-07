@@ -373,6 +373,10 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       } }),
     rawLocalRetentionDays: () => 1,
     providerAdapters: [{ providerId: 'codex', capability: async () => ({ skillInstall: 'available' }) }],
+    relayProviderCapability: async (adapter: { capability(): Promise<unknown> }) =>
+      ({ unsafePath: false, capability: await adapter.capability() }),
+    PROVIDER_UNSAFE_PATH: 'provider_unsafe_path',
+    readRelaySkillActivationState: async () => null,
     isLocalProviderId: (provider: string) => provider === 'codex', prepareProvidersIndependently,
     withSkillPreparationTransaction: async (_input: unknown, operation: () => Promise<void>) => operation(),
     skillPreparationScopeRoot, serializeSkillPreparationRecord,

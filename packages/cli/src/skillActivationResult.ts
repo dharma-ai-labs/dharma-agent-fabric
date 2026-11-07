@@ -74,11 +74,29 @@ export function requireActiveSkillInstall(status: unknown): void {
   throw new SkillActivationError(`install_failed:${suffix}`, 'Skill installation finished without an active bundle.');
 }
 
-/** An empty poll after an activation means the installed release is current, not that none was offered. */
+/** Server decisions and install receipts; an empty poll is not newer news about them. Other failures clear on it. */
+const DECISION_CODES = new Set(['approval_required', 'repository_package_expired', 'repository_package_superseded',
+  'install_failed:failed', 'install_failed:rolled_back', 'install_failed:unknown']);
+
+/**
+ * An empty poll after an activation means the installed release is current, not that none was offered.
+ * An empty poll after a server decision carries no newer reason, so the decision stays the reported one, with the
+ * time it was observed: a readiness wait that began later must not report it as current. It ends once the provider's
+ * active bundle is the one that failed or became active after the failure. Any other failure, such as a transient
+ * poll error, clears once a poll for it succeeds.
+ */
 export function nextSkillActivationResult(previous: SkillActivationResult | undefined,
-  attempt: SkillActivationResult): SkillActivationResult {
+  attempt: SkillActivationResult, installed?: { bundleId: string; at: string } | null): SkillActivationResult {
   if (attempt.outcome === 'no_rollout' && (previous?.outcome === 'activated' || previous?.outcome === 'up_to_date')) {
     return { ...previous, at: attempt.at, outcome: 'up_to_date' };
+  }
+  if (attempt.outcome === 'no_rollout' && previous?.outcome === 'failed') {
+    if (!DECISION_CODES.has(previous.errorCode ?? '')) return attempt;
+    const active = installed && IDENTIFIER.test(installed.bundleId) ? installed : null;
+    if (active && (active.bundleId === previous.bundleId || Date.parse(active.at) > Date.parse(previous.at))) {
+      return { at: attempt.at, outcome: 'up_to_date', rolloutId: null, bundleId: active.bundleId, errorCode: null };
+    }
+    return previous;
   }
   return attempt;
 }
@@ -138,7 +156,11 @@ export async function readRelaySkillActivationState(home: string, workspaceId: s
 export function repositoryReadinessPendingCode(state: RelaySkillActivationState | null, provider: string,
   sinceMs: number): string {
   const result = state?.providers[provider];
-  if (!result || !(Date.parse(result.at) >= sinceMs)) return 'skill_activation_not_observed';
+  if (!result || !(Date.parse(result.at) >= sinceMs)) {
+    // A failure observed before the wait, carried by every empty poll the relay made since.
+    return result?.outcome === 'failed' && Date.parse(state!.updatedAt) >= sinceMs
+      ? 'rollout_not_offered' : 'skill_activation_not_observed';
+  }
   if (result.outcome === 'failed') return result.errorCode ?? 'install_failed';
   if (result.outcome === 'no_rollout') return 'rollout_not_offered';
   return 'installed_bundle_lacks_repository_knowledge';
