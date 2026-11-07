@@ -49,6 +49,7 @@ import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureRecei
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+import { relayOpenFailureRemedy } from './relayOpenFailure.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
@@ -9050,8 +9051,9 @@ async function currentSessionOpenFailure() {
       failure = current;
     }
   }
+  const remedy = relayOpenFailureRemedy(failure?.failureCode);
   return failure && Date.parse(String(failure.at)) > latestSuccess ? { code: failure.failureCode ?? 'repository_relay_failed',
-    at: failure.at, stage: failure.stage, category: failure.category } : null;
+    at: failure.at, stage: failure.stage, category: failure.category, ...(remedy ? { remedy } : {}) } : null;
 }
 
 async function relayStart(flags: Map<string, string | boolean>,

@@ -37,3 +37,21 @@ export function relayOpenFailureCode(error: unknown): RelayOpenFailureCode | und
   if (STORE_FAILURE_PREFIXES.some(prefix => message.startsWith(prefix))) return 'connection_identity_store_unavailable';
   return undefined;
 }
+
+const WINDOWS_CREDENTIALS_REMEDY = 'Device credentials cannot be read. If the Windows password was reset by an administrator, '
+  + 'restore the previous password or re-enroll this device.';
+
+/** One line for `dharma status`; undefined for any code without a known next step. */
+export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform = process.platform): string | undefined {
+  switch (code) {
+    case 'connection_identity_requires_recovery': return platform === 'win32' ? WINDOWS_CREDENTIALS_REMEDY
+      : 'Device credentials cannot be read from the OS keychain. Unlock it for this user or re-enroll this device.';
+    case 'connection_identity_store_unavailable': return platform === 'win32' ? WINDOWS_CREDENTIALS_REMEDY
+      : 'The OS credential store cannot be read. Unlock it for this user; the relay retries on its own.';
+    case 'connection_trust_requires_recovery':
+      return 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.';
+    case 'connection_anchor_lock_unavailable':
+      return 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; the relay retries on its own.';
+    default: return undefined;
+  }
+}
