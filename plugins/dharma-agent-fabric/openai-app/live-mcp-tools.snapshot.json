@@ -9,8 +9,8 @@
   "source": {
     "kind": "hosted_server_registration",
     "description": "Tool registrations of the hosted Dharma HQ MCP route at its production revision, in registration order (the order tools/list returns).",
-    "revision": "273acc16df69c07951848ef8d55818342b333cb0",
-    "extractedAt": "2026-10-31T02:28:46Z"
+    "revision": "2575d71690e955c4757e4ba6de2abd3ab5714633",
+    "extractedAt": "2026-11-07T08:17:49Z"
   },
   "liveCrossCheck": {
     "observedAt": "2026-10-31T02:28:46Z",
