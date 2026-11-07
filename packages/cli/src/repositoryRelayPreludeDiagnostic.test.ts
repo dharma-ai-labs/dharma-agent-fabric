@@ -128,16 +128,22 @@ const openFailures: Array<[string, () => Error]> = [
   ['connection_trust_requires_recovery', () => Error('Device enrollment is not anchored in secure storage. Run dharma login again.')],
   ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_response_invalid.'),
     {code: 'read_response_invalid'})],
-  ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_timeout.'),
+  ['connection_identity_store_busy', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_timeout.'),
     {code: 'read_timeout'})],
+  ['connection_identity_store_busy', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_helper_closed.'),
+    {code: 'read_helper_closed'})],
+  ['connection_identity_store_busy', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_helper_unavailable.'),
+    {code: 'read_helper_unavailable'})],
   ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: secure_store_unreadable.'),
     {code: 'secure_store_unreadable'})],
   // The code decides, not the text around it.
   ['connection_identity_store_unavailable', () => Object.assign(Error('C:/Users/someone/.secret sk_live_token_value'),
+    {code: 'read_response_invalid'})],
+  ['connection_identity_store_busy', () => Object.assign(Error('C:/Users/someone/.secret sk_live_token_value'),
     {code: 'read_helper_exited'})],
-  ['connection_identity_store_unavailable', () => Error('Windows Credential Manager failed: C:/Users/someone/.secret')],
-  ['connection_identity_store_unavailable', () => Error('Linux Secret Service failed: sk_live_token_value')],
-  ['connection_identity_store_unavailable', () => Error('macOS Keychain failed: private detail')],
+  ['connection_identity_store_busy', () => Error('Windows Credential Manager failed: C:/Users/someone/.secret')],
+  ['connection_identity_store_busy', () => Error('Linux Secret Service failed: sk_live_token_value')],
+  ['connection_identity_store_busy', () => Error('macOS Keychain failed: private detail')],
   ['connection_anchor_lock_unavailable', () => errno('EPERM', {syscall: 'kill'})],
   ['connection_anchor_lock_unavailable', () => errno('EPERM', {syscall: 'open',
     path: [lockDirectory, `dharma-enrollment-locks-${'a'.repeat(32)}`, 'x.lock'].join(separator)})],
@@ -195,5 +201,5 @@ test('device credential failure receipts match the schema and read back for stat
     seen.add(failureCode);
   }
   assert.deepEqual([...seen].sort(), ['connection_anchor_lock_unavailable', 'connection_identity_requires_recovery',
-    'connection_identity_store_unavailable', 'connection_trust_requires_recovery']);
+    'connection_identity_store_busy', 'connection_identity_store_unavailable', 'connection_trust_requires_recovery']);
 });

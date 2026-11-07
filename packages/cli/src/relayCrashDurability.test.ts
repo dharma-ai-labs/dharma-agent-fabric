@@ -224,6 +224,7 @@ test('status gives a one-line remedy when the relay cannot open its device ident
       : 'Device credentials cannot be read from the OS keychain. Unlock it for this user or re-enroll this device.',
     connection_identity_store_unavailable: win32 ? windows
       : 'The OS credential store cannot be read. Unlock it for this user; the relay retries on its own.',
+    connection_identity_store_busy: 'The credential store did not answer in time; the relay keeps retrying.',
     connection_trust_requires_recovery: 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.',
     connection_anchor_lock_unavailable: 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; '
       + 'the relay retries on its own.',

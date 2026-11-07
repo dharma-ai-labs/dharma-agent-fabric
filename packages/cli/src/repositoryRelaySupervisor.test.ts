@@ -308,3 +308,17 @@ test('any other failure keeps the short retry and restarts the device credential
   const mixed = await failedSessionOpenStarts(attempt => attempt % 5 === 0 ? Error('worker failed') : identityLost(), 10);
   assert.ok(mixed.every(gap => gap <= 60_000), `interrupted credential failures: ${mixed}`);
 });
+
+// The real relayRestartDelayMs schedule: 1, 2, 4, 8, 16, then 30 s.
+test('a store that does not answer keeps the short retry however often it repeats', async () => {
+  const storeBusy = () => Object.assign(Error('Windows Credential Manager fresh read failed: read_timeout.'), { code: 'read_timeout' });
+  const busy = await failedSessionOpenStarts(storeBusy, 8);
+  assert.equal(busy.length, 8);
+  assert.ok(busy.every(gap => gap <= 60_000), `store-busy failures must never wait ten minutes: ${busy}`);
+  const helperGone = await failedSessionOpenStarts(attempt => attempt % 2 ? storeBusy()
+    : Object.assign(Error('Windows Credential Manager fresh read failed: read_helper_exited.'), { code: 'read_helper_exited' }), 7);
+  assert.ok(helperGone.every(gap => gap <= 60_000), `helper outages: ${helperGone}`);
+  const identity = await failedSessionOpenStarts(identityLost, 6);
+  assert.ok(identity.slice(0, 4).every(gap => gap <= 60_000) && identity.slice(4).every(gap => gap >= 600_000),
+    `identity failures still wait ten minutes after five: ${identity}`);
+});
