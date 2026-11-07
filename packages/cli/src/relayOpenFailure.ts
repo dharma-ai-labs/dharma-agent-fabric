@@ -1,3 +1,5 @@
+import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
+
 // Stable codes for an AgentFabricClient.open failure at the relay session_open stage.
 // Only exact error forms map to a code. The error text itself is never recorded:
 // it can quote a path, a store's stderr or a server value.
@@ -14,7 +16,9 @@ const TRUST_MESSAGES = new Set([
   'Protected enrollment anchor is corrupt.']);
 // Codes the secure-store package sets on a failed credential read. An unreadable answer needs the user;
 // a helper that timed out or went away is transient and keeps the normal short retry.
-const STORE_UNREADABLE_CODES = new Set(['read_response_invalid', 'read_response_too_large', 'secure_store_unreadable']);
+const STORE_UNREADABLE_CODES = new Set(['read_response_invalid', 'read_response_too_large']);
+// Without the fresh reader (WSL) the Windows helper reports any non-not-found vault exception with this fixed text.
+const STORE_UNREADABLE_MESSAGES = new Set(['Windows Credential Manager failed: Credential read unavailable.']);
 const STORE_BUSY_CODES = new Set(['read_timeout', 'read_helper_unavailable', 'read_helper_exited', 'read_helper_closed']);
 const STORE_FAILURE_PREFIXES = ['Windows Credential Manager failed: ', 'Linux Secret Service failed: ', 'macOS Keychain failed: '];
 // The OS-user enrollment and signing-control lock directories (relay-client enrollmentAnchorLock callers).
@@ -36,7 +40,8 @@ export function relayOpenFailureCode(error: unknown): RelayOpenFailureCode | und
   if (typeof message !== 'string') return undefined;
   if (IDENTITY_MESSAGES.has(message)) return 'connection_identity_requires_recovery';
   if (TRUST_MESSAGES.has(message)) return 'connection_trust_requires_recovery';
-  // A store command that exited non-zero gives no sign that the credential is gone.
+  if (STORE_UNREADABLE_MESSAGES.has(message)) return 'connection_identity_store_unavailable';
+  // Any other store command that exited non-zero gives no sign that the credential is gone.
   if (STORE_FAILURE_PREFIXES.some(prefix => message.startsWith(prefix))) return 'connection_identity_store_busy';
   return undefined;
 }
@@ -59,4 +64,15 @@ export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform 
       return 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; the relay retries on its own.';
     default: return undefined;
   }
+}
+
+const BACKEND_PLATFORM: Record<SecureSecretStore['backend'], NodeJS.Platform> = {
+  'windows-credential-manager': 'win32', 'macos-keychain': 'darwin', 'linux-secret-service': 'linux' };
+
+/** The remedy for this host's credential store: WSL uses the Windows vault, so it gets the Windows text. */
+export async function relayOpenFailureRemedyForHost(code: unknown,
+  openStore: () => Promise<Pick<SecureSecretStore, 'backend'>> = createSystemSecureStore): Promise<string | undefined> {
+  if (relayOpenFailureRemedy(code) === undefined) return undefined;
+  const platform = await openStore().then(store => BACKEND_PLATFORM[store.backend] ?? process.platform, () => process.platform);
+  return relayOpenFailureRemedy(code, platform);
 }
